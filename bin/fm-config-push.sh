@@ -78,8 +78,8 @@ SECONDMATES_MD="$DATA/secondmates.md"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
-# shellcheck source=bin/fm-runpod-lib.sh
-. "$SCRIPT_DIR/fm-runpod-lib.sh"
+# shellcheck source=bin/fm-compute-lib.sh
+. "$SCRIPT_DIR/fm-compute-lib.sh"
 
 print_item_report() {
   local report=$1 item status reason
@@ -127,8 +127,8 @@ while IFS='|' read -r id home _window meta; do
     # A scale-to-zero route in a recognized no-host lifecycle state has nothing
     # to push to, and pushing is never a reason to create compute. Its pending
     # nudge marker survives, so the next deliberate wake converges it
-    # (bin/fm-runpod-lib.sh).
-    if fm_runpod_is_dormant "$DATA" "$id"; then
+    # (bin/fm-compute-lib.sh).
+    if fm_compute_is_dormant "$DATA" "$id"; then
       echo "  config-reread: skipped - suspended; converges on its next wake"
       continue
     fi

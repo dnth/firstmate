@@ -142,8 +142,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
-# shellcheck source=bin/fm-runpod-lib.sh
-. "$SCRIPT_DIR/fm-runpod-lib.sh"
+# shellcheck source=bin/fm-compute-lib.sh
+. "$SCRIPT_DIR/fm-compute-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
@@ -1001,12 +1001,12 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
 # Anchor its bounded recheck cadence on the provider lifecycle record rather
 # than a status line, because sleep and provision are lifecycle operations and
 # do not fabricate a crewmate pause event.
-handle_runpod_dormant_stale() {  # <window> <task>
+handle_compute_dormant_stale() {  # <window> <task>
   local win=$1 task=$2 key record lifecycle h mtime age rf rf_age reason
   key=$(window_key "$win")
-  record=$(fm_runpod_meta_path "$DATA" "$task") || return 1
-  lifecycle=$(fm_runpod_lifecycle "$DATA" "$task")
-  h=$(printf 'runpod dormant: %s:%s' "$task" "$lifecycle" | hash_pane)
+  record=$(fm_compute_meta_path "$DATA" "$task") || return 1
+  lifecycle=$(fm_compute_lifecycle "$DATA" "$task")
+  h=$(printf 'compute dormant: %s:%s' "$task" "$lifecycle" | hash_pane)
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
@@ -1017,12 +1017,12 @@ handle_runpod_dormant_stale() {  # <window> <task>
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (RunPod lifecycle=$lifecycle dormant ${age}s, rechecked on a long cadence not a wedge; confirm scale-to-zero should continue)"
+    reason="stale: $win (compute lifecycle=$lifecycle dormant ${age}s, rechecked on a long cadence not a wedge; confirm scale-to-zero should continue)"
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
   fi
-  triage_log "absorbed stale (RunPod lifecycle=$lifecycle, dormant age ${age}s): $win"
+  triage_log "absorbed stale (compute lifecycle=$lifecycle, dormant age ${age}s): $win"
 }
 
 clear_pause_state() {  # <window-key>
@@ -1956,8 +1956,8 @@ EOF
     if [ "$kind" = secondmate ]; then
       meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
       remote_host=$(grep '^remote_host=' "$meta" | cut -d= -f2- || true)
-      if [ -n "$remote_host" ] && fm_runpod_is_dormant "$DATA" "$task"; then
-        handle_runpod_dormant_stale "$w" "$task"
+      if [ -n "$remote_host" ] && fm_compute_is_dormant "$DATA" "$task"; then
+        handle_compute_dormant_stale "$w" "$task"
         continue
       fi
     fi

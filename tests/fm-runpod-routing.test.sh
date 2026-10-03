@@ -256,7 +256,8 @@ FM_FAKE_DOCTOR_READY="$doctor_ready" FM_FAKE_DOCTOR_RELEASE="$doctor_release" \
   FM_FAKE_REMOTE_LAUNCH_SUCCESS=1 \
   world_env "$w" "$ROOT/bin/fm-spawn.sh" ios --secondmate > "$w/spawn.out" 2>&1 &
 spawn_pid=$!
-for _ in $(seq 1 500); do
+deadline=$((SECONDS + 30))
+while [ "$SECONDS" -lt "$deadline" ]; do
   [ -e "$doctor_ready" ] && break
   kill -0 "$spawn_pid" 2>/dev/null || fail "spawn exited before reaching readiness: $(cat "$w/spawn.out")"
   sleep 0.01

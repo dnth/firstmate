@@ -10,8 +10,8 @@ The user's interactive Herdr session remains `default` and is not a remote-secon
 On macOS, Herdr's remote-session server belongs to the host's own GUI login session rather than to the SSH connection; on Linux, the doctor starts the server headlessly in the account runtime.
 In both cases, the agent's endpoint survives every disconnection the primary's supervision depends on.
 Local second mates are unaffected and keep their ordinary backend and session selection, as do the workers a remote second mate supervises inside its own home.
-A remote host may optionally be an ephemeral rented pod rather than a permanent machine; [`runpod-secondmates.md`](runpod-secondmates.md) owns its host-specific bootstrap and compute lifecycle, while this page's routing and safety contracts apply unchanged.
-That page also owns the RunPod OMP auth broker and its hard workstation-online dependency.
+A remote host may optionally be ephemeral rented compute rather than a permanent machine; [`runpod-secondmates.md`](runpod-secondmates.md) and [`boat-secondmates.md`](boat-secondmates.md) own their provider-specific bootstrap and compute lifecycles, while this page's routing and safety contracts apply unchanged.
+The RunPod page owns its OMP auth broker and hard workstation-online dependency, while the Boat page owns its separate provider lifecycle and credential custody requirements.
 
 ## Prerequisites
 

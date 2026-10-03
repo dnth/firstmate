@@ -81,6 +81,10 @@ if ! declare -F fm_treehouse_root_prepare_runpod_boot >/dev/null; then
   . "$FM_TREEHOUSE_ROOT_LIB_DIR/fm-treehouse-root-lib.sh"
   unset FM_TREEHOUSE_ROOT_LIB_DIR
 fi
+if ! declare -F fm_omp_auth_token_valid >/dev/null; then
+  # shellcheck source=bin/fm-omp-auth-token-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/fm-omp-auth-token-lib.sh"
+fi
 
 FM_VOLUME=${FM_VOLUME:-/workspace}
 FM_REMOTE_ROOT=${FM_REMOTE_ROOT:-$FM_VOLUME/firstmate}
@@ -322,7 +326,7 @@ install_boot_control() {
   fi
   tmp="$target.tmp.$$"
   if [ -f "$helper" ]; then
-    cat "$helper" "$source" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+    cat "$helper" "$source_dir/fm-omp-auth-token-lib.sh" "$source" > "$tmp" || { rm -f -- "$tmp"; return 1; }
   else
     cp -f -- "$source" "$tmp" || { rm -f -- "$tmp"; return 1; }
   fi
@@ -338,16 +342,12 @@ mode_600() {
   fi
 }
 
-omp_auth_broker_token_valid() {  # <token>
-  [ -n "$1" ] && [ "${#1}" -le 512 ] || return 1
-  case "$1" in *[!A-Za-z0-9_-]*) return 1 ;; esac
-}
 
 install_omp_auth_broker_token() {
   local token tmp
   require_volume || return 1
   token=$(LC_ALL=C head -c 513)
-  omp_auth_broker_token_valid "$token" || {
+  fm_omp_auth_token_valid "$token" || {
     log "refusing an empty, oversized, or malformed omp auth-broker bearer"
     return 1
   }
@@ -372,7 +372,7 @@ omp_auth_broker_client_configure() {
   [ -f "$FM_OMP_AUTH_BROKER_TOKEN_FILE" ] && [ ! -L "$FM_OMP_AUTH_BROKER_TOKEN_FILE" ] \
     && mode_600 "$FM_OMP_AUTH_BROKER_TOKEN_FILE" || return 1
   token=$(cat "$FM_OMP_AUTH_BROKER_TOKEN_FILE") || return 1
-  omp_auth_broker_token_valid "$token" || return 1
+  fm_omp_auth_token_valid "$token" || return 1
   OMP_AUTH_BROKER_TOKEN=$token
   export OMP_AUTH_BROKER_URL OMP_AUTH_BROKER_TOKEN FM_OMP_AUTH_BROKER_TOKEN_FILE
 }

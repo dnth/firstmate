@@ -344,8 +344,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
-# shellcheck source=bin/fm-runpod-lib.sh
-. "$SCRIPT_DIR/fm-runpod-lib.sh"
+# shellcheck source=bin/fm-compute-lib.sh
+. "$SCRIPT_DIR/fm-compute-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -581,20 +581,20 @@ if [ "$ACCEPTED_LOCAL_BASE_SET" -eq 1 ]; then
   fi
 fi
 
-REMOTE_RUNPOD_DELIVERY_LOCK=
+REMOTE_COMPUTE_DELIVERY_LOCK=
 REMOTE_TASK_SET_LOCK=
 REMOTE_TASK_SET_LOCK_HELD=0
-remote_runpod_delivery_cleanup() {
-  if [ -n "$REMOTE_RUNPOD_DELIVERY_LOCK" ]; then
-    fm_lock_release "$REMOTE_RUNPOD_DELIVERY_LOCK" || true
-    REMOTE_RUNPOD_DELIVERY_LOCK=
+remote_compute_delivery_cleanup() {
+  if [ -n "$REMOTE_COMPUTE_DELIVERY_LOCK" ]; then
+    fm_lock_release "$REMOTE_COMPUTE_DELIVERY_LOCK" || true
+    REMOTE_COMPUTE_DELIVERY_LOCK=
   fi
   if [ "$REMOTE_TASK_SET_LOCK_HELD" = 1 ]; then
     REMOTE_TASK_SET_LOCK_HELD=0
     fm_lock_release "$REMOTE_TASK_SET_LOCK" || true
   fi
 }
-trap remote_runpod_delivery_cleanup EXIT
+trap remote_compute_delivery_cleanup EXIT
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
@@ -755,10 +755,10 @@ spawn_remote_secondmate() {
       return 1
     fi
   fi
-  if fm_runpod_is_managed "$DATA" "$id"; then
-    REMOTE_RUNPOD_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$id")
-    if ! fm_lock_acquire_wait "$REMOTE_RUNPOD_DELIVERY_LOCK"; then
-      REMOTE_RUNPOD_DELIVERY_LOCK=
+  if fm_compute_is_managed "$DATA" "$id"; then
+    REMOTE_COMPUTE_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$id")
+    if ! fm_lock_acquire_wait "$REMOTE_COMPUTE_DELIVERY_LOCK"; then
+      REMOTE_COMPUTE_DELIVERY_LOCK=
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
       echo "error: remote secondmate $id delivery lifecycle could not be locked" >&2
@@ -772,8 +772,8 @@ spawn_remote_secondmate() {
   # concurrent launch and liveness relaunch still produce exactly one pod. This
   # is lifecycle work, before delivery, so retrying it is safe; everything after
   # it keeps the existing unknown-completion and no-failover semantics.
-  if fm_runpod_is_dormant "$DATA" "$id"; then
-    if ! out=$("$SCRIPT_DIR/fm-runpod.sh" wake "$id" 2>&1); then
+  if fm_compute_is_dormant "$DATA" "$id"; then
+    if ! out=$("$SCRIPT_DIR/fm-compute-wake.sh" "$id" 2>&1); then
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
       [ -z "$out" ] || printf '%s\n' "$out" >&2
@@ -5025,7 +5025,7 @@ fi
 if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
   LAUNCH="FM_HERMES_TASK_TOKEN=$(shell_quote "$HERMES_OWNER_TOKEN") HERMES_HOME=$(shell_quote "$HERMES_HOME_DIR") $LAUNCH"
 fi
-# A RunPod secondmate carries the safe broker coordinates to its descendants,
+# A compute-managed secondmate carries safe broker coordinates to its descendants,
 # and each OMP launch receives the workstation broker through a loopback-only
 # reverse tunnel.
 # The bearer stays in its mode-600 pod file until the pane shell expands this

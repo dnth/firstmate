@@ -61,9 +61,10 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## What this fork adds over upstream
 
-`dnth/firstmate` carries five features that are not in [upstream](https://github.com/kunchenguid/firstmate).
+`dnth/firstmate` carries six features that are not in [upstream](https://github.com/kunchenguid/firstmate).
 
 - **RunPod remote secondmates** - run a persistent second mate on an on-demand CPU or GPU pod, with an explicit scale-to-zero lifecycle that drops compute cost after sleep and wakes the pod for the next delivery. See [RunPod second mates](docs/runpod-secondmates.md); the compute lifecycle lives in `bin/fm-runpod*.sh`.
+- **Boat remote secondmates** - explicit-sleep compute with finite TTLs, stable SSH pins, and cgroup-owned subscription credential helpers. See [Boat second mates](docs/boat-secondmates.md); ephemeral workers are not supported.
 - **OMP harness with a read-only credential broker** - run OMP as a primary, crew, scout, or second-mate runtime, including on a remote pod through a [credential-read-only facade](bin/fm-omp-auth-broker-readonly-proxy.mjs) that keeps workstation subscription login and refresh credentials private. See the [OMP supervision protocol](docs/supervision-protocols/omp.md) and the [remote broker design](docs/runpod-secondmates.md#omp-subscription-auth-through-the-workstation).
 - **Hermes crew and scout adapter** - a Hermes crewmate is a full-fledged Firstmate crew that runs complete ship tasks end to end - implement changes, drive no-mistakes, and open a PR - just like the Codex and OMP crews, while also running read-only scouts.
   It operates as a persistent interactive Hermes Agent v0.20.0 TUI in its tmux or Herdr pane; Firstmate delivers ordinary local instructions through the durable steering inbox, keeps slash commands on the composer path, detects busy and idle state, wakes on turn-end, and can interrupt, exit, or resume it with the same pane parity as other TUI crews.
@@ -266,6 +267,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the local Communication Officer bridge, the files you set, and harness support.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
 - [docs/runpod-secondmates.md](docs/runpod-secondmates.md) - optional RunPod compute lifecycle beneath a remote second mate, so an idle domain can scale to zero and cost storage alone.
+- [docs/boat-secondmates.md](docs/boat-secondmates.md) - optional Boat compute lifecycle, cost limits, credential boundaries, and fixture verification beneath a remote second mate.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.

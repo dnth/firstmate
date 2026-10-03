@@ -78,8 +78,8 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
-# shellcheck source=bin/fm-runpod-lib.sh
-. "$SCRIPT_DIR/fm-runpod-lib.sh"
+# shellcheck source=bin/fm-compute-lib.sh
+. "$SCRIPT_DIR/fm-compute-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 
@@ -271,7 +271,7 @@ cmd_arm_locked() {  # <id> [handling-seq]
   # recognized no-host lifecycle state has nothing to poll and must never be
   # woken just to arm it. The cursor is untouched, so the next wake re-arms from
   # exactly this offset.
-  if fm_runpod_is_dormant "$DATA" "$id"; then
+  if fm_compute_is_dormant "$DATA" "$id"; then
     printf 'skipped: %s suspended\n' "$sid"
     return 0
   fi
