@@ -16,8 +16,8 @@
 # What it does when on with at least one rule: one POST to
 #   https://api.typesafe.ai/v1/systemone with the project name and the brief's
 #   `# Task` and `# Acceptance criteria` sections, tagged when it is a scout
-#   brief (the whole brief when it has neither section), as state and ONE
-#   Choice question whose options are every rule's `when` from
+#   brief, as state (the unmodified whole brief when it has neither section).
+#   It asks ONE Choice question whose options are every rule's `when` from
 #   config/crew-dispatch.json plus one fixed generic none option. Jev returns
 #   the matched rule, a probability per option, and a confidence. Everything
 #   after that is jq: the confidence floor (0.6 on the answer confidence, or a
@@ -245,9 +245,9 @@ trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT"' EXIT
 # `# Task` body and, on ship briefs, the `# Acceptance criteria` - plus a scout
 # tag from the scout contract line; the rest of a scaffolded brief is standard
 # boilerplate whose safety language reads as high stakes on every task.
-# A brief with neither section goes whole. Ship delivery mode is deliberately
-# not sent: upstream live runs showed it pushing routine ship briefs to the
-# top tier (docs/verification/dispatch-resolve.md).
+# A brief with neither section goes whole. When extracting sections, ship
+# delivery mode is deliberately not sent: upstream live runs showed it pushing
+# routine ship briefs to the top tier (docs/verification/dispatch-resolve.md).
 brief_kind() {
   if grep -qxF 'This is a SCOUT task: the deliverable is a written report, not a PR.' "$BRIEF"; then
     printf 'Brief kind: scout (report only)\n\n'
