@@ -37,6 +37,11 @@ if name == 'boat':
     verb = args[0]
     refusal(verb)
     if verb == 'new':
+        shape = state.get('new_shape')
+        if shape == 'absent':
+            print(json.dumps({'sandbox': {}})); sys.exit(0)
+        if shape == 'malformed':
+            print(json.dumps({'sandbox': {'id': 'not-a-box'}})); sys.exit(0)
         state.update(id='bx_fixture', state='ready', ip='127.0.0.1', ttl=int(args[args.index('--ttl') + 1]))
     elif verb == 'resume':
         if state.get('no_ready', 0):

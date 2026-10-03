@@ -125,6 +125,12 @@ def compensate(id, rows, cause):
     write(id, rows)
     raise Failure(str(cause) + ('; compensation unresolved: ' + rows['cleanup'] if failures else '; compensation confirmed'))
 
+def unknown_allocation(id, rows, cause):
+    rows['lifecycle'] = 'unresolved'
+    rows['cleanup'] = 'allocation-unknown'
+    write(id, rows)
+    raise Failure(str(cause) + '; billable sandbox may exist; inspect Boat by creation time before retrying')
+
 def provision(args):
     id = safe_id(args.id)
     policy(args.model)  # Before any billable creation, including non-OMP routes.
@@ -144,17 +150,23 @@ def provision(args):
         for path in (DATA / 'boat').glob('*.meta'):
             if load(path).get('ssh_alias') == alias:
                 raise Failure('SSH alias already belongs to another secondmate')
-        body = cli('new', '--json', '--no-env', '--type', args.size, '--ttl', str(args.ttl))
-        box = body.get('id') or body.get('sandbox', {}).get('id')
-        if not isinstance(box, str) or not re.fullmatch(r'bx_[A-Za-z0-9]+', box):
-            raise Failure('created sandbox identity is unknown; inspect Boat before retrying creation')
         rows = dict(schema='fm-boat-secondmate.v1', provider='boat', secondmate=id,
-                    sandbox_id=box, lifecycle='provisioned', ever_ready='0', ssh_alias=alias,
+                    lifecycle='pending-allocation', ever_ready='0', ssh_alias=alias,
                     ssh_identity=str(identity), model=args.model, size=args.size, ttl=str(args.ttl),
-                    omp_auth='1' if args.omp_auth else '0', host_key_verified='0', cost_per_hr=str(RATES[args.size]))
-        rows['name'] = args.prefix + id
+                    omp_auth='1' if args.omp_auth else '0', host_key_verified='0', cost_per_hr=str(RATES[args.size]),
+                    name=args.prefix + id, allocation_started=str(int(time.time())))
         if hasattr(args, 'smoke_deadline'):
             rows['smoke_deadline'] = str(args.smoke_deadline)
+        write(id, rows)
+        try:
+            body = cli('new', '--json', '--no-env', '--type', args.size, '--ttl', str(args.ttl))
+        except (Failure, OSError, ValueError, KeyError) as error:
+            unknown_allocation(id, rows, error)
+        nested = body.get('sandbox')
+        box = body.get('id') or (nested.get('id') if isinstance(nested, dict) else None)
+        if not isinstance(box, str) or not re.fullmatch(r'bx_[A-Za-z0-9]+', box):
+            unknown_allocation(id, rows, 'created sandbox identity is unknown')
+        rows.update(sandbox_id=box, lifecycle='provisioned')
         # Publish allocation before the first fallible customization.
         write(id, rows)
         try:
@@ -301,7 +313,10 @@ def live_smoke(identity, model):
     TIMEOUT = 30
     with lock(STATE / '.boat-live-smoke.lock'):
         for path in (DATA / 'boat').glob('*.meta'):
-            if load(path).get('name', '').startswith('fm-boat-smoke-'):
+            existing = load(path)
+            if existing.get('name', '').startswith('fm-boat-smoke-'):
+                if existing.get('lifecycle') == 'unresolved' and existing.get('cleanup') == 'allocation-unknown':
+                    raise Failure('live smoke allocation identity is unknown; inspect Boat by creation time before retrying')
                 raise Failure('an earlier live smoke sandbox must be reconciled first')
         id = 'fm-boat-smoke-' + secrets.token_hex(4)
         args = argparse.Namespace(id=id, identity=identity, model=model, alias=id,

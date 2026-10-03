@@ -103,6 +103,35 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(self.provider()['state'], 'archived')
             self.assertEqual(self.state()['lifecycle'], 'provisioned')
             self.lab.update(fail=[]); self.call('destroy', '--yes')
+
+    def test_unknown_allocation_is_durable_and_blocks_retry(self):
+        for shape in ('absent', 'malformed'):
+            with self.subTest(shape=shape):
+                self.lab.update(new_shape=shape)
+                result = self.provision(ok=False)
+                self.assertIn('created sandbox identity is unknown', result.stderr)
+                state = self.state()
+                self.assertEqual(state['lifecycle'], 'unresolved')
+                self.assertEqual(state['cleanup'], 'allocation-unknown')
+                self.assertEqual(state['size'], 'small')
+                self.assertEqual(state['name'], 'fm-boat-mate')
+                self.assertTrue(state['allocation_started'].isdigit())
+                retry = self.provision(ok=False)
+                self.assertIn('placement already exists', retry.stderr)
+                self.lab.update(new_shape=None)
+                self.path.unlink()
+
+    def test_live_smoke_refuses_unknown_allocation_record(self):
+        self.lab.env['FM_BOAT_LIVE'] = '1'
+        self.lab.update(new_shape='absent')
+        first = subprocess.run([BOAT, 'live-smoke', '--identity', str(self.identity), '--model', 'openai-codex/fixture'],
+                               env=self.lab.env, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(first.returncode, 0)
+        self.assertIn('created sandbox identity is unknown', first.stderr)
+        second = subprocess.run([BOAT, 'live-smoke', '--identity', str(self.identity), '--model', 'openai-codex/fixture'],
+                                env=self.lab.env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn('live smoke allocation identity is unknown', second.stderr)
     def test_pre_acquisition_compensation_reports_no_bearer_installed(self):
         check = subprocess.run(['systemctl', '--user', 'show', '--property=ControlGroup'], capture_output=True)
         if check.returncode: self.skipTest('Linux systemd user manager required for auth transition')
