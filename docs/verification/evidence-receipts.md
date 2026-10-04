@@ -68,7 +68,7 @@ The relaxed checks use one shared content-identity predicate, `fm_nm_head_is_acc
 `--bind-run` also accepts a run whose reported head tree equals the checked-out tree when ancestry cannot account for it, but only with authoritative run ownership: a terminal passed run, or an active run with proven `fm_nm_run_branch_ownership` branch evidence.
 A run recorded as `validation_preplan_run_id` binds only through that content-identity shape, never through ancestry alone.
 `--bind-check` evaluates the identical decision read-only and reports `bindable` or `refused` with the selected mechanism and refusal reason.
-`--complete` accepts the same shapes, freshly checking tree equality for a recorded content binding and requiring branch identity and ownership for that binding or whenever the run advanced beyond the planned head.
+`--complete` accepts the same shapes, freshly checking tree equality for a recorded content binding or any advanced head and requiring branch identity and ownership for that binding or whenever the run advanced beyond the planned head.
 A descendant is accepted only when the run reports the same task branch and, for active runs, `fm_nm_run_branch_ownership` in `bin/fm-nm-run-lib.sh` proves the run-owned branch state: `branch_sync.state` `pipeline_owned`, either in `axi status` or `axi sync --check`, or the converged `synchronized` state once the pipeline pushed its head back and the run stays active only to monitor its PR.
 The synchronized acceptance requires the complete `axi sync --check` evidence - the same run id, `submitted_head` resolving to the validated head, `current_head` and the reported local head both resolving to the run's observed head, `relation` equal, and `safety` `already_synchronized` - so synchronized alone never proves a pass and foreign, stale, or incomplete readouts stay refused.
 The content-identity shape leaves the `submitted_head` anchor open because a run that predates the plan or was rebased mid-run submits its own head, never the planned one; content linkage is instead pinned by the checked-out-tree comparison.
@@ -94,7 +94,7 @@ Every other completion requirement is unchanged: the run must still be the bound
 ## Commands and results
 
 On 2026-10-04, the focused completion regressions and both owning suites passed with the command below (exit 0).
-The synchronized fixture exercises completion after content binding with a self-submitted descendant head.
+The synchronized fixture exercises completion with a self-submitted descendant head after content binding and after ancestry binding transitions from pipeline custody to synchronized ownership.
 The rebase fixture exercises fleet done acceptance with both original and refreshed implementation heads and refuses stale completion generations and mismatched paths.
 
 ```text
@@ -103,6 +103,8 @@ ok - converged synchronized binding requires the full run-owned sync evidence
 ok - mid-run rebase onto newer main binds and completes by content identity
 all fm-crew-state tests passed
 ```
+
+The ownership-transition regression was refreshed on 2026-10-04 with `TMPDIR="$PWD/.review-tmp" bash tests/fm-receipt-check.test.sh` (exit 0), including `ok - converged synchronized binding requires the full run-owned sync evidence`.
 
 The focused behavioral suites passed with these exact commands.
 

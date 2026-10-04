@@ -1552,6 +1552,21 @@ test_synchronized_monitoring_requires_full_sync_evidence() {
   printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
     || fail "self-submitted synchronized completion did not seal the shipping head"
 
+  status=$(nm_pipeline_status RUN-sync-evidence "fm/$id" "$current_head" running '' pipeline_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-sync-evidence --generation "$generation") \
+    || fail "pipeline-owned self-submitted run could not bind"
+  printf '%s' "$out" | jq -e '.status == "bound" and .binding == "ancestry"' >/dev/null \
+    || fail "pipeline-owned binding did not reproduce ancestry preference"
+  status=$(nm_pipeline_status RUN-sync-evidence "fm/$id" "$current_head" running '' synchronized)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" \
+    FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "ancestry-bound run could not complete after synchronized ownership transition"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "ownership-transition completion did not seal the shipping head"
+
   # A converged claim without the equality and safety fields stays refused.
   sync=$(printf 'branch_sync:\n  state: synchronized\nlocal:\n  branch: fm/%s\n  head: "%s"\npipeline:\n  run: "RUN-sync-evidence"\n  submitted_head: "%s"\n  current_head: "%s"\n' \
     "$id" "$current_head" "$initial_head" "$current_head")

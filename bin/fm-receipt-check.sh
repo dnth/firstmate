@@ -1003,7 +1003,7 @@ record_validation_completed() {
       restamp_accounted=0
       content_accounted=0
       run_binding=$(grep '^validation_run_binding=' "$META" | tail -1 | cut -d= -f2- || true)
-      if [ "$run_binding" = content-tree ] \
+      if { [ "$run_binding" = content-tree ] || [ "$current_head" != "$validated_head" ]; } \
         && fm_nm_commits_share_tree "$worktree" "$observed_head_full" "$current_head"; then
         content_accounted=1
       fi
