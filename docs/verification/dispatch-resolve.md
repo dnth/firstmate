@@ -8,7 +8,8 @@ Task chronology, the captain's rules, and the briefs themselves stay in private 
 
 ## The API the tool depends on
 
-Verified upstream 2026-09-16 against `https://api.typesafe.ai` for upstream PR [#4692](https://github.com/kunchenguid/firstmate/pull/4692). The observations below are upstream evidence only; fork-local live behavior has not been re-established.
+Verified upstream 2026-09-16 against `https://api.typesafe.ai` for upstream PR [#4692](https://github.com/kunchenguid/firstmate/pull/4692).
+The API observations below are upstream evidence only; the fork-local smoke described below does not re-establish this API survey.
 `GET /v1/models` listed `jev-latest` and `jev-preview`, both released 2026-09-10; a `jev-latest` request answered as `jev-1.13.0`.
 `POST /v1/systemone` takes `{model, state, questions}`; a `choice` question returns `{choice, probabilities, confidence}` with the probabilities summing to 1.
 Observed error shapes: 401 `authentication_error` for a bad key, 403 when the header is missing, 422 with a `detail[].loc` naming the offending field, 400 `api_usage_error` for an unknown model, 405 on GET.
@@ -28,14 +29,34 @@ Briefs: 15 real briefs plus 10 synthetic ones written to hit each rule.
 | API errors | 0 | 0 |
 
 A lean request that asks only the rule Choice matched the full request on all 25 briefs, which is why the shipped tool asks one question and keeps every gate in code.
-No fork-local live run is claimed here. Rerun a live table by pointing the tool at a brief with the key injected for that one command.
+No fork-local reproduction of this 25-brief table is claimed here.
+Rerun a live table by pointing the tool at a brief with the key injected for that one command.
+
+## Task sections and per-rule confidence floors
+
+Recorded upstream 2026-09-23 against `jev-latest` (answering as `jev-1.13.0`) for upstream PR [#5478](https://github.com/kunchenguid/firstmate/pull/5478), with fixtures scaffolded by that tree's `fm-brief.sh`; the observations below are upstream evidence for the ported feature.
+The fork's extraction contract is owned by [Typed dispatch resolution](../configuration.md#typed-dispatch-resolution-env-typesafe_api_key); the upstream fixtures used `## Captain's intent` and `## Firstmate spec` subsections.
+
+| Measure | Whole brief | Task sections |
+| --- | --- | --- |
+| Top rule matched the label | 16 of 16 | 16 of 16 |
+| Input tokens per ship brief | 4,327 to 4,379 | 583 to 624 |
+| Input tokens per scout brief | 2,861 to 2,874 | 584 to 597 |
+
+On upstream's generic fixtures the trim did not change routing accuracy; the gain that holds is size, about 4,350 input tokens down to about 600 per ship brief.
+With `min_confidence: 0.95` declared on a loosely worded top-tier rule, a routine port brief that still picked that rule returned `ambiguous` in 3 of 3 runs, and a `min_confidence: 0.05` on the implementation rule returned a `fallback:` to it in 3 of 3 runs.
+A variant that also sent `Brief kind: ship, mode=no-mistakes` moved the same brief to the top-tier rule at probability 0.96 to 0.97 in 7 of 7 runs, so a ship brief's delivery mode is deliberately not sent.
+
+Fork-local smoke 2026-10-03: the resolver ran against three real `data/<id>/brief.md` briefs in this home, before and after the slice.
+Each after run sent Jev only the `# Task` (and `# Acceptance criteria` where present) text - the request body carried no Setup, Rules, inbox, or Definition-of-done content - and each resolved with the same status and rule as the whole-brief run.
 
 ## Offline behavior
 
 `tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, the header read from file descriptor 3, and whether the secret reached its environment, plus a fake `quota-axi` that performs the same environment check.
 It proves the absent key (environment and `.env`) prints one stderr line, nothing on stdout, exits 0, and never invokes `curl` or `quota-axi`.
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
-It proves the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+Request fixtures cover the configured endpoint and model, task-section extraction with trailing-whitespace and fenced headings, scout tagging, omission of scaffold boilerplate and ship delivery mode, whole-brief fallback, and exclusion of routing metadata under the [operator contract](../configuration.md#typed-dispatch-resolution-env-typesafe_api_key).
+Confidence fixtures cover picked and runner-up floors, no qualifying runner-up, ties, interaction with quota floors, unchanged routing without declared floors, and exponent-preserving normalization in all four numeric fields of the emitted fallback diagnostic.
 It proves clear, fixed-floor ambiguous, escalate (approval, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, profile-floor evidence and vetoes, explicit-provider and provider-ID enforcement for this fork's multi-provider harnesses, default fallthrough, quota-axi failure, API and transport failure, malformed responses, and malformed configuration behave as the contract states, with configuration errors exiting 2 before any network call.
 
 ```console

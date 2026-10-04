@@ -1014,7 +1014,7 @@ families_for_changed_path() {
       [ "$path" != bin/fm-quota-axi-lib.sh ] || printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       [ "$path" != bin/fm-bootstrap.sh ] || printf '%s\n' secondmate
       ;;
-    bin/fm-dispatch-resolve.sh)
+    bin/fm-dispatch-resolve.sh|bin/fm-brief-heading-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
