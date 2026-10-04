@@ -96,7 +96,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-invoking_sid=$(ps -o sid= -p "$$" 2>/dev/null | tr -d '[:space:]')
+invoking_sid=$(python3 -c 'import os,sys; print(os.getsid(int(sys.argv[1])))' "$$")
 [ -n "$invoking_sid" ] || fail "could not read the invoking session"
 bash "$TMP_ROOT/run-job.sh" "$TMP_ROOT/job" || fail "the supervised invocation driver failed"
 read -r timed_out rc < "$TMP_ROOT/job.result"
@@ -110,7 +110,7 @@ assert_present "$SERVER_PID_FILE" "the detached start never launched the herdr s
 server_pid=$(cat "$SERVER_PID_FILE")
 kill -0 "$server_pid" 2>/dev/null \
   || fail "the herdr server did not keep running after the invoking command returned"
-server_sid=$(ps -o sid= -p "$server_pid" 2>/dev/null | tr -d '[:space:]')
+server_sid=$(python3 -c 'import os,sys; print(os.getsid(int(sys.argv[1])))' "$server_pid")
 [ -n "$server_sid" ] && [ "$server_sid" != "$invoking_sid" ] \
   || fail "the herdr server did not leave the invoking session (sid=$server_sid invoking_sid=$invoking_sid)"
 server_pgid=$(ps -o pgid= -p "$server_pid" 2>/dev/null | tr -d '[:space:]')
@@ -142,7 +142,7 @@ read -r timed_out rc < "$outcome.result"
 [ "$rc" = 0 ] || fail "fallback ensure failed (rc=$rc): $(cat "$outcome.stderr" 2>/dev/null)"
 fallback_pid=$(cat "$SERVER_PID_FILE")
 kill -0 "$fallback_pid" 2>/dev/null || fail "fallback herdr server did not survive the invoking command"
-fallback_sid=$(ps -o sid= -p "$fallback_pid" 2>/dev/null | tr -d '[:space:]')
+fallback_sid=$(python3 -c 'import os,sys; print(os.getsid(int(sys.argv[1])))' "$fallback_pid")
 [ -n "$fallback_sid" ] && [ "$fallback_sid" != "$invoking_sid" ] \
   || fail "fallback herdr server did not leave the invoking session (sid=$fallback_sid invoking_sid=$invoking_sid)"
 fallback_group=$(cat "$outcome.group")
