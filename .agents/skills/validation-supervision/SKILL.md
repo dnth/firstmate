@@ -23,9 +23,11 @@ Custody recovery settles branch ownership, not content: the worker must replace 
 Apart from supersession or the ordinary-finding custody-return path, do not hand-edit, commit, restart, or start a second validation run while a run still owns the branch.
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
-An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
+An ask-user finding returns as `needs-decision` under the canonical key owned by `bin/fm-nm-run-lib.sh`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
+PR-ready and completion apply the bound-run decision check owned by `bin/fm-nm-run-lib.sh`, with the process-evidence limitation owned by `bin/fm-classify-lib.sh`.
+When that check refuses, decide each named finding per `ask-user-authority` and record the answer through `fm-send`, using the fallback append documented in `bin/fm-nm-run-lib.sh` when no open decision record remains.
 Resume fleet supervision immediately after the decision lands.
 
 For ordinary findings from any No-Mistakes tier, steer the original worker to return branch custody through the supported abort and sync sequence, fix the findings itself, and update receipts.

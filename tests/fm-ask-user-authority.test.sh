@@ -20,6 +20,8 @@ test_primary_and_secondmate_instruction_generation() {
     "generated implementation brief lets the worker own an ask-user decision"
   assert_grep "Firstmate applies \`ask-user-authority\` and obtains any required captain decision" "$ship" \
     "generated implementation brief bypasses the primary authority owner"
+  assert_grep 'needs-decision [key=nm-<run>-<step>]' "$ship" \
+    "generated implementation brief does not pin the canonical ask-user decision key"
   assert_grep "silently bypass firstmate's authority check and any required captain escalation" "$ship" \
     "generated implementation brief permits silent ask-user auto-resolution"
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \

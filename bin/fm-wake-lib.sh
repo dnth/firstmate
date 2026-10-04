@@ -916,7 +916,8 @@ fm_lock_try_acquire() {
 
   # Locks are directories (or ownership symlinks); an ordinary file is an
   # invalid, unacquirable shape and must not enter stale-owner recovery.
-  if [ -e "$lockdir" ] && [ ! -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+  # Observe the file type once: separate existence/type checks race release.
+  if [ -f "$lockdir" ]; then
     return 2
   fi
 
@@ -1662,9 +1663,7 @@ fm_wake_append() {
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
 
-  if [ -e "$FM_WAKE_QUEUE_LOCK" ] \
-    && [ ! -d "$FM_WAKE_QUEUE_LOCK" ] \
-    && [ ! -L "$FM_WAKE_QUEUE_LOCK" ]; then
+  if [ -f "$FM_WAKE_QUEUE_LOCK" ]; then
     return 3
   fi
 
@@ -1729,9 +1728,7 @@ fm_wake_queued_keys() {
   # A malformed queue lock must not make read-only queue inspection wait
   # forever.  Callers use this helper for guard/status checks, so reject an
   # ordinary file just as bounded append does and let them report no queue.
-  if [ -e "$FM_WAKE_QUEUE_LOCK" ] \
-    && [ ! -d "$FM_WAKE_QUEUE_LOCK" ] \
-    && [ ! -L "$FM_WAKE_QUEUE_LOCK" ]; then
+  if [ -f "$FM_WAKE_QUEUE_LOCK" ]; then
     return 1
   fi
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
