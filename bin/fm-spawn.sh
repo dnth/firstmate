@@ -1112,6 +1112,94 @@ spawn_omp_abort_endpoint_stopped() {  # [meta]
   esac
 }
 
+# Retire exactly the artifacts a failed OMP secondmate launch created and the
+# next launch's entry validation checks, so a later launch is accepted instead
+# of refusing on the dead generation's leftovers. This runs only after the
+# failed generation's own endpoint is proven stopped. The persistent home, its
+# endpoint metadata, its durable inbox, and every real retained session file
+# stay: without a live owner, the session pointer is reconciled with the
+# pre-launch retained session or, if its binding is invalid, the unique saved
+# session. Correct bindings stay untouched; replacements publish atomically.
+# An empty session store permits pointer removal; ambiguous saved sessions require
+# explicit reconciliation. Malformed or dead-owner lock and integration
+# markers are retired, but a live owner prevents session-pointer repair.
+spawn_omp_secondmate_abort_retire_generation() {
+  local marker lock_pid pointer named keep session candidate count pointer_tmp live_owner=0 failure=0
+  rm -f -- "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
+    "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
+    "$STATE/$ID.omp-doorbell-failed" || failure=1
+  if [ -d "$STATE/$ID.omp-doorbell-ready.requests" ]; then
+    rm -rf -- "$STATE/$ID.omp-doorbell-ready.requests" || failure=1
+  fi
+  marker="$PROJ_ABS/state/.omp-primary-extension-loaded"
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    if ! fm_omp_primary_marker_read "$marker"; then
+      rm -f -- "$marker" || failure=1
+    else
+      case "$FM_OMP_MARKER_PID" in
+        ''|*[!0-9]*|0*|1) rm -f -- "$marker" || failure=1 ;;
+        *) if kill -0 "$FM_OMP_MARKER_PID" 2>/dev/null; then live_owner=1; else rm -f -- "$marker" || failure=1; fi ;;
+      esac
+    fi
+  fi
+  if [ -f "$PROJ_ABS/state/.lock" ] && [ ! -L "$PROJ_ABS/state/.lock" ]; then
+    lock_pid=$(cat -- "$PROJ_ABS/state/.lock" 2>/dev/null || true)
+    case "$lock_pid" in
+      ''|*[!0-9]*|0*|1) rm -f -- "$PROJ_ABS/state/.lock" || failure=1 ;;
+      *) if kill -0 "$lock_pid" 2>/dev/null; then live_owner=1; else rm -f -- "$PROJ_ABS/state/.lock" || failure=1; fi ;;
+    esac
+  fi
+  [ "$live_owner" = 0 ] || return "$failure"
+  pointer="$PROJ_ABS/state/.omp-session"
+  if [ -n "${OMP_SESSION_DIR:-}" ]; then
+    if [ -L "$pointer" ] || { [ -e "$pointer" ] && [ ! -f "$pointer" ]; }; then
+      return 1
+    fi
+    named=
+    keep=0
+    if [ -f "$pointer" ]; then
+      IFS= read -r named < "$pointer" 2>/dev/null || named=
+      if [ "$(wc -l < "$pointer" 2>/dev/null | tr -d '[:space:]')" = 1 ]; then
+        case "$named" in
+          "$OMP_SESSION_DIR"/*.jsonl)
+            [ "${named%/*}" = "$OMP_SESSION_DIR" ] && [ -f "$named" ] && [ ! -L "$named" ] && keep=1
+            ;;
+        esac
+      fi
+    fi
+    candidate=
+    if [ -n "${OMP_RESUME_FILE:-}" ] && [ -f "$OMP_RESUME_FILE" ] && [ ! -L "$OMP_RESUME_FILE" ]; then
+      if [ "$keep" != 1 ] || [ "$named" != "$OMP_RESUME_FILE" ]; then
+        candidate=$OMP_RESUME_FILE
+      fi
+    elif [ "$keep" != 1 ]; then
+      count=0
+      for session in "$OMP_SESSION_DIR"/*.jsonl "$OMP_SESSION_DIR"/.*.jsonl "$OMP_SESSION_DIR"/.jsonl; do
+        [ -f "$session" ] && [ ! -L "$session" ] || continue
+        candidate=$session
+        count=$((count + 1))
+      done
+      case "$count" in
+        0) rm -f -- "$pointer" || failure=1 ;;
+        1) ;;
+        *)
+          echo "warning: OMP failed-bind cleanup found multiple retained sessions without an exact binding; explicit session reconciliation is required" >&2
+          candidate=
+          failure=1
+          ;;
+      esac
+    fi
+    if [ -n "$candidate" ]; then
+      pointer_tmp=$(mktemp "$pointer.tmp.XXXXXX") || return 1
+      if ! printf '%s\n' "$candidate" > "$pointer_tmp" || ! mv -f -- "$pointer_tmp" "$pointer"; then
+        rm -f -- "$pointer_tmp"
+        failure=1
+      fi
+    fi
+  fi
+  return "$failure"
+}
+
 spawn_omp_abort_clean_unchanged_worktree() {  # <context>
   local context=$1 current_head
   sleep 0.1
@@ -1209,8 +1297,10 @@ spawn_abort_cleanup() {
         echo "warning: OMP secondmate spawn cleanup could not prove persistent-home ownership; preserving its endpoint, home, metadata, and sessions" >&2
       elif ! spawn_omp_abort_endpoint_stopped "$meta"; then
         echo "warning: OMP secondmate spawn cleanup could not confirm its owned endpoint stopped; preserving its home, metadata, and sessions" >&2
+      elif ! spawn_omp_secondmate_abort_retire_generation; then
+        echo "warning: OMP secondmate launch cleanup could not retire every launch-generation artifact; the next launch may need explicit reconciliation" >&2
       else
-        echo "warning: OMP secondmate launch failed after endpoint creation; stopped only its owned endpoint and preserved its persistent home, metadata, and sessions" >&2
+        echo "warning: OMP secondmate launch failed after endpoint creation; stopped only its owned endpoint, retired its launch-generation artifacts, and preserved its persistent home, metadata, and sessions" >&2
       fi
     elif ! spawn_omp_abort_endpoint_stopped "$meta"; then
       SPAWN_ABORT_PRESERVED=1
@@ -4962,7 +5052,10 @@ if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
   OMP_LAUNCH_PATH_GUARD="PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR${PATH:+:$PATH}"); export PATH; FM_OMP_BUN_LOOKUP=\$(command -v bun) || exit 1; FM_OMP_BUN_RESOLVED=\$(readlink -f \"\$FM_OMP_BUN_LOOKUP\" 2>/dev/null || node -e 'const { realpathSync } = require(\"node:fs\"); process.stdout.write(realpathSync(process.argv[1]));' \"\$FM_OMP_BUN_LOOKUP\") || exit 1; [ \"\$FM_OMP_BUN_RESOLVED\" = $(shell_quote "$OMP_BUN_CANON") ] || exit 1; "
 fi
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ] && [ -n "$OMP_BIN_CANON" ]; then
-  LAUNCH="FM_OMP_TASK_INBOX_DIR=$(shell_quote "$STATE_REAL/$ID.inbox") FM_OMP_TASK_DOORBELL_READY=$(shell_quote "$STATE_REAL/$ID.omp-doorbell-ready") FM_OMP_TASK_DOORBELL_FAILED=$(shell_quote "$STATE_REAL/$ID.omp-doorbell-failed") FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
+  # OMP_SKIP_SETUP is OMP's own non-interactive bypass for its first-run setup
+  # scenes: a pane launch can never answer an interactive wizard, so a fresh
+  # remote account would otherwise park before the agent ever binds.
+  LAUNCH="OMP_SKIP_SETUP=1 FM_OMP_TASK_INBOX_DIR=$(shell_quote "$STATE_REAL/$ID.inbox") FM_OMP_TASK_DOORBELL_READY=$(shell_quote "$STATE_REAL/$ID.omp-doorbell-ready") FM_OMP_TASK_DOORBELL_FAILED=$(shell_quote "$STATE_REAL/$ID.omp-doorbell-failed") FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
 fi
 OMPRESUMEFLAG=
 [ -z "$OMP_RESUME_FILE" ] || OMPRESUMEFLAG="--resume $(shell_quote "$OMP_RESUME_FILE") "
@@ -5207,7 +5300,7 @@ if [ "$HARNESS" = omp ] && [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ]; then
       OMP_DOORBELL_DETAIL="doorbell activation failed: $(head -n 1 "$OMP_DOORBELL_FAILED" 2>/dev/null || printf 'unreadable journal') (journal: $OMP_DOORBELL_FAILED)"
     fi
     printf 'failed: OMP inbox doorbell marker %s never appeared; %s\n' "$OMP_DOORBELL_READY" "$OMP_DOORBELL_DETAIL" >> "$STATE/$ID.status"
-    echo "error: OMP inbox doorbell marker $OMP_DOORBELL_READY never appeared; $OMP_DOORBELL_DETAIL; cleaning the owned launch" >&2
+    echo "error: OMP inbox doorbell marker $OMP_DOORBELL_READY never appeared; $OMP_DOORBELL_DETAIL; OMP_SKIP_SETUP=1 may not have been honored and an interactive setup wizard may be blocking; cleaning the owned launch" >&2
     exit 1
   fi
   if [ "$KIND" = secondmate ]; then
@@ -5262,7 +5355,7 @@ if [ "$HARNESS" = omp ] && [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ]; then
     done
     if [ "$OMP_ACKED" -ne 1 ]; then
       printf 'failed: OMP secondmate primary integration and durable session did not bind to its live session lock\n' >> "$STATE/$ID.status"
-      echo "error: OMP secondmate primary integration and durable session did not bind to its live session lock; stopping only the owned endpoint and preserving the persistent home" >&2
+      echo "error: OMP secondmate primary integration and durable session did not bind to its live session lock; OMP_SKIP_SETUP=1 may not have been honored and an interactive setup wizard may be blocking; stopping only the owned endpoint and preserving the persistent home" >&2
       exit 1
     fi
   else

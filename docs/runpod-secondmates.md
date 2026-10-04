@@ -155,7 +155,8 @@ bin/fm-runpod.sh wake <id> --gpu
 bin/fm-runpod.sh wake <id> --min-vram 24
 ```
 
-After a volume's first wake reaches ready, log each pod-local runtime in once: use `bin/fm-runpod.sh ssh <id>`, run the Claude and Codex login flows, run any other selected harness's login, and run `gh auth login`.
+After a volume's first wake reaches ready, log each pod-local runtime in once: use `bin/fm-runpod.sh ssh <id>`, run the Claude and Codex login flows, and run any other selected harness's login.
+The [remote-home prerequisites](remote-secondmates.md#prerequisites) own the forge-authentication decision and dispatch gate.
 Do not run OMP login, logout, import, or migrate on the pod.
 OMP reads the workstation's existing Claude and GPT subscription credentials through the broker instead.
 SSH also becomes available before toolchain provisioning finishes, so it can be used from another terminal to diagnose a wake that is still waiting.
@@ -201,7 +202,7 @@ bin/fm-runpod.sh ssh <id>         # an interactive shell on the pod
 ### Waking is automatic where it matters
 
 The primary wakes a dormant route itself when it actually needs the host: `bin/fm-send.sh` wakes before it delivers, and `bin/fm-spawn.sh <id> --secondmate` wakes before the readiness gate.
-Both wakes happen strictly before anything is delivered, so a compute failure loses nothing and can be retried; once delivery starts, the existing unknown-completion contract in [`remote-secondmates.md`](remote-secondmates.md) applies unchanged.
+Wake-on-delivery follows the shared [agent restoration contract](remote-secondmates.md#compute-wake-and-agent-restoration); once delivery starts, that guide's unknown-completion contract applies unchanged.
 
 The provider treats `provisioned`, `waking`, `suspending`, and `suspended` as dormant because none is ready for ordinary remote work; a waking pod may expose SSH only for bootstrap diagnostics.
 Startup health polling, startup convergence, `bin/fm-config-push.sh`, and reply-source arming all skip a dormant route instead.
