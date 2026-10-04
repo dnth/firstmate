@@ -81,7 +81,7 @@ SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local state=$1 source=$2 detail=${3:-} gate_detail line generation completed_generation validation_head completed_head validation_path completed_path current_head mode implementation_completed implementation_head requires_validation=0
+  local state=$1 source=$2 detail=${3:-} gate_detail line generation completed_generation validation_head completed_head validation_path completed_path current_head mode implementation_completed implementation_head requires_validation=0 completion_is_current=0
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
     if ! fm_worktree_is_clean "${WT:-}"; then
       state=parked
@@ -101,6 +101,17 @@ emit() {  # <state> <source> [detail]
     implementation_head=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
     mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
     current_head=$(git -C "${WT:-}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+    generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+    completed_generation=$(grep '^validation_completed_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+    validation_path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+    completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
+    completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    if [ "$mode" = no-mistakes ] && [ -n "$generation" ] \
+      && [ "$completed_generation" = "$generation" ] \
+      && [ "$validation_path" = full-no-mistakes ] && [ "$completed_path" = "$validation_path" ] \
+      && [ -n "$current_head" ] && [ "$completed_head" = "$current_head" ]; then
+      completion_is_current=1
+    fi
     case "$implementation_completed" in
       ''|*[!0-9]*)
         state=parked
@@ -111,9 +122,8 @@ emit() {  # <state> <source> [detail]
         implementation_head_ok=0
         if [ -n "$current_head" ] && [ "$implementation_head" = "$current_head" ]; then
           implementation_head_ok=1
-        elif [ "$mode" = no-mistakes ] && [ -n "$current_head" ] \
-          && fm_nm_head_descends_from "${WT:-}" "$implementation_head" "$current_head" \
-          && [ "$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)" = "$current_head" ]; then
+        elif [ "$completion_is_current" -eq 1 ] \
+          && git -C "${WT:-}" rev-parse --verify "$implementation_head^{commit}" >/dev/null 2>&1; then
           implementation_head_ok=1
         fi
         if [ "$implementation_head_ok" -ne 1 ]; then
@@ -125,22 +135,14 @@ emit() {  # <state> <source> [detail]
     esac
   fi
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
-    generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
-    mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
     [ -z "$generation" ] || requires_validation=1
     if [ "$source" = 'run-step' ] && [ "$mode" = no-mistakes ]; then requires_validation=1; fi
     case "$mode" in direct-PR|local-only) requires_validation=1 ;; esac
-    completed_generation=$(grep '^validation_completed_generation=' "$META" | tail -1 | cut -d= -f2- || true)
     validation_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
-    completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
-    validation_path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
-    completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
     validation_head_ok=0
     if [ "$completed_head" = "$validation_head" ] && [ "$current_head" = "$validation_head" ]; then
       validation_head_ok=1
-    elif [ "$mode" = no-mistakes ] && [ -n "$validation_head" ] && [ -n "$current_head" ] \
-      && fm_nm_head_descends_from "${WT:-}" "$validation_head" "$current_head" \
-      && [ "$completed_head" = "$current_head" ]; then
+    elif [ "$completion_is_current" -eq 1 ] && [ -n "$validation_head" ]; then
       validation_head_ok=1
     fi
     if [ "$requires_validation" -eq 1 ] && { [ -z "$generation" ] || [ "$completed_generation" != "$generation" ] \

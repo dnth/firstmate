@@ -1544,6 +1544,13 @@ test_synchronized_monitoring_requires_full_sync_evidence() {
     || fail "synchronized run with a self-submitted head could not bind by content identity"
   printf '%s' "$out" | jq -e '.status == "bound" and .binding == "content-tree"' >/dev/null \
     || fail "self-submitted synchronized bind did not use the content mechanism"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" \
+    FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "self-submitted synchronized run could not complete by content identity"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "self-submitted synchronized completion did not seal the shipping head"
 
   # A converged claim without the equality and safety fields stays refused.
   sync=$(printf 'branch_sync:\n  state: synchronized\nlocal:\n  branch: fm/%s\n  head: "%s"\npipeline:\n  run: "RUN-sync-evidence"\n  submitted_head: "%s"\n  current_head: "%s"\n' \
@@ -1867,6 +1874,7 @@ test_mid_run_rebase_binds_and_completes_by_content_identity() {
   ! git -C "$project" merge-base --is-ancestor "$validated_head" "$run_head" 2>/dev/null \
     || fail "mid-run rebase fixture left the planned head an ancestor"
   meta="$HOME_DIR/state/$id.meta"
+  printf 'implementation_completed_at=1\nimplementation_completed_head=%s\n' "$validated_head" >> "$meta"
   # An unowned active run at the same content stays refused: tree equality
   # never substitutes for authoritative branch ownership.
   status=$(nm_pipeline_status RUN-rebase-unowned "fm/$id" "$run_head" ci '' manual)
@@ -1896,6 +1904,22 @@ test_mid_run_rebase_binds_and_completes_by_content_identity() {
     || fail "owned rebase run could not complete by content identity"
   printf '%s' "$out" | jq -e --arg head "$run_head" '.status == "completed" and .completed_head == $head' >/dev/null \
     || fail "rebase completion did not seal the shipping head"
+  status=$(nm_pipeline_status RUN-rebase "fm/$id" "$run_head" completed passed agent_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$ROOT/bin/fm-crew-state.sh" "$id")
+  assert_contains "$out" 'state: done' "rebased completion did not release fleet done with the original implementation head"
+  printf 'implementation_completed_head=%s\n' "$run_head" >> "$meta"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$ROOT/bin/fm-crew-state.sh" "$id")
+  assert_contains "$out" 'state: done' "rebased completion did not release fleet done with a refreshed implementation head"
+  printf 'validation_completed_generation=stale\n' >> "$meta"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$ROOT/bin/fm-crew-state.sh" "$id")
+  assert_contains "$out" 'state: parked' "rebased completion escaped with a stale generation"
+  printf 'validation_completed_generation=%s\nvalidation_completed_path=direct-PR\n' "$generation" >> "$meta"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$ROOT/bin/fm-crew-state.sh" "$id")
+  assert_contains "$out" 'state: parked' "rebased completion escaped with a mismatched path"
   pass "mid-run rebase onto newer main binds and completes by content identity"
 }
 

@@ -889,7 +889,7 @@ if [ "$ACTION" = mechanical-ready ]; then
 fi
 
 record_validation_completed() {
-  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted content_accounted expected_submitted done_claim ask_user_rc ask_user_report
+  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted content_accounted run_binding expected_submitted done_claim ask_user_rc ask_user_report
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -1002,6 +1002,11 @@ record_validation_completed() {
       # active pipeline ownership or a terminal passed run.
       restamp_accounted=0
       content_accounted=0
+      run_binding=$(grep '^validation_run_binding=' "$META" | tail -1 | cut -d= -f2- || true)
+      if [ "$run_binding" = content-tree ] \
+        && fm_nm_commits_share_tree "$worktree" "$observed_head_full" "$current_head"; then
+        content_accounted=1
+      fi
       if [ "$observed_head_full" = "$current_head" ]; then
         run_head_matches_current=1
       elif fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$observed_head_full" \
