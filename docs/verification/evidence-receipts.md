@@ -1,6 +1,6 @@
 # Evidence receipts and risk routing verification
 
-This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-10-01.
+This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-10-04.
 The exact receipt key and type schema is owned by the header and `--help` output of `bin/fm-receipt-schema.sh`; the criterion parser, classifier thresholds, metadata fields, and lifecycle commands are owned by the headers and help output of `bin/fm-receipt-check.sh`, `bin/fm-receipt.sh`, and `bin/fm-receipt-store.sh` at their respective executable boundaries.
 
 ## Guarantees under test
@@ -39,37 +39,31 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - Findings that invalidate a receipt or acceptance claim atomically bind one generation-scoped idempotent finding-to-criterion marker to the invalidation-time head and receipt boundary, then require a strict non-empty descendant delta and a later successful receipt bound to the new head before replanning or completion.
 - One pinned state-directory owner snapshots single-link no-follow metadata and performs compare-bound atomic replacements for every validation metadata update.
 - PR registration publishes canonical PR identity and its validation publication generation through one compare-bound pinned metadata replacement after the watcher artifacts publish, and revokes those artifacts if that replacement fails.
-- Successful planned-head and faithful-restamp runs can bind with checks-passed, passed, or eligible active status, while descendants require active run-owned branch evidence - pipeline ownership or the fully evidenced synchronized convergence - or a terminal passed run; failed and cancelled runs remain ineligible.
+- Binding fixtures cover planned heads and faithful restamps separately from advances and preplan recovery, using the eligibility rules owned by `bin/fm-receipt-check.sh`.
+- Recovery fixtures exercise late planning, mid-run rebasing, and identical-replan refusal through the binding and completion contract owned by `bin/fm-receipt-check.sh`.
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence and records its plan path and authoritative completed head.
-- A changed worktree head invalidates completion unless the bound No-Mistakes run proves the current content is accounted for by the planned chain: a strict descendant of the planned head, a faithful restamp of the validation-base-to-planned chain, or a strict descendant of such a faithful restamp; active runs must prove run-owned branch state through branch_sync or `axi sync --check`, while terminal passed runs prove the advance through their own reported head.
-- A chain the pipeline's rebase step restamped binds and completes only when it is a faithful restamp of the planned chain from the recorded validation base, and a restamped chain followed by additional run-owned commits binds and completes as a run-owned descendant that preserves the same branch and run-owned branch checks.
-- Unrelated, missing, or ambiguous drift remains refused, and a terminal run that did not pass never seals an advance.
+- Head-accounting fixtures cover descendants, faithful restamps, descendants of restamps, and owned content identity, with refusal cases for unvalidated checkout content, mismatched branches, incomplete ownership evidence, failed runs, and cancelled runs.
 - Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
 - Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
 - Ordinary No-Mistakes findings return to the original worker through guarded custody return and then full revalidation.
 - Direct-PR registration publishes its watcher before recording completion, while other paths preserve their earlier path-specific completion boundary.
 
-## Reconciliation with the descendant-advance guarantee
+## Head-accounting regression coverage
 
-The descendant-advance guarantee above admits three shapes of head change, and no others.
-The first shape is a strict descendant: new commits landed on top of the planned head, so the planned head stays an ancestor of the current head.
-The second shape is a faithful restamp: the no-mistakes rebase step re-commits every commit on the branch with a fresh committer stamp, which mints a new object id for the whole chain while every tree stays byte-identical, so the planned head stops being an ancestor of anything the run reports.
-Observed on 2026-09-05 in run `01M1RW6JNH5C5VN15PPRYDW3J0`: planned head `874ce334` and run head `bd8aaff5` both carry tree `f7d8fa3a`, and `git merge-base --is-ancestor 874ce334 bd8aaff5` exits 1.
-The third shape is a restamped chain followed by additional run-owned commits: the pipeline first restamps the planned chain, then adds review or document commits on top, so the current head is a strict descendant of a faithful restamp.
+The binding and completion contract is owned by the header and help of [`bin/fm-receipt-check.sh`](../../bin/fm-receipt-check.sh); the tree, chain-provenance, and branch-ownership predicates are owned by [`bin/fm-nm-run-lib.sh`](../../bin/fm-nm-run-lib.sh).
+The executable-interface fixtures in [`tests/fm-receipt-check.test.sh`](../../tests/fm-receipt-check.test.sh) exercise these guarantees:
 
-The relaxed checks use one shared content-identity predicate, `fm_nm_head_is_accounted` in `bin/fm-nm-run-lib.sh`.
-`--bind-run` accepts the planned head or a faithful restamp when the run reports the task branch and has an eligible checks-passed or active status; a strict descendant of either additionally requires active run-owned branch evidence or a terminal passed run.
-`--complete` accepts the same shapes, with branch identity and ownership required whenever the run advanced beyond the planned head.
-A descendant is accepted only when the run reports the same task branch and, for active runs, `fm_nm_run_branch_ownership` in `bin/fm-nm-run-lib.sh` proves the run-owned branch state: `branch_sync.state` `pipeline_owned`, either in `axi status` or `axi sync --check`, or the converged `synchronized` state once the pipeline pushed its head back and the run stays active only to monitor its PR.
-The synchronized acceptance requires the complete `axi sync --check` evidence - the same run id, `submitted_head` resolving to the validated head, `current_head` and the reported local head both resolving to the run's observed head, `relation` equal, and `safety` `already_synchronized` - so synchronized alone never proves a pass and foreign, stale, or incomplete readouts stay refused.
+- The late-plan fixture records an already-existing run as the plan boundary, refuses it without ownership, then checks, binds, and completes its terminal pass through content identity without changing the plan.
+- The mid-run rebase fixture advances main with real content, replays the task chain, and adds pipeline fixes, asserting that the resulting head neither descends from the planned head nor shares its tree before checking binding and completion.
+- The replan fixture refuses an identical plan without clearing the live binding, then verifies that changed-content replanning clears stale run and completion bindings.
+- The synchronized fixture checks completion with a self-submitted descendant after content binding and after ancestry binding transitions from pipeline custody to synchronized ownership.
+- The rebase fixture also checks fleet done acceptance through `bin/fm-crew-state.sh` with original and refreshed implementation heads, rejecting stale completion generations and mismatched paths.
+- The refusal fixtures separate tree identity from ownership and branch identity, and reject run or checkout content that the run did not validate, as well as failed and cancelled runs.
+- The binding-check prerequisite fixture verifies the single read-only verdict surface for missing or invalid receipts, dirty or missing worktrees, invalid plans or generations, and unobservable runs.
 
-Chain provenance is the content-identity mechanism, stated in `fm_nm_head_is_faithful_restamp` in `bin/fm-nm-run-lib.sh`.
-It resolves the recorded validation base, requires it to be an ancestor of both heads, requires equal commit counts, and compares each corresponding commit tree in base-to-head order.
-The descendant-of-restamp check extends this by taking the leading segment of the candidate's first-parent chain and requiring that segment to be a faithful restamp, with at least one additional commit after it.
-Foreign drift, unrelated same-tree tips, reverted foreign commits, rebases onto changed bases, and unowned or mismatched branches stay refused because they break ancestry, count, tree comparison, branch identity, or run ownership.
-Every other completion requirement is unchanged: the run must still be the bound run at the current generation, still be genuinely passed or checks-green, and still report the current worktree branch while active with run-owned branch evidence or be terminal PASSED otherwise.
+Commands and captured results are recorded below.
 
 ## Known limitations
 
@@ -78,11 +72,24 @@ Every other completion requirement is unchanged: the run must still be the bound
 
 ## Verification environment
 
-- Date: 2026-10-01.
+- Date: 2026-10-04.
 - ShellCheck: 0.11.0.
 - Git: 2.34.1.
 
 ## Commands and results
+
+On 2026-10-04, the focused completion regressions and both owning suites passed with the command below (exit 0).
+The synchronized fixture exercises completion with a self-submitted descendant head after content binding and after ancestry binding transitions from pipeline custody to synchronized ownership.
+The rebase fixture exercises fleet done acceptance with both original and refreshed implementation heads and refuses stale completion generations and mismatched paths.
+
+```text
+$ TMPDIR="$PWD/.review-tmp" bash -c 'bash tests/fm-receipt-check.test.sh && bash tests/fm-crew-state.test.sh'
+ok - converged synchronized binding requires the full run-owned sync evidence
+ok - mid-run rebase onto newer main binds and completes by content identity
+all fm-crew-state tests passed
+```
+
+The ownership-transition and prerequisite-refusal regressions were refreshed on 2026-10-04 with `TMPDIR="$PWD/.review-tmp" bash tests/fm-receipt-check.test.sh` (exit 0), including `ok - converged synchronized binding requires the full run-owned sync evidence` and `ok - bind-check prerequisite refusals preserve one read-only binding verdict contract`.
 
 The focused behavioral suites passed with these exact commands.
 
@@ -141,6 +148,9 @@ ok - authoritative documentation remains high
 ok - terminal delivery paths record one completion timestamp at their boundary
 ok - completion signals release the validation lock for retry
 ok - replanning invalidates prior run and completion bindings
+ok - a passed run recorded before its plan binds and completes by content identity
+ok - mid-run rebase onto newer main binds and completes by content identity
+ok - content-identity binding still refuses unreviewed content and unowned or failed runs
 ok - dirty worktrees cannot be planned or completed
 ok - git status errors fail implementation, planning, and completion cleanliness gates
 ok - shared cleanliness inspects ignored submodules
@@ -149,6 +159,7 @@ ok - local completion requires fast-forward readiness
 ok - local readiness and landing share one fail-closed default resolver
 ok - security and uncertain changes retain full No-Mistakes validation
 ok - direct-PR and local-only retain evidence gates without invoking No-Mistakes
+ok - completion refuses a standing done: claim that carries no delivery artifact
 ok - accepted-blocked accounts for its criterion without evidencing it and still refuses real gaps
 
 $ tests/fm-crew-state.test.sh

@@ -122,6 +122,80 @@ nm_sync_converged() {  # <run-id> <branch> <submitted-head> <current-head>
     "$2" "$4" "$1" "$3" "$4" "$4" "$4"
 }
 
+test_bind_check_prerequisites_use_binding_verdict() {
+  local id=receipt-bind-prerequisites base project head generation status variant reason rc expected_rc out nm_bin meta brief ledger saved
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test passed
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "binding prerequisite fixture could not plan"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  meta="$HOME_DIR/state/$id.meta"
+  brief="$HOME_DIR/data/$id/brief.md"
+  ledger="$HOME_DIR/data/$id/evidence.jsonl"
+  generation=$(sed -n 's/^validation_generation=//p' "$meta" | tail -1)
+  status=$(nm_pipeline_status RUN-prerequisites "fm/$id" "$head" completed passed agent_owned)
+  saved="$TMP_ROOT/bind-prerequisites"
+  mkdir -p "$saved"
+  cp "$meta" "$saved/meta"
+  cp "$brief" "$saved/brief"
+  cp "$ledger" "$saved/ledger"
+  for variant in snapshot kind-missing kind-duplicate kind-invalid scout secondmate brief-mode-missing brief-mode-invalid brief-mode-duplicate meta-mode-missing meta-mode-invalid meta-mode-duplicate mode-mismatch criteria ledger-missing ledger-invalid path worktree head base dirty run generation; do
+    cp "$saved/meta" "$meta"
+    cp "$saved/brief" "$brief"
+    cp "$saved/ledger" "$ledger"
+    nm_bin="$FAKE_NO_MISTAKES"
+    expected_rc=2
+    case "$variant" in
+      snapshot) mv "$brief" "$saved/absent-brief"; reason='pinned evidence snapshot failed' ;;
+      kind-missing) sed '/^kind=/d' "$saved/meta" > "$meta"; reason='task metadata must contain exactly one kind' ;;
+      kind-duplicate) printf 'kind=ship\n' >> "$meta"; reason='task metadata must contain exactly one kind' ;;
+      kind-invalid) sed 's/^kind=.*/kind=unknown/' "$saved/meta" > "$meta"; reason='task metadata has an invalid kind' ;;
+      scout|secondmate) sed "s/^kind=.*/kind=$variant/" "$saved/meta" > "$meta"; reason='validation planning applies only to ship tasks' ;;
+      brief-mode-missing) sed '/^Delivery contract:/d' "$saved/brief" > "$brief"; reason='ship brief has no delivery contract' ;;
+      brief-mode-invalid) sed 's/^Delivery contract:.*/Delivery contract: mode=unknown/' "$saved/brief" > "$brief"; reason='ship brief has an invalid delivery contract' ;;
+      brief-mode-duplicate) printf 'Delivery contract: mode=no-mistakes\n' >> "$brief"; reason='ship brief has multiple delivery contracts' ;;
+      meta-mode-missing) sed '/^mode=/d' "$saved/meta" > "$meta"; reason='task metadata must contain exactly one concrete delivery mode' ;;
+      meta-mode-invalid) sed 's/^mode=.*/mode=unknown/' "$saved/meta" > "$meta"; reason='task metadata has no concrete delivery mode' ;;
+      meta-mode-duplicate) printf 'mode=no-mistakes\n' >> "$meta"; reason='task metadata must contain exactly one concrete delivery mode' ;;
+      mode-mismatch) sed 's/^mode=.*/mode=direct-PR/' "$saved/meta" > "$meta"; reason='task metadata delivery mode contradicts the pinned ship brief' ;;
+      criteria) sed 's/^- AC1:/- BAD:/' "$saved/brief" > "$brief"; reason="ship brief must contain one valid '# Acceptance criteria' section with unique AC ids and no placeholders" ;;
+      ledger-missing) : > "$ledger"; reason='missing evidence: AC1, AC2'; expected_rc=1 ;;
+      ledger-invalid) printf 'invalid-json\n' >> "$ledger"; reason='invalid evidence: line 3: invalid v1 receipt' ;;
+      path) printf 'validation_path=direct-PR\n' >> "$meta"; reason='latest plan does not use full No-Mistakes' ;;
+      worktree) printf 'worktree=%s/absent\n' "$saved" >> "$meta"; reason='validation worktree is missing' ;;
+      head) printf 'validation_head=absent\n' >> "$meta"; reason='validated head is missing' ;;
+      base) printf 'validation_base=absent\n' >> "$meta"; reason='validation base is missing' ;;
+      dirty) printf 'dirty\n' > "$project/untracked"; reason='validation worktree is dirty' ;;
+      run) nm_bin="$FAIL_NO_MISTAKES"; reason='No-Mistakes run could not be observed' ;;
+      generation) printf 'validation_generation=stale\n' >> "$meta"; reason='run generation does not match the latest plan' ;;
+    esac
+    cp "$meta" "$saved/expected-meta"
+    cp "$ledger" "$saved/expected-ledger"
+    out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$nm_bin" FM_HOME="$HOME_DIR" \
+      "$CHECK" "$id" --bind-check RUN-prerequisites --generation "$generation" 2> "$saved/stderr")
+    rc=$?
+    expect_code "$expected_rc" "$rc" "$variant binding prerequisite exit changed"
+    printf '%s' "$out" | jq -se --arg task "$id" --arg reason "$reason" '
+      length == 1 and .[0] == {schema:"fm-validation-run-binding-check.v1",task:$task,
+        status:"refused",run:"RUN-prerequisites",binding:"none",reason:$reason,head:""}
+    ' >/dev/null || fail "$variant prerequisite did not return the binding refusal contract"
+    cmp -s "$meta" "$saved/expected-meta" || fail "$variant bind-check changed metadata"
+    cmp -s "$ledger" "$saved/expected-ledger" || fail "$variant bind-check changed receipts"
+    [ "$variant" != dirty ] || rm "$project/untracked"
+  done
+  cp "$saved/meta" "$meta"
+  cp "$saved/brief" "$brief"
+  cp "$saved/ledger" "$ledger"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-check RUN-prerequisites --generation "$generation") \
+    || fail "restored binding prerequisites did not report bindable"
+  printf '%s' "$out" | jq -e '.schema == "fm-validation-run-binding-check.v1" and .status == "bindable" and .reason == ""' >/dev/null \
+    || fail "successful bind-check changed verdict schema"
+  pass "bind-check prerequisite refusals preserve one read-only binding verdict contract"
+}
+
 test_help_advertises_generation_bound_run_binding() {
   local out
   out=$("$CHECK" --help) || fail "receipt checker help failed"
@@ -1191,7 +1265,7 @@ test_pipeline_rebase_restamp_binds_and_seals_identical_content() {
 }
 
 test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
-  local id base project validated_head restamped generation status rc
+  local id base project validated_head restamped clean_restamped generation status rc
 
   # Foreign content: the chain is rewritten AND carries an unvalidated edit, so
   # its tree differs from the validated tree and neither bind nor complete may
@@ -1213,15 +1287,18 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
   rc=$?
   expect_code 2 "$rc" "bind accepted a rewritten chain carrying foreign content"
   git -C "$project" reset -q --hard "$validated_head"
-  status=$(nm_status RUN-restamp-clean "$(restamp_chain "$project" "$base")" pending)
+  clean_restamped=$(restamp_chain "$project" "$base")
+  status=$(nm_status RUN-restamp-clean "$clean_restamped" pending)
   FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-restamp-clean --generation "$generation" >/dev/null \
     || fail "foreign fixture control binding failed"
   printf 'unvalidated edit\n' >> "$project/src/app.sh"
   git -C "$project" add src/app.sh
   git -C "$project" commit -q --amend --no-edit
-  restamped=$(git -C "$project" rev-parse HEAD)
-  status=$(nm_pipeline_status RUN-restamp-clean "fm/$id" "$restamped" completed passed agent_owned)
+  # The passed run keeps reporting the clean head it actually validated, so the
+  # foreign tip it never reviewed must not seal: its tree differs from both the
+  # validated chain's and the reported head's.
+  status=$(nm_pipeline_status RUN-restamp-clean "fm/$id" "$clean_restamped" completed passed agent_owned)
   FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
   rc=$?
@@ -1509,7 +1586,7 @@ test_synchronized_monitoring_run_binds_and_completes() {
 }
 
 test_synchronized_monitoring_requires_full_sync_evidence() {
-  local id=receipt-sync-evidence base project initial_head current_head generation status sync rc
+  local id=receipt-sync-evidence base project initial_head current_head generation status sync out rc
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint passed
@@ -1531,12 +1608,38 @@ test_synchronized_monitoring_requires_full_sync_evidence() {
   rc=$?
   expect_code 2 "$rc" "synchronized bind accepted a foreign run id"
 
-  # A submitted head other than the validated head is not this plan's run.
+  # A submitted head other than the validated head no longer proves a foreign
+  # run once content identity applies: a run that predates the plan or was
+  # rebased mid-run submits its own head by design, so the remaining
+  # converged-state evidence still binds it through the content shape.
   sync=$(nm_sync_converged RUN-sync-evidence "fm/$id" "$current_head" "$current_head")
-  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --bind-run RUN-sync-evidence --generation "$generation" >/dev/null 2>&1
-  rc=$?
-  expect_code 2 "$rc" "synchronized bind accepted a mismatched submitted head"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-sync-evidence --generation "$generation") \
+    || fail "synchronized run with a self-submitted head could not bind by content identity"
+  printf '%s' "$out" | jq -e '.status == "bound" and .binding == "content-tree"' >/dev/null \
+    || fail "self-submitted synchronized bind did not use the content mechanism"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" \
+    FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "self-submitted synchronized run could not complete by content identity"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "self-submitted synchronized completion did not seal the shipping head"
+
+  status=$(nm_pipeline_status RUN-sync-evidence "fm/$id" "$current_head" running '' pipeline_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-sync-evidence --generation "$generation") \
+    || fail "pipeline-owned self-submitted run could not bind"
+  printf '%s' "$out" | jq -e '.status == "bound" and .binding == "ancestry"' >/dev/null \
+    || fail "pipeline-owned binding did not reproduce ancestry preference"
+  status=$(nm_pipeline_status RUN-sync-evidence "fm/$id" "$current_head" running '' synchronized)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" \
+    FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "ancestry-bound run could not complete after synchronized ownership transition"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "ownership-transition completion did not seal the shipping head"
 
   # A converged claim without the equality and safety fields stays refused.
   sync=$(printf 'branch_sync:\n  state: synchronized\nlocal:\n  branch: fm/%s\n  head: "%s"\npipeline:\n  run: "RUN-sync-evidence"\n  submitted_head: "%s"\n  current_head: "%s"\n' \
@@ -1742,7 +1845,7 @@ EOF
 }
 
 test_replan_invalidates_run_binding() {
-  local id=replan-binding base project head running passed rc generation
+  local id=replan-binding base project head running passed rc generation out
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
@@ -1755,13 +1858,232 @@ test_replan_invalidates_run_binding() {
   FM_FAKE_NM_STATUS="$running" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-old --generation "$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)" >/dev/null || fail "initial run binding failed"
+  # A replan over identical content would only orphan the bound run: the
+  # preplan boundary would record it as predating the new plan and refuse its
+  # binding, so --plan refuses while the binding stays intact.
+  out=$(FM_FAKE_NM_STATUS="$running" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "same-content replan orphaned the bound run"
+  assert_contains "$out" "already bound to an identical validation plan" \
+    "same-content replan refusal did not name the bound run"
+  [ "$(grep '^validation_run_id=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)" = RUN-old ] \
+    || fail "refused replan still cleared the bound run"
+  # Genuinely changed content remains replannable and still invalidates the
+  # stale binding because the bound run validated a different head.
+  printf 'rework\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'rework after findings'
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --implementation-complete >/dev/null \
+    || fail "reworked implementation completion failed"
   FM_FAKE_NM_STATUS="$running" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "replan failed"
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "changed-content replan failed"
+  [ "$(grep '^validation_run_id=' "$HOME_DIR/state/$id.meta" | tail -1)" = 'validation_run_id=' ] \
+    || fail "changed-content replan kept the stale run binding"
   FM_FAKE_NM_STATUS="$passed" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "replan invalidates the prior run binding"
   pass "replanning invalidates prior run and completion bindings"
+}
+
+test_preplan_run_binds_by_content_identity() {
+  local id=late-plan-bind base project head generation status passed out rc meta
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  # The validating run already exists when the plan is recorded, so the plan
+  # captures it as the pre-plan boundary and ordinary binding would refuse it.
+  status=$(nm_status RUN-late "$head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "late-plan fixture plan failed"
+  meta="$HOME_DIR/state/$id.meta"
+  generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
+  [ "$(grep '^validation_preplan_run_id=' "$meta" | tail -1 | cut -d= -f2-)" = RUN-late ] \
+    || fail "late plan did not record the existing run as its boundary"
+  # A preplan run still in flight without proven ownership stays refused: the
+  # content-identity shape never stands on head equality alone.
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-late --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "unproven preplan run bound without terminal pass or ownership"
+  # Once the run reached a terminal pass at the same content, content identity
+  # proves it validated exactly what ships and the run binds without a replan.
+  passed=$(printf 'run:\n  id: "RUN-late"\n  branch: fm/%s\n  status: completed\n  head: "%s"\noutcome: passed\n' "$id" "$head")
+  out=$(FM_FAKE_NM_STATUS="$passed" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-check RUN-late --generation "$generation") \
+    || fail "read-only check refused a passed preplan run"
+  printf '%s' "$out" | jq -e '.status == "bindable" and .binding == "content-tree" and .reason == ""' >/dev/null \
+    || fail "read-only check did not report the content-tree mechanism"
+  grep -q '^validation_run_id=' "$meta" && fail "read-only check wrote run binding metadata"
+  out=$(FM_FAKE_NM_STATUS="$passed" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-late --generation "$generation") \
+    || fail "passed preplan run could not bind by content identity"
+  printf '%s' "$out" | jq -e --arg head "$head" '.status == "bound" and .head == $head and .binding == "content-tree"' >/dev/null \
+    || fail "preplan bind did not record the content-tree mechanism"
+  [ "$(grep '^validation_run_binding=' "$meta" | tail -1 | cut -d= -f2-)" = content-tree ] \
+    || fail "bound run metadata did not record the content-tree mechanism"
+  out=$(FM_FAKE_NM_STATUS="$passed" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "passed preplan run could not complete after content binding"
+  printf '%s' "$out" | jq -e --arg head "$head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "preplan completion did not seal the validated head"
+  pass "a passed run recorded before its plan binds and completes by content identity"
+}
+
+# Rebase the planned branch onto a newer main carrying real new content, then
+# add the pipeline's own fix commits on top: the run head is neither the
+# planned commit, a same-base restamp, nor its descendant. Prints the new head.
+rebase_onto_newer_main() {  # <project> <base> <validated-head>
+  local project=$1 base=$2 validated=$3 commit
+  git -C "$project" checkout -q main
+  printf 'newly merged main content\n' >> "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" commit -q -m 'main advances mid-run' || fail "newer-base fixture commit failed"
+  git -C "$project" checkout -q -B "fm/${id:?}" HEAD
+  while IFS= read -r commit; do
+    git -C "$project" cherry-pick "$commit" >/dev/null \
+      || fail "mid-run rebase fixture could not replay the task chain"
+  done < <(git -C "$project" rev-list --reverse "$base..$validated")
+  printf 'pipeline fix\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: apply CI fixes' || fail "pipeline fix fixture commit failed"
+  git -C "$project" rev-parse HEAD
+}
+
+test_mid_run_rebase_binds_and_completes_by_content_identity() {
+  local id=receipt-rebase-bind base project validated_head run_head generation status out rc foreign_head meta
+  # Crew-state discovers the CLI on PATH before using FM_NO_MISTAKES_BIN.
+  # Keep both interfaces on the fixture, even on hosts without no-mistakes.
+  mkdir -p "$TMP_ROOT/crew-bin"
+  ln -s "$FAKE_NO_MISTAKES" "$TMP_ROOT/crew-bin/no-mistakes"
+  local PATH="$TMP_ROOT/crew-bin:$PATH"
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  run_head=$(rebase_onto_newer_main "$project" "$base" "$validated_head")
+  [ "$(git -C "$project" rev-parse "$run_head^{tree}")" != "$(git -C "$project" rev-parse "$validated_head^{tree}")" ] \
+    || fail "mid-run rebase fixture kept the planned tree"
+  ! git -C "$project" merge-base --is-ancestor "$validated_head" "$run_head" 2>/dev/null \
+    || fail "mid-run rebase fixture left the planned head an ancestor"
+  meta="$HOME_DIR/state/$id.meta"
+  printf 'implementation_completed_at=1\nimplementation_completed_head=%s\n' "$validated_head" >> "$meta"
+  # An unowned active run at the same content stays refused: tree equality
+  # never substitutes for authoritative branch ownership.
+  status=$(nm_pipeline_status RUN-rebase-unowned "fm/$id" "$run_head" ci '' manual)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-check RUN-rebase-unowned --generation "$generation" 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "unowned rebase run reported bindable"
+  printf '%s' "$out" | jq -e '.status == "refused" and .reason == "ownership-unproven"' >/dev/null \
+    || fail "unowned rebase refusal did not name the missing ownership proof"
+  # The authoritative pipeline-owned run binds: its reported head tree is
+  # byte-identical to the checked-out content it validated.
+  status=$(nm_pipeline_status RUN-rebase "fm/$id" "$run_head" ci '' pipeline_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-check RUN-rebase --generation "$generation") \
+    || fail "read-only check refused the owned rebase run"
+  printf '%s' "$out" | jq -e '.status == "bindable" and .binding == "content-tree"' >/dev/null \
+    || fail "read-only check did not select the content-tree mechanism"
+  grep -q '^validation_run_id=' "$meta" && fail "read-only check wrote run binding metadata"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-rebase --generation "$generation") \
+    || fail "owned rebase run could not bind by content identity"
+  printf '%s' "$out" | jq -e --arg head "$run_head" '.status == "bound" and .head == $head and .binding == "content-tree"' >/dev/null \
+    || fail "rebase bind did not record the content-tree mechanism"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "owned rebase run could not complete by content identity"
+  printf '%s' "$out" | jq -e --arg head "$run_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "rebase completion did not seal the shipping head"
+  status=$(nm_pipeline_status RUN-rebase "fm/$id" "$run_head" completed passed agent_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$ROOT/bin/fm-crew-state.sh" "$id")
+  assert_contains "$out" 'state: done' "rebased completion did not release fleet done with the original implementation head"
+  printf 'implementation_completed_head=%s\n' "$run_head" >> "$meta"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$ROOT/bin/fm-crew-state.sh" "$id")
+  assert_contains "$out" 'state: done' "rebased completion did not release fleet done with a refreshed implementation head"
+  printf 'validation_completed_generation=stale\n' >> "$meta"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$ROOT/bin/fm-crew-state.sh" "$id")
+  assert_contains "$out" 'state: parked' "rebased completion escaped with a stale generation"
+  printf 'validation_completed_generation=%s\nvalidation_completed_path=direct-PR\n' "$generation" >> "$meta"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$ROOT/bin/fm-crew-state.sh" "$id")
+  assert_contains "$out" 'state: parked' "rebased completion escaped with a mismatched path"
+  pass "mid-run rebase onto newer main binds and completes by content identity"
+}
+
+test_rebase_content_identity_still_refuses_unreviewed_content() {
+  local id=receipt-rebase-refusals base project validated_head run_head generation status out rc foreign_head sync
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  run_head=$(rebase_onto_newer_main "$project" "$base" "$validated_head")
+
+  # A terminal passed run still binds a rebased chain it owns.
+  status=$(nm_pipeline_status RUN-rebase-terminal "fm/$id" "$run_head" completed passed agent_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-rebase-terminal --generation "$generation") \
+    || fail "terminal passed rebase run could not bind"
+  printf '%s' "$out" | jq -e '.binding == "content-tree"' >/dev/null \
+    || fail "terminal rebase bind did not record the content-tree mechanism"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "terminal passed rebase run could not complete"
+  printf '%s' "$out" | jq -e --arg head "$run_head" '.completed_head == $head' >/dev/null \
+    || fail "terminal rebase completion did not seal the shipping head"
+
+  # A converged monitoring run binds through the full synchronized evidence;
+  # its submitted head differs from the plan head because it submitted before
+  # the rebase, which the content path leaves open by design.
+  id='receipt-rebase-sync-bind'
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  run_head=$(rebase_onto_newer_main "$project" "$base" "$validated_head")
+  status=$(printf 'run:\n  id: "RUN-rebase-sync"\n  branch: fm/%s\n  status: running\n  head: "%s"\n' "$id" "$run_head")
+  sync=$(nm_sync_converged RUN-rebase-sync "fm/$id" "$validated_head" "$run_head")
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-rebase-sync --generation "$generation" >/dev/null \
+    || fail "converged synchronized rebase run could not bind"
+
+  # Foreign content never binds: the run's reported head tree must equal the
+  # checked-out tree even when the run claims pipeline ownership.
+  id='receipt-rebase-foreign-head'
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  run_head=$(rebase_onto_newer_main "$project" "$base" "$validated_head")
+  printf 'unvalidated foreign content\n' > "$project/foreign.txt"
+  git -C "$project" add foreign.txt
+  git -C "$project" commit -q -m 'foreign commit' || fail "foreign fixture commit failed"
+  foreign_head=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" reset -q --hard "$run_head" || fail "foreign fixture reset failed"
+  status=$(nm_pipeline_status RUN-rebase-foreign "fm/$id" "$foreign_head" ci '' pipeline_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-check RUN-rebase-foreign --generation "$generation" 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "foreign-head run reported bindable"
+  printf '%s' "$out" | jq -e '.status == "refused" and .reason == "head-content-not-accounted"' >/dev/null \
+    || fail "foreign-head refusal did not name the content mismatch"
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-rebase-foreign --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted a run head carrying unreviewed content"
+
+  # Unreviewed checkout content never seals: a foreign commit on top of the
+  # bound run's validated head keeps its tree out of the run's verdict.
+  git -C "$project" checkout -q -B "fm/$id" "$foreign_head"
+  status=$(nm_pipeline_status RUN-rebase-owned "fm/$id" "$run_head" completed passed agent_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-rebase-owned --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted a checkout carrying unreviewed content"
+
+  # A failed or cancelled rebase run can never bind, however the trees look.
+  status=$(nm_pipeline_status RUN-rebase-cancelled "fm/$id" "$run_head" cancelled cancelled agent_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-rebase-cancelled --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted a cancelled rebase run"
+  pass "content-identity binding still refuses unreviewed content and unowned or failed runs"
 }
 
 test_dirty_worktrees_cannot_plan_or_complete() {
@@ -2435,6 +2757,7 @@ test_pr_ready_requires_bound_run() {
   pass "PR-ready requires a bound no-mistakes run"
 }
 
+test_bind_check_prerequisites_use_binding_verdict
 test_help_advertises_generation_bound_run_binding
 test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
@@ -2473,6 +2796,9 @@ test_authoritative_docs_remain_high
 test_terminal_paths_record_completion_at_their_boundary
 test_completion_signal_releases_validation_lock
 test_replan_invalidates_run_binding
+test_preplan_run_binds_by_content_identity
+test_mid_run_rebase_binds_and_completes_by_content_identity
+test_rebase_content_identity_still_refuses_unreviewed_content
 test_dirty_worktrees_cannot_plan_or_complete
 test_git_status_errors_fail_every_cleanliness_gate
 test_submodule_ignore_cannot_hide_dirty_work
