@@ -1260,14 +1260,19 @@ test_23_stale_inflight_ttl_and_dead_pid_steal() {
   mkdir -p "$home/state/ext-outbox"
   lockbase="probe.answer.1.inflight.lock"
   mkdir "$home/state/ext-outbox/$lockbase"
-  if (
+  (
     # shellcheck source=bin/fm-ext-lib.sh
     . "$ROOT/bin/fm-ext-lib.sh"
     FM_EXT_INFLIGHT_TTL_SECS=0
-    fm_ext_outbox_inflight_steallock_stale "$home/state/ext-outbox" "$lockbase"
-  ); then
-    fail "a fresh steal-lock must not be reclaimable when claim TTL is 0"
-  fi
+    FM_EXT_NOW_OVERRIDE=$(fm_ext_file_mtime "$home/state/ext-outbox/$lockbase") \
+      || fail "could not read the steal-lock fixture mtime"
+    if fm_ext_outbox_inflight_steallock_stale "$home/state/ext-outbox" "$lockbase"; then
+      fail "a fresh steal-lock must not be reclaimable when claim TTL is 0"
+    fi
+    FM_EXT_NOW_OVERRIDE=$((FM_EXT_NOW_OVERRIDE + 1))
+    fm_ext_outbox_inflight_steallock_stale "$home/state/ext-outbox" "$lockbase" \
+      || fail "a steal-lock at the one-second floor must be reclaimable when claim TTL is 0"
+  ) || fail "steal-lock TTL boundary checks failed"
 
   home="$TMP_ROOT/c23stealrace"
   setup_home "$home"
