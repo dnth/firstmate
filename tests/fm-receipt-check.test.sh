@@ -2333,7 +2333,7 @@ test_ask_user_gate_unaffected_and_unreadable_cases() {
 }
 
 test_malformed_nm_decision_fields() {
-  local table field value out rc
+  local table field value out rc expect cases case_
   . "$ROOT/bin/fm-classify-lib.sh"
   . "$ROOT/bin/fm-nm-run-lib.sh"
   nm_db "INSERT INTO runs VALUES ('RUN-malformed');
@@ -2344,7 +2344,26 @@ test_malformed_nm_decision_fields() {
   for table in step_results step_rounds; do
     for field in findings_json user_findings_json selected_finding_ids; do
       [ "$table" != step_results ] || [ "$field" = findings_json ] || continue
-      for value in broken null '{}' '[1]' '[{"id":"","action":"ask-user"}]' '[{"id":"R1"}]' '[{"id":"R1","action":"other"}]'; do
+      if [ "$field" = selected_finding_ids ]; then
+        # Selection fields only accept an array of nonempty string ids; a JSON
+        # null means "no selection" like SQL NULL does.
+        cases='broken:2 {}:2 [1]:2 [{"id":"R1"}]:2 null:0'
+      elif [ "$table" = step_results ]; then
+        # Step summary fields: real data stores "findings":null envelopes and
+        # finds with empty/missing actions that were never parked; only
+        # structurally broken content refuses as unreadable. A never-parked
+        # finding with an unknown action still fails safe to a decision
+        # requirement on a completed step.
+        cases='broken:2 null:0 {}:0 {"findings":null,"summary":"s"}:0 [1]:2 [{"id":"","action":"ask-user"}]:2 [{"id":"R1"}]:0 [{"id":"R1","action":""}]:0 [{"id":"R1","action":"other"}]:1'
+      else
+        # Round records: a user/user_declined round is parked-gate evidence, so
+        # an empty/missing or unknown action finding inside it is ask-user and
+        # an unmarked response must refuse (rc=1); routine actions do not.
+        cases='broken:2 null:0 {}:0 {"findings":null,"summary":"s"}:0 [1]:2 [{"id":"","action":"ask-user"}]:2 [{"id":"R1"}]:1 [{"id":"R1","action":""}]:1 [{"id":"R1","action":"other"}]:1 [{"id":"R1","action":"auto-fix"}]:0 [{"id":"R1","action":"no-op"}]:0'
+      fi
+      for case_ in $cases; do
+        value=${case_%:*}
+        expect=${case_##*:}
         if [ "$table" = step_results ]; then
           nm_db "UPDATE step_results SET $field='$value' WHERE id='sr-malformed';"
         else
@@ -2352,15 +2371,19 @@ test_malformed_nm_decision_fields() {
         fi
         out=$(fm_nm_ask_user_decisions "$TMP_ROOT" 10 RUN-malformed "$HOME_DIR/state/malformed.status" 2>&1)
         rc=$?
-        expect_code 2 "$rc" "malformed $table.$field was accepted"
-        assert_contains "$out" 'RUN-malformed' "malformed refusal lost run"
-        assert_contains "$out" 'step review' "malformed refusal lost step"
-        assert_contains "$out" "$table.$field" "malformed refusal lost field"
+        expect_code "$expect" "$rc" "$table.$field=$value gave unexpected verdict"
+        if [ "$expect" = 2 ]; then
+          assert_contains "$out" 'RUN-malformed' "malformed refusal lost run"
+          assert_contains "$out" 'step review' "malformed refusal lost step"
+          assert_contains "$out" "$table.$field" "malformed refusal lost field"
+        elif [ "$expect" = 1 ]; then
+          assert_contains "$out" 'R1' "parked empty/unknown action was not audited"
+        fi
       done
       nm_db "UPDATE $table SET $field='[]';"
     done
   done
-  pass "all persisted finding and selection fields reject malformed data"
+  pass "persisted finding and selection fields reject malformed data, accept real shapes, and audit parked empty-action findings"
 }
 
 test_informational_nm_findings_are_unaffected() {

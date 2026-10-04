@@ -406,26 +406,31 @@ def serialized(js, step, field):
 
 def finding_actions(js, step, field):
     data = serialized(js, step, field)
-    if data is None and (js is None or js == ""):
+    if data is None:
         return {}
     items = data.get("findings") if isinstance(data, dict) else data
+    if items is None:
+        return {}
     if not isinstance(items, list):
         missing(f"step {step} field {field}: findings must be an array")
     actions = {}
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
             missing(f"step {step} field {field}: finding requires a nonempty string id")
-        if item.get("action") not in ("ask-user", "auto-fix", "no-op"):
-            missing(f"step {step} field {field}: finding {item['id']} has invalid action")
+        action = item.get("action")
+        if action in (None, ""):
+            action = None
+        elif action not in ("ask-user", "auto-fix", "no-op"):
+            action = "ask-user"
         if item["id"] in actions:
             missing(f"step {step} field {field}: duplicate finding id {item['id']}")
-        actions[item["id"]] = item["action"]
+        actions[item["id"]] = action
     return actions
 
 
 def selected_ids(js, step, field):
     data = serialized(js, step, field)
-    if data is None and (js is None or js == ""):
+    if data is None:
         return []
     if not isinstance(data, list) or any(not isinstance(i, str) or not i.strip() for i in data):
         missing(f"step {step} field {field}: selection must be an array of nonempty string ids")
@@ -447,8 +452,22 @@ for (step_result_id, step, _order, status, step_findings,
         selection = selected_ids(sel_js, step, f"step_rounds.selected_finding_ids round {rnd}")
         if src not in ("user", "user_declined"):
             continue
-        ask_user = [fid for fid in list(presented) + [i for i in captured if i not in presented]
-                    if presented.get(fid) == "ask-user" or captured.get(fid) == "ask-user"]
+        # A finding recorded at a parked decision gate is ask-user when its
+        # stored action is explicitly ask-user or unknown (mapped above), or
+        # when it carries no action: ActionOrDefault resolves empty/missing to
+        # ask-user, so the gate parked for a decision on it. auto-fix and
+        # no-op findings stay routine even when parked; empty actions absent
+        # from every gate record (step_results leftovers) stay routine too.
+        parked = list(presented) + [i for i in captured if i not in presented]
+        parked += [i for i in selection if i not in presented and i not in captured]
+        ask_user = []
+        for fid in parked:
+            pa, ca = presented.get(fid), captured.get(fid)
+            if "ask-user" in (pa, ca) \
+                    or (fid in presented and pa is None) \
+                    or (fid not in presented and fid in captured and ca is None) \
+                    or (fid not in presented and fid not in captured):
+                ask_user.append(fid)
         if not ask_user:
             continue
         resolved_now = {}
