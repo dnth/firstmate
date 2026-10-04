@@ -155,7 +155,8 @@ bin/fm-runpod.sh wake <id> --gpu
 bin/fm-runpod.sh wake <id> --min-vram 24
 ```
 
-After a volume's first wake reaches ready, log each pod-local runtime in once: use `bin/fm-runpod.sh ssh <id>`, run the Claude and Codex login flows, run any other selected harness's login, and run `gh auth login`.
+After a volume's first wake reaches ready, log each pod-local runtime in once: use `bin/fm-runpod.sh ssh <id>`, run the Claude and Codex login flows, and run any other selected harness's login.
+The [remote-home prerequisites](remote-secondmates.md#prerequisites) own the forge-authentication decision and dispatch gate.
 Do not run OMP login, logout, import, or migrate on the pod.
 OMP reads the workstation's existing Claude and GPT subscription credentials through the broker instead.
 SSH also becomes available before toolchain provisioning finishes, so it can be used from another terminal to diagnose a wake that is still waiting.

@@ -130,7 +130,7 @@ The doctor reports host gaps it can prove, while each runtime's vendor login rem
 
 ### The parity tier
 
-That required set is the minimum a remote second mate needs to run at all.
+That required set is the minimum checked by the remote control path; the [prerequisites](#prerequisites) own the full-home toolchain requirements.
 A host expected to do everything a local second mate and its crews do needs more, and `--parity` is the opt-in second tier that checks it:
 
 ```sh
@@ -140,7 +140,7 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --parity
 It reports one `parity <tool>=<path>|MISSING` line per parity tool, records a `parity-toolchain` check, and records a `parity-durable-home` check that a host declaring only part of its filesystem durable keeps its account home inside that part, because otherwise every completed login is lost the next time the host is replaced.
 A host declares that durable root in `/etc/firstmate/durable-root`; where the file is absent the whole host persists and the check is skipped.
 
-The tier is opt-in because this command owns readiness for every remote second mate, and a minimal remote host is complete at the required minimum.
+The tier is opt-in because it extends the doctor's required control-path checks rather than replacing the full-home prerequisites.
 Without `--parity` the report and the verdict are unchanged.
 `--parity` reports gaps and never installs, exactly like the required tier; [`runpod-secondmates.md`](runpod-secondmates.md) covers the host that provisions that set for itself.
 That page also owns the RunPod-specific informational parity note.
