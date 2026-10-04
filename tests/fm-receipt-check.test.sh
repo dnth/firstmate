@@ -1955,6 +1955,11 @@ rebase_onto_newer_main() {  # <project> <base> <validated-head>
 
 test_mid_run_rebase_binds_and_completes_by_content_identity() {
   local id=receipt-rebase-bind base project validated_head run_head generation status out rc foreign_head meta
+  # Crew-state discovers the CLI on PATH before using FM_NO_MISTAKES_BIN.
+  # Keep both interfaces on the fixture, even on hosts without no-mistakes.
+  mkdir -p "$TMP_ROOT/crew-bin"
+  ln -s "$FAKE_NO_MISTAKES" "$TMP_ROOT/crew-bin/no-mistakes"
+  local PATH="$TMP_ROOT/crew-bin:$PATH"
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   run_head=$(rebase_onto_newer_main "$project" "$base" "$validated_head")
   [ "$(git -C "$project" rev-parse "$run_head^{tree}")" != "$(git -C "$project" rev-parse "$validated_head^{tree}")" ] \
