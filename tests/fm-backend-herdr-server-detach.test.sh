@@ -96,6 +96,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
+invoking_sid=$(ps -o sid= -p "$$" 2>/dev/null | tr -d '[:space:]')
+[ -n "$invoking_sid" ] || fail "could not read the invoking session"
 bash "$TMP_ROOT/run-job.sh" "$TMP_ROOT/job" || fail "the supervised invocation driver failed"
 read -r timed_out rc < "$TMP_ROOT/job.result"
 [ "$timed_out" = 0 ] || fail "the supervised job's process group stayed alive; the detached server held the invoker open"
@@ -109,8 +111,8 @@ server_pid=$(cat "$SERVER_PID_FILE")
 kill -0 "$server_pid" 2>/dev/null \
   || fail "the herdr server did not keep running after the invoking command returned"
 server_sid=$(ps -o sid= -p "$server_pid" 2>/dev/null | tr -d '[:space:]')
-[ "$server_sid" = "$server_pid" ] \
-  || fail "the herdr server did not move into its own session (sid=$server_sid pid=$server_pid)"
+[ -n "$server_sid" ] && [ "$server_sid" != "$invoking_sid" ] \
+  || fail "the herdr server did not leave the invoking session (sid=$server_sid invoking_sid=$invoking_sid)"
 server_pgid=$(ps -o pgid= -p "$server_pid" 2>/dev/null | tr -d '[:space:]')
 [ "$server_pgid" != "$group_pid" ] \
   || fail "the herdr server kept the invoking job's process group $group_pid"
@@ -140,6 +142,9 @@ read -r timed_out rc < "$outcome.result"
 [ "$rc" = 0 ] || fail "fallback ensure failed (rc=$rc): $(cat "$outcome.stderr" 2>/dev/null)"
 fallback_pid=$(cat "$SERVER_PID_FILE")
 kill -0 "$fallback_pid" 2>/dev/null || fail "fallback herdr server did not survive the invoking command"
+fallback_sid=$(ps -o sid= -p "$fallback_pid" 2>/dev/null | tr -d '[:space:]')
+[ -n "$fallback_sid" ] && [ "$fallback_sid" != "$invoking_sid" ] \
+  || fail "fallback herdr server did not leave the invoking session (sid=$fallback_sid invoking_sid=$invoking_sid)"
 fallback_group=$(cat "$outcome.group")
 kill -0 -- "-$fallback_group" 2>/dev/null && fail "fallback herdr server remained in the invoking group"
 kill "$fallback_pid" 2>/dev/null || true
@@ -175,6 +180,7 @@ try:
     with open(sys.argv[3]) as pid_file:
         server_pid = int(pid_file.read())
     os.kill(server_pid, 0)
+    assert os.getsid(server_pid) != os.getsid(0), "server retained the invoking session"
     ready, _, _ = select.select([reader], [], [], 2)
     assert ready and os.read(reader, 1) == b"", "server retained descriptor 300 pipe"
     os.kill(server_pid, 0)
