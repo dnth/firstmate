@@ -1594,10 +1594,9 @@ rm -f "$TMP_ROOT/execute-omp-launch"
 OMP_BROKEN_HOME="$TMP_ROOT/remote-omp-broken-home"
 printf 'omp test/model low\n' > "$PARENT/config/secondmate-harness"
 rm -f "$PARENT/config/secondmate-harness-fallback"
-# The typed-delivery regression above replaced the remote omp entrypoint with a
-# task-bound inbox listener that carries no Bun launch identity. A fresh route
-# launches through the capabilities check again, so restore the ordinary
-# capabilities-passing entrypoint the first fake modeled.
+# The delivery regression above executes a task-bound inbox listener through
+# the generated launch. Failed-bind cases use fixture-published artifacts, so
+# restore the ordinary capabilities-passing entrypoint the first fake modeled.
 cat > "$REMOTE_ROOT/bin/omp" <<'JS'
 #!/usr/bin/env bun
 if (process.argv[2] === "models" && process.argv.includes("--json")) {

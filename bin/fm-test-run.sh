@@ -372,9 +372,9 @@ list_portable_serial() {
   done < <(all_repo_tests)
 }
 
-# Measured portable-serial script durations in milliseconds, from the CI timing
-# artifact recorded in docs/fm-test-portable-shards.md. These are balance hints
-# only: the shard partition stays complete and disjoint whatever they say, so a
+# Portable-serial duration hints in milliseconds, from CI artifacts, completed
+# log records, and conservative estimates documented in docs/fm-test-portable-shards.md.
+# These affect balance only: the shard partition stays complete and disjoint, so a
 # stale hint costs balance rather than coverage. That doc owns the refresh
 # procedure.
 portable_serial_weight_hints() {
