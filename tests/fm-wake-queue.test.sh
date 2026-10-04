@@ -56,6 +56,69 @@ test_task_worker_env_refuses_drain() {
   pass "fm-wake-drain refuses an fm-spawn task worker's environment"
 }
 
+test_lock_release_during_shape_observation() {
+  local operation dir
+  for operation in acquire append bounded-append keys; do
+    dir=$(make_case "release-during-shape-$operation")
+    (
+      # shellcheck disable=SC2030 # Each operation deliberately owns an isolated state override.
+      export FM_STATE_OVERRIDE="$dir/state"
+      # shellcheck source=/dev/null
+      . "$ROOT/bin/fm-wake-lib.sh"
+      race_lock="$FM_WAKE_QUEUE_LOCK"
+      fm_wake_append signal existing 'signal: existing' || fail "fixture append failed"
+      fm_lock_try_acquire "$race_lock" || fail "fixture lock acquisition failed"
+      race_released=0
+      # Preserve each real file-test result, but release the directory lock
+      # immediately after the first shape observation to pin the racing owner.
+      # shellcheck disable=SC2329 # Invoked by production file-shape checks.
+      function [() {
+        local test_status=0
+        builtin [ "$@" || test_status=$?
+        if builtin [ "$race_released" = 0 ] \
+          && builtin [ "$#" -eq 3 ] && builtin [ "$2" = "$race_lock" ]; then
+          race_released=1
+          fm_lock_release "$race_lock"
+        fi
+        return "$test_status"
+      }
+      status=0
+      case "$operation" in
+        acquire) fm_lock_try_acquire "$race_lock" || status=$? ;;
+        append) fm_wake_append signal added 'signal: added' || status=$? ;;
+        bounded-append) fm_wake_append signal added 'signal: added' 1 || status=$? ;;
+        keys) fm_wake_queued_keys signal > "$dir/keys.out" || status=$? ;;
+      esac
+      unset -f '['
+      [ "$race_released" = 1 ] || fail "$operation never exercised lock release"
+      [ "$status" -eq 0 ] || fail "$operation misclassified a released lock (status $status)"
+      case "$operation" in
+        acquire)
+          fm_lock_held_by_self "$race_lock" || fail "released lock was not acquired"
+          fm_lock_release "$race_lock"
+          ;;
+        append|bounded-append)
+          assert_grep "$(printf '\tsignal\tadded\tsignal: added')" "$FM_WAKE_QUEUE" \
+            "release during shape observation lost the appended wake"
+          ;;
+        keys) assert_grep existing "$dir/keys.out" "release hid the existing queued key" ;;
+      esac
+      # The direct shape check must still reject an actual malformed file.
+      printf 'invalid lock\n' > "$race_lock"
+      status=0
+      case "$operation" in
+        acquire) fm_lock_try_acquire "$race_lock" || status=$? ;;
+        append) fm_wake_append signal rejected 'signal: rejected' || status=$? ;;
+        bounded-append) fm_wake_append signal rejected 'signal: rejected' 1 || status=$? ;;
+        keys) fm_wake_queued_keys signal || status=$? ;;
+      esac
+      [ "$status" -ne 0 ] || fail "$operation accepted a regular file as a lock"
+      [ "$(cat "$race_lock")" = 'invalid lock' ] || fail "$operation mutated an invalid lock"
+    ) || fail "$operation lock-shape regression failed"
+  done
+  pass "lock release during shape observation preserves acquisition, append, and key inspection"
+}
+
 test_concurrent_append_and_drain() {
   local dir state out1 out2 pids i pid count unique malformed sequence generation
   dir=$(make_case concurrent)
@@ -1676,6 +1739,7 @@ test_turnend_marker_consumer_incarnation_gate() {
 test_turnend_marker_consumer_incarnation_gate
 test_stale_acknowledgement_names_current_presented_wake
 test_task_worker_env_refuses_drain
+test_lock_release_during_shape_observation
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
