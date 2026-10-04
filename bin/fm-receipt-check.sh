@@ -7,6 +7,7 @@
 #   fm-receipt-check.sh <task-id> --implementation-complete
 #   fm-receipt-check.sh <task-id> --mechanical-ready
 #   fm-receipt-check.sh <task-id> --bind-run <run-id> --generation <plan-generation>
+#   fm-receipt-check.sh <task-id> --bind-check <run-id> --generation <plan-generation>
 #   fm-receipt-check.sh <task-id> --complete --terminal-evidence <evidence>
 #   fm-receipt-check.sh <task-id> --plan [--base <commit>]
 #   fm-receipt-check.sh <task-id> --invalidate-claim <finding-id> --invalidated-criterion <criterion-id>
@@ -64,9 +65,18 @@
 # run needs no replan or fresh run to seal its own pipeline commits. A chain the
 # pipeline's rebase step restamped is proved by matching every corresponding
 # commit tree, even though fresh committer stamps make the reported head neither
-# validation_head nor its descendant. Foreign commits still refuse completion
-# because they break ancestry, count, or pairwise tree identity, or lack the
-# required run-owned branch evidence.
+# validation_head nor its descendant. When a mid-run rebase onto a newer base
+# or a plan recorded after the run started breaks every ancestry shape, a run
+# whose reported head tree is byte-identical to the checked-out tree still
+# binds and completes by content identity, but only with authoritative run
+# ownership: a terminal passed run, or an active run with proven
+# fm_nm_run_branch_ownership branch evidence. A run recorded as predating the
+# plan binds only through that content-identity shape, and --plan refuses to
+# publish an identical plan while a run is still bound to it. Foreign commits
+# still refuse completion because they break ancestry, count, or pairwise tree
+# identity, change the checked-out tree, or lack the required run-owned branch
+# evidence. --bind-check evaluates the same binding decision read-only and
+# reports bindable or refused with its mechanism and reason.
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
 # evidence for every changed file with:
 #
@@ -232,6 +242,13 @@ while [ "$#" -gt 0 ]; do
       RUN_ID_INPUT=$1
       shift
       ;;
+    --bind-check)
+      [ "$#" -gt 0 ] || { echo "error: --bind-check requires a value" >&2; exit 2; }
+      [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
+      ACTION=bind-check
+      RUN_ID_INPUT=$1
+      shift
+      ;;
     --invalidate-claim)
       [ "$#" -gt 0 ] || { echo "error: --invalidate-claim requires a value" >&2; exit 2; }
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
@@ -262,8 +279,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ "$ACTION" != bind-run ] && [ -n "$RUN_GENERATION_INPUT" ]; then
-  echo "error: --generation requires --bind-run" >&2
+if [ "$ACTION" != bind-run ] && [ "$ACTION" != bind-check ] && [ -n "$RUN_GENERATION_INPUT" ]; then
+  echo "error: --generation requires --bind-run or --bind-check" >&2
   exit 2
 fi
 if [ "$ACTION" != invalidate-claim ] && [ -n "$INVALIDATION_CRITERION" ]; then
@@ -272,12 +289,12 @@ if [ "$ACTION" != invalidate-claim ] && [ -n "$INVALIDATION_CRITERION" ]; then
 fi
 
 case "$ACTION" in
-  check|criterion|implementation-complete|mechanical-ready|bind-run|invalidate-claim)
+  check|criterion|implementation-complete|mechanical-ready|bind-run|bind-check|invalidate-claim)
     [ -z "$BASE_INPUT" ] || { echo "error: --base requires --plan" >&2; exit 2; }
     [ -z "$TERMINAL_EVIDENCE" ] || { echo "error: --terminal-evidence requires --complete" >&2; exit 2; }
-    if [ "$ACTION" = bind-run ]; then
+    if [ "$ACTION" = bind-run ] || [ "$ACTION" = bind-check ]; then
       case "$RUN_ID_INPUT" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid run id" >&2; exit 2 ;; esac
-      [ -n "$RUN_GENERATION_INPUT" ] || { echo "error: --bind-run requires --generation" >&2; exit 2; }
+      [ -n "$RUN_GENERATION_INPUT" ] || { echo "error: $ACTION requires --generation" >&2; exit 2; }
     fi
     if [ "$ACTION" = invalidate-claim ]; then
       case "$INVALIDATION_FINDING" in F[1-9]|F[1-9][0-9]*) ;; *) echo "error: invalid finding id" >&2; exit 2 ;; esac
@@ -676,7 +693,7 @@ mechanical_evidence_covers_file() {
   ' "$ledger" >/dev/null 2>&1
 }
 
-if [ "$ACTION" = bind-run ]; then
+if [ "$ACTION" = bind-run ] || [ "$ACTION" = bind-check ]; then
   BIND_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_BASE=$(grep '^validation_base=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -697,14 +714,13 @@ if [ "$ACTION" = bind-run ]; then
   BIND_OBSERVED_HEAD=$(fm_nm_field "$BIND_OUT" head)
   BIND_STATUS=$(fm_nm_field "$BIND_OUT" status)
   BIND_OUTCOME=$(fm_nm_field "$BIND_OUT" outcome)
-  [ "$RUN_ID_INPUT" != "$BIND_PREPLAN_RUN" ] || { echo "error: No-Mistakes run predates the latest plan" >&2; exit 2; }
   # The generation is Firstmate's own plan-side nonce, recorded authoritatively
   # in this task's metadata as validation_generation. Real no-mistakes does not
   # echo the agent-supplied --intent body back through `axi logs --step intent`
   # (it reports only "using intent supplied by the agent"), so the run is bound
   # to its plan through what no-mistakes DOES report authoritatively - the run id
   # and head from `axi status --run` (checked below) plus the created-after-plan
-  # boundary above - cross-checked against the plan metadata's generation. A
+  # boundary - cross-checked against the plan metadata's generation. A
   # superseded plan mints a new generation and clears validation_run_*, so a run
   # bound under an old generation can never satisfy completion's generation check.
   [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { echo "error: run generation does not match the latest plan" >&2; exit 2; }
@@ -725,6 +741,7 @@ if [ "$ACTION" = bind-run ]; then
   # binding does not require a fresh plan for every no-mistakes fix round.
   BIND_RUN_HEAD=$(fm_nm_resolve_head "$BIND_WORKTREE" "$BIND_OBSERVED_HEAD" || true)
   BIND_HEAD_ACCOUNTED=0
+  BIND_CONTENT_ACCOUNTED=0
   if [ -n "$BIND_RUN_HEAD" ]; then
     if [ "$BIND_RUN_HEAD" = "$BIND_HEAD" ]; then
       [ "$BIND_BRANCH_MATCH" -eq 1 ] && BIND_HEAD_ACCOUNTED=1
@@ -749,17 +766,90 @@ if [ "$ACTION" = bind-run ]; then
         fi
       fi
     fi
+    # Content-identity shape: when ancestry cannot account for the run head - a
+    # plan recorded after the run started, or a mid-run rebase onto a newer
+    # base - a run whose reported head tree is byte-identical to the checked-out
+    # tree still binds, but only with authoritative run ownership: a terminal
+    # passed run, or an active run with proven branch ownership. The submitted
+    # anchor stays empty because a run that predates the plan or was rebased
+    # mid-run submitted its own head, never the planned one; plan linkage is
+    # proven by tree equality instead.
+    if [ "$BIND_BRANCH_MATCH" -eq 1 ] \
+      && fm_nm_commits_share_tree "$BIND_WORKTREE" "$BIND_RUN_HEAD" HEAD; then
+      if fm_nm_run_is_terminal_passed "$BIND_OUT"; then
+        BIND_CONTENT_ACCOUNTED=1
+      elif fm_nm_run_is_active "$BIND_OUT"; then
+        branch_sync_state=$(fm_nm_run_branch_ownership "$BIND_WORKTREE" "$NM_TIMEOUT" \
+          "$BIND_OUT" "$RUN_ID_INPUT" '' "$BIND_RUN_HEAD" || true)
+        [ -n "$branch_sync_state" ] && BIND_CONTENT_ACCOUNTED=1
+      fi
+    fi
   fi
-  [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] \
-    && [ "$BIND_HEAD_ACCOUNTED" -eq 1 ] \
-    && [ "$BIND_STATE_OK" -eq 1 ] \
-    || { echo "error: No-Mistakes run does not match the latest plan" >&2; exit 2; }
+  # The created-after-plan boundary yields only to the content proof: a run
+  # recorded as predating the latest plan binds solely through the
+  # content-identity shape, never through ancestry alone.
+  BIND_PREPLAN_BLOCKED=0
+  if [ "$RUN_ID_INPUT" = "$BIND_PREPLAN_RUN" ] && [ "$BIND_CONTENT_ACCOUNTED" -ne 1 ]; then
+    BIND_PREPLAN_BLOCKED=1
+  fi
+  BIND_ACCOUNTED=0
+  { [ "$BIND_HEAD_ACCOUNTED" -eq 1 ] || [ "$BIND_CONTENT_ACCOUNTED" -eq 1 ]; } && BIND_ACCOUNTED=1
+  BIND_MECHANISM=none
+  if [ "$BIND_CONTENT_ACCOUNTED" -eq 1 ] \
+    && { [ "$BIND_HEAD_ACCOUNTED" -eq 0 ] || [ "$RUN_ID_INPUT" = "$BIND_PREPLAN_RUN" ]; }; then
+    BIND_MECHANISM=content-tree
+  elif [ "$BIND_HEAD_ACCOUNTED" -eq 1 ]; then
+    BIND_MECHANISM=ancestry
+  elif [ "$BIND_CONTENT_ACCOUNTED" -eq 1 ]; then
+    BIND_MECHANISM=content-tree
+  fi
+  BINDABLE=0
+  if [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] && [ "$BIND_STATE_OK" -eq 1 ] \
+    && [ "$BIND_ACCOUNTED" -eq 1 ] && [ "$BIND_PREPLAN_BLOCKED" -eq 0 ]; then
+    BINDABLE=1
+  fi
+  BIND_REASON=
+  if [ "$BINDABLE" -eq 1 ]; then
+    :
+  elif [ "$BIND_OBSERVED_ID" != "$RUN_ID_INPUT" ]; then
+    BIND_REASON="run-id-mismatch"
+  elif [ "$BIND_STATE_OK" -ne 1 ]; then
+    BIND_REASON="run-not-in-bindable-state"
+  elif [ "$BIND_PREPLAN_BLOCKED" -eq 1 ]; then
+    BIND_REASON="predates-latest-plan"
+  elif [ -z "$BIND_RUN_HEAD" ]; then
+    BIND_REASON="run-head-unresolvable"
+  elif [ "$BIND_BRANCH_MATCH" -ne 1 ]; then
+    BIND_REASON="run-branch-mismatch"
+  elif fm_nm_commits_share_tree "$BIND_WORKTREE" "$BIND_RUN_HEAD" HEAD; then
+    BIND_REASON="ownership-unproven"
+  else
+    BIND_REASON="head-content-not-accounted"
+  fi
+  if [ "$ACTION" = bind-check ]; then
+    BIND_VERDICT=refused
+    [ "$BINDABLE" -eq 1 ] && BIND_VERDICT=bindable
+    jq -cn --arg task "$ID" --arg run "$RUN_ID_INPUT" --arg verdict "$BIND_VERDICT" \
+      --arg binding "$BIND_MECHANISM" --arg reason "$BIND_REASON" --arg head "$BIND_RUN_HEAD" \
+      '{schema:"fm-validation-run-binding-check.v1",task:$task,status:$verdict,run:$run,binding:$binding,reason:$reason,head:$head}'
+    [ "$BINDABLE" -eq 1 ]
+    exit $?
+  fi
+  if [ "$BINDABLE" -ne 1 ]; then
+    if [ "$BIND_PREPLAN_BLOCKED" -eq 1 ]; then
+      echo "error: No-Mistakes run predates the latest plan" >&2
+    else
+      echo "error: No-Mistakes run does not match the latest plan" >&2
+    fi
+    exit 2
+  fi
   [ -n "$BIND_GENERATION" ] || { echo "error: validation generation is missing" >&2; exit 2; }
-  printf 'validation_run_id=%s\nvalidation_run_path=%s\nvalidation_run_head=%s\nvalidation_run_generation=%s\n' \
-    "$RUN_ID_INPUT" "$BIND_PATH" "$BIND_RUN_HEAD" "$BIND_GENERATION" | append_meta_records \
+  printf 'validation_run_id=%s\nvalidation_run_path=%s\nvalidation_run_head=%s\nvalidation_run_generation=%s\nvalidation_run_binding=%s\n' \
+    "$RUN_ID_INPUT" "$BIND_PATH" "$BIND_RUN_HEAD" "$BIND_GENERATION" "$BIND_MECHANISM" | append_meta_records \
     || { echo "error: could not bind the No-Mistakes run" >&2; exit 2; }
   jq -cn --arg task "$ID" --arg run "$RUN_ID_INPUT" --arg path "$BIND_PATH" --arg head "$BIND_RUN_HEAD" \
-    '{schema:"fm-validation-run-binding.v1",task:$task,status:"bound",run:$run,path:$path,head:$head}'
+    --arg binding "$BIND_MECHANISM" \
+    '{schema:"fm-validation-run-binding.v1",task:$task,status:"bound",run:$run,path:$path,head:$head,binding:$binding}'
   exit 0
 fi
 
@@ -799,7 +889,7 @@ if [ "$ACTION" = mechanical-ready ]; then
 fi
 
 record_validation_completed() {
-  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted done_claim ask_user_rc ask_user_report
+  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted content_accounted expected_submitted done_claim ask_user_rc ask_user_report
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -903,26 +993,43 @@ record_validation_completed() {
         echo "error: bound No-Mistakes run did not pass checks at the exact validated head" >&2
         return 1
       fi
-      # The run must account for the current head itself or both heads must be
-      # faithful restamps of the validated chain from the recorded base.
+      # The run must account for the current head itself, both heads must be
+      # faithful restamps of the validated chain from the recorded base, or the
+      # run's reported head and the checked-out head must carry identical
+      # trees: a mid-run rebase onto a newer base breaks every ancestry shape
+      # while the bound run still validates exactly the shipping content. Tree
+      # equality never stands alone - the ownership gate below still requires
+      # active pipeline ownership or a terminal passed run.
       restamp_accounted=0
+      content_accounted=0
       if [ "$observed_head_full" = "$current_head" ]; then
         run_head_matches_current=1
       elif fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$observed_head_full" \
         && fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$current_head"; then
         run_head_matches_current=1
         restamp_accounted=1
+      elif fm_nm_commits_share_tree "$worktree" "$observed_head_full" "$current_head"; then
+        run_head_matches_current=1
+        content_accounted=1
       else
         run_head_matches_current=0
       fi
       [ "$run_head_matches_current" -eq 1 ] \
         || { release_validation_lock; echo "error: bound No-Mistakes run head does not account for the current worktree content" >&2; return 1; }
       if [ "$current_head" != "$validated_head" ]; then
-        fm_nm_head_is_accounted "$worktree" "$validation_base" "$validated_head" "$current_head" \
-          || { release_validation_lock; echo "error: current head neither descends from nor reproduces the implementation head" >&2; return 1; }
+        if [ "$content_accounted" -eq 0 ] \
+          && ! fm_nm_head_is_accounted "$worktree" "$validation_base" "$validated_head" "$current_head"; then
+          if fm_nm_commits_share_tree "$worktree" "$observed_head_full" "$current_head"; then
+            content_accounted=1
+          else
+            release_validation_lock
+            echo "error: current head neither descends from nor reproduces the implementation head" >&2
+            return 1
+          fi
+        fi
         completion_head=$current_head
       fi
-      if [ "$current_head" != "$validated_head" ] || [ "$restamp_accounted" -eq 1 ]; then
+      if [ "$current_head" != "$validated_head" ] || [ "$restamp_accounted" -eq 1 ] || [ "$content_accounted" -eq 1 ]; then
         run_branch=$(fm_nm_field "$run_out" branch)
         current_branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
         if [ -z "$current_branch" ] || ! fm_nm_branch_matches_worktree "$worktree" "$run_branch"; then
@@ -937,13 +1044,20 @@ record_validation_completed() {
         # pipeline_owned, either directly in the axi status output or in `axi
         # sync --check` for current no-mistakes, or the fully evidenced
         # synchronized state once the pushed-back head converged and the run
-        # only monitors its PR (bin/fm-nm-run-lib.sh).
+        # only monitors its PR (bin/fm-nm-run-lib.sh). A content-accounted
+        # advance leaves the submitted anchor open because a run bound through
+        # content identity may have submitted before the plan recorded its head
+        # or submitted the pre-rebase chain.
         if fm_nm_run_is_active "$run_out"; then
+          expected_submitted=$validated_head
+          [ "$content_accounted" -eq 1 ] && expected_submitted=
           branch_sync_state=$(fm_nm_run_branch_ownership "$worktree" "$NM_TIMEOUT" \
-            "$run_out" "$run_id" "$validated_head" "$observed_head_full" || true)
+            "$run_out" "$run_id" "$expected_submitted" "$observed_head_full" || true)
           if [ -z "$branch_sync_state" ]; then
             release_validation_lock
-            if [ "$restamp_accounted" -eq 1 ]; then
+            if [ "$content_accounted" -eq 1 ]; then
+              echo "error: content-identical head lacks authoritative pipeline ownership" >&2
+            elif [ "$restamp_accounted" -eq 1 ]; then
               echo "error: accepted restamp lacks authoritative pipeline ownership" >&2
             else
               echo "error: current head advance lacks authoritative pipeline ownership" >&2
@@ -953,7 +1067,9 @@ record_validation_completed() {
         else
           if ! fm_nm_run_is_terminal_passed "$run_out"; then
             release_validation_lock
-            if [ "$restamp_accounted" -eq 1 ]; then
+            if [ "$content_accounted" -eq 1 ]; then
+              echo "error: content-identical head lacks a passing bound pipeline run" >&2
+            elif [ "$restamp_accounted" -eq 1 ]; then
               echo "error: accepted restamp lacks a passing bound pipeline run" >&2
             else
               echo "error: current head advanced without a passing bound pipeline run" >&2
@@ -1199,6 +1315,26 @@ case "$MODE:$TIER" in
   no-mistakes:low) VALIDATION_PATH=receipts-mechanical ;;
   no-mistakes:high) VALIDATION_PATH=full-no-mistakes ;;
 esac
+
+# A plan identical to the latest one (same resolved base and head) cannot add
+# evidence, so it must never silently clear a bound No-Mistakes run: the
+# preplan boundary would then record that run as predating the plan and refuse
+# its binding, orphaning live validation behind a forced re-review. A replan
+# over genuinely changed content still clears the stale binding because the
+# bound run validated a different head.
+if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
+  PREVIOUS_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+  BOUND_RUN=$(grep '^validation_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
+  BOUND_RUN_GENERATION=$(grep '^validation_run_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+  PREVIOUS_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  PREVIOUS_BASE=$(grep '^validation_base=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ -n "$BOUND_RUN" ] && [ -n "$PREVIOUS_GENERATION" ] \
+    && [ "$BOUND_RUN_GENERATION" = "$PREVIOUS_GENERATION" ] \
+    && [ "$PREVIOUS_HEAD" = "$HEAD" ] && [ "$PREVIOUS_BASE" = "$BASE" ]; then
+    echo "error: run $BOUND_RUN is already bound to an identical validation plan; a same-content replan cannot add evidence - bind a new run to the current plan or advance the head before replanning" >&2
+    exit 2
+  fi
+fi
 
 write_meta_record() {  # <pass>
   local pass=$1 started previous_generation

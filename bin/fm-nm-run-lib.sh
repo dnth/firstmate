@@ -129,6 +129,19 @@ fm_nm_head_is_faithful_restamp() {  # <worktree> <base> <validated-head> <candid
   [ "$validated_trees" = "$candidate_trees" ]
 }
 
+# 0 when resolved revisions $2 and $3 name commits in worktree $1 whose root
+# tree objects are identical - byte-identical content regardless of ancestry.
+# A mid-run rebase onto a newer base produces a head that is neither equal, a
+# same-base restamp, nor a descendant of the planned head, while the run still
+# validates the exact content checked out; callers pair this content proof with
+# authoritative run ownership rather than trusting tree equality alone.
+fm_nm_commits_share_tree() {  # <worktree> <rev1> <rev2>
+  local wt=$1 rev1=$2 rev2=$3 tree1 tree2
+  tree1=$(git -C "$wt" rev-parse --verify "${rev1}^{tree}" 2>/dev/null) || return 1
+  tree2=$(git -C "$wt" rev-parse --verify "${rev2}^{tree}" 2>/dev/null) || return 1
+  [ "$tree1" = "$tree2" ]
+}
+
 # 0 when $4 is accounted for by the validated chain in worktree $1.
 # It matches the validated head itself, a faithful restamp of the validated
 # chain from $2, a strict descendant of $3, or a strict descendant of a faithful
@@ -229,6 +242,10 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 # reported local head both resolving to the run's observed head $6, relation
 # equal, and safety already_synchronized. Anything missing, stale, or
 # mismatched prints nothing so callers keep refusing unproven advances.
+# An empty expected-submitted accepts whatever submitted head the run reports:
+# the content-identity binding path uses it for runs that submitted before the
+# latest plan recorded its head, where plan linkage is proven separately by
+# tree equality instead of by the submitted anchor.
 fm_nm_run_branch_ownership() {  # <worktree> <timeout-secs> <status-out> <run-id> <expected-submitted> <expected-current>
   local wt=$1 timeout_secs=$2 status_out=$3 run_id=$4 submitted=$5 current=$6
   local state sync_out sync_state sync_run sync_submitted sync_current sync_local
@@ -245,7 +262,7 @@ fm_nm_run_branch_ownership() {  # <worktree> <timeout-secs> <status-out> <run-id
   [ -n "$sync_run" ] && [ "$sync_run" = "$run_id" ] || return 1
   sync_submitted=$(fm_nm_field "$sync_out" submitted_head)
   sync_current=$(fm_nm_field "$sync_out" current_head)
-  if [ -n "$sync_submitted" ]; then
+  if [ -n "$submitted" ] && [ -n "$sync_submitted" ]; then
     [ "$(fm_nm_resolve_head "$wt" "$sync_submitted" || true)" = "$submitted" ] || return 1
   fi
   if [ -n "$sync_current" ]; then
