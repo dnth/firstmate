@@ -10,7 +10,8 @@
 # re-validates. This helper never infers the current state from a tail of the log:
 # it reads the authoritative source (a
 # no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, with a
-# completed receipt allowing a proven pipeline descendant, else the pane
+# current-generation, path-matching completion receipt at the exact current
+# head allowing pipeline advances and content-identity recovery, else the pane
 # busy-signature) and reconciles the possibly-stale log against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus

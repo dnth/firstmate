@@ -55,9 +55,10 @@
 # and start time are appended to state/<task-id>.meta for durable inspection.
 # Every completion records validation_completed_head and refuses current head
 # drift unless the bound No-Mistakes run accounts for the current content in one
-# of three shapes: a strict descendant of the latest validation_head, a faithful
-# restamp of the validation-base-to-head chain, or a strict descendant of such a
-# restamp. Active descendants require run-owned branch evidence: current
+# of four shapes: a strict descendant of the latest validation_head, a faithful
+# restamp of the validation-base-to-head chain, a strict descendant of such a
+# restamp, or content identity with the run's reported head. Active descendants
+# require run-owned branch evidence: current
 # pipeline ownership, or the fully evidenced synchronized state once the pushed
 # head converged and the run only monitors its PR, both decided by the shared
 # fm_nm_run_branch_ownership predicate in bin/fm-nm-run-lib.sh. Terminal
@@ -76,7 +77,18 @@
 # still refuse completion because they break ancestry, count, or pairwise tree
 # identity, change the checked-out tree, or lack the required run-owned branch
 # evidence. --bind-check evaluates the same binding decision read-only and
-# reports bindable or refused with its mechanism and reason.
+# reports one fm-validation-run-binding-check.v1 JSON object with task, status
+# (bindable/refused), run, binding (ancestry/content-tree/none), reason, and head.
+# Bindable exits 0; evaluated refusals and missing evidence exit 1; other
+# prerequisite refusals exit 2. Prerequisite refusals use binding=none, the
+# diagnostic in reason, and an empty head.
+# Argument errors and a missing jq remain usage/dependency errors.
+# Successful --bind-run records validation_run_binding and returns it as binding
+# in fm-validation-run-binding.v1. Completion freshly evaluates content identity
+# for a recorded content-tree binding or an advanced head, regardless of the
+# original mechanism, so a change to synchronized ownership does not reinstate
+# an incompatible submitted-head anchor. Branch-ownership evidence is owned by
+# fm_nm_run_branch_ownership in bin/fm-nm-run-lib.sh.
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
 # evidence for every changed file with:
 #
@@ -740,7 +752,8 @@ if [ "$ACTION" = bind-run ] || [ "$ACTION" = bind-check ]; then
   # (it reports only "using intent supplied by the agent"), so the run is bound
   # to its plan through what no-mistakes DOES report authoritatively - the run id
   # and head from `axi status --run` (checked below) plus the created-after-plan
-  # boundary - cross-checked against the plan metadata's generation. A
+  # boundary or the owned content-identity recovery proof - cross-checked
+  # against the plan metadata's generation. A
   # superseded plan mints a new generation and clears validation_run_*, so a run
   # bound under an old generation can never satisfy completion's generation check.
   [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { refuse_prerequisite "run generation does not match the latest plan"; }
@@ -792,7 +805,7 @@ if [ "$ACTION" = bind-run ] || [ "$ACTION" = bind-check ]; then
     # tree still binds, but only with authoritative run ownership: a terminal
     # passed run, or an active run with proven branch ownership. The submitted
     # anchor stays empty because a run that predates the plan or was rebased
-    # mid-run submitted its own head, never the planned one; plan linkage is
+    # mid-run may have submitted a different head; plan linkage is
     # proven by tree equality instead.
     if [ "$BIND_BRANCH_MATCH" -eq 1 ] \
       && fm_nm_commits_share_tree "$BIND_WORKTREE" "$BIND_RUN_HEAD" HEAD; then

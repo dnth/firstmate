@@ -34,9 +34,9 @@ For ordinary findings from any No-Mistakes tier, steer the original worker to re
 When a finding invalidates a receipt or acceptance claim, use the receipt checker owner to record it before returning branch custody.
 After the original worker's fix, return high-risk work to full validation with the updated receipts and delta context.
 
-When a validating run cannot bind because the plan postdates it or the base moved mid-run, replanning is never the fix: a same-content `--plan` refuses while a run is bound, and a new plan would only record the live run as predating it.
-Rebind the run through the receipt checker's supported content-identity shape instead - `--bind-run` accepts a run whose reported head tree is byte-identical to the checked-out tree once the run is authoritative (a terminal passed run, or an active run with proven `fm_nm_run_branch_ownership` branch evidence), and `--bind-check` evaluates that same decision read-only before steering the worker.
-The checked-out branch must first carry the run's own pushed head, so a diverged lane reconciles to the pipeline head before binding.
+When a validating run cannot bind because the plan postdates it or the base moved mid-run, keep the current plan and use the receipt checker's supported recovery procedure, owned by the header and help of `bin/fm-receipt-check.sh`.
+Use its read-only binding verdict before steering the worker to retry binding the same run.
+If the lane diverged, have the worker follow the pipeline's guarded branch-reconciliation guidance before retrying; preserve pipeline custody throughout recovery.
 
 Judge validation by the currently attributed run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
