@@ -1955,7 +1955,6 @@ rebase_onto_newer_main() {  # <project> <base> <validated-head>
 
 test_mid_run_rebase_binds_and_completes_by_content_identity() {
   local id=receipt-rebase-bind base project validated_head run_head generation status out rc foreign_head meta
-  id=receipt-rebase-bind
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   run_head=$(rebase_onto_newer_main "$project" "$base" "$validated_head")
   [ "$(git -C "$project" rev-parse "$run_head^{tree}")" != "$(git -C "$project" rev-parse "$validated_head^{tree}")" ] \
@@ -2014,7 +2013,6 @@ test_mid_run_rebase_binds_and_completes_by_content_identity() {
 
 test_rebase_content_identity_still_refuses_unreviewed_content() {
   local id=receipt-rebase-refusals base project validated_head run_head generation status out rc foreign_head sync
-  id=receipt-rebase-refusals
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   run_head=$(rebase_onto_newer_main "$project" "$base" "$validated_head")
 
@@ -2034,7 +2032,7 @@ test_rebase_content_identity_still_refuses_unreviewed_content() {
   # A converged monitoring run binds through the full synchronized evidence;
   # its submitted head differs from the plan head because it submitted before
   # the rebase, which the content path leaves open by design.
-  id=receipt-rebase-sync-bind
+  id='receipt-rebase-sync-bind'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   run_head=$(rebase_onto_newer_main "$project" "$base" "$validated_head")
   status=$(printf 'run:\n  id: "RUN-rebase-sync"\n  branch: fm/%s\n  status: running\n  head: "%s"\n' "$id" "$run_head")
@@ -2045,7 +2043,7 @@ test_rebase_content_identity_still_refuses_unreviewed_content() {
 
   # Foreign content never binds: the run's reported head tree must equal the
   # checked-out tree even when the run claims pipeline ownership.
-  id=receipt-rebase-foreign-head
+  id='receipt-rebase-foreign-head'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   run_head=$(rebase_onto_newer_main "$project" "$base" "$validated_head")
   printf 'unvalidated foreign content\n' > "$project/foreign.txt"
