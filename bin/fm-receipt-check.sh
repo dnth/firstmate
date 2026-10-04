@@ -312,10 +312,26 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 2; }
 
+binding_check_result() {
+  jq -cn --arg task "$ID" --arg run "$RUN_ID_INPUT" --arg verdict "$1" \
+    --arg binding "$2" --arg reason "$3" --arg head "$4" \
+    '{schema:"fm-validation-run-binding-check.v1",task:$task,status:$verdict,run:$run,binding:$binding,reason:$reason,head:$head}'
+}
+
+refuse_prerequisite() {
+  local reason=$1 code=${2:-2}
+  if [ "$ACTION" = bind-check ]; then
+    binding_check_result refused none "$reason" ''
+  else
+    echo "error: $reason" >&2
+  fi
+  exit "$code"
+}
+
 TASK_DIR="$DATA/$ID"
 LEDGER_PATH="$TASK_DIR/evidence.jsonl"
 
-command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 2; }
+command -v perl >/dev/null 2>&1 || { refuse_prerequisite "perl is required"; }
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-receipt-check.XXXXXX")
 TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
 VALIDATION_LOCK=
@@ -361,33 +377,32 @@ FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" hold \
 STORE_PID=$!
 while [ ! -f "$STORE_READY" ] || [ -L "$STORE_READY" ] || [ ! -s "$STORE_READY" ]; do
   kill -0 "$STORE_PID" 2>/dev/null \
-    || { wait "$STORE_PID" 2>/dev/null || true; STORE_PID=; echo "error: pinned evidence snapshot failed" >&2; exit 2; }
+    || { wait "$STORE_PID" 2>/dev/null || true; STORE_PID=; refuse_prerequisite "pinned evidence snapshot failed"; }
 done
 SNAPSHOT_RC=$(sed -n '1p' "$STORE_READY")
 case "$SNAPSHOT_RC" in
   0) PINNED_LEDGER_EXISTS=true ;;
   3) PINNED_LEDGER_EXISTS=false ;;
   4) PINNED_LEDGER_EXISTS=false ;;
-  *) exit 2 ;;
+  *) refuse_prerequisite "pinned evidence snapshot failed" ;;
 esac
 
 KIND_COUNT=$(grep -c '^kind=' "$META" 2>/dev/null || true)
 [ "$KIND_COUNT" -eq 1 ] \
-  || { echo "error: task metadata must contain exactly one kind" >&2; exit 2; }
+  || { refuse_prerequisite "task metadata must contain exactly one kind"; }
 KIND=$(sed -n 's/^kind=//p' "$META")
 case "$KIND" in
   scout|secondmate)
     if [ "$ACTION" = criterion ]; then exit 1; fi
     if [ "$ACTION" != check ]; then
-      echo "error: validation planning applies only to ship tasks" >&2
-      exit 2
+      refuse_prerequisite "validation planning applies only to ship tasks"
     fi
     jq -cn --arg task "$ID" \
       '{schema:"fm-evidence-check.v1",task:$task,kind:"non-ship",status:"not-applicable",required:[],evidenced:[],missing:[],invalid:[],accepted_blocked:[],receipt_count:0,ledger_exists:false}'
     exit 0
     ;;
   ship) ;;
-  *) echo "error: task metadata has an invalid kind" >&2; exit 2 ;;
+  *) refuse_prerequisite "task metadata has an invalid kind" ;;
 esac
 
 append_meta_records() {
@@ -406,25 +421,23 @@ if [ "$MODE_COUNT" -eq 1 ]; then
   MODE=$(sed -n 's/^Delivery contract: mode=//p' "$BRIEF")
   case "$MODE" in
     no-mistakes|direct-PR|local-only) ;;
-    *) echo "error: ship brief has an invalid delivery contract" >&2; exit 2 ;;
+    *) refuse_prerequisite "ship brief has an invalid delivery contract" ;;
   esac
 elif [ "$MODE_COUNT" -eq 0 ]; then
-  echo "error: ship brief has no delivery contract" >&2
-  exit 2
+  refuse_prerequisite "ship brief has no delivery contract"
 else
-  echo "error: ship brief has multiple delivery contracts" >&2
-  exit 2
+  refuse_prerequisite "ship brief has multiple delivery contracts"
 fi
 META_MODE_COUNT=$(grep -c '^mode=' "$META" 2>/dev/null || true)
 [ "$META_MODE_COUNT" -eq 1 ] \
-  || { echo "error: task metadata must contain exactly one concrete delivery mode" >&2; exit 2; }
+  || { refuse_prerequisite "task metadata must contain exactly one concrete delivery mode"; }
 META_MODE=$(sed -n 's/^mode=//p' "$META")
 case "$META_MODE" in
   no-mistakes|direct-PR|local-only) ;;
-  *) echo "error: task metadata has no concrete delivery mode" >&2; exit 2 ;;
+  *) refuse_prerequisite "task metadata has no concrete delivery mode" ;;
 esac
 [ "$META_MODE" = "$MODE" ] \
-  || { echo "error: task metadata delivery mode contradicts the pinned ship brief" >&2; exit 2; }
+  || { refuse_prerequisite "task metadata delivery mode contradicts the pinned ship brief"; }
 CRITERIA="$TMP_ROOT/criteria.tsv"
 EVIDENCED="$TMP_ROOT/evidenced"
 INVALID="$TMP_ROOT/invalid"
@@ -441,7 +454,8 @@ ACTIVE_REQUIREMENTS="$TMP_ROOT/active-requirements.tsv"
 : > "$ACTIVE_INVALIDATIONS"
 : > "$ACTIVE_REQUIREMENTS"
 
-"$SCRIPT_DIR/fm-receipt-check.sh" --parse-criteria "$BRIEF" > "$CRITERIA" || exit 2
+"$SCRIPT_DIR/fm-receipt-check.sh" --parse-criteria "$BRIEF" > "$CRITERIA" \
+  || { [ "$ACTION" != bind-check ] || refuse_prerequisite "ship brief must contain one valid '# Acceptance criteria' section with unique AC ids and no placeholders"; exit 2; }
 
 CURRENT_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ -n "$CURRENT_GENERATION" ]; then
@@ -606,6 +620,12 @@ if [ "$ACTION" = plan ] && [ -s "$ACTIVE_INVALIDATED" ]; then
 fi
 
 if [ "$CHECK_RC" -ne 0 ] && [ "$ACTION" != invalidate-claim ]; then
+  if [ "$ACTION" = bind-check ]; then
+    refuse_prerequisite "$(printf '%s' "$CHECK_JSON" | jq -r '
+      if .status == "invalid" then "invalid evidence: " + (.invalid | join("; "))
+      else "missing evidence: " + (.missing | join(", ")) end
+    ')" "$CHECK_RC"
+  fi
   printf '%s\n' "$CHECK_JSON"
   exit "$CHECK_RC"
 fi
@@ -700,16 +720,16 @@ if [ "$ACTION" = bind-run ] || [ "$ACTION" = bind-check ]; then
   BIND_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PREPLAN_RUN=$(grep '^validation_preplan_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
-  [ "$BIND_PATH" = full-no-mistakes ] || { echo "error: latest plan does not use full No-Mistakes" >&2; exit 2; }
-  [ -n "$BIND_WORKTREE" ] && [ -d "$BIND_WORKTREE" ] || { echo "error: validation worktree is missing" >&2; exit 2; }
+  [ "$BIND_PATH" = full-no-mistakes ] || { refuse_prerequisite "latest plan does not use full No-Mistakes"; }
+  [ -n "$BIND_WORKTREE" ] && [ -d "$BIND_WORKTREE" ] || { refuse_prerequisite "validation worktree is missing"; }
   BIND_HEAD=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_HEAD^{commit}" 2>/dev/null) \
-    || { echo "error: validated head is missing" >&2; exit 2; }
+    || { refuse_prerequisite "validated head is missing"; }
   BIND_BASE=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_BASE^{commit}" 2>/dev/null) \
-    || { echo "error: validation base is missing" >&2; exit 2; }
+    || { refuse_prerequisite "validation base is missing"; }
   fm_worktree_is_clean "$BIND_WORKTREE" \
-    || { echo "error: validation worktree is dirty" >&2; exit 2; }
+    || { refuse_prerequisite "validation worktree is dirty"; }
   BIND_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi status --run "$RUN_ID_INPUT") \
-    || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
+    || { refuse_prerequisite "No-Mistakes run could not be observed"; }
   BIND_OBSERVED_ID=$(fm_nm_field "$BIND_OUT" id)
   BIND_OBSERVED_HEAD=$(fm_nm_field "$BIND_OUT" head)
   BIND_STATUS=$(fm_nm_field "$BIND_OUT" status)
@@ -723,7 +743,7 @@ if [ "$ACTION" = bind-run ] || [ "$ACTION" = bind-check ]; then
   # boundary - cross-checked against the plan metadata's generation. A
   # superseded plan mints a new generation and clears validation_run_*, so a run
   # bound under an old generation can never satisfy completion's generation check.
-  [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { echo "error: run generation does not match the latest plan" >&2; exit 2; }
+  [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { refuse_prerequisite "run generation does not match the latest plan"; }
   BIND_STATE_OK=0
   case "$BIND_STATUS:$BIND_OUTCOME" in
     failed:*|cancelled:*|*:failed|*:cancelled) ;;
@@ -829,9 +849,7 @@ if [ "$ACTION" = bind-run ] || [ "$ACTION" = bind-check ]; then
   if [ "$ACTION" = bind-check ]; then
     BIND_VERDICT=refused
     [ "$BINDABLE" -eq 1 ] && BIND_VERDICT=bindable
-    jq -cn --arg task "$ID" --arg run "$RUN_ID_INPUT" --arg verdict "$BIND_VERDICT" \
-      --arg binding "$BIND_MECHANISM" --arg reason "$BIND_REASON" --arg head "$BIND_RUN_HEAD" \
-      '{schema:"fm-validation-run-binding-check.v1",task:$task,status:$verdict,run:$run,binding:$binding,reason:$reason,head:$head}'
+    binding_check_result "$BIND_VERDICT" "$BIND_MECHANISM" "$BIND_REASON" "$BIND_RUN_HEAD"
     [ "$BINDABLE" -eq 1 ]
     exit $?
   fi

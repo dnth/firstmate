@@ -67,7 +67,7 @@ The relaxed checks use one shared content-identity predicate, `fm_nm_head_is_acc
 `--bind-run` accepts the planned head or a faithful restamp when the run reports the task branch and has an eligible checks-passed or active status; a strict descendant of either additionally requires active run-owned branch evidence or a terminal passed run.
 `--bind-run` also accepts a run whose reported head tree equals the checked-out tree when ancestry cannot account for it, but only with authoritative run ownership: a terminal passed run, or an active run with proven `fm_nm_run_branch_ownership` branch evidence.
 A run recorded as `validation_preplan_run_id` binds only through that content-identity shape, never through ancestry alone.
-`--bind-check` evaluates the identical decision read-only and reports `bindable` or `refused` with the selected mechanism and refusal reason.
+`--bind-check` evaluates the identical decision read-only and reports `bindable` or `refused` with the selected mechanism and refusal reason, including prerequisite failures with mechanism `none` and the prerequisite diagnostic in `reason`.
 `--complete` accepts the same shapes, freshly checking tree equality for a recorded content binding or any advanced head and requiring branch identity and ownership for that binding or whenever the run advanced beyond the planned head.
 A descendant is accepted only when the run reports the same task branch and, for active runs, `fm_nm_run_branch_ownership` in `bin/fm-nm-run-lib.sh` proves the run-owned branch state: `branch_sync.state` `pipeline_owned`, either in `axi status` or `axi sync --check`, or the converged `synchronized` state once the pipeline pushed its head back and the run stays active only to monitor its PR.
 The synchronized acceptance requires the complete `axi sync --check` evidence - the same run id, `submitted_head` resolving to the validated head, `current_head` and the reported local head both resolving to the run's observed head, `relation` equal, and `safety` `already_synchronized` - so synchronized alone never proves a pass and foreign, stale, or incomplete readouts stay refused.
@@ -104,7 +104,7 @@ ok - mid-run rebase onto newer main binds and completes by content identity
 all fm-crew-state tests passed
 ```
 
-The ownership-transition regression was refreshed on 2026-10-04 with `TMPDIR="$PWD/.review-tmp" bash tests/fm-receipt-check.test.sh` (exit 0), including `ok - converged synchronized binding requires the full run-owned sync evidence`.
+The ownership-transition and prerequisite-refusal regressions were refreshed on 2026-10-04 with `TMPDIR="$PWD/.review-tmp" bash tests/fm-receipt-check.test.sh` (exit 0), including `ok - converged synchronized binding requires the full run-owned sync evidence` and `ok - bind-check prerequisite refusals preserve one read-only binding verdict contract`.
 
 The focused behavioral suites passed with these exact commands.
 

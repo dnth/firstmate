@@ -122,6 +122,80 @@ nm_sync_converged() {  # <run-id> <branch> <submitted-head> <current-head>
     "$2" "$4" "$1" "$3" "$4" "$4" "$4"
 }
 
+test_bind_check_prerequisites_use_binding_verdict() {
+  local id=receipt-bind-prerequisites base project head generation status variant reason rc expected_rc out nm_bin meta brief ledger saved
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test passed
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "binding prerequisite fixture could not plan"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  meta="$HOME_DIR/state/$id.meta"
+  brief="$HOME_DIR/data/$id/brief.md"
+  ledger="$HOME_DIR/data/$id/evidence.jsonl"
+  generation=$(sed -n 's/^validation_generation=//p' "$meta" | tail -1)
+  status=$(nm_pipeline_status RUN-prerequisites "fm/$id" "$head" completed passed agent_owned)
+  saved="$TMP_ROOT/bind-prerequisites"
+  mkdir -p "$saved"
+  cp "$meta" "$saved/meta"
+  cp "$brief" "$saved/brief"
+  cp "$ledger" "$saved/ledger"
+  for variant in snapshot kind-missing kind-duplicate kind-invalid scout secondmate brief-mode-missing brief-mode-invalid brief-mode-duplicate meta-mode-missing meta-mode-invalid meta-mode-duplicate mode-mismatch criteria ledger-missing ledger-invalid path worktree head base dirty run generation; do
+    cp "$saved/meta" "$meta"
+    cp "$saved/brief" "$brief"
+    cp "$saved/ledger" "$ledger"
+    nm_bin="$FAKE_NO_MISTAKES"
+    expected_rc=2
+    case "$variant" in
+      snapshot) mv "$brief" "$saved/absent-brief"; reason='pinned evidence snapshot failed' ;;
+      kind-missing) sed '/^kind=/d' "$saved/meta" > "$meta"; reason='task metadata must contain exactly one kind' ;;
+      kind-duplicate) printf 'kind=ship\n' >> "$meta"; reason='task metadata must contain exactly one kind' ;;
+      kind-invalid) sed 's/^kind=.*/kind=unknown/' "$saved/meta" > "$meta"; reason='task metadata has an invalid kind' ;;
+      scout|secondmate) sed "s/^kind=.*/kind=$variant/" "$saved/meta" > "$meta"; reason='validation planning applies only to ship tasks' ;;
+      brief-mode-missing) sed '/^Delivery contract:/d' "$saved/brief" > "$brief"; reason='ship brief has no delivery contract' ;;
+      brief-mode-invalid) sed 's/^Delivery contract:.*/Delivery contract: mode=unknown/' "$saved/brief" > "$brief"; reason='ship brief has an invalid delivery contract' ;;
+      brief-mode-duplicate) printf 'Delivery contract: mode=no-mistakes\n' >> "$brief"; reason='ship brief has multiple delivery contracts' ;;
+      meta-mode-missing) sed '/^mode=/d' "$saved/meta" > "$meta"; reason='task metadata must contain exactly one concrete delivery mode' ;;
+      meta-mode-invalid) sed 's/^mode=.*/mode=unknown/' "$saved/meta" > "$meta"; reason='task metadata has no concrete delivery mode' ;;
+      meta-mode-duplicate) printf 'mode=no-mistakes\n' >> "$meta"; reason='task metadata must contain exactly one concrete delivery mode' ;;
+      mode-mismatch) sed 's/^mode=.*/mode=direct-PR/' "$saved/meta" > "$meta"; reason='task metadata delivery mode contradicts the pinned ship brief' ;;
+      criteria) sed 's/^- AC1:/- BAD:/' "$saved/brief" > "$brief"; reason="ship brief must contain one valid '# Acceptance criteria' section with unique AC ids and no placeholders" ;;
+      ledger-missing) : > "$ledger"; reason='missing evidence: AC1, AC2'; expected_rc=1 ;;
+      ledger-invalid) printf 'invalid-json\n' >> "$ledger"; reason='invalid evidence: line 3: invalid v1 receipt' ;;
+      path) printf 'validation_path=direct-PR\n' >> "$meta"; reason='latest plan does not use full No-Mistakes' ;;
+      worktree) printf 'worktree=%s/absent\n' "$saved" >> "$meta"; reason='validation worktree is missing' ;;
+      head) printf 'validation_head=absent\n' >> "$meta"; reason='validated head is missing' ;;
+      base) printf 'validation_base=absent\n' >> "$meta"; reason='validation base is missing' ;;
+      dirty) printf 'dirty\n' > "$project/untracked"; reason='validation worktree is dirty' ;;
+      run) nm_bin="$FAIL_NO_MISTAKES"; reason='No-Mistakes run could not be observed' ;;
+      generation) printf 'validation_generation=stale\n' >> "$meta"; reason='run generation does not match the latest plan' ;;
+    esac
+    cp "$meta" "$saved/expected-meta"
+    cp "$ledger" "$saved/expected-ledger"
+    out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$nm_bin" FM_HOME="$HOME_DIR" \
+      "$CHECK" "$id" --bind-check RUN-prerequisites --generation "$generation" 2> "$saved/stderr")
+    rc=$?
+    expect_code "$expected_rc" "$rc" "$variant binding prerequisite exit changed"
+    printf '%s' "$out" | jq -se --arg task "$id" --arg reason "$reason" '
+      length == 1 and .[0] == {schema:"fm-validation-run-binding-check.v1",task:$task,
+        status:"refused",run:"RUN-prerequisites",binding:"none",reason:$reason,head:""}
+    ' >/dev/null || fail "$variant prerequisite did not return the binding refusal contract"
+    cmp -s "$meta" "$saved/expected-meta" || fail "$variant bind-check changed metadata"
+    cmp -s "$ledger" "$saved/expected-ledger" || fail "$variant bind-check changed receipts"
+    [ "$variant" != dirty ] || rm "$project/untracked"
+  done
+  cp "$saved/meta" "$meta"
+  cp "$saved/brief" "$brief"
+  cp "$saved/ledger" "$ledger"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-check RUN-prerequisites --generation "$generation") \
+    || fail "restored binding prerequisites did not report bindable"
+  printf '%s' "$out" | jq -e '.schema == "fm-validation-run-binding-check.v1" and .status == "bindable" and .reason == ""' >/dev/null \
+    || fail "successful bind-check changed verdict schema"
+  pass "bind-check prerequisite refusals preserve one read-only binding verdict contract"
+}
+
 test_help_advertises_generation_bound_run_binding() {
   local out
   out=$("$CHECK" --help) || fail "receipt checker help failed"
@@ -2680,6 +2754,7 @@ test_pr_ready_requires_bound_run() {
   pass "PR-ready requires a bound no-mistakes run"
 }
 
+test_bind_check_prerequisites_use_binding_verdict
 test_help_advertises_generation_bound_run_binding
 test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
