@@ -55,8 +55,8 @@
 # this code root (any worktree of it counts), the ship scaffold also appends the
 # reserved criterion AC99 as the section's last line, matching .no-mistakes.yaml's
 # test policy: evidence of targeted local tests plus lint is sufficient before
-# validation planning; the existing checks-green PR-ready gate enforces GitHub
-# CI broad regression (local-only wording drops the CI clause). No local
+# validation planning; broad regression is owned by the PR GitHub CI per
+# .no-mistakes.yaml (local-only wording drops the CI clause). No local
 # full-suite run is required. Other repos get no extra criterion; the reserved
 # high id keeps task criteria AC1..AC98 collision-free.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -473,7 +473,7 @@ if repo_is_firstmate_code_root "$REPO"; then
       ;;
     *)
       # shellcheck disable=SC2016  # single quotes are deliberate: the backticks are literal brief text
-      FIRSTMATE_VERIFICATION_AC='- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line with the branch head before validation planning; no local full-suite run is required because the PR'"'"'s GitHub CI (`.github/workflows/ci.yml`) owns broad regression, enforced by the existing checks-green PR-ready gate.'
+      FIRSTMATE_VERIFICATION_AC='- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line with the branch head before validation planning; no local full-suite run is required; broad regression is owned by the PR GitHub CI per .no-mistakes.yaml.'
       ;;
   esac
 fi

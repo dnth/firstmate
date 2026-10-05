@@ -1035,8 +1035,10 @@ test_firstmate_repo_ship_brief_prefills_verification_criterion() {
     # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
     assert_grep '- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line with the branch head before validation planning;' "$brief" \
       "firstmate-repo AC99 cannot be evidenced before PR creation"
-    assert_grep 'owns broad regression, enforced by the existing checks-green PR-ready gate' "$brief" \
-      "firstmate-repo AC99 did not defer broad regression to the PR-ready gate"
+    assert_grep 'broad regression is owned by the PR GitHub CI per .no-mistakes.yaml' "$brief" \
+      "firstmate-repo AC99 did not identify CI as the broad regression owner"
+    assert_no_grep 'checks-green PR-ready gate' "$brief" \
+      "firstmate-repo AC99 claimed CI enforcement across all PR paths"
     assert_grep 'no local full-suite run is required' "$brief" \
       "firstmate-repo AC99 did not exclude local full-suite runs"
     assert_no_grep 'CI run URL' "$brief" \
