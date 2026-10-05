@@ -1020,38 +1020,44 @@ test_completion_boundary_contract_in_briefs() {
 # regression - per .no-mistakes.yaml) as the last criterion; every other repo's
 # scaffold stays free of it. fm-receipt-check.sh must parse the result.
 test_firstmate_repo_ship_brief_prefills_verification_criterion() {
-  local home brief filled criteria out status other_repo
+  local home brief filled criteria out status other_repo mode non_git_root
   home="$TMP_ROOT/firstmate-ac99-home"
   mkdir -p "$home/data"
 
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-fm-ac99-nm "$ROOT" --mode no-mistakes 2>&1); status=$?
-  expect_code 0 "$status" "firstmate-repo no-mistakes brief should scaffold"
-  assert_contains "$out" "AC99 is pre-filled" \
-    "firstmate-repo scaffold did not announce the pre-filled AC99"
-  assert_contains "$out" "replace {TASK} and every {ACCEPTANCE CRITERION}" \
-    "firstmate-repo scaffold dropped the placeholder-replacement instruction"
-  brief="$home/data/brief-fm-ac99-nm/brief.md"
-  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
-  assert_grep '- AC99: changed tests green via `bin/fm-test-run.sh --changed`' "$brief" \
-    "firstmate-repo brief missing the AC99 verification criterion"
-  assert_grep 'full GitHub CI suite green' "$brief" \
-    "firstmate-repo brief AC99 did not defer broad regression to CI"
-  [ "$(grep -oE '^- AC[0-9]+' "$brief" | tail -1)" = "- AC99" ] \
-    || fail "AC99 is not the last acceptance criterion in the firstmate-repo brief"
-  [ "$(grep -n -- '- AC1:' "$brief" | head -1 | cut -d: -f1)" -lt \
-    "$(grep -n -- '- AC99:' "$brief" | cut -d: -f1)" ] \
-    || fail "AC99 did not appear after the AC1 scaffold line"
+  for mode in no-mistakes direct-PR; do
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "brief-fm-ac99-$mode" "$ROOT" --mode "$mode" 2>&1); status=$?
+    expect_code 0 "$status" "firstmate-repo $mode brief should scaffold"
+    assert_contains "$out" "AC99 is pre-filled" \
+      "firstmate-repo scaffold did not announce the pre-filled AC99"
+    assert_contains "$out" "replace {TASK} and every {ACCEPTANCE CRITERION}" \
+      "firstmate-repo scaffold dropped the placeholder-replacement instruction"
+    brief="$home/data/brief-fm-ac99-$mode/brief.md"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep '- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line with the branch head before validation planning;' "$brief" \
+      "firstmate-repo AC99 cannot be evidenced before PR creation"
+    assert_grep 'owns broad regression, enforced by the existing checks-green PR-ready gate' "$brief" \
+      "firstmate-repo AC99 did not defer broad regression to the PR-ready gate"
+    assert_grep 'no local full-suite run is required' "$brief" \
+      "firstmate-repo AC99 did not exclude local full-suite runs"
+    assert_no_grep 'CI run URL' "$brief" \
+      "firstmate-repo AC99 still requires a pre-validation CI receipt"
+    [ "$(grep -oE '^- AC[0-9]+' "$brief" | tail -1)" = "- AC99" ] \
+      || fail "AC99 is not the last acceptance criterion in the firstmate-repo brief"
+    [ "$(grep -n -- '- AC1:' "$brief" | head -1 | cut -d: -f1)" -lt \
+      "$(grep -n -- '- AC99:' "$brief" | cut -d: -f1)" ] \
+      || fail "AC99 did not appear after the AC1 scaffold line"
 
-  filled="$TMP_ROOT/brief-fm-ac99-nm-filled.md"
-  sed 's/{ACCEPTANCE CRITERION}/the change works as specified/' "$brief" > "$filled"
-  "$ROOT/bin/fm-receipt-check.sh" --parse-criteria "$filled" --require AC99 >/dev/null 2>&1 \
-    || fail "fm-receipt-check --require AC99 rejected the filled firstmate brief"
-  criteria=$("$ROOT/bin/fm-receipt-check.sh" --parse-criteria "$filled") \
-    || fail "fm-receipt-check could not parse the filled firstmate brief"
-  printf '%s\n' "$criteria" | cut -f1 | grep -Fx AC1 >/dev/null \
-    || fail "parsed criteria lost AC1"
-  printf '%s\n' "$criteria" | cut -f1 | grep -Fx AC99 >/dev/null \
-    || fail "parsed criteria lost AC99"
+    filled="$TMP_ROOT/brief-fm-ac99-$mode-filled.md"
+    sed 's/{ACCEPTANCE CRITERION}/the change works as specified/' "$brief" > "$filled"
+    "$ROOT/bin/fm-receipt-check.sh" --parse-criteria "$filled" --require AC99 >/dev/null 2>&1 \
+      || fail "fm-receipt-check --require AC99 rejected the filled firstmate brief"
+    criteria=$("$ROOT/bin/fm-receipt-check.sh" --parse-criteria "$filled") \
+      || fail "fm-receipt-check could not parse the filled firstmate brief"
+    printf '%s\n' "$criteria" | cut -f1 | grep -Fx AC1 >/dev/null \
+      || fail "parsed criteria lost AC1"
+    printf '%s\n' "$criteria" | cut -f1 | grep -Fx AC99 >/dev/null \
+      || fail "parsed criteria lost AC99"
+  done
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-fm-ac99-lo "$ROOT" --mode local-only 2>&1); status=$?
   expect_code 0 "$status" "firstmate-repo local-only brief should scaffold"
@@ -1076,6 +1082,15 @@ test_firstmate_repo_ship_brief_prefills_verification_criterion() {
     || fail "foreign-repo ship brief did not scaffold"
   assert_no_grep 'AC99' "$home/data/brief-fm-ac99-other/brief.md" \
     "a checkout of a different repository gained the firstmate-only AC99 criterion"
+
+  non_git_root="$TMP_ROOT/non-git-code-root"
+  mkdir -p "$non_git_root"
+  cp -R "$ROOT/bin" "$non_git_root/bin"
+  GIT_CEILING_DIRECTORIES="$TMP_ROOT" FM_HOME="$home" FM_ROOT_OVERRIDE="$non_git_root" \
+    "$non_git_root/bin/fm-brief.sh" brief-fm-ac99-non-git "$non_git_root" --mode no-mistakes >/dev/null 2>&1 \
+    || fail "non-git code-root ship brief did not scaffold"
+  assert_no_grep 'AC99' "$home/data/brief-fm-ac99-non-git/brief.md" \
+    "physical equality without Git identity gained the firstmate-only AC99 criterion"
 
   pass "fm-brief.sh: firstmate-repo ship briefs pre-fill AC99, other repos stay unchanged"
 }

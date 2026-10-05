@@ -54,8 +54,9 @@
 # When the repo argument resolves to a checkout of the same git repository as
 # this code root (any worktree of it counts), the ship scaffold also appends the
 # reserved criterion AC99 as the section's last line, matching .no-mistakes.yaml's
-# test policy: targeted local tests plus lint, the PR's GitHub CI suite owns
-# broad regression (local-only wording drops the CI clause), and no local
+# test policy: evidence of targeted local tests plus lint is sufficient before
+# validation planning; the existing checks-green PR-ready gate enforces GitHub
+# CI broad regression (local-only wording drops the CI clause). No local
 # full-suite run is required. Other repos get no extra criterion; the reserved
 # high id keeps task criteria AC1..AC98 collision-free.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -450,20 +451,14 @@ REPO=${POS[1]}
 # a safety gate: a repo string that does not resolve to a directory - the
 # common bare project-name case - simply gets the plain scaffold.
 repo_is_firstmate_code_root() {
-  local dir=$1 dir_common root_common dir_abs root_abs
+  local dir=$1 dir_common root_common
   case "$dir" in
     projects/*) dir="$FM_HOME/projects/${dir#projects/}" ;;
   esac
   [ -d "$dir" ] || return 1
-  dir_common=$(cd "$dir" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || dir_common=
-  root_common=$(cd "$FM_ROOT" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || root_common=
-  if [ -n "$dir_common" ] && [ -n "$root_common" ]; then
-    [ "$dir_common" = "$root_common" ]
-    return
-  fi
-  dir_abs=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
-  root_abs=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || return 1
-  [ "$dir_abs" = "$root_abs" ]
+  dir_common=$(cd "$dir" 2>/dev/null && common_dir=$(git rev-parse --git-common-dir 2>/dev/null) && cd "$common_dir" 2>/dev/null && pwd -P) || return 1
+  root_common=$(cd "$FM_ROOT" 2>/dev/null && common_dir=$(git rev-parse --git-common-dir 2>/dev/null) && cd "$common_dir" 2>/dev/null && pwd -P) || return 1
+  [ -n "$dir_common" ] && [ -n "$root_common" ] && [ "$dir_common" = "$root_common" ]
 }
 
 # Reserved acceptance criterion, appended last so task criteria AC1..AC98 never
@@ -478,7 +473,7 @@ if repo_is_firstmate_code_root "$REPO"; then
       ;;
     *)
       # shellcheck disable=SC2016  # single quotes are deliberate: the backticks are literal brief text
-      FIRSTMATE_VERIFICATION_AC='- AC99: changed tests green via `bin/fm-test-run.sh --changed`, `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, and the PR'"'"'s full GitHub CI suite green, recorded as an evidence line with the CI run URL and head before reporting PR-ready; no local full-suite run is required because `.github/workflows/ci.yml` owns broad regression.'
+      FIRSTMATE_VERIFICATION_AC='- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line with the branch head before validation planning; no local full-suite run is required because the PR'"'"'s GitHub CI (`.github/workflows/ci.yml`) owns broad regression, enforced by the existing checks-green PR-ready gate.'
       ;;
   esac
 fi
