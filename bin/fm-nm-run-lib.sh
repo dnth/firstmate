@@ -292,7 +292,7 @@ fm_nm_run_is_terminal_passed() {  # <toon-output>
   status=$(fm_nm_field "$1" status)
   outcome=$(fm_nm_field "$1" outcome)
   case "$outcome:$status" in
-    passed:*|checks-passed:*|*:passed|*:checks-passed) return 0 ;;
+    passed:*|passed-with-override:*|checks-passed:*|*:passed|*:passed-with-override|*:checks-passed) return 0 ;;
   esac
   return 1
 }

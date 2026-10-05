@@ -760,7 +760,7 @@ if [ "$ACTION" = bind-run ] || [ "$ACTION" = bind-check ]; then
   BIND_STATE_OK=0
   case "$BIND_STATUS:$BIND_OUTCOME" in
     failed:*|cancelled:*|*:failed|*:cancelled) ;;
-    passed:*|checks-passed:*|*:passed|*:checks-passed) BIND_STATE_OK=1 ;;
+    passed:*|passed-with-override:*|checks-passed:*|*:passed|*:passed-with-override|*:checks-passed) BIND_STATE_OK=1 ;;
     running:*|fixing:*|ci:*|awaiting_approval:*) BIND_STATE_OK=1 ;;
   esac
   BIND_RUN_BRANCH=$(fm_nm_field "$BIND_OUT" branch)
@@ -1012,7 +1012,7 @@ record_validation_completed() {
       outcome=$(fm_nm_field "$run_out" outcome)
       run_status=$(fm_nm_field "$run_out" status)
       run_ready=0
-      if [ "$outcome" = passed ] || [ "$outcome" = checks-passed ] || [ "$run_status" = checks-passed ]; then
+      if [ "$outcome" = passed ] || [ "$outcome" = passed-with-override ] || [ "$outcome" = checks-passed ] || [ "$run_status" = checks-passed ]; then
         run_ready=1
       elif [ "$run_status" = ci ] || [ "$run_status" = running ]; then
         ci_state=$(fm_nm_ci_checks_state "$worktree" "$NM_TIMEOUT" "$run_id")
