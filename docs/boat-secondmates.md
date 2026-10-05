@@ -62,7 +62,13 @@ A failed wake compensates by retiring credentials and requesting a confirmed sto
 Failed compensation remains explicitly unresolved and never reports a clean stop.
 A failed sleep restores credential and reply availability when the sandbox is still running; incomplete restoration remains unresolved.
 A failed bearer shred prevents deletion.
-Sleep and destroy accept an already stopped or archived sandbox without issuing another provider stop; destroy still requires checked credential cleanup before deletion.
+Sleep and destroy do not issue another provider stop for an already stopped or archived sandbox.
+For a registered remote route, destroy skips remote reconciliation and child-work checks only when the placement is suspended or provisioned and has durable proof of a successful sleep whose remote checks passed.
+Wake clears that proof before transitioning, so a suspended record left by failed-wake compensation does not qualify.
+Without proof, dormant destroy refuses before remote checks; wake the placement so destroy can run those checks.
+A running placement still requires remote reconciliation and no active or unknown child work.
+Dormant destroy rechecks the lifecycle and proof under the lifecycle lock and refuses if either no longer qualifies.
+All destroy paths retain the pending-reply, handoff, decision, credential-cleanup, and explicit confirmation guards.
 Reconcile an unresolved placement or credential record before retrying sleep or destroy; do not delete its records to bypass cleanup.
 
 ## Subscription credential boundary
