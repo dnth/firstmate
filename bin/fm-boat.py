@@ -236,6 +236,7 @@ def wake(id):
                     auth.acquire(id, desc['alias'], desc['config'], rows['model'])
                 reply(id, 'arm')
                 return
+            rows.pop('sleep_quiesced', None)
             rows['lifecycle'] = 'waking'; write(id, rows)
             deadline = time.monotonic() + TIMEOUT
             while True:
@@ -280,6 +281,10 @@ def sleep(id, destroy=False):
         before = rows['lifecycle']
         if before not in ('ready', 'provisioned', 'suspended'):
             raise Failure('unresolved compute must be reconciled before sleep or deletion')
+        if destroy and os.environ.get('FM_BOAT_DESTROY_DORMANT') == '1' \
+                and (before not in ('provisioned', 'suspended')
+                     or rows.get('sleep_quiesced') != '1'):
+            raise Failure('placement changed after dormant destroy checks; retry destroy')
         try:
             rows['lifecycle'] = 'suspending'; write(id, rows)
             if rows['omp_auth'] == '1':
@@ -290,6 +295,10 @@ def sleep(id, destroy=False):
                 record_path(id).unlink()
                 print('deleted: ' + id)
                 return
+            if os.environ.get('FM_BOAT_SLEEP_QUIESCED') == '1':
+                rows['sleep_quiesced'] = '1'
+            else:
+                rows.pop('sleep_quiesced', None)
             rows['lifecycle'] = 'suspended' if rows['ever_ready'] == '1' else 'provisioned'
             write(id, rows)
             print('suspended: ' + id)
