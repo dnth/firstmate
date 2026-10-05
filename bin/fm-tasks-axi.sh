@@ -232,7 +232,7 @@ append_cleanup() {
 
 # append-note <id> (--body <text> | --body-file <path>) [--json]
 cmd_append_note() {
-  local id= have_body=0 have_file=0 body_text= body_file= json_flag=0
+  local id='' have_body=0 have_file=0 body_text='' body_file='' json_flag=0
   local i arg new_text prior new_body status stored
   for ((i = 1; i < ${#ARGS[@]}; i++)); do
     arg=${ARGS[i]}
@@ -311,7 +311,7 @@ cmd_append_note() {
 # stored body is non-empty and the new text does not contain it verbatim - the
 # tell-tale shape of a caller that meant to append.
 guard_body_replace() {
-  local id=${ARGS[1]-} body_seen=0 archive_seen=0 body_file= new_text= prior i arg
+  local id=${ARGS[1]-} body_seen=0 archive_seen=0 body_file='' new_text='' prior i arg
   [ "${id#-}" = "$id" ] || return 0
   for ((i = 2; i < ${#ARGS[@]}; i++)); do
     arg=${ARGS[i]}
