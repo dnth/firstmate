@@ -320,7 +320,6 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       line="$task $ev_line"
       fm_cap_line_var "$line" $((item_bytes - 1)); line=$FM_LINE_CAP_LINE
       receipt_line="STATUS OUTCOME BACKSTOP: after relaying it to the captain, record its receipt: bin/fm-branch-outcome.sh deliver --task $task --status-ident $ident --endpoint $ev_endpoint"
-      fm_cap_line_var "$receipt_line" $((item_bytes - 1)); receipt_line=$FM_LINE_CAP_LINE
       bytes=$(( ${#line} + ${#receipt_line} + 2 ))
       if [ $((used + bytes)) -gt "$global_bytes" ]; then omitted=$((omitted + 1)); continue; fi
       output="${output}${line}"$'\n'"${receipt_line}"$'\n'

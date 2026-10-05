@@ -428,11 +428,12 @@ test_outcome_backstop_surfaces_pending_completion_without_outcome() {
 }
 
 test_outcome_backstop_receipt_survives_status_teardown() {
-  local dir state out status cmd ident endpoint
+  local dir state out status cmd ident endpoint task
   dir=$(make_case outcome-backstop-teardown)
   state="$dir/state"
   out="$dir/drain.out"
-  status="$state/torn.status"
+  task=fm-delivery-backstop-receipt-after-scout-status-teardown-long-id
+  status="$state/$task.status"
   printf 'done: shipped then torn down\n' > "$status"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
@@ -442,6 +443,8 @@ test_outcome_backstop_receipt_survives_status_teardown() {
     || fail "the backstop did not print exactly one per-event receipt command: $(cat "$out")"
   ident=$(status_ident "$status") || fail "could not read torn status identity"
   endpoint=$(wc -c < "$status" | tr -d ' ')
+  [ "$cmd" = "bin/fm-branch-outcome.sh deliver --task $task --status-ident $ident --endpoint $endpoint" ] \
+    || fail "the long task's printed receipt command was incomplete: $cmd"
   rm "$status" || fail "could not simulate the status-file teardown"
 
   # shellcheck disable=SC2086  # cmd is the printed receipt command, an intentional word-split arg list
@@ -449,10 +452,10 @@ test_outcome_backstop_receipt_survives_status_teardown() {
     || fail "the printed receipt command refused after the status file was torn down"
   [ "$(wc -l < "$state/completion-deliveries.jsonl" | tr -d ' ')" = "1" ] \
     || fail "the receipt command did not append exactly one ledger row: $(cat "$state/completion-deliveries.jsonl")"
-  grep -F "\"task\":\"torn\",\"statusIdent\":\"$ident\",\"endpoint\":$endpoint" \
+  grep -F "\"task\":\"$task\",\"statusIdent\":\"$ident\",\"endpoint\":$endpoint" \
     "$state/completion-deliveries.jsonl" >/dev/null \
     || fail "the ledger row did not record the torn event's identity and endpoint: $(cat "$state/completion-deliveries.jsonl")"
-  pass "the printed per-event receipt records delivery after the status file is torn down"
+  pass "the long task's complete printed receipt records delivery after status teardown"
 }
 
 test_outcome_backstop_prints_one_receipt_per_shown_event() {
