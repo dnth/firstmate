@@ -1320,6 +1320,21 @@ teardown_task aflat "$SECOND_HOME_A" > "$TMP_ROOT/aflat-teardown.out" 2> "$TMP_R
   || fail "flat cross-home contention fixture teardown failed"
 pass "real Herdr lab: session lock contention from a secondmate home falls back flat with no journal"
 
+# Retire the multi-home slot owners before whole-session restarts make their
+# worktrees reusable, while still proving exact-pane teardown and focus safety.
+for META_HOME_PAIR in \
+  "p1:$HOME_DIR" "p2:$HOME_DIR" "pcw:$HOME_DIR" \
+  "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A" "acw:$SECOND_HOME_A" \
+  "b1:$SECOND_HOME_B" "b2:$SECOND_HOME_B" "bcw:$SECOND_HOME_B"
+do
+  TASK_ID=${META_HOME_PAIR%%:*}
+  TASK_HOME=${META_HOME_PAIR#*:}
+  teardown_task "$TASK_ID" "$TASK_HOME" > "$TMP_ROOT/td-$TASK_ID.out" 2> "$TMP_ROOT/td-$TASK_ID.err" \
+    || fail "multi-home teardown of $TASK_ID failed: $(cat "$TMP_ROOT/td-$TASK_ID.err")"
+done
+assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
+pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
+
 # Same-identity recovery replaces only one exact agent-free husk in its
 # original projected workspace.
 # Exercise both the leading fm- identity style seen in Hi Bit work and the
@@ -1523,20 +1538,11 @@ lab tab get "$FLAT_TAB_ID" >/dev/null 2>&1 \
   || fail "correction removed the seeded flat secondmate child tab"
 pass "real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated"
 
-# Teardown multi-home projected tasks by exact pane only.
-for META_HOME_PAIR in \
-  "p1:$HOME_DIR" "p2:$HOME_DIR" "pcw:$HOME_DIR" "post-legacy:$HOME_DIR" \
-  "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A" "acw:$SECOND_HOME_A" \
-  "alpha:$HOME_DIR" \
-  "b1:$SECOND_HOME_B" "b2:$SECOND_HOME_B" "bcw:$SECOND_HOME_B"
-do
-  TASK_ID=${META_HOME_PAIR%%:*}
-  TASK_HOME=${META_HOME_PAIR#*:}
-  teardown_task "$TASK_ID" "$TASK_HOME" > "$TMP_ROOT/td-$TASK_ID.out" 2> "$TMP_ROOT/td-$TASK_ID.err" \
-    || fail "multi-home teardown of $TASK_ID failed: $(cat "$TMP_ROOT/td-$TASK_ID.err")"
-done
-assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
-pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
+teardown_task alpha "$HOME_DIR" > "$TMP_ROOT/td-alpha.out" 2> "$TMP_ROOT/td-alpha.err" \
+  || fail "secondmate alpha teardown failed: $(cat "$TMP_ROOT/td-alpha.err")"
+teardown_task post-legacy "$HOME_DIR" > "$TMP_ROOT/td-post-legacy.out" 2> "$TMP_ROOT/td-post-legacy.err" \
+  || fail "post-legacy teardown failed: $(cat "$TMP_ROOT/td-post-legacy.err")"
+assert_focus_is "$CAPTAIN_FOCUS" "post-legacy teardown"
 stop_herdr_snapshotter
 
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
