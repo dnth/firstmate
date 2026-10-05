@@ -201,4 +201,76 @@ if out=$(FM_FAKE_DOCTOR_MODE=unready world_env "$ROOT/bin/fm-spawn.sh" ios --sec
 grep -qx 'lifecycle=ready' "$w/home/data/boat/ios.meta" || fail 'spawn did not wake before readiness'
 grep -qx 'boat resume' "$w/calls" || fail 'spawn bypassed Boat wake'
 pass 'Boat wake precedes public remote spawn readiness'
+
+# Destroy of a running placement keeps the remote reachability checks: an
+# unreachable host or active remote child work refuses before the provider.
+for request in "$w/home/state/pending-replies/"*; do
+  [ -f "$request" ] || continue
+  printf 'done [corr=%s]: fixture reply\n' "$(basename "$request")" >> "$w/home/state/ios.status"
+done
+: > "$w/calls"
+: > "$w/calls.log"
+if out=$(FM_FAKE_SSH_MODE=unreachable world_env "$ROOT/bin/fm-boat.sh" destroy ios --yes 2>&1); then
+  fail 'destroy on a running placement ignored an unreachable remote'
+fi
+assert_no_grep 'boat delete' "$w/calls" 'unreachable remote still deleted the sandbox'
+grep -qx 'lifecycle=ready' "$w/home/data/boat/ios.meta" || fail 'refused destroy changed the lifecycle'
+out=$(FM_FAKE_REMOTE_CHILDREN=1 world_env "$ROOT/bin/fm-boat.sh" destroy ios --yes 2>&1) \
+  && fail 'destroy on a running placement ignored active remote child work'
+assert_contains "$out" 'remote child work is active or unknown' 'remote child refusal lost its reason'
+assert_no_grep 'boat delete' "$w/calls" 'remote child work still deleted the sandbox'
+assert_grep 'fm-remote-secondmate-control.sh children' "$w/calls.log" \
+  'running placement skipped the remote checks'
+pass 'Boat destroy on a running placement keeps remote checks and refuses when they fail'
+
+# A suspended record alone is not quiescence proof: a failed wake also ends
+# suspended through compensation, so destroy must refuse before any SSH.
+world_env "$ROOT/bin/fm-boat.sh" sleep ios >/dev/null \
+  || fail 'could not suspend the route before dormant destroy'
+grep -qx 'lifecycle=suspended' "$w/home/data/boat/ios.meta" || fail 'route did not suspend'
+grep -qx 'sleep_quiesced=1' "$w/home/data/boat/ios.meta" \
+  || fail 'proven sleep did not record quiescence proof'
+jq '.fail = ["resume"]' "$w/provider.json" > "$w/provider.tmp" && mv "$w/provider.tmp" "$w/provider.json"
+if out=$(world_env "$ROOT/bin/fm-boat.sh" wake ios 2>&1); then
+  fail 'wake unexpectedly ignored the injected resume failure'
+fi
+jq '.fail = []' "$w/provider.json" > "$w/provider.tmp" && mv "$w/provider.tmp" "$w/provider.json"
+grep -qx 'lifecycle=suspended' "$w/home/data/boat/ios.meta" \
+  || fail "compensated wake did not leave a suspended record: $(cat "$w/home/data/boat/ios.meta")"
+if grep -q '^sleep_quiesced=' "$w/home/data/boat/ios.meta"; then
+  fail 'compensated wake kept the sleep-time quiescence proof'
+fi
+: > "$w/calls"
+: > "$w/calls.log"
+out=$(FM_FAKE_SSH_MODE=unreachable world_env "$ROOT/bin/fm-boat.sh" destroy ios --yes 2>&1) \
+  && fail 'destroy on an unproven dormant placement unexpectedly succeeded'
+assert_contains "$out" 'no sleep-time quiescence proof' 'unproven dormant refusal lost its reason'
+assert_no_grep 'boat delete' "$w/calls" 'unproven dormant destroy still deleted the sandbox'
+grep -qx 'lifecycle=suspended' "$w/home/data/boat/ios.meta" || fail 'refused destroy removed the record'
+assert_no_grep 'fm-remote-secondmate-control.sh' "$w/calls.log" \
+  'unproven dormant destroy probed the remote'
+pass 'Boat destroy on an unproven dormant placement refuses before any remote check'
+
+# With durable sleep-time proof the dormant route is already known idle, so
+# destroy skips the unreachable remote checks and deletes through the provider.
+world_env "$ROOT/bin/fm-boat.sh" wake ios >/dev/null \
+  || fail 'could not wake the route after clearing the injected failure'
+world_env "$ROOT/bin/fm-boat.sh" sleep ios >/dev/null \
+  || fail 'could not suspend the route before dormant destroy'
+grep -qx 'sleep_quiesced=1' "$w/home/data/boat/ios.meta" \
+  || fail 'proven sleep did not record quiescence proof'
+: > "$w/calls"
+: > "$w/calls.log"
+if out=$(FM_FAKE_SSH_MODE=unreachable world_env "$ROOT/bin/fm-boat.sh" destroy ios 2>&1); then
+  fail 'destroy without --yes unexpectedly succeeded'
+fi
+assert_no_grep 'boat delete' "$w/calls" 'unconfirmed destroy still deleted the sandbox'
+grep -qx 'lifecycle=suspended' "$w/home/data/boat/ios.meta" || fail 'unconfirmed destroy removed the record'
+out=$(FM_FAKE_SSH_MODE=unreachable world_env "$ROOT/bin/fm-boat.sh" destroy ios --yes 2>&1) \
+  || fail "destroy on a proven suspended placement failed: $out"
+assert_grep 'boat delete' "$w/calls" 'suspended destroy did not delete the sandbox'
+[ ! -e "$w/home/data/boat/ios.meta" ] || fail 'suspended destroy left the record behind'
+assert_no_grep 'fm-remote-secondmate-control.sh' "$w/calls.log" \
+  'suspended destroy probed the unreachable remote'
+pass 'Boat destroy on a suspended placement skips unreachable remote checks and deletes'
 fm_test_cleanup

@@ -198,6 +198,40 @@ class LifecycleTests(unittest.TestCase):
         self.call('sleep', ok=False); self.assertEqual(self.provider()['state'], 'ready')
         (pending / 'fixture').unlink(); (state / 'mate.status').write_text('needs-decision: [key=fixture] unresolved\n')
         self.call('sleep', ok=False); self.assertEqual(self.provider()['state'], 'ready')
+    def boat_py(self, verb, *args, ok=True, **env_extra):
+        result = subprocess.run(['uv', 'run', '--no-project', str(ROOT / 'bin/fm-boat.py'),
+                                 verb, 'mate', *args],
+                                env=dict(self.lab.env, **env_extra), capture_output=True, text=True, timeout=20)
+        if ok and result.returncode: raise AssertionError(result.stderr)
+        if not ok and not result.returncode: raise AssertionError('operation unexpectedly succeeded')
+        return result
+    def test_dormant_destroy_requires_sleep_time_quiescence_proof(self):
+        self.provision(); self.call('wake')
+        refused = self.boat_py('destroy', '--yes', ok=False, FM_BOAT_DESTROY_DORMANT='1')
+        self.assertIn('retry destroy', refused.stderr)
+        self.assertNotEqual(self.provider()['state'], 'deleted')
+        self.call('sleep')
+        self.assertNotIn('sleep_quiesced', self.state())
+        refused = self.boat_py('destroy', '--yes', ok=False, FM_BOAT_DESTROY_DORMANT='1')
+        self.assertIn('retry destroy', refused.stderr)
+        self.assertNotEqual(self.provider()['state'], 'deleted')
+        self.boat_py('destroy', '--yes', FM_BOAT_DESTROY_DORMANT='0')
+        self.assertEqual(self.provider()['state'], 'deleted')
+        self.assertFalse(self.path.exists())
+    def test_wake_invalidates_sleep_time_quiescence_proof(self):
+        self.provision(); self.call('wake')
+        self.boat_py('sleep', FM_BOAT_SLEEP_QUIESCED='1')
+        self.assertEqual(self.state()['sleep_quiesced'], '1')
+        self.call('wake')
+        self.assertNotIn('sleep_quiesced', self.state())
+        self.boat_py('sleep', FM_BOAT_SLEEP_QUIESCED='1')
+        self.lab.update(fail=['resume']); self.call('wake', ok=False)
+        self.assertEqual(self.state()['lifecycle'], 'suspended')
+        self.assertNotIn('sleep_quiesced', self.state())
+        refused = self.boat_py('destroy', '--yes', ok=False, FM_BOAT_DESTROY_DORMANT='1')
+        self.assertIn('retry destroy', refused.stderr)
+        self.assertNotEqual(self.provider()['state'], 'deleted')
+        self.lab.update(fail=[]); self.call('destroy', '--yes')
     def test_shred_failure_prevents_deletion_and_failed_stop_restores_credentials(self):
         check = subprocess.run(['systemctl', '--user', 'show', '--property=ControlGroup'], capture_output=True)
         if check.returncode: self.skipTest('Linux systemd user manager required for auth transition')
