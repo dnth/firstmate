@@ -5,7 +5,8 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>] [--lock-preheld]
+#                                         [--effort <level>] [--backend <name>]
+#                                         [--lock-preheld]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -46,6 +47,10 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              --backend pins the replacement's runtime backend instead of
+#              letting the launch owner resolve it from this home's config; a
+#              task whose recorded endpoint sits on a different backend is
+#              refused before anything is touched.
 #              --lock-preheld is the supervised-recovery handshake: the caller
 #              (bin/fm-stall-recovery.sh) already holds this task's lifecycle
 #              lock, so fm-control verifies the lock's recorded owner is its
@@ -211,9 +216,11 @@ fi
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
+PIN_BACKEND=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+BACKEND_SET=0
 NOTE=
 NOTE_SET=0
 LOCK_PREHELD=0
@@ -228,6 +235,7 @@ for control_arg in "$@"; do
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      backend) PIN_BACKEND=$control_arg; BACKEND_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       stall_record) STALL_RECORD=$control_arg ;;
       note_file)
@@ -246,6 +254,8 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --backend) control_want_value=backend ;;
+    --backend=*) PIN_BACKEND=${control_arg#--backend=}; BACKEND_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -266,8 +276,8 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$LOCK_PREHELD" = 0 ] && [ -z "$STALL_RECORD" ] \
-    || die "--harness, --model, --effort, --note, --lock-preheld, and --stall-record apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$BACKEND_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$LOCK_PREHELD" = 0 ] && [ -z "$STALL_RECORD" ] \
+    || die "--harness, --model, --effort, --backend, --note, --lock-preheld, and --stall-record apply to 'relaunch' only"
 fi
 # The stall-record re-check is only meaningful inside the supervised-recovery
 # handshake: without --lock-preheld there is no proof the caller serialized
@@ -277,6 +287,7 @@ fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
+[ "$BACKEND_SET" = 0 ] || [ -n "$PIN_BACKEND" ] || die "--backend requires a non-empty value"
 case "$NEW_EFFORT" in
   ''|default|low|medium|high|xhigh|max) ;;
   *) die "--effort must be one of default, low, medium, high, xhigh, max" ;;
@@ -356,6 +367,13 @@ fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 
 fm_backend_validate "$BACKEND" || exit 1
+
+# A pinned replacement backend must be the backend the recorded endpoint
+# already lives on: refusing here, before any journal write or agent touch,
+# keeps a mismatched pin from silently migrating the task onto another backend.
+if [ "$VERB" = relaunch ] && [ "$BACKEND_SET" = 1 ] && [ "$PIN_BACKEND" != "$BACKEND" ]; then
+  die "task $ID's endpoint is recorded on backend '$BACKEND', not the pinned '$PIN_BACKEND'; refusing to relaunch it onto another backend"
+fi
 
 # --- shared helpers ---------------------------------------------------------
 
@@ -953,6 +971,7 @@ do_relaunch() {
   else
     spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   fi
+  [ "$BACKEND_SET" = 0 ] || spawn_args+=(--backend "$PIN_BACKEND")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   # FM_RESTART_SPAWN_CMD replaces the launch owner (default: bin/fm-spawn.sh) so

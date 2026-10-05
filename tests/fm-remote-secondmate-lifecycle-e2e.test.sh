@@ -761,6 +761,21 @@ cmp -s "$TMP_ROOT/remote-ios-legacy-before-refusal.meta" "$remote_route_meta" \
 assert_present "$TMUX_STATE" "remote refusal killed the alive legacy endpoint"
 cmp -s "$TMP_ROOT/registry-before-nonherdr.md" "$PARENT/data/secondmates.md" \
   || fail "remote legacy refusal removed or changed the registry route"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh relaunch ios codex - - \
+  > "$TMP_ROOT/legacy-relaunch-refusal.out" 2>&1
+legacy_relaunch_rc=$?
+set -e
+[ "$legacy_relaunch_rc" -ne 0 ] || fail "remote control relaunched an alive legacy tmux endpoint"
+assert_grep "endpoint is recorded on backend 'tmux', expected 'herdr'" "$TMP_ROOT/legacy-relaunch-refusal.out" \
+  "remote relaunch refusal did not name the endpoint's recorded backend"
+cmp -s "$TMP_ROOT/remote-ios-legacy-before-refusal.meta" "$remote_route_meta" \
+  || fail "remote relaunch refusal changed the legacy endpoint metadata"
+cmp -s "$TMP_ROOT/parent-ios-before-nonherdr.meta" "$PARENT/state/ios.meta" \
+  || fail "remote relaunch refusal rewrote the parent's endpoint metadata"
+cmp -s "$TMP_ROOT/registry-before-nonherdr.md" "$PARENT/data/secondmates.md" \
+  || fail "remote relaunch refusal removed or changed the registry route"
+assert_present "$TMUX_STATE" "remote relaunch refusal killed the alive legacy endpoint"
 mv -f "$TMP_ROOT/remote-ios-before-legacy.meta" "$remote_route_meta"
 rm -f "$TMUX_STATE"
 pass "non-herdr remote endpoints are refused without changing either route"
@@ -1828,6 +1843,52 @@ for pointer_state in absent malformed; do
   [ -f "$orphan_session" ] || fail 'remote relaunch deleted the saved session'
 done
 pass 'Remote failed binds repair absent and malformed pointers without deleting saved sessions'
+
+# --- remote OMP relaunch stays pinned to herdr -------------------------------
+# AC1 regression: a remote home whose own config/backend names tmux must not
+# pull a remote second mate's relaunch off herdr - launch pins the backend, and
+# relaunch pins it the same way.
+
+OMP_BROKEN_BACKEND_CFG="$OMP_BROKEN_HOME/config/backend"
+if [ -f "$OMP_BROKEN_BACKEND_CFG" ]; then
+  cp -p "$OMP_BROKEN_BACKEND_CFG" "$TMP_ROOT/omp-broken-backend.prior"
+  omp_broken_backend_prior=1
+else
+  omp_broken_backend_prior=0
+fi
+mkdir -p "$OMP_BROKEN_HOME/config"
+printf 'tmux\n' > "$OMP_BROKEN_BACKEND_CFG"
+# Relaunch on a dead endpoint skips graceful exit entirely, so the fixture's
+# missing exit semantics do not matter: close the live pane and model the
+# session lock the same way the failed-bind case does (dead pid).
+OMP_BROKEN_LIVE_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_BROKEN_CONTROL/remote-omp-broken.meta")
+[ -n "$OMP_BROKEN_LIVE_PANE" ] || fail "live remote OMP endpoint metadata omitted its Herdr pane identity"
+"$REMOTE_ROOT/bin/herdr" pane close "$OMP_BROKEN_LIVE_PANE"
+omp_dead_pid=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
+printf '%s\n' "$omp_dead_pid" > "$OMP_BROKEN_STATE/.lock"
+OMP_BROKEN_VERSION=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
+  _ "$REMOTE_ROOT" "$OMP_BROKEN_HOME")
+printf '%s\n%s\n%s\n%s\n' "$OMP_BROKEN_VERSION" "$omp_dead_pid" "$REMOTE_OMP_BUN" "$REMOTE_OMP_BIN" \
+  > "$OMP_BROKEN_STATE/.omp-primary-extension-loaded"
+remote_env "$ROOT/bin/fm-on.sh" remote-omp-broken \
+  fm-remote-secondmate-control.sh relaunch remote-omp-broken omp - - \
+  > "$TMP_ROOT/remote-omp-broken-relaunch.out" 2>&1 \
+  || fail "remote OMP relaunch on a tmux-configured home was refused:"$'\n'"$(cat "$TMP_ROOT/remote-omp-broken-relaunch.out")"
+assert_grep 'backend=herdr' "$OMP_BROKEN_CONTROL/remote-omp-broken.meta" \
+  "the relaunched remote OMP endpoint record does not name the herdr backend"
+assert_grep 'herdr_session=fm-remote' "$OMP_BROKEN_CONTROL/remote-omp-broken.meta" \
+  "the relaunched remote OMP endpoint record does not name the fm-remote session"
+assert_no_grep 'window=firstmate:' "$OMP_BROKEN_CONTROL/remote-omp-broken.meta" \
+  "the remote OMP relaunch landed on the home's configured tmux backend instead of herdr"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" remote-omp-broken \
+    fm-remote-secondmate-control.sh state remote-omp-broken)" = alive ] \
+  || fail "remote OMP relaunch on a tmux-configured home did not reach a live endpoint"
+if [ "$omp_broken_backend_prior" = 1 ]; then
+  mv -f "$TMP_ROOT/omp-broken-backend.prior" "$OMP_BROKEN_BACKEND_CFG"
+else
+  rm -f "$OMP_BROKEN_BACKEND_CFG"
+fi
+pass "a remote OMP relaunch pins the herdr backend even when the remote home configures tmux"
 
 pass "remote OMP primary, fallback, result metadata, pane launch, and existing safety refusals hold end to end"
 
