@@ -145,7 +145,7 @@ family_for_basename() {
     fm-pi-compatible-family.test.sh|fm-pi-primary-types.test.sh|fm-reflect-skill.test.sh|\
     fm-cleanup-skill.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
-    fm-todo-project.test.sh|\
+    fm-tasks-axi.test.sh|fm-todo-project.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
