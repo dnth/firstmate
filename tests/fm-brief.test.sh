@@ -1014,6 +1014,72 @@ test_completion_boundary_contract_in_briefs() {
   pass "fm-brief.sh: ship and scout briefs carry the bounded completion contract"
 }
 
+# When the ship task's repo argument resolves to a checkout of the same git
+# repository as this code root, the scaffold appends the reserved AC99
+# verification criterion (targeted local tests plus lint, CI owns broad
+# regression - per .no-mistakes.yaml) as the last criterion; every other repo's
+# scaffold stays free of it. fm-receipt-check.sh must parse the result.
+test_firstmate_repo_ship_brief_prefills_verification_criterion() {
+  local home brief filled criteria out status other_repo
+  home="$TMP_ROOT/firstmate-ac99-home"
+  mkdir -p "$home/data"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-fm-ac99-nm "$ROOT" --mode no-mistakes 2>&1); status=$?
+  expect_code 0 "$status" "firstmate-repo no-mistakes brief should scaffold"
+  assert_contains "$out" "AC99 is pre-filled" \
+    "firstmate-repo scaffold did not announce the pre-filled AC99"
+  assert_contains "$out" "replace {TASK} and every {ACCEPTANCE CRITERION}" \
+    "firstmate-repo scaffold dropped the placeholder-replacement instruction"
+  brief="$home/data/brief-fm-ac99-nm/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep '- AC99: changed tests green via `bin/fm-test-run.sh --changed`' "$brief" \
+    "firstmate-repo brief missing the AC99 verification criterion"
+  assert_grep 'full GitHub CI suite green' "$brief" \
+    "firstmate-repo brief AC99 did not defer broad regression to CI"
+  [ "$(grep -oE '^- AC[0-9]+' "$brief" | tail -1)" = "- AC99" ] \
+    || fail "AC99 is not the last acceptance criterion in the firstmate-repo brief"
+  [ "$(grep -n -- '- AC1:' "$brief" | head -1 | cut -d: -f1)" -lt \
+    "$(grep -n -- '- AC99:' "$brief" | cut -d: -f1)" ] \
+    || fail "AC99 did not appear after the AC1 scaffold line"
+
+  filled="$TMP_ROOT/brief-fm-ac99-nm-filled.md"
+  sed 's/{ACCEPTANCE CRITERION}/the change works as specified/' "$brief" > "$filled"
+  "$ROOT/bin/fm-receipt-check.sh" --parse-criteria "$filled" --require AC99 >/dev/null 2>&1 \
+    || fail "fm-receipt-check --require AC99 rejected the filled firstmate brief"
+  criteria=$("$ROOT/bin/fm-receipt-check.sh" --parse-criteria "$filled") \
+    || fail "fm-receipt-check could not parse the filled firstmate brief"
+  printf '%s\n' "$criteria" | cut -f1 | grep -Fx AC1 >/dev/null \
+    || fail "parsed criteria lost AC1"
+  printf '%s\n' "$criteria" | cut -f1 | grep -Fx AC99 >/dev/null \
+    || fail "parsed criteria lost AC99"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-fm-ac99-lo "$ROOT" --mode local-only 2>&1); status=$?
+  expect_code 0 "$status" "firstmate-repo local-only brief should scaffold"
+  brief="$home/data/brief-fm-ac99-lo/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep '- AC99: changed tests green via `bin/fm-test-run.sh --changed`' "$brief" \
+    "firstmate-repo local-only brief missing the AC99 verification criterion"
+  assert_grep 'ready in branch' "$brief" \
+    "local-only AC99 did not bind evidence to the branch-ready report"
+  assert_no_grep 'GitHub CI' "$brief" \
+    "local-only AC99 referenced CI that a local-only delivery never runs"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-fm-ac99-bare some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "bare-name ship brief did not scaffold"
+  assert_no_grep 'AC99' "$home/data/brief-fm-ac99-bare/brief.md" \
+    "bare project name gained the firstmate-only AC99 criterion"
+
+  other_repo="$TMP_ROOT/unrelated-repo"
+  mkdir -p "$other_repo"
+  git -C "$other_repo" init -q
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-fm-ac99-other "$other_repo" --mode no-mistakes >/dev/null 2>&1 \
+    || fail "foreign-repo ship brief did not scaffold"
+  assert_no_grep 'AC99' "$home/data/brief-fm-ac99-other/brief.md" \
+    "a checkout of a different repository gained the firstmate-only AC99 criterion"
+
+  pass "fm-brief.sh: firstmate-repo ship briefs pre-fill AC99, other repos stay unchanged"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1038,5 +1104,6 @@ test_scouting_delegation_section_in_ship_and_scout
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_captain_hold_policy
 test_scout_and_secondmate_scaffold
+test_firstmate_repo_ship_brief_prefills_verification_criterion
 test_concurrent_ship_scaffold_has_one_owner
 test_ship_scaffold_rejects_destination_swap_and_retries_cleanly

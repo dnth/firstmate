@@ -70,7 +70,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 Tracked changes to firstmate itself use the risk-based documentation rule above on a feature branch and require an explicit merge approval.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
-There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.
+When a task's repo argument resolves to a checkout of this repository, `bin/fm-brief.sh`'s scaffold already appends the reserved verification criterion AC99 (the fm-brief.sh header owns that contract); firstmate still adds this skill's load line to firstmate-repo briefs by hand.
 A crewmate picking up such a brief should load the skill even if the brief predates this instruction.
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
 Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
