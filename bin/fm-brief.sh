@@ -31,8 +31,9 @@
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
-#   caller-supplied repo string cannot reliably identify this repo. Briefs made
-#   without it carry a loud declaration so an omitted contract cannot be silent.
+#   caller-supplied repo string cannot be relied on to identify this repo for a
+#   safety gate. Briefs made without it carry a loud declaration so an omitted
+#   contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -50,6 +51,17 @@
 # "# Acceptance criteria" section and creates the append-only evidence ledger at
 # data/<task-id>/evidence.jsonl. bin/fm-receipt-check.sh owns the section parser,
 # evidence gate, conservative binary risk plan, and validation timing.
+# When the repo argument resolves to a directory whose git common dir equals
+# this code root's git common dir (any worktree of it counts), the ship scaffold
+# appends reserved criterion AC99 as the section's last line; keep it and use
+# AC1..AC98 for task criteria. projects/<name> resolves under FM_HOME; unresolved
+# names, non-git directories, and other repos get no extra criterion.
+# AC99 requires bin/fm-test-run.sh --changed green and
+# FM_LINT_JOBS=1 bin/fm-lint.sh clean, recorded as an evidence line with the branch
+# head before validation planning. No local full-suite run is required; broad
+# regression is owned by the PR GitHub CI per .no-mistakes.yaml.
+# For local-only, AC99 drops the CI clause and binds the branch-head evidence to
+# reporting "ready in branch" instead of validation planning.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -436,6 +448,39 @@ fi
 
 REPO=${POS[1]}
 
+# True when the ship task's repo argument resolves to a checkout (main checkout
+# or any worktree) of the same git repository as this code root. This is a
+# best-effort convenience for pre-filling the AC99 verification criterion, not
+# a safety gate: a repo string that does not resolve to a directory - the
+# common bare project-name case - simply gets the plain scaffold.
+repo_is_firstmate_code_root() {
+  local dir=$1 dir_common root_common
+  case "$dir" in
+    projects/*) dir="$FM_HOME/projects/${dir#projects/}" ;;
+  esac
+  [ -d "$dir" ] || return 1
+  dir_common=$(cd "$dir" 2>/dev/null && common_dir=$(git rev-parse --git-common-dir 2>/dev/null) && cd "$common_dir" 2>/dev/null && pwd -P) || return 1
+  root_common=$(cd "$FM_ROOT" 2>/dev/null && common_dir=$(git rev-parse --git-common-dir 2>/dev/null) && cd "$common_dir" 2>/dev/null && pwd -P) || return 1
+  [ -n "$dir_common" ] && [ -n "$root_common" ] && [ "$dir_common" = "$root_common" ]
+}
+
+# Reserved acceptance criterion, appended last so task criteria AC1..AC98 never
+# collide. The wording follows .no-mistakes.yaml: targeted local verification,
+# CI owns broad regression, no local full-suite run.
+FIRSTMATE_VERIFICATION_AC=
+if repo_is_firstmate_code_root "$REPO"; then
+  case "$MODE" in
+    local-only)
+      # shellcheck disable=SC2016  # single quotes are deliberate: the backticks are literal brief text
+      FIRSTMATE_VERIFICATION_AC='- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line with the branch head before reporting ready in branch; no local full-suite run is required.'
+      ;;
+    *)
+      # shellcheck disable=SC2016  # single quotes are deliberate: the backticks are literal brief text
+      FIRSTMATE_VERIFICATION_AC='- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line with the branch head before validation planning; no local full-suite run is required; broad regression is owned by the PR GitHub CI per .no-mistakes.yaml.'
+      ;;
+  esac
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -577,7 +622,8 @@ ${ORCHESTRATION_FRONTMATTER:+$ORCHESTRATION_FRONTMATTER}You are a crewmate: an a
 {TASK}
 
 # Acceptance criteria
-- AC1: {ACCEPTANCE CRITERION}
+- AC1: {ACCEPTANCE CRITERION}${FIRSTMATE_VERIFICATION_AC:+
+$FIRSTMATE_VERIFICATION_AC}
 
 ${ORCHESTRATION_SECTION:+$ORCHESTRATION_SECTION}$HERDR_SECTION
 
@@ -642,4 +688,8 @@ if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
   exit 1
 fi
 BRIEF_COMMITTED=1
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and every {ACCEPTANCE CRITERION})"
+if [ -n "$FIRSTMATE_VERIFICATION_AC" ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and every {ACCEPTANCE CRITERION}; AC99 is pre-filled with the firstmate verification criterion and must be kept)"
+else
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and every {ACCEPTANCE CRITERION})"
+fi
