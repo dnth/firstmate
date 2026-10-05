@@ -7,8 +7,9 @@
 #
 # Every routine firstmate backlog read or mutation goes through this command
 # rather than a bare `tasks-axi`; `fm-tasks-axi.sh <command> --help` prints
-# tasks-axi's own help. Arguments reach tasks-axi as given, apart from one
-# rewrite that keeps file arguments meaning what the caller meant: a relative
+# tasks-axi's own help, except for the wrapper-owned `append-note` command.
+# Forwarded arguments reach tasks-axi as given after wrapper checks, apart
+# from one rewrite that keeps file arguments meaning what the caller meant: a relative
 # value of `--to` or any `--*-file` flag (`--body-file`, `--relation-file`, ...)
 # is made absolute against the caller's working directory, because tasks-axi
 # starts from the backlog root instead. `--report` stays as given: tasks-axi
@@ -39,8 +40,9 @@
 # body and verifies the write landed as intended. Use it for evidence and
 # follow-up notes; the prior body is kept inline, so no archive entry is made.
 #
-# Because `update`/`edit --body|--body-file` replaces the whole body, this
-# wrapper guards it: without `--archive-body` it reads the current body first
+# Whole-body replacement with `update`/`edit --body|--body-file` (including
+# `task update`/`task edit`) is guarded: without `--archive-body` the wrapper
+# reads the current body first
 # and refuses (exit 2, nothing written) when that body is non-empty and the
 # new text does not contain it verbatim. To genuinely replace a considered
 # body, re-run with `--archive-body` so tasks-axi preserves the old body in
