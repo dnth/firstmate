@@ -1581,6 +1581,91 @@ set -e
 rm -f "$HERDR_FORCE_IDLE"
 pass "remote OMP delivery replaces the reproducible typed no-turn regression with one bound inbox request, programmatic turn, and handled acknowledgement"
 
+# --- wake-on-delivery restore after a successful generation -----------------
+# The remote-omp secondmate completed a real generation and then lost its
+# endpoint as if its compute had slept: the pane is gone but its generation's
+# runtime artifacts are still on disk. A live owner must still refuse, and a
+# genuinely dead owner must let the ordinary relaunch retire the prior
+# generation's markers instead of refusing on them.
+
+assert_present "$OMP_TURN_STARTED" \
+  "the remote OMP generation lost its own turn-start marker before the restore case"
+assert_present "$OMP_READY" \
+  "the remote OMP generation lost its own doorbell marker before the restore case"
+OMP_PRIOR_STARTED=$(cat "$OMP_TURN_STARTED")
+
+# A live home owner still refuses the relaunch and leaves the prior
+# generation's artifacts untouched.
+if ! kill -0 "$OMP_LISTENER_PID" 2>/dev/null; then
+  ( sleep 300 & echo "$!" > "$TMP_ROOT/lock-owner.pid" )
+  OMP_LISTENER_PID=$(cat "$TMP_ROOT/lock-owner.pid")
+  printf '%s\n' "$OMP_LISTENER_PID" > "$OMP_REMOTE_HOME/state/.lock"
+fi
+set +e
+remote_env "$ROOT/bin/fm-spawn.sh" remote-omp --secondmate \
+  > "$TMP_ROOT/remote-omp-live-relaunch.out" 2>&1
+live_relaunch_rc=$?
+set -e
+[ "$live_relaunch_rc" -ne 0 ] \
+  || fail "remote OMP relaunch launched over a live session-lock owner"
+case "$(cat "$TMP_ROOT/remote-omp-live-relaunch.out")" in
+  *'live session-lock owner'*|*'live primary-integration marker owner'*) ;;
+  *) fail "live-owner remote OMP relaunch refusal did not name its owner:"$'\n'"$(cat "$TMP_ROOT/remote-omp-live-relaunch.out")" ;;
+esac
+assert_present "$OMP_TURN_STARTED" \
+  "live-owner refusal removed the prior generation's turn-start marker"
+assert_present "$OMP_READY" \
+  "live-owner refusal removed the prior generation's doorbell marker"
+
+# The compute sleep takes the agent process; the generation's artifacts stay.
+kill -TERM "$OMP_LISTENER_PID" 2>/dev/null || true
+listener_gone=0
+while kill -0 "$OMP_LISTENER_PID" 2>/dev/null; do
+  listener_gone=$((listener_gone + 1))
+  [ "$listener_gone" -le 250 ] || fail "remote OMP listener did not exit on SIGTERM"
+  sleep 0.02
+done
+assert_present "$OMP_TURN_STARTED" \
+  "compute sleep removed the prior generation's turn-start marker"
+
+# An awake compute-managed route takes the wake-on-delivery restore path: the
+# ordinary secondmate launch must accept the slept generation's leftovers.
+mkdir -p "$PARENT/data/boat"
+printf 'lifecycle=ready\n' > "$PARENT/data/boat/remote-omp.meta"
+: > "$OMP_ACTIVE_PID"
+sent_before_restore=$(wc -l < "$OMP_SENT" | tr -d ' ')
+records_before_restore=$(find "$OMP_INBOX" -name '*.msg' | wc -l | tr -d ' ')
+remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp \
+  "wake-on-delivery restore after a successful generation" \
+  > "$TMP_ROOT/remote-omp-restore.out" 2>&1 \
+  || fail "wake-on-delivery restore after a successful generation failed:"$'\n'"$(cat "$TMP_ROOT/remote-omp-restore.out")"
+grep -Eq '^request=[0-9a-f]{16} record=[0-9]+ state=(recorded|handled)$' \
+  "$TMP_ROOT/remote-omp-restore.out" \
+  || fail "restored remote OMP delivery did not report its durable machine line:"$'\n'"$(cat "$TMP_ROOT/remote-omp-restore.out")"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh state remote-omp)" = alive ] \
+  || fail "wake-on-delivery restore did not reach a live endpoint"
+OMP_RESTORED_PID=$(cat "$OMP_ACTIVE_PID")
+case "$OMP_RESTORED_PID" in
+  ''|*[!0-9]*) fail "restored remote OMP listener did not publish its pid" ;;
+esac
+[ "$OMP_RESTORED_PID" != "$OMP_LISTENER_PID" ] \
+  || fail "wake-on-delivery restore rebound the dead listener instead of a new process"
+OMP_LISTENER_PID=$OMP_RESTORED_PID
+kill -0 "$OMP_LISTENER_PID" 2>/dev/null \
+  || fail "restored remote OMP listener is not running"
+[ "$(find "$OMP_INBOX" -name '*.msg' | wc -l | tr -d ' ')" = "$((records_before_restore + 1))" ] \
+  || fail "restored remote OMP delivery did not durably record exactly one inbox record"
+[ "$(wc -l < "$OMP_SENT" | tr -d ' ')" = "$((sent_before_restore + 1))" ] \
+  || fail "restored remote OMP delivery did not trigger exactly one programmatic turn"
+assert_grep '"deliverAs":"steer","triggerTurn":true' "$OMP_SENT" \
+  "restored remote OMP delivery did not use programmatic triggerTurn"
+[ "$(cat "$OMP_TURN_STARTED")" != "$OMP_PRIOR_STARTED" ] \
+  || fail "restored remote OMP generation kept the prior generation's turn-start marker"
+rm -f "$PARENT/data/boat/remote-omp.meta"
+OMP_RESTORED_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_CONTROL_STATE/remote-omp.meta")
+[ -z "$OMP_RESTORED_PANE" ] || "$REMOTE_ROOT/bin/herdr" pane close "$OMP_RESTORED_PANE"
+pass "a successful remote OMP generation slept and restored on delivery retires its prior runtime markers and delivers exactly once"
+
 # --- failed-bind generation retirement --------------------------------------
 # The paid pilot's failed bind left the aborted generation's whole artifact
 # set behind: a session pointer naming a session file that never existed, a
