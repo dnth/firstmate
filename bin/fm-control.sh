@@ -50,7 +50,8 @@
 #              --backend pins the replacement's runtime backend instead of
 #              letting the launch owner resolve it from this home's config; a
 #              task whose recorded endpoint sits on a different backend is
-#              refused before anything is touched.
+#              refused before a journal write, agent touch, or replacement
+#              launch.
 #              --lock-preheld is the supervised-recovery handshake: the caller
 #              (bin/fm-stall-recovery.sh) already holds this task's lifecycle
 #              lock, so fm-control verifies the lock's recorded owner is its
