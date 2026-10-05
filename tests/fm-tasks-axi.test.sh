@@ -139,6 +139,28 @@ test_append_note_on_a_missing_id_fails_and_writes_nothing() {
   pass "append-note on a missing id fails and writes nothing"
 }
 
+test_append_note_rejects_removed_options() {
+  local home id option status out
+  home=$(make_home append-options)
+  id=append-options-t11
+  add_item "$home" "$id" 'considered body'
+  printf 'new note\n' > "$TMP_ROOT/append-options/note.md"
+  for option in --json '--body=new note' "--body-file=$TMP_ROOT/append-options/note.md"; do
+    status=0
+    out=$(FM_HOME=$home "$TASKS" append-note "$id" --body 'new note' "$option" 2>&1) || status=$?
+    expect_code 2 "$status" "append-note accepted removed option $option"
+    assert_contains "$out" 'unknown flag' "append-note did not reject $option as an unknown flag"
+    assert_equals 'considered body' "$(body_of "$home" "$id")" "rejected option changed the body"
+    assert_absent "$home/data/note-archive.md" "rejected option created an archive"
+  done
+  out=$("$TASKS" append-note --help)
+  assert_contains "$out" '--body <text> | --body-file <path>' "append help omitted the supported inputs"
+  [[ $out != *--json* ]] || fail "append help still advertises --json"
+  out=$("$TASKS" --help)
+  [[ $out != *'[--json]'* ]] || fail "wrapper help still advertises append JSON output"
+  pass "append-note rejects removed options and advertises space-separated inputs"
+}
+
 # --- replace guard ----------------------------------------------------------
 
 test_update_body_file_dropping_the_body_is_refused() {
@@ -227,17 +249,61 @@ test_update_of_an_empty_body_proceeds_without_the_flag() {
   pass "a replace of an empty body proceeds without --archive-body"
 }
 
+test_replace_guard_resolves_flags_and_task_aliases() {
+  local home id verb prefix input status text path out
+  local -a command_args body_args
+  for prefix in direct task; do
+    for verb in update edit; do
+      for input in body body-equals file file-equals; do
+        home=$(make_home "resolve-$prefix-$verb-$input")
+        id="resolve-$prefix-$verb-$input"
+        path="$home/new.md"
+        add_item "$home" "$id" 'considered body'
+        command_args=("$verb")
+        [ "$prefix" != task ] || command_args=(task "$verb")
+        for text in 'replacement' 'considered body plus evidence'; do
+          printf '%s\n' "$text" > "$path"
+          case "$input" in
+            body) body_args=(--body "$text") ;;
+            body-equals) body_args=("--body=$text") ;;
+            file) body_args=(--body-file "$path") ;;
+            file-equals) body_args=("--body-file=$path") ;;
+          esac
+          status=0
+          out=$(FM_HOME=$home "$TASKS" "${command_args[@]}" --json --title 'updated title' \
+            "${body_args[@]}" "$id" 2>&1) || status=$?
+          if [ "$text" = replacement ]; then
+            expect_code 2 "$status" "$prefix $verb $input bypassed the guard with flags before ID"
+            assert_equals 'considered body' "$(body_of "$home" "$id")" "refused replace changed the body"
+          else
+            expect_code 0 "$status" "$prefix $verb $input refused a preserving replace: $out"
+            assert_equals "$text" "$(body_of "$home" "$id")" "preserving replace stored the wrong body"
+          fi
+          assert_absent "$home/data/note-archive.md" "unarchived replace created an archive"
+        done
+        FM_HOME=$home "$TASKS" "${command_args[@]}" --archive-body --json "$id" \
+          --body 'archived replacement' >/dev/null || fail "$prefix $verb refused an archived replace"
+        assert_equals 'archived replacement' "$(body_of "$home" "$id")" "archived replace stored the wrong body"
+        assert_grep 'considered body plus evidence' "$home/data/note-archive.md" "archived replace lost the prior body"
+      done
+    done
+  done
+  pass "replace guards cover both verbs, task aliases, body inputs, and flags before ID"
+}
+
 # --- runner -----------------------------------------------------------------
 
 test_append_note_keeps_the_prior_body_and_adds_text
 test_append_note_to_an_empty_body_stores_just_the_text
 test_append_note_body_file_resolves_against_the_caller_directory
 test_append_note_on_a_missing_id_fails_and_writes_nothing
+test_append_note_rejects_removed_options
 test_update_body_file_dropping_the_body_is_refused
 test_update_body_text_dropping_the_body_is_refused
 test_edit_alias_dropping_the_body_is_refused
 test_update_with_archive_body_replaces_and_archives
 test_update_keeping_the_prior_body_proceeds_without_the_flag
 test_update_of_an_empty_body_proceeds_without_the_flag
+test_replace_guard_resolves_flags_and_task_aliases
 
 printf 'ok - fm-tasks-axi: all cases passed\n'

@@ -2,7 +2,7 @@
 # fm-tasks-axi.sh - run tasks-axi against THIS home's backlog from any working directory.
 #
 # Usage: fm-tasks-axi.sh [<tasks-axi command> [args...]]
-#        fm-tasks-axi.sh append-note <id> (--body <text> | --body-file <path>) [--json]
+#        fm-tasks-axi.sh append-note <id> (--body <text> | --body-file <path>)
 #        fm-tasks-axi.sh --help
 #
 # Every routine firstmate backlog read or mutation goes through this command
@@ -94,7 +94,7 @@ fail() {
 
 append_note_usage() {
   cat <<'EOF'
-Usage: fm-tasks-axi.sh append-note <id> (--body <text> | --body-file <path>) [--json]
+Usage: fm-tasks-axi.sh append-note <id> (--body <text> | --body-file <path>)
 
 Append text to a task's existing body, joined by a blank line, instead of
 replacing the body the way `update --body`/`--body-file` does. To replace a
@@ -230,9 +230,9 @@ append_cleanup() {
   [ -z "$APPEND_TMP" ] || rm -f -- "$APPEND_TMP"
 }
 
-# append-note <id> (--body <text> | --body-file <path>) [--json]
+# append-note <id> (--body <text> | --body-file <path>)
 cmd_append_note() {
-  local id='' have_body=0 have_file=0 body_text='' body_file='' json_flag=0
+  local id='' have_body=0 have_file=0 body_text='' body_file=''
   local i arg new_text prior new_body status stored
   for ((i = 1; i < ${#ARGS[@]}; i++)); do
     arg=${ARGS[i]}
@@ -242,21 +242,10 @@ cmd_append_note() {
         i=$((i + 1))
         body_text=${ARGS[i]-}
         ;;
-      --body=*)
-        have_body=1
-        body_text=${arg#*=}
-        ;;
       --body-file)
         have_file=1
         i=$((i + 1))
         body_file=${ARGS[i]-}
-        ;;
-      --body-file=*)
-        have_file=1
-        body_file=${arg#*=}
-        ;;
-      --json)
-        json_flag=1
         ;;
       -*)
         append_note_usage >&2
@@ -291,10 +280,8 @@ cmd_append_note() {
     || fail "append-note: cannot stage the new body"
   trap append_cleanup EXIT
   printf '%s\n' "$new_body" > "$APPEND_TMP" || fail "append-note: cannot stage the new body"
-  local -a update_args=(update "$id" --body-file "$APPEND_TMP")
-  [ "$json_flag" = 0 ] || update_args+=(--json)
   status=0
-  tasks-axi "${update_args[@]}" || status=$?
+  tasks-axi update "$id" --body-file "$APPEND_TMP" || status=$?
   [ "$status" -eq 0 ] || exit "$status"
 
   stored=$(read_prior_body "$id") || exit $?
@@ -311,9 +298,8 @@ cmd_append_note() {
 # stored body is non-empty and the new text does not contain it verbatim - the
 # tell-tale shape of a caller that meant to append.
 guard_body_replace() {
-  local id=${ARGS[1]-} body_seen=0 archive_seen=0 body_file='' new_text='' prior i arg
-  [ "${id#-}" = "$id" ] || return 0
-  for ((i = 2; i < ${#ARGS[@]}; i++)); do
+  local id='' body_seen=0 archive_seen=0 body_file='' new_text='' prior i arg
+  for ((i = $1; i < ${#ARGS[@]}; i++)); do
     arg=${ARGS[i]}
     case "$arg" in
       --archive-body) archive_seen=1 ;;
@@ -321,9 +307,20 @@ guard_body_replace() {
       --body=*) body_seen=1; new_text=${arg#*=} ;;
       --body-file) body_seen=1; i=$((i + 1)); body_file=${ARGS[i]-} ;;
       --body-file=*) body_seen=1; body_file=${arg#*=} ;;
+      --json|-h|--help|-v|-V|--version) ;;
+      --backend|--title|--repo|--kind|--priority|--pr|--report)
+        i=$((i + 1))
+        ;;
+      --backend=*|--title=*|--repo=*|--kind=*|--priority=*|--pr=*|--report=*) ;;
+      -*) fail "cannot safely resolve the task ID with unsupported flag $arg" ;;
+      *)
+        [ -z "$id" ] || fail "unexpected extra argument $arg"
+        id=$arg
+        ;;
     esac
   done
   [ "$body_seen" = 1 ] || return 0
+  [ -n "$id" ] || fail "body replacement requires a task ID"
   [ "$archive_seen" = 0 ] || return 0
   if [ -n "$body_file" ]; then
     # An unreadable body file is tasks-axi's own error to report.
@@ -343,7 +340,12 @@ case "${ARGS[0]-}" in
     exit $?
     ;;
   update|edit)
-    guard_body_replace
+    guard_body_replace 1
+    ;;
+  task)
+    case "${ARGS[1]-}" in
+      update|edit) guard_body_replace 2 ;;
+    esac
     ;;
 esac
 
