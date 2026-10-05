@@ -135,6 +135,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check.sh`         | Publish a static merge poll and atomically record validated PR-path metadata          |
 | `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub URL, and verify the real outcome |
+| `fm-main-ci-watch.sh`    | Arm a bounded custom check for a verified merge's base-branch CI                     |
+| `fm-main-ci-poll.sh`     | Classify merge-commit CI and durably alert before retiring a non-silent check         |
 | `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome                 |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-promote-transaction.sh` | Execute the pinned store's recoverable scout-to-ship promotion phases              |
