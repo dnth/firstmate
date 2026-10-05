@@ -907,6 +907,92 @@ test_duplicate_recovery_states() {
   pass "OMP secondmate recovery refuses live, ambiguous, and unreadable duplicates and relaunches only proven dead endpoints"
 }
 
+test_slept_generation_relaunch_retires_markers() {
+  local out dead_pid retained version
+
+  # A generation that ran turns and then lost its endpoint leaves its own
+  # runtime artifacts behind: the adapter file, readiness, turn-start and
+  # doorbell markers, and request receipts. A relaunch whose recorded
+  # endpoint is proven missing must retire them after the live-owner checks,
+  # not refuse on them.
+  setup_case slept-generation
+  write_meta
+  mkdir -p "$HOME_DIR/state/omp-sessions"
+  retained="$HOME_DIR/state/omp-sessions/selected.jsonl"
+  printf '{"type":"session"}\n' > "$retained"
+  printf '%s\n' "$retained" > "$HOME_DIR/state/.omp-session"
+  dead_pid=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
+  printf '%s\n' "$dead_pid" > "$HOME_DIR/state/.lock"
+  version=$(fm_primary_watch_version "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "$HOME_DIR")
+  printf '%s\n%s\n%s\n%s\n' "$version" "$dead_pid" "$TEST_OMP_BUN" "$TEST_OMP_BIN" \
+    > "$HOME_DIR/state/.omp-primary-extension-loaded"
+  : > "$MAIN_STATE/$TASK_ID.omp-ext.ts"
+  : > "$MAIN_STATE/$TASK_ID.omp-ready"
+  : > "$MAIN_STATE/$TASK_ID.omp-started"
+  : > "$MAIN_STATE/$TASK_ID.omp-doorbell-ready"
+  : > "$MAIN_STATE/$TASK_ID.omp-doorbell-failed"
+  mkdir -p "$MAIN_STATE/$TASK_ID.omp-doorbell-ready.requests"
+  : > "$MAIN_STATE/$TASK_ID.omp-doorbell-ready.requests/request.1"
+  out=$(FM_TEST_STATE_MODE=missing run_spawn 2>&1) \
+    || fail "OMP secondmate relaunch after a slept generation was refused: $out"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-ready" \
+    "slept-generation relaunch left the prior readiness marker"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-started" \
+    "slept-generation relaunch left the prior turn-start marker"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-doorbell-ready.requests/request.1" \
+    "slept-generation relaunch left the prior request receipts"
+  assert_contains "$(cat "$LAUNCH_LOG")" "$retained" \
+    "slept-generation relaunch did not resume the retained session"
+
+  # The same prior artifacts remain refusal evidence when their paths are
+  # unsafe, even though the endpoint is proven missing.
+  setup_case slept-generation-symlink
+  write_meta
+  : > "$MAIN_STATE/$TASK_ID.omp-ext.ts"
+  : > "$MAIN_STATE/$TASK_ID.omp-ready"
+  ln -s "$CASE/nonexistent-target" "$MAIN_STATE/$TASK_ID.omp-started"
+  out=$(FM_TEST_STATE_MODE=missing run_spawn 2>&1) \
+    && fail "OMP secondmate relaunch accepted a symlinked generation artifact"
+  assert_contains "$out" 'unsafe artifact path' \
+    "symlinked generation artifact refusal was not actionable"
+  [ "$(count_new_windows)" = 0 ] \
+    || fail "symlinked generation artifact refusal created another endpoint"
+
+  # A live session-lock owner still refuses and must not disturb the prior
+  # generation's artifacts.
+  setup_case slept-generation-live-owner
+  write_meta
+  : > "$MAIN_STATE/$TASK_ID.omp-ext.ts"
+  : > "$MAIN_STATE/$TASK_ID.omp-ready"
+  : > "$MAIN_STATE/$TASK_ID.omp-started"
+  printf '%s\n' "$AGENT_PID" > "$HOME_DIR/state/.lock"
+  out=$(FM_TEST_STATE_MODE=missing run_spawn 2>&1) \
+    && fail "OMP secondmate relaunch ignored a live session-lock owner"
+  assert_contains "$out" 'live session-lock owner' \
+    "live session-lock owner refusal was not actionable"
+  assert_present "$MAIN_STATE/$TASK_ID.omp-started" \
+    "live-owner refusal removed the prior generation's turn-start marker"
+  assert_present "$MAIN_STATE/$TASK_ID.omp-ext.ts" \
+    "live-owner refusal removed the prior generation's adapter file"
+  [ "$(count_new_windows)" = 0 ] \
+    || fail "live session-lock owner refusal created another endpoint"
+
+  # Without a recorded endpoint the same leftovers are still worker-only
+  # artifacts and refuse the launch exactly as before.
+  setup_case slept-generation-no-meta
+  : > "$MAIN_STATE/$TASK_ID.omp-ext.ts"
+  : > "$MAIN_STATE/$TASK_ID.omp-ready"
+  : > "$MAIN_STATE/$TASK_ID.omp-started"
+  out=$(FM_TEST_STATE_MODE=missing run_spawn 2>&1) \
+    && fail "OMP secondmate launch accepted worker-only artifacts without a recorded endpoint"
+  assert_contains "$out" 'worker-only artifact' \
+    "worker-only artifact refusal was not actionable"
+  [ "$(count_new_windows)" = 0 ] \
+    || fail "worker-only artifact refusal created another endpoint"
+
+  pass "a slept OMP secondmate generation's relaunch retires prior runtime markers only after live-owner checks pass"
+}
+
 test_post_meta_abort_preserves_home() {
   local out
   setup_case abort
@@ -1016,4 +1102,5 @@ test_rendered_legacy_launch_executes
 test_legacy_launch_rejects_empty_path_components
 test_legacy_launch_rejects_runtime_fallback
 test_duplicate_recovery_states
+test_slept_generation_relaunch_retires_markers
 test_post_meta_abort_preserves_home

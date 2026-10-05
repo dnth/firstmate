@@ -1112,6 +1112,21 @@ spawn_omp_abort_endpoint_stopped() {  # [meta]
   esac
 }
 
+# Remove exactly the per-generation runtime marker artifacts a finished or
+# aborted OMP secondmate generation left behind, so a later launch's entry
+# validation is not refused by the prior generation's leftovers. Reports
+# failure instead of partially succeeding silently.
+spawn_omp_secondmate_retire_generation_markers() {
+  local failure=0
+  rm -f -- "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
+    "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
+    "$STATE/$ID.omp-doorbell-failed" || failure=1
+  if [ -d "$STATE/$ID.omp-doorbell-ready.requests" ]; then
+    rm -rf -- "$STATE/$ID.omp-doorbell-ready.requests" || failure=1
+  fi
+  return "$failure"
+}
+
 # Retire exactly the artifacts a failed OMP secondmate launch created and the
 # next launch's entry validation checks, so a later launch is accepted instead
 # of refusing on the dead generation's leftovers. This runs only after the
@@ -1125,12 +1140,7 @@ spawn_omp_abort_endpoint_stopped() {  # [meta]
 # markers are retired, but a live owner prevents session-pointer repair.
 spawn_omp_secondmate_abort_retire_generation() {
   local marker lock_pid pointer named keep session candidate count pointer_tmp live_owner=0 failure=0
-  rm -f -- "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
-    "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
-    "$STATE/$ID.omp-doorbell-failed" || failure=1
-  if [ -d "$STATE/$ID.omp-doorbell-ready.requests" ]; then
-    rm -rf -- "$STATE/$ID.omp-doorbell-ready.requests" || failure=1
-  fi
+  spawn_omp_secondmate_retire_generation_markers || failure=1
   marker="$PROJ_ABS/state/.omp-primary-extension-loaded"
   if [ -f "$marker" ] && [ ! -L "$marker" ]; then
     if ! fm_omp_primary_marker_read "$marker"; then
@@ -2404,12 +2414,29 @@ if [ "$HARNESS" = omp ]; then
           ;;
       esac
     fi
-    for artifact in "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"; do
-      if [ -e "$artifact" ] || [ -L "$artifact" ]; then
-        echo "error: refusing OMP secondmate launch because worker-only artifact exists at $artifact" >&2
+    if [ "$OMP_SECONDMATE_RELAUNCH" = 1 ]; then
+      for artifact in \
+        "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
+        "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
+        "$STATE/$ID.omp-doorbell-failed"; do
+        if [ -L "$artifact" ] || { [ -e "$artifact" ] && [ ! -f "$artifact" ]; }; then
+          echo "error: refusing OMP secondmate relaunch through unsafe artifact path: $artifact" >&2
+          exit 1
+        fi
+      done
+      OMP_REQUESTS_DIR="$STATE/$ID.omp-doorbell-ready.requests"
+      if [ -L "$OMP_REQUESTS_DIR" ] || { [ -e "$OMP_REQUESTS_DIR" ] && [ ! -d "$OMP_REQUESTS_DIR" ]; }; then
+        echo "error: refusing OMP secondmate relaunch through unsafe artifact path: $OMP_REQUESTS_DIR" >&2
         exit 1
       fi
-    done
+    else
+      for artifact in "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"; do
+        if [ -e "$artifact" ] || [ -L "$artifact" ]; then
+          echo "error: refusing OMP secondmate launch because worker-only artifact exists at $artifact" >&2
+          exit 1
+        fi
+      done
+    fi
   else
     if [ "$RELAUNCH" -eq 1 ]; then
       OMP_PRIOR_META=$RELAUNCH_META
@@ -3181,6 +3208,10 @@ if [ "$KIND" = secondmate ]; then
         echo "error: could not retire the stale OMP secondmate integration marker: $OMP_PRIMARY_MARKER" >&2
         exit 1
       }
+    fi
+    if [ "$OMP_SECONDMATE_RELAUNCH" = 1 ] && ! spawn_omp_secondmate_retire_generation_markers; then
+      echo "error: could not retire the prior OMP secondmate generation's runtime artifacts; refusing launch" >&2
+      exit 1
     fi
   fi
   if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
