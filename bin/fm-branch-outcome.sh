@@ -113,8 +113,11 @@
 #   fm-branch-outcome.sh deliver --task <id> --status-ident <dev:inode>
 #       --endpoint <endpoint> | --through <endpoint>
 #     Record the captain-facing delivery receipt that discharges an
-#     obligation. --endpoint marks exactly that event; --through marks every
-#     undelivered obligation event at or before it. Idempotent: an already
+#     obligation. --endpoint marks exactly that event and still records after
+#     the status file is gone (teardown, merge reconciliation), so it is the
+#     form the wake drain's backstop prints; --through marks every
+#     undelivered obligation event at or before it and refuses unless the
+#     live status file still has the named identity. Idempotent: an already
 #     delivered endpoint is reported, never duplicated.
 #   fm-branch-outcome.sh reconcile --seq <seq>
 #     Print "current" when the seq's advisory is still deliverable, or
