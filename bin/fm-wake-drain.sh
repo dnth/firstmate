@@ -298,7 +298,7 @@ STATUS_OUTCOME_BACKSTOP_DELIVERED=
 # next scan, never a presentation marker.
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
   local snapshot=$1 task endpoint ident f receipt output='' shown=0 omitted=0
-  local line ev_endpoint ev_state ev_line bound seen_undelivered hint_endpoint
+  local line receipt_line ev_endpoint ev_state ev_line bound seen_undelivered
   local completions item_bytes=220 global_bytes=4000 used=0 bytes
   STATUS_OUTCOME_BACKSTOP_DELIVERED=
   [ "$ACTOR" = main ] || return 0
@@ -313,30 +313,22 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     fi
     bound=$receipt
     seen_undelivered=0
-    hint_endpoint=
     while IFS=$(printf '\t') read -r ev_endpoint ev_state ev_line; do
       [ -n "$ev_endpoint" ] || continue
       if [ "$ev_endpoint" = bound ]; then bound=$ev_state; continue; fi
       seen_undelivered=1
-      hint_endpoint=$ev_endpoint
       line="$task $ev_line"
       fm_cap_line_var "$line" $((item_bytes - 1)); line=$FM_LINE_CAP_LINE
-      bytes=$(( ${#line} + 1 ))
+      receipt_line="STATUS OUTCOME BACKSTOP: after relaying it to the captain, record its receipt: bin/fm-branch-outcome.sh deliver --task $task --status-ident $ident --endpoint $ev_endpoint"
+      bytes=$(( ${#line} + ${#receipt_line} + 2 ))
       if [ $((used + bytes)) -gt "$global_bytes" ]; then omitted=$((omitted + 1)); continue; fi
-      output="${output}${line}"$'\n'
+      output="${output}${line}"$'\n'"${receipt_line}"$'\n'
       used=$((used + bytes)); shown=$((shown + 1))
     done <<EOF
 $completions
 EOF
     [ "$seen_undelivered" -eq 0 ] && bound=$endpoint
     STATUS_OUTCOME_BACKSTOP_DELIVERED="${STATUS_OUTCOME_BACKSTOP_DELIVERED}${task}"$'\t'"${bound}"$'\n'
-    if [ -n "$hint_endpoint" ]; then
-      line="STATUS OUTCOME BACKSTOP: after relaying these to the captain, record the delivery receipt: bin/fm-branch-outcome.sh deliver --task $task --status-ident $ident --through $hint_endpoint"
-      fm_cap_line_var "$line" $((item_bytes - 1)); line=$FM_LINE_CAP_LINE
-      bytes=$(( ${#line} + 1 ))
-      output="${output}${line}"$'\n'
-      used=$((used + bytes))
-    fi
   done <<EOF
 $snapshot
 EOF

@@ -427,6 +427,128 @@ test_outcome_backstop_surfaces_pending_completion_without_outcome() {
   pass "the wake drain surfaces a completion that has neither outcome nor delivery receipt"
 }
 
+test_outcome_backstop_receipt_survives_status_teardown() {
+  local dir state out status cmd ident endpoint task
+  dir=$(make_case outcome-backstop-teardown)
+  state="$dir/state"
+  out="$dir/drain.out"
+  task=fm-delivery-backstop-receipt-after-scout-status-teardown-long-id
+  status="$state/$task.status"
+  printf 'done: shipped then torn down\n' > "$status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "the teardown backstop drain failed"
+  cmd=$(sed -n 's/^STATUS OUTCOME BACKSTOP: after relaying it to the captain, record its receipt: //p' "$out")
+  [ "$(printf '%s\n' "$cmd" | grep -c .)" = "1" ] \
+    || fail "the backstop did not print exactly one per-event receipt command: $(cat "$out")"
+  ident=$(status_ident "$status") || fail "could not read torn status identity"
+  endpoint=$(wc -c < "$status" | tr -d ' ')
+  [ "$cmd" = "bin/fm-branch-outcome.sh deliver --task $task --status-ident $ident --endpoint $endpoint" ] \
+    || fail "the long task's printed receipt command was incomplete: $cmd"
+  rm "$status" || fail "could not simulate the status-file teardown"
+
+  # shellcheck disable=SC2086  # cmd is the printed receipt command, an intentional word-split arg list
+  (cd "$ROOT" && FM_STATE_OVERRIDE="$state" bash $cmd) \
+    || fail "the printed receipt command refused after the status file was torn down"
+  [ "$(wc -l < "$state/completion-deliveries.jsonl" | tr -d ' ')" = "1" ] \
+    || fail "the receipt command did not append exactly one ledger row: $(cat "$state/completion-deliveries.jsonl")"
+  grep -F "\"task\":\"$task\",\"statusIdent\":\"$ident\",\"endpoint\":$endpoint" \
+    "$state/completion-deliveries.jsonl" >/dev/null \
+    || fail "the ledger row did not record the torn event's identity and endpoint: $(cat "$state/completion-deliveries.jsonl")"
+  pass "the long task's complete printed receipt records delivery after status teardown"
+}
+
+test_outcome_backstop_prints_one_receipt_per_shown_event() {
+  local dir state out status ident ep_done ep_working ep_failed cmd ledger
+  dir=$(make_case outcome-backstop-multi)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/multi.status"
+  {
+    printf 'done: first\n'
+    printf 'working: busy\n'
+    printf 'failed: second\n'
+  } > "$status"
+  ident=$(status_ident "$status") || fail "could not read multi status identity"
+  ep_done=$(printf 'done: first\n' | wc -c | tr -d ' ')
+  ep_working=$((ep_done + $(printf 'working: busy\n' | wc -c | tr -d ' ')))
+  ep_failed=$(wc -c < "$status" | tr -d ' ')
+
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+    --task multi --status-ident "$ident" --endpoint "$ep_done" >/dev/null \
+    || fail "could not pre-deliver the first event's receipt"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "the multi-event backstop drain failed"
+  [ "$(grep -c 'record its receipt' "$out")" = "1" ] \
+    || fail "the backstop did not print exactly one receipt line for the one undelivered event: $(cat "$out")"
+  cmd=$(sed -n 's/^STATUS OUTCOME BACKSTOP: after relaying it to the captain, record its receipt: //p' "$out")
+  case "$cmd" in *"--endpoint $ep_failed") ;; *)
+    fail "the printed receipt names the failed event's endpoint, got: $cmd" ;; esac
+  if grep -F "endpoint $ep_working" "$out" >/dev/null; then
+    fail "a non-captain-facing working line got a receipt command: $(cat "$out")"
+  fi
+
+  rm "$status" || fail "could not simulate the multi status teardown"
+  # shellcheck disable=SC2086  # cmd is the printed receipt command, an intentional word-split arg list
+  (cd "$ROOT" && FM_STATE_OVERRIDE="$state" bash $cmd) \
+    || fail "the failed event's printed receipt refused after teardown"
+  ledger="$state/completion-deliveries.jsonl"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = "2" ] \
+    || fail "the ledger does not hold exactly the two event endpoints: $(cat "$ledger")"
+  grep -F "\"endpoint\":$ep_done" "$ledger" >/dev/null \
+    || fail "the pre-delivered done endpoint vanished from the ledger: $(cat "$ledger")"
+  grep -F "\"endpoint\":$ep_failed" "$ledger" >/dev/null \
+    || fail "the failed endpoint was not recorded by the printed receipt: $(cat "$ledger")"
+  if grep -F "\"endpoint\":$ep_working" "$ledger" >/dev/null; then
+    fail "the working line's non-event endpoint was recorded: $(cat "$ledger")"
+  fi
+  pass "the backstop prints a per-event receipt for each shown undelivered event only"
+}
+
+test_outcome_backstop_receipt_refusals_append_nothing() {
+  local dir state status ident ep_working size err ledger
+  dir=$(make_case outcome-backstop-refusals)
+  state="$dir/state"
+  status="$state/ref.status"
+  err="$dir/deliver.err"
+  ledger="$state/completion-deliveries.jsonl"
+  {
+    printf 'working: busy\n'
+    printf 'done: shipped\n'
+  } > "$status"
+  ident=$(status_ident "$status") || fail "could not read ref status identity"
+  ep_working=$(printf 'working: busy\n' | wc -c | tr -d ' ')
+  size=$(wc -c < "$status" | tr -d ' ')
+
+  if FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+      --task ref --status-ident "$ident" --endpoint "$ep_working" >"$err" 2>&1; then
+    fail "deliver --endpoint accepted a non-captain-facing endpoint with the file present"
+  fi
+  [ ! -s "$ledger" ] \
+    || fail "a refused --endpoint receipt appended a ledger row: $(cat "$ledger")"
+
+  if FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+      --task ref --status-ident "1:1" --through "$size" >"$err" 2>&1; then
+    fail "deliver --through accepted a mismatched status identity"
+  fi
+  grep -F 'status file identity changed' "$err" >/dev/null \
+    || fail "the identity-mismatch refusal did not name its cause: $(cat "$err")"
+  [ ! -s "$ledger" ] \
+    || fail "a refused --through receipt appended a ledger row: $(cat "$ledger")"
+
+  rm "$status" || fail "could not simulate the ref status teardown"
+  if FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+      --task ref --status-ident "$ident" --through "$size" >"$err" 2>&1; then
+    fail "deliver --through accepted a torn status file"
+  fi
+  grep -F 'status file is missing or unreadable' "$err" >/dev/null \
+    || fail "the torn-file refusal did not name its cause: $(cat "$err")"
+  [ ! -s "$ledger" ] \
+    || fail "the torn-file --through receipt appended a ledger row: $(cat "$ledger")"
+  pass "--endpoint on a non-event, an identity-mismatched --through, and a torn-file --through all refuse without appending"
+}
+
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
@@ -442,3 +564,6 @@ test_outcome_backstop_resurfaces_missed_terminal_until_delivered
 test_outcome_backstop_resurfaces_terminal_buried_under_routine_status
 test_outcome_backstop_delivery_receipt_is_idempotent
 test_outcome_backstop_surfaces_pending_completion_without_outcome
+test_outcome_backstop_receipt_survives_status_teardown
+test_outcome_backstop_prints_one_receipt_per_shown_event
+test_outcome_backstop_receipt_refusals_append_nothing
