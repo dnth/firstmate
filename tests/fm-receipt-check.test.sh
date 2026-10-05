@@ -1162,6 +1162,106 @@ test_terminal_passed_run_seals_its_own_pipeline_head_advance() {
   pass "terminal passed runs seal their own pipeline advance and refuse foreign drift"
 }
 
+test_passed_with_override_completes_and_other_outcomes_refuse() {
+  local id base project head initial_head current_head generation status out rc outcome run_state
+
+  # A run that passed with a firstmate-approved test exception reports outcome
+  # passed-with-override: it is a real pass and must complete at the bound head.
+  id='receipt-override-complete'
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "override completion plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-override "$head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-override --generation "$generation" >/dev/null \
+    || fail "override completion run binding failed"
+  status=$(printf 'run:\n  id: "RUN-override"\n  branch: fm/%s\n  status: completed\n  head: "%s"\noutcome: passed-with-override\n' "$id" "$head")
+  out=$(FM_FAKE_NM_STATUS="$status" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "passed-with-override run did not complete at its bound head"
+  printf '%s' "$out" | jq -e --arg head "$head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "passed-with-override completion did not bind the validated head"
+
+  # The same outcome seals the run's own pipeline head advance through the
+  # terminal-passed ownership gate.
+  id='receipt-override-advance'
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "override advance plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-override-advance "$initial_head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-override-advance --generation "$generation" >/dev/null \
+    || fail "override advance run binding failed"
+  printf 'doc commit\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: docs'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_pipeline_status RUN-override-advance "fm/$id" "$current_head" completed passed-with-override agent_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "passed-with-override run could not seal its own pipeline head advance"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "passed-with-override completion did not bind the advanced head"
+
+  # An already terminal passed-with-override run binds to its current plan.
+  id='receipt-override-bind'
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "override bind plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(printf 'run:\n  id: "RUN-override-terminal"\n  branch: fm/%s\n  status: completed\n  head: "%s"\noutcome: passed-with-override\n' "$id" "$head")
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-override-terminal --generation "$generation" >/dev/null \
+    || fail "terminal passed-with-override run could not bind to its current plan"
+
+  # Every other outcome still refuses: only a real pass completes.
+  for outcome in failed cancelled pending passed-with-overrides override; do
+    id="receipt-override-refuse-$outcome"
+    base=$(make_project "$id" no-mistakes localized)
+    add_receipt "$id" AC1 test "2 passed"
+    add_receipt "$id" AC2 lint passed
+    FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+      "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "$outcome refusal plan failed"
+    project="$TMP_ROOT/project-$id"
+    head=$(git -C "$project" rev-parse HEAD)
+    generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+    status=$(nm_status "RUN-refuse-$outcome" "$head" pending)
+    FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+      FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+      "$CHECK" "$id" --bind-run "RUN-refuse-$outcome" --generation "$generation" >/dev/null \
+      || fail "$outcome refusal run binding failed"
+    run_state=completed
+    case "$outcome" in failed|cancelled) run_state=$outcome ;; esac
+    status=$(printf 'run:\n  id: "RUN-refuse-%s"\n  branch: fm/%s\n  status: %s\n  head: "%s"\noutcome: %s\n' \
+      "$outcome" "$id" "$run_state" "$head" "$outcome")
+    FM_FAKE_NM_STATUS="$status" \
+      FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+      "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+    rc=$?
+    expect_code 2 "$rc" "outcome $outcome completed without a real pass"
+  done
+  pass "passed-with-override completes and seals while every other outcome refuses"
+}
+
 # Re-commit every commit in <base>..HEAD with the same tree under a fresh
 # committer stamp, exactly as the no-mistakes rebase step does, leave the branch
 # on the rewritten chain, and print the rewritten head. Every rewritten commit
@@ -2775,6 +2875,7 @@ test_run_heads_resolve_authoritatively
 test_agent_supplied_intent_log_binds_and_completes
 test_completion_accepts_only_pipeline_owned_head_advance
 test_terminal_passed_run_seals_its_own_pipeline_head_advance
+test_passed_with_override_completes_and_other_outcomes_refuse
 test_pipeline_rebase_restamp_binds_and_seals_identical_content
 test_restamped_chains_refuse_foreign_content_and_unowned_rewrites
 test_active_pipeline_owned_descendant_binds_without_replan

@@ -107,6 +107,11 @@
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head;
 # exact bound runs may prove current checks-green readiness through the shared CI log predicate.
+# Binding and full-no-mistakes completion accept passed-with-override as a
+# terminal pass carrying a Firstmate-approved test exception, alongside passed
+# and checks-passed; no fresh validation run is needed to complete that pass.
+# passed-with-skips lacks required evidence and is not a pass; other non-pass
+# outcomes and look-alikes such as passed-with-overrides or override still refuse.
 # Full-no-mistakes completion also requires the decision-evidence check owned
 # by bin/fm-nm-run-lib.sh; unreadable run data or insufficient decision records
 # refuse completion. bin/fm-classify-lib.sh owns the process-evidence limitation.
@@ -760,7 +765,7 @@ if [ "$ACTION" = bind-run ] || [ "$ACTION" = bind-check ]; then
   BIND_STATE_OK=0
   case "$BIND_STATUS:$BIND_OUTCOME" in
     failed:*|cancelled:*|*:failed|*:cancelled) ;;
-    passed:*|checks-passed:*|*:passed|*:checks-passed) BIND_STATE_OK=1 ;;
+    passed:*|passed-with-override:*|checks-passed:*|*:passed|*:passed-with-override|*:checks-passed) BIND_STATE_OK=1 ;;
     running:*|fixing:*|ci:*|awaiting_approval:*) BIND_STATE_OK=1 ;;
   esac
   BIND_RUN_BRANCH=$(fm_nm_field "$BIND_OUT" branch)
@@ -1012,7 +1017,7 @@ record_validation_completed() {
       outcome=$(fm_nm_field "$run_out" outcome)
       run_status=$(fm_nm_field "$run_out" status)
       run_ready=0
-      if [ "$outcome" = passed ] || [ "$outcome" = checks-passed ] || [ "$run_status" = checks-passed ]; then
+      if [ "$outcome" = passed ] || [ "$outcome" = passed-with-override ] || [ "$outcome" = checks-passed ] || [ "$run_status" = checks-passed ]; then
         run_ready=1
       elif [ "$run_status" = ci ] || [ "$run_status" = running ]; then
         ci_state=$(fm_nm_ci_checks_state "$worktree" "$NM_TIMEOUT" "$run_id")
