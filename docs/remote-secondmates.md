@@ -183,7 +183,7 @@ The primary resolves both configured secondmate profiles, runs the same readines
 [`runpod-secondmates.md`](runpod-secondmates.md) owns the provider-specific crew route that converges after this inherited transfer.
 The remote response supplies the actually launched harness, model, effort, and fallback metadata for the primary record; reusing an already-live endpoint preserves that stored profile instead of relabeling it from a new request.
 All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
-An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.
+An explicit request for any other backend is refused rather than honored, and the remote host refuses one too; a remote relaunch pins the replacement to Herdr like launch does and refuses a recorded endpoint on any other backend.
 An existing remote endpoint recorded in another Herdr session, including `default`, is classified as unverified and left untouched; launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it instead of attempting a live cutover.
 A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 OMP is accepted for the remote second-mate agent itself, as either the primary or configured fallback harness, through the same verified-adapter boundary as the other supported harnesses.

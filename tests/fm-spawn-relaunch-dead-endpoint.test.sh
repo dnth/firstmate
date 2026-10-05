@@ -1126,6 +1126,97 @@ test_orca_relaunch_still_refuses() {
   pass "fm-spawn --relaunch: orca remains refused"
 }
 
+# --- relaunch --backend pin --------------------------------------------------
+
+# make_spawn_stub <case_dir>: a launch-owner stand-in that records its argv and
+# brings the recorded tmux endpoint up as a live agent, the way a real relaunch
+# publication would leave the world.
+make_spawn_stub() {
+  local case_dir=$1
+  cat > "$case_dir/spawn-stub" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_TEST_SPAWN_ARGS"
+window=$(sed -n 's/^window=//p' "$FM_TEST_META")
+ses=${window%%:*}
+name=${window#*:}
+cwd=$(sed -n 's/^worktree=//p' "$FM_TEST_META")
+printf '@9\t%s\t%s\t%s\n' "$name" "$cwd" "claude" > "$FM_FAKE_TMUX_STATE/$ses.windows"
+SH
+  chmod +x "$case_dir/spawn-stub"
+}
+
+test_relaunch_backend_pin_refuses_mismatch() {
+  local rec id meta_prior
+  id=$(case_id pin-refuse)
+  rec=$(make_case pin-refuse "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" tmux "$WT_DIR" "$PROJ_DIR" claude
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  make_spawn_stub "$CASE_DIR"
+  export FM_TEST_SPAWN_ARGS="$CASE_DIR/spawn-args.log"
+  export FM_TEST_META="$HOME_DIR/state/$id.meta"
+  export FM_RESTART_SPAWN_CMD="$CASE_DIR/spawn-stub"
+  meta_prior="$CASE_DIR/meta-prior"
+  cp -p "$HOME_DIR/state/$id.meta" "$meta_prior"
+
+  run_control "$CASE_DIR" "$HOME_DIR" "$id" --backend herdr
+  unset FM_RESTART_SPAWN_CMD FM_TEST_SPAWN_ARGS FM_TEST_META
+
+  [ "$CONTROL_STATUS" -ne 0 ] || fail "a relaunch pinned to a foreign backend should refuse; got: $CONTROL_OUT"
+  assert_contains "$CONTROL_OUT" "recorded on backend 'tmux', not the pinned 'herdr'" \
+    "the pin refusal did not name the recorded and pinned backends"
+  cmp -s "$meta_prior" "$HOME_DIR/state/$id.meta" \
+    || fail "a refused backend pin rewrote the durable endpoint record"
+  assert_absent "$HOME_DIR/state/$id.control-relaunch" \
+    "a refused backend pin left a relaunch journal behind"
+  assert_absent "$CASE_DIR/spawn-args.log" \
+    "a refused backend pin still invoked the launch owner"
+  pass "fm-control relaunch --backend: a recorded endpoint on another backend refuses untouched"
+}
+
+test_relaunch_backend_pin_forwards_to_spawn() {
+  local rec id
+  id=$(case_id pin-forward)
+  rec=$(make_case pin-forward "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" tmux "$WT_DIR" "$PROJ_DIR" claude
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  make_spawn_stub "$CASE_DIR"
+  export FM_TEST_SPAWN_ARGS="$CASE_DIR/spawn-args.log"
+  export FM_TEST_META="$HOME_DIR/state/$id.meta"
+  export FM_RESTART_SPAWN_CMD="$CASE_DIR/spawn-stub"
+
+  run_control "$CASE_DIR" "$HOME_DIR" "$id" --backend tmux
+  unset FM_RESTART_SPAWN_CMD FM_TEST_SPAWN_ARGS FM_TEST_META
+
+  expect_code 0 "$CONTROL_STATUS" "a relaunch pinned to its recorded backend should proceed; got: $CONTROL_OUT"
+  assert_contains "$CONTROL_OUT" "relaunched $id" "the pinned relaunch did not report success"
+  assert_grep "$id --relaunch --harness claude --backend tmux" "$CASE_DIR/spawn-args.log" \
+    "the pin was not forwarded to the launch owner: $(cat "$CASE_DIR/spawn-args.log" 2>/dev/null)"
+  pass "fm-control relaunch --backend: a matching pin is forwarded to the launch owner"
+}
+
+test_backend_flag_refused_off_relaunch() {
+  local rec id
+  id=$(case_id pin-verb)
+  rec=$(make_case pin-verb "$id" pool)
+  read_case "$rec"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" tmux "$WT_DIR" "$PROJ_DIR" claude
+
+  CONTROL_OUT=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" \
+    "$CONTROL" "$id" interrupt --backend tmux 2>&1)
+  CONTROL_STATUS=$?
+  [ "$CONTROL_STATUS" -ne 0 ] || fail "--backend was accepted on interrupt"
+  assert_contains "$CONTROL_OUT" "apply to 'relaunch' only" \
+    "interrupt --backend did not refuse as a relaunch-only option"
+  pass "fm-control --backend: non-relaunch verbs refuse the pin"
+}
+
 # --- run ---------------------------------------------------------------------
 
 test_tmux_gone_relaunch_recreates_in_worktree
@@ -1147,5 +1238,8 @@ test_zellij_present_endpoint_refuses
 test_cmux_absent_relaunch_recreates
 test_cmux_present_endpoint_refuses
 test_orca_relaunch_still_refuses
+test_relaunch_backend_pin_refuses_mismatch
+test_relaunch_backend_pin_forwards_to_spawn
+test_backend_flag_refused_off_relaunch
 
 pass "all dead-endpoint relaunch tests"

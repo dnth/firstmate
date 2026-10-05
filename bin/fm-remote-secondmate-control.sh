@@ -397,6 +397,9 @@ cmd_launch() {
 # Relaunch through the ordinary host-local control plane.  The remote mate is
 # local from this host's perspective, while the explicit profile comes from the
 # parent because config/secondmate-harness belongs to a different home here.
+# The replacement is pinned to the herdr backend exactly like launch, so a
+# remote home configured for tmux cannot pull the relaunched mate off the
+# endpoint the route depends on.
 cmd_relaunch() {
   local id=$1 harness=$2 model=$3 effort=$4
   validate_id "$id"
@@ -418,7 +421,8 @@ cmd_relaunch() {
     FM_DATA_OVERRIDE="$CONTROL_DATA" FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \
     FM_SKIP_SECONDMATE_INHERIT=1 FM_SKIP_SECONDMATE_SYNC=1 \
     "$SCRIPT_DIR/fm-control.sh" "$id" relaunch \
-      --harness "$harness" --model "$model" --effort "$effort"
+      --harness "$harness" --model "$model" --effort "$effort" \
+      --backend herdr
 }
 
 cmd_send() {
