@@ -51,14 +51,17 @@
 # "# Acceptance criteria" section and creates the append-only evidence ledger at
 # data/<task-id>/evidence.jsonl. bin/fm-receipt-check.sh owns the section parser,
 # evidence gate, conservative binary risk plan, and validation timing.
-# When the repo argument resolves to a checkout of the same git repository as
-# this code root (any worktree of it counts), the ship scaffold also appends the
-# reserved criterion AC99 as the section's last line, matching .no-mistakes.yaml's
-# test policy: evidence of targeted local tests plus lint is sufficient before
-# validation planning; broad regression is owned by the PR GitHub CI per
-# .no-mistakes.yaml (local-only wording drops the CI clause). No local
-# full-suite run is required. Other repos get no extra criterion; the reserved
-# high id keeps task criteria AC1..AC98 collision-free.
+# When the repo argument resolves to a directory whose git common dir equals
+# this code root's git common dir (any worktree of it counts), the ship scaffold
+# appends reserved criterion AC99 as the section's last line; keep it and use
+# AC1..AC98 for task criteria. projects/<name> resolves under FM_HOME; unresolved
+# names, non-git directories, and other repos get no extra criterion.
+# AC99 requires bin/fm-test-run.sh --changed green and
+# FM_LINT_JOBS=1 bin/fm-lint.sh clean, recorded as an evidence line with the branch
+# head before validation planning. No local full-suite run is required; broad
+# regression is owned by the PR GitHub CI per .no-mistakes.yaml.
+# For local-only, AC99 drops the CI clause and binds the branch-head evidence to
+# reporting "ready in branch" instead of validation planning.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.

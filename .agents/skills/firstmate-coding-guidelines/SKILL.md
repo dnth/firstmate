@@ -69,7 +69,7 @@ A new skill is dead weight if nothing loads it.
 Every new skill needs its load trigger declared in its description plus an inline `AGENTS.md` pointer in the operating section whose always-loaded rule depends on it, because not every harness surfaces skill descriptions; `agent-skill-trigger-index` holds the complete list.
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
 Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.
-When `bin/fm-brief.sh`'s `REPO` argument resolves to a checkout of this repository, the scaffold auto-adds only the reserved verification criterion AC99 (the fm-brief.sh header owns that contract).
+The [`bin/fm-brief.sh` header](../../../bin/fm-brief.sh) owns automatic verification criteria.
 Firstmate still adds this skill's load instruction to firstmate-repo briefs by hand.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
