@@ -107,6 +107,11 @@
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head;
 # exact bound runs may prove current checks-green readiness through the shared CI log predicate.
+# Binding and full-no-mistakes completion accept passed-with-override as a
+# terminal pass carrying a Firstmate-approved test exception, alongside passed
+# and checks-passed; no fresh validation run is needed to complete that pass.
+# passed-with-skips lacks required evidence and is not a pass; other non-pass
+# outcomes and look-alikes such as passed-with-overrides or override still refuse.
 # Full-no-mistakes completion also requires the decision-evidence check owned
 # by bin/fm-nm-run-lib.sh; unreadable run data or insufficient decision records
 # refuse completion. bin/fm-classify-lib.sh owns the process-evidence limitation.
