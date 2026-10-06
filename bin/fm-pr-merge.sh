@@ -43,9 +43,9 @@
 # short-option cluster such as -yR, because the repository comes only from the
 # URL.
 #
-# PR metadata recording and merge-poll arming happen once, unconditionally,
-# before the forge call: they are not a success claim, so they survive any
-# later refusal and a merge that actually lands never loses its poll.
+# After the pre-merge guards pass, PR metadata recording and merge-poll arming
+# happen once before the forge merge call: they are not a success claim, so
+# they survive any later refusal and a landed merge never loses its poll.
 # A verified merge leaves a durable role-routed outcome instead of living only
 # in the merging agent's memory; bin/fm-merge-outcome-lib.sh owns its
 # destination, normal-case deduplication, and at-least-once recovery. A queued
@@ -60,9 +60,12 @@
 # authority does not cover: a ship task with any accepted-blocked acceptance
 # criterion, and a PR whose reported checks are not all green. Checks are read
 # with gh pr checks --json (gh-axi pr checks when gh is absent or its read
-# fails); pass and skipping are green, pending is pending, every other bucket
-# is failing, and a PR with no reported checks has nothing red. Checks that
-# cannot be read refuse. Each refusal names the failing or pending checks or
+# fails). gh buckets pass and skipping are green, pending is pending, and
+# every other bucket is failing. gh-axi conclusions pass, skip, skipping,
+# skipped, and neutral are green; pending, queued, in_progress, waiting,
+# requested, and expected are pending; every other conclusion is failing.
+# A PR with no reported checks has nothing red. Checks that cannot be read
+# refuse. Each refusal names the failing or pending checks or
 # the accepted-blocked criteria, plus --captain-instruction, the only override;
 # bin/fm-merge-guard-lib.sh owns the accepted-blocked guard and the override
 # flag's validation and durable record.

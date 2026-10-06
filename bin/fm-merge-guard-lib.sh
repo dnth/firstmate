@@ -8,8 +8,7 @@
 #     lists any accepted_blocked criterion is refused, naming each criterion id
 #     and its recorded captain exception. Evidence that cannot be read refuses
 #     too, because an accepted-blocked criterion cannot then be ruled out.
-#     Tasks whose metadata kind is not ship carry no acceptance criteria and
-#     are not checked.
+#     Tasks whose metadata kind is not ship are not checked by this guard.
 #   - red checks: owned by bin/fm-pr-merge.sh, which adds its own reasons.
 #
 # Override: --captain-instruction "<words>" carries the captain's concrete
