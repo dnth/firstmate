@@ -14,8 +14,10 @@
 # A ship `done` is accepted only through the delivery gate in emit(): a clean
 # worktree, complete acceptance evidence (bin/fm-receipt-check.sh), pr= recorded
 # by bin/fm-pr-check.sh for the PR modes or a clean checked-out fm/<id> branch
-# for local-only, and for no-mistakes the ask-user decision audit owned by
-# bin/fm-nm-run-lib.sh against the recorded or attributed run.
+# for local-only. For no-mistakes, it also applies the ask-user decision audit
+# owned by bin/fm-nm-run-lib.sh when a recorded or attributed full run is
+# available; absence of that identity does not itself refuse done. PR-ready
+# registration owns the required audit before recording the PR.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,

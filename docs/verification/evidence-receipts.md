@@ -23,9 +23,9 @@ Delivery gates that consume the accounting result are owned by `bin/fm-pr-check.
 - Promotion pins and verifies its scout task directory before reading or replacing the brief and ledger, refuses symlinked or out-of-root task paths before mutation, and distinguishes identity-bound unfinished rollback from committed retirement recovery.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions and rejects scaffold placeholder tokens while allowing concrete brace syntax.
 - The pinned brief and task metadata must record the same concrete delivery mode before accounting proceeds.
-- Every ship PR-ready through `bin/fm-pr-check.sh` requires complete acceptance evidence and names the missing or invalid criteria when it refuses; direct-PR registration never consults No-Mistakes.
-- A no-mistakes PR-ready proves the run from No-Mistakes' own `axi status`: branch equal to the task branch, `pr` equal to the URL being armed, full `head_sha` equal to the forge's PR head, and a passed outcome or a green CI log; the run id is recorded as `nm_run_id=` and runs on another branch or PR, foreign heads, failed, cancelled, unfinished, or unobservable runs never arm.
-- PR-ready and done acceptance apply the ask-user decision audit owned by `bin/fm-nm-run-lib.sh` against the recorded or attributed run, refusing a self-answered finding until a canonical firstmate `resolved [key=nm-<run>-<step>]: answered:` record exists and failing closed when the run's decision data cannot be read.
+- Initial ship PR registration exercises the acceptance-evidence gate owned by `bin/fm-pr-check.sh` and names missing or invalid criteria when it refuses; direct-PR registration never consults No-Mistakes.
+- Initial no-mistakes PR registration exercises the run-identity gate owned by `bin/fm-pr-check.sh`, records `nm_run_id=`, and refuses runs on another branch or PR, foreign heads, failed, cancelled, unfinished, or unobservable runs.
+- The PR-ready and done-acceptance audit fixtures exercise the decision-evidence predicate owned by `bin/fm-nm-run-lib.sh`, including refusal of unmatched answers and unreadable run data; the conditional done-time audit is owned by `bin/fm-crew-state.sh`.
 - `bin/fm-crew-state.sh` accepts a ship done only with a clean worktree, complete evidence, and `pr=` recorded for the PR modes or a clean checked-out `fm/<id>` branch for local-only.
 - `bin/fm-spawn.sh --relaunch` carries `pr=`, `pr_head=`, and `nm_run_id=` into the replacement record, including a restart mid-handoff, and invents none for an unregistered task.
 - PR registration publishes canonical PR identity through one compare-bound pinned metadata replacement after the watcher artifacts publish, revokes those artifacts if that replacement fails, serializes per task on `state/.<id>.pr-publication.lock`, and the watcher defers a valid pre-metadata poll only while that lock is fresh.
@@ -97,7 +97,7 @@ ok - fm-receipt gates accepted-blocked on a verbatim captain exception
 
 ## Line accounting
 
-`git diff --numstat dad3e4a58cac6f3f450523b9dcd72e754d8e1753 -- bin/ tests/` reports the following totals for the reviewed change through `e37e2baab4de89daa412bc8bc3d30db7e3c699aa`.
+`git diff --numstat dad3e4a58cac6f3f450523b9dcd72e754d8e1753 44dbd3f1483e4050f93cff9e85d6436f870d7f67 -- bin/ tests/` reports the following totals for the reviewed change.
 
 | Scope | Lines removed | Lines added |
 | --- | ---: | ---: |

@@ -5,7 +5,7 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
-# Every ship PR-ready requires complete acceptance evidence
+# Initial ship PR registration requires complete acceptance evidence
 # (bin/fm-receipt-check.sh <task-id> exits 0); missing or invalid receipts
 # refuse registration naming the criteria.
 # A no-mistakes task additionally proves its run from No-Mistakes' own status:
@@ -17,11 +17,11 @@
 # PR-ready owner, and unreadable run data or insufficient decision records
 # refuse registration. Nothing here reconstructs what the pipeline validated
 # from the worker's object store.
-# A PR this task already records as pr= passed those handoff gates when it was
-# first registered, so re-registering the same URL (fm-pr-merge.sh does this
-# once before every merge, and reconciliation re-arms a skipped poll) refreshes
-# pr_head= and re-arms the poll without re-running them; a different URL is a
-# new registration and is gated in full.
+# Re-registering the recorded pr= URL refreshes pr_head= and re-arms the poll
+# without re-running the handoff gates, provided a no-mistakes ship also has
+# nm_run_id= recorded. Older no-mistakes records without that run identity and
+# registrations of a different URL are gated in full. fm-pr-merge.sh calls this
+# before every merge, and reconciliation re-arms a skipped poll.
 # Publication is serialized per task through state/.<task-id>.pr-publication.lock
 # (a mkdir lock) so a concurrent registration cannot interleave its metadata
 # replacement with this one; bin/fm-watch.sh defers a pre-metadata poll while

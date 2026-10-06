@@ -26,7 +26,7 @@ Once ownership is settled, validate exactly once against that final head so no o
 An ask-user finding returns as `needs-decision` under the canonical key owned by `bin/fm-nm-run-lib.sh`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
-PR-ready (`bin/fm-pr-check.sh`) and done acceptance (`bin/fm-crew-state.sh`) apply the decision check owned by `bin/fm-nm-run-lib.sh` against the task's recorded or attributed run, with the process-evidence limitation owned by `bin/fm-classify-lib.sh`.
+Follow the PR-ready and done-acceptance gates owned by `bin/fm-pr-check.sh` and `bin/fm-crew-state.sh`, including their use of the decision check owned by `bin/fm-nm-run-lib.sh` and the process-evidence limitation owned by `bin/fm-classify-lib.sh`.
 When that check refuses, decide each named finding per `ask-user-authority` and record the answer through `fm-send`, using the fallback append documented in `bin/fm-nm-run-lib.sh` when no open decision record remains.
 Resume fleet supervision immediately after the decision lands.
 
