@@ -48,6 +48,19 @@
 #   existing unreadable rules file, malformed rules, or missing jq), which is
 #   actionable, never selected around.
 #
+# Quota snapshot versions: quota-axi --json schemaVersion 5 and 6 are accepted
+#   (fm_quota_json_valid owns the check); any other version is refused as an
+#   invalid snapshot. Schema 6 is what quota-axi emits when output is
+#   account-expanded (any provider row carries accountKey), otherwise it emits
+#   5. The window and effectiveAvailability shape is identical; the difference
+#   is that one provider may appear once per account lane. Schema 5 requires
+#   unique providers; schema 6 requires non-empty accountKey strings and unique
+#   (provider, accountKey) pairs. The shared readers use one lane per provider:
+#   "default" if present, else the lane with the most headroom (the minimum
+#   numeric effectivePercentRemaining across its windows, or -1 if unknown),
+#   breaking ties by accountKey. Source: https://github.com/kunchenguid/quota-axi
+#   (src/advice.ts).
+#
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
 #
@@ -315,8 +328,8 @@ fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an inval
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
-  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" '
-  ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
+  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_LANES_JQ"'
+  ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0] | collapse_lanes) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
   def rows($p): (prov($p) | .quotaSemantics.effectiveAvailability // []);

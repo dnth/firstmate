@@ -4,7 +4,7 @@
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
 # read from file descriptor 3, and answers with a canned typesafe.ai response.
-# A fake quota-axi serves the selected schema-5 fixture. No case touches the
+# A fake quota-axi serves the selected snapshot fixture. No case touches the
 # network, and the absent-key case proves the tool makes no call
 # at all.
 set -u
@@ -719,6 +719,45 @@ expect_code 0 "$code" "quota-axi failure exits 0"
 assert_contains "$out" '  status: error' "quota-axi failure is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json failed' "quota-axi failure is named"
 pass "quota evidence comes from one quota-axi --json read, and its failure is an error outcome"
+
+# --- quota-axi schema versions: 5 and 6 accepted, anything else refused ---------
+# Schema 6 is account-expanded: every row carries accountKey and a provider may
+# repeat once per lane. The default lane must win over a rosier non-default lane.
+V6="$TMP_ROOT/quota-v6.json"
+jq '.schemaVersion = 6
+  | .providers |= map(. + {accountKey: "default", accountKeys: ["default"]})
+  | .providers += [
+      {provider: "claude", accountKey: "alt", accountKeys: ["alt"], state: {status: "fresh"}, quotaSemantics: {status: "known", effectiveAvailability: [
+        {scope: "all_models", status: "known", effectivePercentRemaining: 99, runway: {status: "through_reset"}, selection: {spendPriority: 0.99}},
+        {scope: "model:fable", status: "known", effectivePercentRemaining: 95, runway: {status: "through_reset"}, selection: {spendPriority: 0.95}}]}},
+      {provider: "devin", accountKey: "alt", accountKeys: ["alt"], state: {status: "fresh"}, quotaSemantics: {status: "known", effectiveAvailability: [
+        {scope: "all_models", status: "known", effectivePercentRemaining: 99, runway: {status: "through_reset"}, selection: {spendPriority: 5}}]}}]' "$QUOTA" > "$V6"
+for version_case in "5:$QUOTA" "6:$V6"; do
+  version=${version_case%%:*}; fixture=${version_case#*:}
+  reset_log
+  cp "$BASE_RULES" "$RULES"
+  write_response "$RESPONSE" rule_4 0.9
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$fixture" run code out err "$BRIEF"
+  expect_code 0 "$code" "schema $version exits 0"
+  assert_not_contains "$out" 'invalid snapshot' "schema $version is a valid snapshot"
+  assert_contains "$out" '  status: clear' "schema $version resolves"
+  assert_contains "$out" 'devin:swe-4.6-medium  provider=devin  scope=all_models  remaining=91%  spendPriority=0.7597' "schema $version reads the default lane's headroom and priority"
+  write_response "$RESPONSE" rule_1 0.9
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$fixture" run code out err "$BRIEF"
+  assert_contains "$out" 'rule rule_1 floor model:fable below 20%' "schema $version floor reads the default lane's model:fable window (15%)"
+done
+reset_log
+V7="$TMP_ROOT/quota-v7.json"
+jq '.schemaVersion = 7' "$V6" > "$V7"
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$V7" run code out err "$BRIEF"
+expect_code 0 "$code" "schema 7 exits 0"
+assert_contains "$out" '  status: error' "schema 7 is an error outcome"
+assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "schema 7 is refused as an invalid snapshot"
+jq '.providers[-1].accountKey = "default"' "$V6" > "$V7"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$V7" run code out err "$BRIEF"
+assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "schema 6 with a duplicate provider lane is refused"
+pass "schema 5 and 6 snapshots are read from the right lane and window; schema 7 is refused"
 
 # --- API and response failures are error outcomes, exit 0 ----------------------
 reset_log
