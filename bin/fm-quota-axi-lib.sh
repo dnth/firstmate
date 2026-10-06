@@ -135,7 +135,7 @@ fm_quota_profile_fallback_reason() {
   json=$(quota-axi --provider "$provider" --json 2>/dev/null) || return 0
   printf '%s\n' "$json" | jq -r \
     --arg provider "$provider" \
-    --arg model "$model" '
+    --arg model "$model" "$FM_QUOTA_LANES_JQ"'
       def unusable:
         . == "auth_required" or
         . == "unavailable" or
@@ -146,7 +146,8 @@ fm_quota_profile_fallback_reason() {
         elif type == "string" then (tonumber? // empty)
         else empty
         end;
-      .providers[]?
+      (if (.providers | type) == "array" then collapse_lanes else . end)
+      | .providers[]?
       | select(.provider == $provider)
       | if ([
           .status?,
@@ -180,16 +181,38 @@ fm_quota_secondmate_fallback_reason() {
   fm_quota_profile_fallback_reason "$@"
 }
 
-# Validate one quota-axi --json snapshot against the schema-5 shape the typed
-# dispatch resolver consumes. stdin is the snapshot; exit 0 means usable.
+# jq definition shared by every snapshot reader. quota-axi schema 6 (emitted
+# when any provider row carries an accountKey, i.e. account-expanded output)
+# may list one provider several times, one row per account lane; schema 5 lists
+# each provider once. Prepend this to a jq program and call collapse_lanes on the
+# snapshot to get one row per provider: the "default" lane when present, else
+# the lane with the most headroom (ties by accountKey). Single-lane snapshots
+# pass through unchanged.
+FM_QUOTA_LANES_JQ='
+  def lane_pct: ([.quotaSemantics.effectiveAvailability[]?.effectivePercentRemaining? | numbers] | min) // -1;
+  def collapse_lanes:
+    .providers |= (group_by(.provider) | map(
+      if length == 1 then .[0]
+      else (sort_by([((.accountKey // "") != "default"), -lane_pct, (.accountKey // "")]) | .[0])
+      end));
+'
+
+# Validate one quota-axi --json snapshot against the shape the typed dispatch
+# resolver consumes. stdin is the snapshot; exit 0 means usable.
+# Accepted schemaVersion values: 5 and 6 (see fm-dispatch-resolve.sh header).
+# Anything else, including a future version, is refused, never guessed at.
 fm_quota_json_valid() {
   jq -se --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     length == 1 and
     (.[0] | type) == "object" and
     (.[0] |
-      .schemaVersion == 5 and
+      (.schemaVersion == 5 or .schemaVersion == 6) and
       (.providers | type) == "array" and
-      (([.providers[].provider] | length) == ([.providers[].provider] | unique | length)) and
+      (if .schemaVersion == 5
+       then (([.providers[].provider] | length) == ([.providers[].provider] | unique | length))
+       else (all(.providers[]; (.accountKey | type) == "string" and (.accountKey | length) > 0) and
+             (([.providers[] | [.provider, .accountKey]] | length) == ([.providers[] | [.provider, .accountKey]] | unique | length)))
+       end) and
       all(.providers[];
       (.provider | type) == "string" and
       (.provider | test($provider_re)) and
