@@ -495,7 +495,7 @@ Firstmate passes its profile line unless it states a reason to override, such as
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
-Typed resolution reads a schema-5 or schema-6 `quota-axi --json` snapshot through `fm_quota_json_valid` (schema 6 is account-expanded output, one provider row per account lane, collapsed to one lane per provider; other versions are refused as an invalid snapshot); a snapshot from a build older than the schema-5 producer is an ordinary `error` outcome that returns the intake to firstmate, so the `FM_QUOTA_AXI_MIN` floor is unchanged.
+Typed resolution validates and reads `quota-axi --json` according to the schema-version and account-lane contract in the [`fm-dispatch-resolve.sh` header](../bin/fm-dispatch-resolve.sh); an incompatible snapshot is an ordinary `error` outcome that returns the intake to firstmate, so the `FM_QUOTA_AXI_MIN` floor is unchanged.
 The ported evidence record lives in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md); upstream's live rule-match runs are recorded there and remain the authority on model behavior.
 
 ## Toolchain

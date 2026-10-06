@@ -181,13 +181,9 @@ fm_quota_secondmate_fallback_reason() {
   fm_quota_profile_fallback_reason "$@"
 }
 
-# jq definition shared by every snapshot reader. quota-axi schema 6 (emitted
-# when any provider row carries an accountKey, i.e. account-expanded output)
-# may list one provider several times, one row per account lane; schema 5 lists
-# each provider once. Prepend this to a jq program and call collapse_lanes on the
-# snapshot to get one row per provider: the "default" lane when present, else
-# the lane with the most headroom (ties by accountKey). Single-lane snapshots
-# pass through unchanged.
+# Shared jq definition implementing the account-lane contract owned by the
+# fm-dispatch-resolve.sh header. Prepend it to a jq program and call
+# collapse_lanes on the snapshot before reading provider windows.
 FM_QUOTA_LANES_JQ='
   def lane_pct: ([.quotaSemantics.effectiveAvailability[]?.effectivePercentRemaining? | numbers] | min) // -1;
   def collapse_lanes:
@@ -199,8 +195,7 @@ FM_QUOTA_LANES_JQ='
 
 # Validate one quota-axi --json snapshot against the shape the typed dispatch
 # resolver consumes. stdin is the snapshot; exit 0 means usable.
-# Accepted schemaVersion values: 5 and 6 (see fm-dispatch-resolve.sh header).
-# Anything else, including a future version, is refused, never guessed at.
+# The fm-dispatch-resolve.sh header owns accepted versions and lane constraints.
 fm_quota_json_valid() {
   jq -se --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     length == 1 and

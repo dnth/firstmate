@@ -51,12 +51,15 @@
 # Quota snapshot versions: quota-axi --json schemaVersion 5 and 6 are accepted
 #   (fm_quota_json_valid owns the check); any other version is refused as an
 #   invalid snapshot. Schema 6 is what quota-axi emits when output is
-#   account-expanded (any provider row carries accountKey, quota-axi >= 0.1.58;
-#   0.1.57 emits 5). The window and effectiveAvailability shape is identical;
-#   the difference is that one provider may appear once per account lane. The
-#   resolver reads one lane per provider: "default" if present, else the lane
-#   with the most headroom. Source: quota-axi src/advice.ts, schemaVersion is 6
-#   iff some provider has an accountKey, else 5.
+#   account-expanded (any provider row carries accountKey), otherwise it emits
+#   5. The window and effectiveAvailability shape is identical; the difference
+#   is that one provider may appear once per account lane. Schema 5 requires
+#   unique providers; schema 6 requires non-empty accountKey strings and unique
+#   (provider, accountKey) pairs. The shared readers use one lane per provider:
+#   "default" if present, else the lane with the most headroom (the minimum
+#   numeric effectivePercentRemaining across its windows, or -1 if unknown),
+#   breaking ties by accountKey. Source: https://github.com/kunchenguid/quota-axi
+#   (src/advice.ts).
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
