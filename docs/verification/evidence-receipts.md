@@ -94,3 +94,12 @@ ok - fm-receipt gates accepted-blocked on a verbatim captain exception
 
 `bash tests/fm-brief.test.sh` and `bash tests/fm-task-delivery.test.sh` passed on the same date, asserting that no generated or promoted ship brief instructs a removed receipt-check action or carries a plan generation.
 `bin/fm-lint.sh` exited 0 with ShellCheck 0.11.0.
+
+## Line accounting
+
+`git diff --numstat dad3e4a58cac6f3f450523b9dcd72e754d8e1753 -- bin/ tests/` reports the following totals for the reviewed change through `e37e2baab4de89daa412bc8bc3d30db7e3c699aa`.
+
+| Scope | Lines removed | Lines added |
+| --- | ---: | ---: |
+| Production (`bin/`) | 1,550 | 297 |
+| Tests (`tests/`) | 2,892 | 750 |
