@@ -37,6 +37,12 @@
 #   (s) an accepted queued GitHub merge emits nothing and leaves its poll armed
 #   (t) an uncommitted marker retry never loses the durable outcome
 #   (u) distinct merged PRs for a reused task each survive queue deduplication
+#   (v) an accepted-blocked task is refused, even under yolo, naming the
+#       criteria and --captain-instruction, and merges with that flag, whose
+#       verbatim words land in the task's durable override record
+#   (w) failing, pending, or unreadable checks refuse naming the checks and the
+#       flag; all-green and check-less PRs merge with no override record; gh-axi
+#       reads the checks when gh is absent
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1614,5 +1620,316 @@ test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
+
+# --- merge guards: accepted-blocked criteria and red checks ---------------
+
+# Rewrite the case's ledger so AC1's latest receipt is accepted-blocked under a
+# captain exception; the evidence stays complete, so PR registration accepts it.
+write_accepted_blocked_evidence() {  # <case_dir>
+  local case_dir=$1
+  printf '%s\n' \
+    '{"criterion":"AC1","type":"test","outcome":"success","summary":"fixture","result":"passed"}' \
+    '{"criterion":"AC1","type":"manual","outcome":"accepted-blocked","summary":"needs live creds","result":"not run","captain_exception":"2026-10-06 captain: ship without live creds"}' \
+    > "$case_dir/data/task-x1/evidence.jsonl"
+}
+
+# Put a fake `gh pr checks` in front of the case's gh mock: it prints the
+# given file and exits with the given code; every other gh call reaches the
+# original mock. Args: case_dir checks_file [exit_code]
+add_gh_checks_answer() {
+  local case_dir=$1 answer=$2 code=${3:-0}
+  "$REAL_MV" "$case_dir/fakebin/gh" "$case_dir/fakebin/gh-forge"
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-} \${2:-}" = "pr checks" ]; then
+  printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+  cat '$answer'
+  exit $code
+fi
+exec "\$(dirname "\$0")/gh-forge" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+# The same interception for gh-axi pr checks. Args: case_dir checks_file [exit_code]
+add_gh_axi_checks_answer() {
+  local case_dir=$1 answer=$2 code=${3:-0}
+  "$REAL_MV" "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh-axi-forge"
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-} \${2:-}" = "pr checks" ]; then
+  printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+  cat '$answer'
+  exit $code
+fi
+exec "\$(dirname "\$0")/gh-axi-forge" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+OVERRIDE_LOG=data/task-x1/captain-merge-instructions.jsonl
+
+test_accepted_blocked_task_is_refused_without_captain_instruction() {
+  local case_dir rc
+  case_dir=$(make_case accepted-blocked-refused)
+  mkdir -p "$case_dir/wt"
+  printf 'yolo=on\n' >> "$case_dir/state/task-x1.meta"
+  write_accepted_blocked_evidence "$case_dir"
+  add_gh_mocks "$case_dir" 8181818181818181818181818181818181818181
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/81 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "accepted-blocked-refused: an accepted-blocked task merged on standing authority"
+  assert_grep 'acceptance criteria accepted as blocked: AC1 (captain exception: 2026-10-06 captain: ship without live creds)' \
+    "$case_dir/stderr" "accepted-blocked-refused: refusal did not name the criterion and its exception"
+  assert_grep '--captain-instruction' "$case_dir/stderr" \
+    "accepted-blocked-refused: refusal did not name the override flag"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "accepted-blocked-refused: the forge merge ran anyway"
+  assert_no_grep 'pr=https' "$case_dir/state/task-x1.meta" \
+    "accepted-blocked-refused: a refused merge recorded PR metadata"
+  assert_absent "$case_dir/$OVERRIDE_LOG" \
+    "accepted-blocked-refused: a refusal wrote an override record"
+  pass "fm-pr-merge refuses an accepted-blocked task even under standing yolo authority"
+}
+
+test_accepted_blocked_task_merges_under_recorded_captain_instruction() {
+  local case_dir rc words
+  words='Captain 2026-10-06: merge PR 82 despite AC1 being blocked'
+  case_dir=$(make_case accepted-blocked-override)
+  mkdir -p "$case_dir/wt"
+  write_accepted_blocked_evidence "$case_dir"
+  add_gh_mocks "$case_dir" 8282828282828282828282828282828282828282
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    --captain-instruction "$words" -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "accepted-blocked-override: the captain's instruction did not authorize the merge"
+  grep -qxF 'pr merge 82 --repo example/repo --merge' "$case_dir/gh-axi.log" \
+    || fail "accepted-blocked-override: the merge was not forwarded unchanged after the flag"
+  assert_grep 'verified: https://github.com/example/repo/pull/82 is merged' "$case_dir/stdout" \
+    "accepted-blocked-override: the merge was not verified"
+  jq -e --arg words "$words" \
+    'select(.schema == "fm-merge-override.v1" and .task == "task-x1" and .script == "fm-pr-merge"
+      and .target == "https://github.com/example/repo/pull/82" and .captain_instruction == $words
+      and (.overridden | length == 1) and (.overridden[0] | test("AC1")))' \
+    "$case_dir/$OVERRIDE_LOG" >/dev/null \
+    || fail "accepted-blocked-override: the verbatim instruction was not recorded in the task's durable record"
+  pass "fm-pr-merge merges an accepted-blocked task under a recorded verbatim captain instruction"
+}
+
+test_blank_captain_instruction_is_rejected() {
+  local case_dir rc words n=0
+  for words in '' '   ' $'two\nlines'; do
+    n=$((n + 1))
+    case_dir=$(make_case "blank-instruction-$n")
+    mkdir -p "$case_dir/wt"
+    write_accepted_blocked_evidence "$case_dir"
+    add_gh_mocks "$case_dir" 8383838383838383838383838383838383838383
+    : > "$case_dir/gh-axi.log"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/83 \
+      --captain-instruction "$words" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 2 "$rc" "blank-instruction: an unusable instruction was accepted"
+    assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+      "blank-instruction: the forge merge ran with an unusable instruction"
+    assert_absent "$case_dir/$OVERRIDE_LOG" \
+      "blank-instruction: an unusable instruction was recorded"
+  done
+  pass "fm-pr-merge rejects a blank or multi-line captain instruction"
+}
+
+test_failing_checks_refuse_and_name_the_checks() {
+  local case_dir rc
+  case_dir=$(make_case red-checks-refused)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8484848484848484848484848484848484848484
+  printf '%s\n' '[{"name":"lint","bucket":"pass"},{"name":"unit tests","bucket":"fail"},{"name":"deploy","bucket":"cancel"},{"name":"docs","bucket":"skipping"}]' \
+    > "$case_dir/checks.json"
+  add_gh_checks_answer "$case_dir" "$case_dir/checks.json"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/84 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "red-checks-refused: a PR with failing checks was merged"
+  assert_grep 'pr checks 84 --repo example/repo --json name,bucket' "$case_dir/gh.log" \
+    "red-checks-refused: the PR's checks were not read"
+  assert_grep 'checks are failing: unit tests, deploy' "$case_dir/stderr" \
+    "red-checks-refused: refusal did not name exactly the failing checks"
+  assert_grep '--captain-instruction' "$case_dir/stderr" \
+    "red-checks-refused: refusal did not name the override flag"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "red-checks-refused: the forge merge ran anyway"
+  pass "fm-pr-merge refuses a PR with failing checks, naming each one"
+}
+
+test_pending_checks_refuse_and_name_the_checks() {
+  local case_dir rc
+  case_dir=$(make_case pending-checks-refused)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8585858585858585858585858585858585858585
+  printf '%s\n' '[{"name":"lint","bucket":"pass"},{"name":"e2e","bucket":"pending"}]' \
+    > "$case_dir/checks.json"
+  add_gh_checks_answer "$case_dir" "$case_dir/checks.json"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/85 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pending-checks-refused: a PR with pending checks was merged"
+  assert_grep 'checks are still pending: e2e' "$case_dir/stderr" \
+    "pending-checks-refused: refusal did not name the pending check"
+  assert_no_grep 'checks are failing' "$case_dir/stderr" \
+    "pending-checks-refused: a pending check was reported as failing"
+  assert_grep '--captain-instruction' "$case_dir/stderr" \
+    "pending-checks-refused: refusal did not name the override flag"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "pending-checks-refused: the forge merge ran anyway"
+  pass "fm-pr-merge refuses a PR with pending checks, naming each one"
+}
+
+test_red_checks_merge_under_recorded_captain_instruction() {
+  local case_dir rc words
+  words='Captain 2026-10-06: merge 86 now, the e2e failure is a known flake'
+  case_dir=$(make_case red-checks-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8686868686868686868686868686868686868686
+  printf '%s\n' '[{"name":"e2e","bucket":"fail"}]' > "$case_dir/checks.json"
+  add_gh_checks_answer "$case_dir" "$case_dir/checks.json"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/86 \
+    "--captain-instruction=$words" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "red-checks-override: the captain's instruction did not authorize the merge"
+  grep -qxF 'pr merge 86 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "red-checks-override: the merge did not run with its default method"
+  jq -e --arg words "$words" \
+    'select(.captain_instruction == $words and (.overridden == ["checks are failing: e2e"]))' \
+    "$case_dir/$OVERRIDE_LOG" >/dev/null \
+    || fail "red-checks-override: the overridden red check and verbatim words were not recorded"
+  pass "fm-pr-merge merges a red PR only under a recorded verbatim captain instruction"
+}
+
+test_green_or_absent_checks_merge_without_override() {
+  local case_dir rc answer code
+  for answer in green none; do
+    case_dir=$(make_case "checks-$answer")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" 8787878787878787878787878787878787878787
+    if [ "$answer" = green ]; then
+      printf '%s\n' '[{"name":"lint","bucket":"pass"},{"name":"docs","bucket":"skipping"}]' > "$case_dir/checks.out"
+      code=0
+    else
+      printf '%s\n' "no checks reported on the 'feature' branch" > "$case_dir/checks.out"
+      code=1
+    fi
+    add_gh_checks_answer "$case_dir" "$case_dir/checks.out" "$code"
+    : > "$case_dir/gh-axi.log"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/87 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "checks-$answer: a PR with nothing red was refused"
+    grep -qxF 'pr merge 87 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+      || fail "checks-$answer: the merge did not run"
+    assert_no_grep 'refusing' "$case_dir/stderr" "checks-$answer: a guard refused a green PR"
+    assert_absent "$case_dir/$OVERRIDE_LOG" "checks-$answer: a green merge wrote an override record"
+  done
+  pass "fm-pr-merge merges all-green and check-less PRs with no override"
+}
+
+test_unreadable_checks_refuse() {
+  local case_dir rc
+  case_dir=$(make_case unreadable-checks)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
+  printf 'HTTP 502\n' > "$case_dir/checks.out"
+  add_gh_checks_answer "$case_dir" "$case_dir/checks.out" 1
+  add_gh_axi_checks_answer "$case_dir" "$case_dir/checks.out" 1
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/88 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unreadable-checks: a PR whose checks could not be read was merged"
+  assert_grep 'checks on https://github.com/example/repo/pull/88 could not be read' "$case_dir/stderr" \
+    "unreadable-checks: refusal did not say the checks were unreadable"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unreadable-checks: the forge merge ran anyway"
+  pass "fm-pr-merge refuses when neither forge reader can show the checks"
+}
+
+test_gh_axi_checks_fallback_refuses_red_checks_without_gh() {
+  local case_dir rc ghless_path
+  case_dir=$(make_case red-checks-without-gh)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8989898989898989898989898989898989898989
+  printf '%s\n' 'summary: "1 passed, 1 failed, 2 total"' 'checks[3]{name,conclusion}:' \
+    '  lint,pass' '  "build, linux",fail' '  e2e,pending' > "$case_dir/checks.out"
+  add_gh_axi_checks_answer "$case_dir" "$case_dir/checks.out"
+  rm -f "$case_dir/fakebin/gh"
+  ghless_path="$case_dir/ghless"
+  mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/89 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "red-checks-without-gh: a red PR was merged through the gh-axi reader"
+  assert_grep 'pr checks 89 --repo example/repo' "$case_dir/gh-axi.log" \
+    "red-checks-without-gh: gh-axi never read the checks"
+  assert_grep 'checks are failing: build, linux' "$case_dir/stderr" \
+    "red-checks-without-gh: refusal did not name the failing check"
+  assert_grep 'checks are still pending: e2e' "$case_dir/stderr" \
+    "red-checks-without-gh: refusal did not name the pending check"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "red-checks-without-gh: the forge merge ran anyway"
+  pass "fm-pr-merge reads checks through gh-axi when gh is absent"
+}
+
+test_accepted_blocked_task_is_refused_without_captain_instruction
+test_accepted_blocked_task_merges_under_recorded_captain_instruction
+test_blank_captain_instruction_is_rejected
+test_failing_checks_refuse_and_name_the_checks
+test_pending_checks_refuse_and_name_the_checks
+test_red_checks_merge_under_recorded_captain_instruction
+test_green_or_absent_checks_merge_without_override
+test_unreadable_checks_refuse
+test_gh_axi_checks_fallback_refuses_red_checks_without_gh
 
 echo "all fm-pr-merge tests passed"

@@ -36,7 +36,7 @@
 # record, makes the ledger invalid rather than silently disappearing.
 # accepted_blocked is always reported as a distinct list with exception
 # references, never inside evidenced; firstmate never auto-merges a task with
-# any accepted-blocked criterion.
+# any accepted-blocked criterion, which bin/fm-merge-guard-lib.sh enforces.
 # --criterion exits 0 when the id is declared by the pinned brief, else 1.
 # --parse-criteria prints "<id>\t<description>" per criterion, or exits 1
 # with --require when the named id is absent.
