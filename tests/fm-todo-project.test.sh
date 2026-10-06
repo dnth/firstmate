@@ -945,11 +945,16 @@ assert_not_contains "$out" "t11 - " "the default bound kept an eleventh task"
 pass "--emit defaults the Ready bound to 10"
 
 home=$(ready_home ready-invalid)
-for bad in abc -1 1.5; do
-  if ready_items "$home" FM_TODO_READY_MAX="$bad" >/dev/null 2> "$home/bad.err"; then
-    fail "--emit accepted invalid FM_TODO_READY_MAX '$bad'"
-  fi
-  assert_contains "$(<"$home/bad.err")" "FM_TODO_READY_MAX" "invalid value '$bad' was not reported"
+for bad in '' abc -1 1.5; do
+  set +e
+  env FM_TODO_READY_MAX="$bad" PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_FAKE_LISTINGS="$home/listings" "$PROJECT" --emit > "$home/bad.out" 2> "$home/bad.err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "--emit with invalid FM_TODO_READY_MAX '$bad'"
+  [ ! -s "$home/bad.out" ] || fail "--emit printed stdout for invalid Ready bound '$bad'"
+  [ "$(<"$home/bad.err")" = "fm-todo-project: FM_TODO_READY_MAX '$bad' is not a non-negative integer (0 disables the Ready bound)" ] \
+    || fail "invalid value '$bad' did not use the standard refusal message"
 done
 out=$(env FM_TODO_READY_MAX=abc PATH="$home/fakebin:$PATH" FM_HOME="$home" \
   FM_FAKE_LISTINGS="$home/listings" "$PROJECT" --check) || fail "--check broke on an unused Ready setting"
