@@ -878,3 +878,79 @@ assert_contains "$out" \
 assert_not_contains "$out" "DRIFT inflight-no-worker" \
   "--check derived findings from a row containing an invalid TOON escape"
 pass "--check skips an invalid TOON escape and still exits zero"
+
+# --- (u) Ready is bounded by FM_TODO_READY_MAX --------------------------------
+
+# 5 ready tasks in `tasks-axi ready` order; queued metadata ranks them.
+ready_home() {  # <name>
+  local home
+  home=$(new_home "$1")
+  write_listing "$home" in_flight 'id,state,kind,repo,title' \
+    'act-1,in_flight,ship,firstmate,Active one' 'act-2,in_flight,ship,firstmate,Active two'
+  write_listing "$home" ready 'id,state,kind,repo,title' \
+    'r-none-old,queued,ship,firstmate,No priority old' \
+    'r-p2-new,queued,ship,firstmate,P2 new' \
+    'r-p1-new,queued,ship,firstmate,P1 new' \
+    'r-p2-old,queued,ship,firstmate,P2 old' \
+    'r-p1-old,queued,ship,firstmate,P1 old'
+  write_listing "$home" queued 'id,state,kind,repo,title,priority,created' \
+    'r-none-old,queued,ship,firstmate,x,"-",2026-01-01' \
+    'r-p2-new,queued,ship,firstmate,x,2,2026-09-01' \
+    'r-p1-new,queued,ship,firstmate,x,1,2026-09-01' \
+    'r-p2-old,queued,ship,firstmate,x,2,2026-02-01' \
+    'r-p1-old,queued,ship,firstmate,x,1,2026-02-01'
+  printf '%s\n' "$home"
+}
+
+ready_items() {  # <home> [env...]; prints Ready items joined by |, and Active count
+  local home=$1
+  shift
+  env "$@" PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_FAKE_LISTINGS="$home/listings" \
+    "$PROJECT" --emit > "$home/ready.json" || return 1
+  node -e '
+    const list = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+    const a = list.find((p) => p.phase === "Active");
+    const r = list.find((p) => p.phase === "Ready");
+    console.log("active=" + (a ? a.items.length : 0) + " " + r.items.join("|"));
+  ' "$home/ready.json"
+}
+
+home=$(ready_home ready-bounded)
+out=$(ready_items "$home" FM_TODO_READY_MAX=3) || fail "bounded --emit failed"
+[ "$out" = 'active=2 r-p1-old - P1 old|r-p1-new - P1 new|r-p2-old - P2 old|… 2 more ready - list them with bin/fm-tasks-axi.sh ready' ] \
+  || fail "Ready was not the top 3 by priority then age plus one summary: $out"
+pass "--emit bounds Ready to priority-then-age order plus one summary item"
+
+out=$(ready_items "$home" FM_TODO_READY_MAX=5) || fail "exact-fit --emit failed"
+assert_not_contains "$out" "more ready" "a Ready list that fits the bound got a summary item"
+assert_contains "$out" "r-none-old" "a Ready list that fits the bound dropped a task"
+out=$(ready_items "$home") || fail "default --emit failed"
+assert_not_contains "$out" "more ready" "the default bound of 10 truncated a 5-task Ready list"
+out=$(ready_items "$home" FM_TODO_READY_MAX=0) || fail "unbounded --emit failed"
+assert_not_contains "$out" "more ready" "FM_TODO_READY_MAX=0 did not disable the bound"
+assert_contains "$out" "r-none-old - No priority old" "FM_TODO_READY_MAX=0 dropped a task"
+pass "--emit keeps every Ready task when it fits, by default, or when the bound is 0"
+
+home=$(new_home ready-default-ten)
+rows=(); queued=()
+for n in 01 02 03 04 05 06 07 08 09 10 11 12; do
+  rows+=("t$n,queued,ship,firstmate,Task $n")
+  queued+=("t$n,queued,ship,firstmate,x,\"-\",2026-03-$n")
+done
+write_listing "$home" ready 'id,state,kind,repo,title' "${rows[@]}"
+write_listing "$home" queued 'id,state,kind,repo,title,priority,created' "${queued[@]}"
+out=$(ready_items "$home") || fail "default-bound --emit failed"
+assert_contains "$out" "t10 - Task 10|… 2 more ready" "the default bound is not 10 oldest plus a summary"
+assert_not_contains "$out" "t11 - " "the default bound kept an eleventh task"
+pass "--emit defaults the Ready bound to 10"
+
+home=$(ready_home ready-invalid)
+for bad in abc -1 1.5; do
+  if ready_items "$home" FM_TODO_READY_MAX="$bad" >/dev/null 2> "$home/bad.err"; then
+    fail "--emit accepted invalid FM_TODO_READY_MAX '$bad'"
+  fi
+  assert_contains "$(<"$home/bad.err")" "FM_TODO_READY_MAX" "invalid value '$bad' was not reported"
+done
+out=$(env FM_TODO_READY_MAX=abc PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+  FM_FAKE_LISTINGS="$home/listings" "$PROJECT" --check) || fail "--check broke on an unused Ready setting"
+pass "--emit reports an invalid Ready bound and --check ignores it"

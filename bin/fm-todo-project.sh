@@ -25,7 +25,13 @@
 # phases are projected - "Active" (every in-flight task) and "Ready" (every
 # dispatchable queued task from `tasks-axi ready`). A phase with no tasks is
 # omitted rather than emitted empty, because the tool requires at least one item
-# per phase; an empty board therefore emits `[]`. Item text is one line and its
+# per phase; an empty board therefore emits `[]`. Active is complete. Ready is
+# bounded so a deep queue cannot flood the session context on every update: at
+# most FM_TODO_READY_MAX (default 10) task items, chosen by priority (0 first,
+# unset last) then oldest created date, then board order, followed by exactly one
+# "... K more ready" summary item when tasks were cut. FM_TODO_READY_MAX=0 turns
+# the bound off; any other non-integer value makes --emit refuse on stderr. Only
+# --emit is bounded; --check reads the full board. Item text is one line and its
 # title is capped so the complete durable ID and separator are always preserved,
 # even when FM_TODO_ITEM_MAX (default 100) is smaller than that identity prefix.
 # TOON string escapes are decoded strictly, with line-breaking whitespace
@@ -74,7 +80,7 @@
 #
 # The caller re-projects the session todo after every board mutation, including
 # this script's merged-PR close. Deferred work is put on hold at deferral time,
-# because --emit projects every dispatchable queued row into Ready by design.
+# because --emit draws Ready from every dispatchable queued row.
 #
 # When the board cannot be read machine-side at all - `config/backlog-backend`
 # selects manual, or tasks-axi is missing or incompatible - --check prints one
@@ -131,6 +137,7 @@ SECONDMATES="$DATA/secondmates.md"
 
 ITEM_MAX=${FM_TODO_ITEM_MAX:-100}
 case "$ITEM_MAX" in ''|*[!0-9]*|0) ITEM_MAX=100 ;; esac
+READY_MAX_RAW=${FM_TODO_READY_MAX:-10}
 PR_POLL_TIMEOUT=${FM_TODO_PR_TIMEOUT:-20}
 case "$PR_POLL_TIMEOUT" in ''|*[!0-9]*|0) PR_POLL_TIMEOUT=20 ;; esac
 
@@ -406,8 +413,40 @@ phase_json() {  # <phase-name> <rows>
     "$name" "$items"
 }
 
+# Keep the READY_MAX best Ready items: priority ascending (unset last), then
+# created ascending, then the order `tasks-axi ready` printed. Prints the kept
+# items in that order, then one summary item for the rest.
+bound_ready() {  # <ready-listing> <ready-items> <max>
+  local listing=$1 items=$2 max=$3 queued meta ids total
+  total=$(printf '%s\n' "$items" | grep -c .)
+  if [ "$total" -le "$max" ]; then
+    printf '%s\n' "$items"
+    return 0
+  fi
+  queued=$(axi_list queued priority,created) || fail "tasks-axi list --state queued failed: $queued"
+  meta=$(axi_rows tasks "$queued" rows id priority created) \
+    || fail "tasks-axi list --state queued returned an unrecognized listing"
+  ids=$(axi_rows ready "$listing" rows id) \
+    || fail "tasks-axi ready returned an unrecognized listing"
+  paste -d '\t' <(printf '%s\n' "$ids") <(printf '%s\n' "$items") \
+    | awk -F '\t' -v max="$max" -v total="$total" '
+      NR == FNR {
+        prio[$1] = ($2 ~ /^[0-9]+$/) ? $2 : 99
+        made[$1] = ($3 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) ? $3 : "9999-99-99"
+        next
+      }
+      { printf "%s\t%s\t%d\t%s\n", ($1 in prio) ? prio[$1] : 99, ($1 in made) ? made[$1] : "9999-99-99", FNR, $2 }
+    ' <(printf '%s\n' "$meta") - \
+    | sort -t $'\t' -s -k1,1n -k2,2 -k3,3n \
+    | head -n "$max" | cut -f4
+  printf '"… %d more ready - list them with bin/fm-tasks-axi.sh ready"\n' $((total - max))
+}
+
 run_emit() {
   local reason in_flight ready in_flight_rows ready_rows phases=() rendered
+  case "$READY_MAX_RAW" in
+    ''|*[!0-9]*) fail "FM_TODO_READY_MAX '$READY_MAX_RAW' is not a non-negative integer (0 disables the Ready bound)" ;;
+  esac
   reason=$(board_unavailable_reason)
   [ -z "$reason" ] || fail "cannot project the todo: $reason"
 
@@ -417,6 +456,9 @@ run_emit() {
     || fail "tasks-axi list --state in_flight returned an unrecognized listing"
   ready_rows=$(axi_rows ready "$ready" items id title) \
     || fail "tasks-axi ready returned an unrecognized listing"
+  if [ "$((10#$READY_MAX_RAW))" -gt 0 ] && [ -n "$ready_rows" ]; then
+    ready_rows=$(bound_ready "$ready" "$ready_rows" "$((10#$READY_MAX_RAW))") || exit 1
+  fi
 
   if rendered=$(phase_json Active "$in_flight_rows"); then
     phases+=("$rendered")
