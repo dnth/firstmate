@@ -23,16 +23,10 @@
 # records nothing.
 #
 # Caller contract: set SCRIPT_DIR, FM_HOME, and FM_MERGE_GUARD_DATA (the data
-# directory) before calling; ids are validated by fm_merge_guard_task_id_valid.
+# directory) before calling; callers validate ids with fm_pr_task_id_valid
+# from bin/fm-pr-lib.sh.
 
 FM_MERGE_GUARD_REASONS=
-
-fm_merge_guard_task_id_valid() {
-  case "${1:-}" in
-    ''|.|..|*[!A-Za-z0-9._-]*|[._-]*) return 1 ;;
-  esac
-  return 0
-}
 
 # A usable instruction is one line with at least one non-blank character.
 fm_merge_guard_instruction_valid() {

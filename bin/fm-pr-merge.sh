@@ -106,15 +106,10 @@ PR_NUMBER=$FM_PR_NUMBER
 shift 2
 CAPTAIN_INSTRUCTION=
 case "${1:-}" in
-  --captain-instruction|--captain-instruction=*)
-    if [ "$1" = --captain-instruction ]; then
-      [ "$#" -ge 2 ] || { echo "error: --captain-instruction requires the captain's exact words" >&2; exit 2; }
-      CAPTAIN_INSTRUCTION=$2
-      shift 2
-    else
-      CAPTAIN_INSTRUCTION=${1#--captain-instruction=}
-      shift
-    fi
+  --captain-instruction)
+    [ "$#" -ge 2 ] || { echo "error: --captain-instruction requires the captain's exact words" >&2; exit 2; }
+    CAPTAIN_INSTRUCTION=$2
+    shift 2
     fm_merge_guard_instruction_valid "$CAPTAIN_INSTRUCTION" \
       || { echo "error: --captain-instruction must carry the captain's exact words on one non-blank line" >&2; exit 2; }
     ;;
@@ -531,7 +526,7 @@ github_read_checks_with_gh_axi() {
     END { if (!found || bad) exit 1 }
   ') || return 1
   FM_PR_CHECKS_FAILING=$(printf '%s\n' "$rows" | awk -F '\t' '
-    $1 !~ /^(pass|skipping|skipped|neutral|pending|queued|in_progress|waiting|requested|expected)$/ { out = out sep $2; sep=", " }
+    $1 !~ /^(pass|skip|skipping|skipped|neutral|pending|queued|in_progress|waiting|requested|expected)$/ { out = out sep $2; sep=", " }
     END { print out }')
   FM_PR_CHECKS_PENDING=$(printf '%s\n' "$rows" | awk -F '\t' '
     $1 ~ /^(pending|queued|in_progress|waiting|requested|expected)$/ { out = out sep $2; sep=", " }

@@ -1823,7 +1823,7 @@ test_red_checks_merge_under_recorded_captain_instruction() {
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/86 \
-    "--captain-instruction=$words" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    --captain-instruction "$words" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
@@ -1923,6 +1923,46 @@ test_gh_axi_checks_fallback_refuses_red_checks_without_gh() {
   pass "fm-pr-merge reads checks through gh-axi when gh is absent"
 }
 
+test_gh_axi_checks_fallback_accepts_skipped_checks() {
+  local case_dir rc reader merge_path
+  for reader in absent failed; do
+    case_dir=$(make_case "skipped-checks-gh-$reader")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" 9090909090909090909090909090909090909090
+    printf '%s\n' 'checks[5]{name,conclusion}:' \
+      '  lint,pass' '  docs,skip' '  build,skipping' '  deploy,skipped' '  optional,neutral' \
+      > "$case_dir/checks.out"
+    add_gh_axi_checks_answer "$case_dir" "$case_dir/checks.out"
+    merge_path=$BASE_PATH
+    if [ "$reader" = absent ]; then
+      rm -f "$case_dir/fakebin/gh"
+      merge_path="$case_dir/ghless"
+      mirror_path_without "$merge_path" gh "$case_dir/fakebin"
+    else
+      printf 'HTTP 502\n' > "$case_dir/gh-checks.out"
+      add_gh_checks_answer "$case_dir" "$case_dir/gh-checks.out" 1
+    fi
+    : > "$case_dir/gh-axi.log"
+
+    set +e
+    PATH="$merge_path" run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/90 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "skipped-checks-gh-$reader: skipped checks refused a green merge"
+    assert_grep 'pr checks 90 --repo example/repo' "$case_dir/gh-axi.log" \
+      "skipped-checks-gh-$reader: the fallback never read checks"
+    grep -qxF 'pr merge 90 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+      || fail "skipped-checks-gh-$reader: the merge did not run"
+    assert_grep 'verified: https://github.com/example/repo/pull/90 is merged' "$case_dir/stdout" \
+      "skipped-checks-gh-$reader: the landed merge was not verified"
+    assert_absent "$case_dir/$OVERRIDE_LOG" \
+      "skipped-checks-gh-$reader: a green merge wrote an override record"
+  done
+  pass "fm-pr-merge accepts skipped checks through both gh-axi fallback paths"
+}
+
 test_accepted_blocked_task_is_refused_without_captain_instruction
 test_accepted_blocked_task_merges_under_recorded_captain_instruction
 test_blank_captain_instruction_is_rejected
@@ -1932,5 +1972,6 @@ test_red_checks_merge_under_recorded_captain_instruction
 test_green_or_absent_checks_merge_without_override
 test_unreadable_checks_refuse
 test_gh_axi_checks_fallback_refuses_red_checks_without_gh
+test_gh_axi_checks_fallback_accepts_skipped_checks
 
 echo "all fm-pr-merge tests passed"

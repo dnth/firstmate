@@ -28,6 +28,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-merge-guard-lib.sh
 . "$SCRIPT_DIR/fm-merge-guard-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
@@ -36,13 +38,12 @@ shift
 CAPTAIN_INSTRUCTION=
 case "$#:${1:-}" in
   2:--captain-instruction) CAPTAIN_INSTRUCTION=$2 ;;
-  1:--captain-instruction=*) CAPTAIN_INSTRUCTION=${1#--captain-instruction=} ;;
 esac
 if [ "$#" -gt 0 ] && ! fm_merge_guard_instruction_valid "$CAPTAIN_INSTRUCTION"; then
   echo "error: usage: fm-merge-local.sh <task-id> [--captain-instruction <words>], with the captain's exact words on one non-blank line" >&2
   exit 2
 fi
-fm_merge_guard_task_id_valid "$ID" || { echo "error: invalid task id: $ID" >&2; exit 2; }
+fm_pr_task_id_valid "$ID" || { echo "error: invalid task id: $ID" >&2; exit 2; }
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
