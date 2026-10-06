@@ -22,17 +22,19 @@
 #
 # --emit prints ONLY a JSON array on stdout, shaped as the todo tool's `init`
 # `list` argument: [{"phase":"<name>","items":["<id> - <title>", ...]}]. Two
-# phases are projected - "Active" (every in-flight task) and "Ready" (every
-# dispatchable queued task from `tasks-axi ready`). A phase with no tasks is
+# phases are projected - "Active" (every in-flight task) and "Ready" (selected
+# dispatchable queued tasks from `tasks-axi ready`). A phase with no tasks is
 # omitted rather than emitted empty, because the tool requires at least one item
 # per phase; an empty board therefore emits `[]`. Active is complete. Ready is
 # bounded so a deep queue cannot flood the session context on every update: at
-# most FM_TODO_READY_MAX (default 10) task items, chosen by priority (0 first,
+# most FM_TODO_READY_MAX (10 when unset) task items, chosen by priority (0 first,
 # unset last) then oldest created date, then board order, followed by exactly one
-# "... K more ready" summary item when tasks were cut. FM_TODO_READY_MAX=0 turns
-# the bound off; any other non-integer value makes --emit refuse on stderr. Only
-# --emit is bounded; --check reads the full board. Item text is one line and its
-# title is capped so the complete durable ID and separator are always preserved,
+# "… K more ready - list them with bin/fm-tasks-axi.sh ready" summary item when
+# tasks were cut. FM_TODO_READY_MAX=0 turns the bound off; empty values and values
+# other than non-negative integers make --emit refuse on stderr with exit 1.
+# Only --emit is bounded; --check and --check --reconcile read the full board.
+# Item text is one line and its title is capped so the complete durable ID and
+# separator are always preserved,
 # even when FM_TODO_ITEM_MAX (default 100) is smaller than that identity prefix.
 # TOON string escapes are decoded strictly, with line-breaking whitespace
 # collapsed before projection; malformed escapes make the listing incompatible.
