@@ -104,6 +104,48 @@ test_blank_captain_instruction_is_rejected() {
   pass "fm-merge-local rejects a blank captain instruction"
 }
 
+test_invalid_receipt_evidence_is_refused() {
+  local case_dir rc before
+  case_dir=$(make_case invalid-refused success)
+  printf '%s\n' '{malformed receipt' > "$case_dir/data/task-l1/evidence.jsonl"
+  before=$(main_sha "$case_dir")
+
+  run_merge_local "$case_dir" task-l1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+
+  expect_code 1 "$rc" "invalid: malformed receipt evidence allowed a merge"
+  assert_grep 'acceptance evidence for task task-l1 could not be read' \
+    "$case_dir/stderr" "invalid: refusal did not explain the evidence failure"
+  assert_grep '--captain-instruction' "$case_dir/stderr" "invalid: refusal did not name the override flag"
+  [ "$(main_sha "$case_dir")" = "$before" ] || fail "invalid: main moved despite the refusal"
+  assert_absent "$case_dir/data/task-l1/captain-merge-instructions.jsonl" \
+    "invalid: a refusal wrote an override record"
+  pass "fm-merge-local refuses malformed receipt evidence"
+}
+
+test_invalid_receipt_override_is_recorded() {
+  local case_dir rc words
+  words='Captain 2026-10-06: land task-l1 despite its malformed receipt evidence'
+  case_dir=$(make_case invalid-override success)
+  printf '%s\n' '{malformed receipt' > "$case_dir/data/task-l1/evidence.jsonl"
+
+  run_merge_local "$case_dir" task-l1 --captain-instruction "$words" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+
+  expect_code 0 "$rc" "invalid override: the captain instruction did not authorize landing"
+  [ "$(main_sha "$case_dir")" = "$(git -C "$case_dir/project" rev-parse fm/task-l1)" ] \
+    || fail "invalid override: main was not fast-forwarded to the task branch"
+  jq -e --arg words "$words" \
+    'select(.schema == "fm-merge-override.v1" and .task == "task-l1"
+      and .script == "fm-merge-local" and .target == "fm/task-l1"
+      and .captain_instruction == $words
+      and (.overridden | any(contains("acceptance evidence for task task-l1 could not be read"))))' \
+    "$case_dir/data/task-l1/captain-merge-instructions.jsonl" >/dev/null \
+    || fail "invalid override: the evidence failure and verbatim instruction were not recorded"
+  pass "fm-merge-local records the captain instruction overriding invalid receipt evidence"
+}
+
 test_evidenced_task_lands_unchanged() {
   local case_dir rc
   case_dir=$(make_case evidenced success)
@@ -121,6 +163,8 @@ test_evidenced_task_lands_unchanged() {
 test_accepted_blocked_task_is_refused
 test_accepted_blocked_task_lands_under_captain_instruction
 test_blank_captain_instruction_is_rejected
+test_invalid_receipt_evidence_is_refused
+test_invalid_receipt_override_is_recorded
 test_evidenced_task_lands_unchanged
 
 echo "all fm-merge-local tests passed"

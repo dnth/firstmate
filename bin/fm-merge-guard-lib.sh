@@ -52,7 +52,7 @@ fm_merge_guard_check_accepted_blocked() {
   [ "$kind" = ship ] || return 0
   out=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$FM_MERGE_GUARD_DATA" \
     "$SCRIPT_DIR/fm-receipt-check.sh" "$id" 2>/dev/null) || rc=$?
-  if [ "$rc" -gt 2 ] || ! blocked=$(printf '%s' "$out" | jq -er '
+  if [ "$rc" -ge 2 ] || ! blocked=$(printf '%s' "$out" | jq -er '
       .accepted_blocked
       | if type == "array" then . else error("no accepted_blocked") end
       | map(.criterion + " (captain exception: " + (.captain_exception // "") + ")")
