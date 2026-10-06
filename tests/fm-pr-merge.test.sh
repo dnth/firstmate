@@ -40,6 +40,7 @@
 #   (v) an accepted-blocked task is refused, even under yolo, naming the
 #       criteria and --captain-instruction, and merges with that flag, whose
 #       verbatim words land in the task's durable override record
+#       (guard and record contract: bin/fm-merge-guard-lib.sh)
 #   (w) failing, pending, or unreadable checks refuse naming the checks and the
 #       flag; all-green and check-less PRs merge with no override record; gh-axi
 #       reads the checks when gh is absent

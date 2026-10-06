@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-merge-local.sh's merge guard: a local-only ship task with
-# any accepted-blocked acceptance criterion is refused without a captain
-# instruction, lands with one whose verbatim words are recorded in the task's
-# durable record, and a fully evidenced task still fast-forwards unchanged.
+# Tests for bin/fm-merge-local.sh's merge guard (bin/fm-merge-guard-lib.sh):
+# a local-only ship task with any accepted-blocked acceptance criterion is
+# refused without a captain instruction, lands with one whose verbatim words
+# are recorded in the task's durable record, and a fully evidenced task still
+# fast-forwards unchanged.
 set -u
 
 # shellcheck source=tests/lib.sh
