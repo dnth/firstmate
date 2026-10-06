@@ -39,7 +39,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
-NM_TIMEOUT=${FM_PR_CHECK_NM_TIMEOUT:-${FM_RECEIPT_NM_TIMEOUT:-10}}
+NM_TIMEOUT=${FM_PR_CHECK_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 
 if [ "$#" -ne 2 ]; then
