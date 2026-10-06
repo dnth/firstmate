@@ -50,6 +50,20 @@ REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed publi
 
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
 # fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
+# A direct-PR task with complete acceptance evidence: fm-pr-check.sh gates every
+# ship registration on bin/fm-receipt-check.sh before it records pr=, and these
+# cases exercise merge mechanics rather than the handoff gates owned by
+# tests/fm-pr-check-handoff.test.sh.
+write_evidence_contract() {  # <case_dir> [id]
+  local case_dir=$1 id=${2:-task-x1}
+  mkdir -p "$case_dir/data/$id"
+  printf '# Task\nFixture.\n\n# Acceptance criteria\n- AC1: Fixture works.\n\n# Definition of done\nDelivery contract: mode=direct-PR\n' \
+    > "$case_dir/data/$id/brief.md"
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"success","summary":"fixture","result":"passed"}' \
+    > "$case_dir/data/$id/evidence.jsonl"
+  : > "$case_dir/data/$id/.evidence.lock"
+}
+
 make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
@@ -60,7 +74,8 @@ make_case() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
+  write_evidence_contract "$case_dir"
   # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
   # stat and simply skips the pr_head lookup via `gh` in that case, so give it
   # one that resolves for cases that want pr_head recorded.
@@ -227,6 +242,7 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_HOME="${FM_TEST_HOME:-$ROOT}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \

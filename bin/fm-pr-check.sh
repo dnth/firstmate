@@ -17,6 +17,11 @@
 # PR-ready owner, and unreadable run data or insufficient decision records
 # refuse registration. Nothing here reconstructs what the pipeline validated
 # from the worker's object store.
+# A PR this task already records as pr= passed those handoff gates when it was
+# first registered, so re-registering the same URL (fm-pr-merge.sh does this
+# once before every merge, and reconciliation re-arms a skipped poll) refreshes
+# pr_head= and re-arms the poll without re-running them; a different URL is a
+# new registration and is gated in full.
 # Publication is serialized per task through state/.<task-id>.pr-publication.lock
 # (a mkdir lock) so a concurrent registration cannot interleave its metadata
 # replacement with this one; bin/fm-watch.sh defers a pre-metadata poll while
@@ -114,10 +119,21 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
-# Every ship PR-ready requires complete acceptance evidence.
+# Every ship PR-ready requires complete acceptance evidence; a PR already
+# recorded for this task passed the handoff gates at its registration.
 KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
-if [ "$KIND" = ship ]; then
+RECORDED_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+NM_RUN_ID=$(grep '^nm_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
+ALREADY_REGISTERED=0
+if [ "$RECORDED_PR" = "$URL" ]; then
+  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+    [ -z "$NM_RUN_ID" ] || ALREADY_REGISTERED=1
+  else
+    ALREADY_REGISTERED=1
+  fi
+fi
+if [ "$ALREADY_REGISTERED" -eq 0 ] && [ "$KIND" = ship ]; then
   EVIDENCE_RC=0
   EVIDENCE_OUT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-receipt-check.sh" "$ID" 2>&1) || EVIDENCE_RC=$?
   if [ "$EVIDENCE_RC" -ne 0 ]; then
@@ -133,8 +149,8 @@ fi
 # A no-mistakes task proves its run from No-Mistakes' own status, then passes
 # the decision-evidence audit owned by bin/fm-nm-run-lib.sh (process-evidence
 # limitation owned by bin/fm-classify-lib.sh).
-NM_RUN_ID=
-if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+if [ "$ALREADY_REGISTERED" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  NM_RUN_ID=
   [ -n "$WT" ] && [ -d "$WT" ] || { echo "error: no-mistakes PR-ready requires the task worktree" >&2; exit 1; }
   NM_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status) \
     || { echo "error: No-Mistakes status could not be observed for $ID" >&2; exit 1; }

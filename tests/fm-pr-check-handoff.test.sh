@@ -155,10 +155,17 @@ test_no_mistakes_handoff_proves_run_from_pipeline_status() {
   assert_present "$HOME_DIR/state/$id.check.sh" "no-mistakes registration did not arm the poll"
   grep -q 'validation_\|implementation_completed' "$HOME_DIR/state/$id.meta" \
     && fail "registration wrote validation metadata"
-  # Re-registration of the same PR replaces rather than duplicates the records.
-  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" run_pr_check "$id" "$url"
+  # Re-registration of the same PR (fm-pr-merge does this before every merge)
+  # replaces rather than duplicates the records and does not re-run the
+  # handoff gates, so a daemon that is down later cannot block a merge of a PR
+  # that was accepted at registration; a different URL is gated in full.
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_DOWN=1 run_pr_check "$id" "$url"
   expect_code 0 "$PR_RC" "idempotent re-registration failed: $PR_OUT"
   [ "$(grep -c '^nm_run_id=' "$HOME_DIR/state/$id.meta")" -eq 1 ] || fail "nm_run_id was duplicated"
+  [ "$(grep -c '^pr=' "$HOME_DIR/state/$id.meta")" -eq 1 ] || fail "pr= was duplicated"
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_DOWN=1 run_pr_check "$id" https://github.com/o/r/pull/120
+  expect_code 1 "$PR_RC" "a different PR skipped the handoff gates"
+  assert_grep "pr=$url" "$HOME_DIR/state/$id.meta" "a refused re-registration replaced the recorded PR"
   pass "no-mistakes handoff records nm_run_id from a passed run matching branch, PR, and head"
 }
 
