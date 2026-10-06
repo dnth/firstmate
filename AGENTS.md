@@ -223,7 +223,7 @@ Supervise all live work under section 8.
 ### Selected delivery path and merge authority
 
 The selected delivery path owns its own rigor.
-Every ship mode keeps the evidence gate, while `bin/fm-receipt-check.sh` owns the binary low/high classifier and validation-path mechanics used inside `no-mistakes` mode.
+Every ship mode keeps the evidence gate owned by `bin/fm-receipt-check.sh`, which establishes only that every declared acceptance criterion was accounted for; `no-mistakes` mode always runs full validation, and `bin/fm-pr-check.sh` proves the run and PR identity from No-Mistakes' own status at PR-ready.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
@@ -245,7 +245,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 ### Validate
 
-Load `validation-supervision` on a ship worker's implementation-complete `done:`, whenever a ship starts or already has an active no-mistakes validation run, including a mid-run requirement change or finding, and before deciding or answering any ask-user finding; it owns the evidence gate, run ownership, supersession, finding return, and validation-state judgment.
+Load `validation-supervision` on a ship worker's implementation-complete `done:`, whenever a ship starts or already has an active no-mistakes validation run, including a mid-run requirement change or finding, and before deciding or answering any ask-user finding; it owns the evidence-gate handoff, run ownership, supersession, finding return, and validation-state judgment.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 
 ### PR ready, landing, and teardown
@@ -389,7 +389,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 ## 11. Crewmate briefs
 
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
-Every new ship brief declares stable acceptance-criterion ids and receives an append-only `evidence.jsonl`; `bin/fm-receipt-schema.sh` owns the receipt schema, `bin/fm-receipt-check.sh` owns criterion parsing and completion checking, and scout/report behavior remains separate.
+Every new ship brief declares stable acceptance-criterion ids and receives an append-only `evidence.jsonl`; `bin/fm-receipt-schema.sh` owns the receipt schema, `bin/fm-receipt-check.sh` owns criterion parsing and acceptance-evidence accounting, and scout/report behavior remains separate.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 

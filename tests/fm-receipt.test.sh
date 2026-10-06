@@ -67,24 +67,24 @@ test_append_is_additive_and_result_flag_works() {
   pass "fm-receipt preserves prior records and accepts --result"
 }
 
-test_head_binding_is_canonical() {
-  local id=canonical-head project expected_head out rc
+test_receipts_carry_no_head_and_schema_tolerates_legacy_head() {
+  local id=no-head project out rc
   project="$TMP_ROOT/project-$id"
   fm_git_init_commit "$project"
-  expected_head=$(git -C "$project" rev-parse HEAD)
   write_ship "$id"
   fm_write_meta "$HOME_DIR/state/$id.meta" "worktree=$project" "kind=ship" "mode=no-mistakes"
   out=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test \
-    "head binding is canonical" "1 passed" --outcome success) \
-    || fail "head-bound receipt append failed"
-  printf '%s' "$out" | jq -e --arg head "$expected_head" \
-    '.head == $head and ((.head | length) == 40 or (.head | length) == 64)' >/dev/null \
-    || fail "receipt did not bind the canonical current commit id"
+    "accounting needs no commit identity" "1 passed" --outcome success) \
+    || fail "receipt append failed with a recorded worktree"
+  printf '%s' "$out" | jq -e 'has("head") | not' >/dev/null \
+    || fail "the writer stamped a commit head onto an accounting receipt"
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"success","summary":"x","result":"passed","head":"0123456789012345678901234567890123456789"}' \
+    | "$SCHEMA" >/dev/null 2>&1 || fail "receipt schema rejected a legacy head-stamped record"
   printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"success","summary":"x","result":"passed","head":"0123456789012345678901234567890123456789\n"}' \
     | "$SCHEMA" >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "receipt schema accepted a newline-suffixed commit id"
-  pass "fm-receipt stores and validates an exact canonical commit id"
+  pass "fm-receipt writes no commit head while the schema still reads legacy head-stamped records"
 }
 
 test_large_receipt_is_appended_completely() {
@@ -495,7 +495,7 @@ test_appends_one_compact_valid_receipt
 test_append_is_additive_and_result_flag_works
 test_relative_artifact_warns_without_refusing
 test_accepted_blocked_requires_captain_exception
-test_head_binding_is_canonical
+test_receipts_carry_no_head_and_schema_tolerates_legacy_head
 test_large_receipt_is_appended_completely
 test_rejects_invalid_schema_and_undeclared_criteria
 test_portable_paths_and_failed_append_rollback

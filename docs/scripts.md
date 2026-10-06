@@ -79,7 +79,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-local-default.sh`    | Resolve the local default branch shared by readiness and guarded landing              |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-receipt.sh`          | Append one validated acceptance-criterion evidence receipt to a ship task             |
-| `fm-receipt-check.sh`    | Check ship evidence and own risk-based validation planning and completion             |
+| `fm-receipt-check.sh`    | Check whether a ship task's declared acceptance criteria are accounted for            |
 | `fm-receipt-schema.sh`   | Validate the single receipt JSON schema used by append and read paths                |
 | `fm-receipt-store.sh`    | Own pinned ship contracts, evidence, metadata updates, and promotion storage           |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |

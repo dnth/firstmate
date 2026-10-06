@@ -2,15 +2,16 @@
 # Shared no-mistakes axi run attribution primitives.
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
-# fm-crew-state.sh (read-only current-state reporting), fm-teardown.sh
-# (pre-teardown run abort, see its "Fix 1" header comment),
-# fm-receipt-check.sh (bound-run completion), and fm-pr-check.sh (PR-ready
-# decision evidence). Teardown uses only strict
-# branch-and-head identity; crew-state additionally permits the active
-# pipeline-owned exemption defined below, and receipt-check's active-advance
-# ownership proof is fm_nm_run_branch_ownership. Getting this wrong in either
-# direction is unsafe: a false negative hides a genuinely parked run, and a
-# false positive lets teardown act on a run it does not own.
+# fm-crew-state.sh (read-only current-state reporting and the done-time
+# ask-user decision audit), fm-teardown.sh (pre-teardown run abort, see its
+# "Fix 1" header comment), and fm-pr-check.sh (PR-ready run identity and the
+# decision-evidence audit). Teardown uses only strict branch-and-head identity;
+# crew-state additionally permits the active pipeline-owned exemption defined
+# below. Getting this wrong in either direction is unsafe: a false negative
+# hides a genuinely parked run, and a false positive lets teardown act on a run
+# it does not own. No helper here reconstructs what the pipeline validated
+# from the worker's object store: run identity is the branch, PR URL, full
+# head SHA, status, and outcome that `axi status --run` reports.
 #
 # Bounded command in dir $1, timeout $2 seconds. The bounded form preserves
 # stdout, stderr, and exit status; the checked form discards stderr, while
@@ -86,88 +87,6 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
 }
 
-# Print the authoritative full commit identity for a run head in worktree $1.
-# Git accepts abbreviated identities only after resolving them against the
-# repository object database; callers must never compare the presentation form
-# emitted by `axi status` directly with a full local SHA.
-fm_nm_resolve_head() {  # <worktree> <run-head>
-  [ -n "$2" ] || return 1
-  git -C "$1" rev-parse --verify "${2}^{commit}" 2>/dev/null
-}
-
-# 0 when $3 is a strict descendant of $2 after both identities are resolved by
-# Git in worktree $1.
-fm_nm_head_descends_from() {  # <worktree> <ancestor> <descendant>
-  local wt=$1 ancestor=$2 descendant=$3 ancestor_full descendant_full
-  ancestor_full=$(fm_nm_resolve_head "$wt" "$ancestor") || return 1
-  descendant_full=$(fm_nm_resolve_head "$wt" "$descendant") || return 1
-  [ "$ancestor_full" != "$descendant_full" ] \
-    && git -C "$wt" merge-base --is-ancestor "$ancestor_full" "$descendant_full" 2>/dev/null
-}
-
-# 0 when $3 is a faithful restamp of the validated chain from $2 in worktree $1.
-# The base must be an ancestor of both heads, their commit counts must match, and
-# each pair of commits in base-to-head order must carry the same tree object.
-fm_nm_head_is_faithful_restamp() {  # <worktree> <base> <validated-head> <candidate-head>
-  local wt=$1 base=$2 validated=$3 candidate=$4 base_full validated_full candidate_full
-  local validated_list candidate_list validated_trees candidate_trees commit
-  base_full=$(fm_nm_resolve_head "$wt" "$base") || return 1
-  validated_full=$(fm_nm_resolve_head "$wt" "$validated") || return 1
-  candidate_full=$(fm_nm_resolve_head "$wt" "$candidate") || return 1
-  git -C "$wt" merge-base --is-ancestor "$base_full" "$validated_full" 2>/dev/null || return 1
-  git -C "$wt" merge-base --is-ancestor "$base_full" "$candidate_full" 2>/dev/null || return 1
-  validated_list=$(git -C "$wt" rev-list --reverse "$base_full..$validated_full") || return 1
-  candidate_list=$(git -C "$wt" rev-list --reverse "$base_full..$candidate_full") || return 1
-  validated_trees=$(printf '%s\n' "$validated_list" | while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    git -C "$wt" rev-parse --verify "${commit}^{tree}" || exit 1
-  done) || return 1
-  candidate_trees=$(printf '%s\n' "$candidate_list" | while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    git -C "$wt" rev-parse --verify "${commit}^{tree}" || exit 1
-  done) || return 1
-  [ "$validated_trees" = "$candidate_trees" ]
-}
-
-# 0 when resolved revisions $2 and $3 name commits in worktree $1 whose root
-# tree objects are identical - byte-identical content regardless of ancestry.
-# A mid-run rebase onto a newer base produces a head that is neither equal, a
-# same-base restamp, nor a descendant of the planned head, while the run still
-# validates the exact content checked out; callers pair this content proof with
-# authoritative run ownership rather than trusting tree equality alone.
-fm_nm_commits_share_tree() {  # <worktree> <rev1> <rev2>
-  local wt=$1 rev1=$2 rev2=$3 tree1 tree2
-  tree1=$(git -C "$wt" rev-parse --verify "${rev1}^{tree}" 2>/dev/null) || return 1
-  tree2=$(git -C "$wt" rev-parse --verify "${rev2}^{tree}" 2>/dev/null) || return 1
-  [ "$tree1" = "$tree2" ]
-}
-
-# 0 when $4 is accounted for by the validated chain in worktree $1.
-# It matches the validated head itself, a faithful restamp of the validated
-# chain from $2, a strict descendant of $3, or a strict descendant of a faithful
-# restamp of the validated chain.
-fm_nm_head_is_accounted() {  # <worktree> <base> <validated-head> <candidate-head>
-  local wt=$1 base=$2 validated=$3 candidate=$4
-  local base_full validated_full candidate_full validated_count prefix_head prefix_count
-  base_full=$(fm_nm_resolve_head "$wt" "$base") || return 1
-  validated_full=$(fm_nm_resolve_head "$wt" "$validated") || return 1
-  candidate_full=$(fm_nm_resolve_head "$wt" "$candidate") || return 1
-  [ "$candidate_full" = "$validated_full" ] && return 0
-  fm_nm_head_is_faithful_restamp "$wt" "$base_full" "$validated_full" "$candidate_full" && return 0
-  fm_nm_head_descends_from "$wt" "$validated_full" "$candidate_full" && return 0
-  # Pipeline restamps can be followed by additional owned commits; the leading
-  # segment must be a faithful restamp of the validated chain from the base.
-  validated_count=$(git -C "$wt" rev-list --count "$base_full..$validated_full" 2>/dev/null) || return 1
-  [ "$validated_count" -gt 0 ] || return 1
-  prefix_head=$(git -C "$wt" rev-list --first-parent --reverse "$base_full..$candidate_full" 2>/dev/null | head -n "$validated_count" | tail -1) || return 1
-  [ -n "$prefix_head" ] || return 1
-  prefix_count=$(git -C "$wt" rev-list --count "$base_full..$prefix_head" 2>/dev/null) || return 1
-  [ "$prefix_count" -eq "$validated_count" ] || return 1
-  fm_nm_head_is_faithful_restamp "$wt" "$base_full" "$validated_full" "$prefix_head" || return 1
-  git -C "$wt" merge-base --is-ancestor "$prefix_head" "$candidate_full" 2>/dev/null || return 1
-  [ "$prefix_head" != "$candidate_full" ] || return 1
-}
-
 # 0 when a run's branch presentation identifies the checked-out branch. The
 # no-mistakes CLI renders Firstmate's slash branch names with a hyphen, so both
 # authoritative spellings are accepted and no other branch is normalized.
@@ -231,61 +150,15 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   fm_nm_run_is_active "$1"
 }
 
-# Print the proven branch-ownership state for an ACTIVE run, or nothing.
-# `pipeline_owned` in captured `axi status` output $3 means the pipeline still
-# holds the branch, so the head it reports is run-owned evidence. When `axi
-# status` omits branch_sync, `axi sync --check` supplies the same proof: state
-# pipeline_owned again, or state synchronized once the pipeline pushed its head
-# back and the branch converged while the run stays active only to monitor its
-# PR. The converged state is accepted only on the full sync evidence: the same
-# run id, submitted_head resolving to expected head $5, current_head and the
-# reported local head both resolving to the run's observed head $6, relation
-# equal, and safety already_synchronized. Anything missing, stale, or
-# mismatched prints nothing so callers keep refusing unproven advances.
-# An empty expected-submitted accepts whatever submitted head the run reports:
-# the content-identity binding path uses it for runs that submitted before the
-# latest plan recorded its head, where plan linkage is proven separately by
-# tree equality instead of by the submitted anchor.
-fm_nm_run_branch_ownership() {  # <worktree> <timeout-secs> <status-out> <run-id> <expected-submitted> <expected-current>
-  local wt=$1 timeout_secs=$2 status_out=$3 run_id=$4 submitted=$5 current=$6
-  local state sync_out sync_state sync_run sync_submitted sync_current sync_local
-  state=$(fm_nm_branch_sync_state "$status_out")
-  if [ "$state" = pipeline_owned ]; then
-    printf 'pipeline_owned'
-    return 0
-  fi
-  sync_out=$(fm_nm_run_checked "$wt" "$timeout_secs" axi sync --check) || sync_out=
-  [ -n "$sync_out" ] || return 1
-  sync_state=$(fm_nm_branch_sync_state "$sync_out")
-  case "$sync_state" in pipeline_owned|synchronized) ;; *) return 1 ;; esac
-  sync_run=$(fm_nm_field "$sync_out" run)
-  [ -n "$sync_run" ] && [ "$sync_run" = "$run_id" ] || return 1
-  sync_submitted=$(fm_nm_field "$sync_out" submitted_head)
-  sync_current=$(fm_nm_field "$sync_out" current_head)
-  if [ -n "$submitted" ] && [ -n "$sync_submitted" ]; then
-    [ "$(fm_nm_resolve_head "$wt" "$sync_submitted" || true)" = "$submitted" ] || return 1
-  fi
-  if [ -n "$sync_current" ]; then
-    [ "$(fm_nm_resolve_head "$wt" "$sync_current" || true)" = "$current" ] || return 1
-  fi
-  if [ "$sync_state" = synchronized ]; then
-    [ "$(fm_nm_field "$sync_out" relation)" = equal ] || return 1
-    [ "$(fm_nm_field "$sync_out" safety)" = already_synchronized ] || return 1
-    [ -n "$sync_submitted" ] && [ -n "$sync_current" ] || return 1
-    sync_local=$(fm_nm_resolve_head "$wt" "$(fm_nm_field "$sync_out" head)" || true)
-    [ -n "$sync_local" ] && [ "$sync_local" = "$current" ] || return 1
-  fi
-  printf '%s' "$sync_state"
-}
-
 # 0 when captured `axi status` shows a run that reached a terminal PASSED state.
 # A terminal run has released the branch, so branch_sync no longer reports
 # pipeline_owned and fm_nm_run_is_pipeline_owned_active above correctly rejects
-# it. Its OWN reported head is then the authority for the commits that run
-# produced, including the review and doc commits its pipeline landed after the
-# validated head. Callers must therefore still require that reported head to be
-# the current worktree head: that is exactly what refuses foreign commits landed
-# after the run finished, which the run never reports as its head.
+# it. Its OWN reported head_sha is then the authority for the commits that run
+# produced, including the review and doc commits its pipeline landed; the
+# PR-ready owner compares that head with the forge's live PR head, which is
+# exactly what refuses foreign commits pushed after the run finished.
+# passed-with-override is a terminal pass carrying a Firstmate-approved test
+# exception; it does not by itself mean every forge check is green.
 fm_nm_run_is_terminal_passed() {  # <toon-output>
   local status outcome
   if fm_nm_run_is_active "$1"; then return 1; fi
@@ -317,6 +190,18 @@ fm_nm_ci_checks_state() {  # <worktree> <timeout-secs> <run-id>
   esac
 }
 
+# 0 when captured `axi status` output $3 for run $4 is PR-ready: a terminal
+# passed run, or an active run whose ci step has turned green per the CI log.
+# PR-ready is the handoff point for landing, not proof that the run has
+# terminated; merge-time green belongs to the merge owner.
+fm_nm_run_is_pr_ready() {  # <worktree> <timeout-secs> <status-out> <run-id>
+  local status
+  fm_nm_run_is_terminal_passed "$3" && return 0
+  status=$(fm_nm_field "$3" status)
+  case "$status" in ci|running) ;; *) return 1 ;; esac
+  [ "$(fm_nm_ci_checks_state "$1" "$2" "$4")" = green ]
+}
+
 # The canonical status-ledger key for a parked no-mistakes ask-user gate:
 # nm-<run>-<step>. A worker escalates such a gate as
 # `needs-decision [key=nm-<run>-<step>]` (the generated ship brief owns that
@@ -325,7 +210,8 @@ fm_nm_ci_checks_state() {  # <worktree> <timeout-secs> <run-id>
 # no open record left to close, firstmate appends
 # `resolved [key=nm-<run>-<step>]: answered: <action> <finding-ids>` itself.
 # fm_nm_ask_user_decisions below compares the run's recorded gate resolutions
-# against those resolved records at PR-ready and completion time.
+# against those resolved records at PR-ready (bin/fm-pr-check.sh) and at
+# done acceptance (bin/fm-crew-state.sh).
 fm_nm_ask_user_key() {  # <run-id> <step>
   printf 'nm-%s-%s' "$1" "$2"
 }

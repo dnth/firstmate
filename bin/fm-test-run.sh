@@ -206,7 +206,7 @@ family_for_basename() {
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-check-unregister.test.sh|fm-main-ci-watch.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
+    fm-check-unregister.test.sh|fm-main-ci-watch.test.sh|fm-pr-check-handoff.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh|fm-ext-bridge.test.sh)
       printf '%s\n' pr-forge
       ;;
@@ -455,13 +455,14 @@ tests/fm-pending-reply.test.sh 19949
 tests/fm-pi-compatible-family.test.sh 56
 tests/fm-pi-primary-live-e2e.test.sh 21
 tests/fm-pi-watch-extension.test.sh 22031
+tests/fm-pr-check-handoff.test.sh 42228
 tests/fm-pr-check-security.test.sh 158907
 tests/fm-prepush-guard.test.sh 19208
 tests/fm-procevent-when.test.sh 24358
 tests/fm-procevent.test.sh 61916
 tests/fm-public-followup.test.sh 35559
 tests/fm-quota-array-dispatch-live-e2e.test.sh 12
-tests/fm-receipt-check.test.sh 96584
+tests/fm-receipt-check.test.sh 11636
 tests/fm-receipt.test.sh 1331
 tests/fm-reflect-skill.test.sh 372
 tests/fm-remote-backlog-handoff.test.sh 15173
