@@ -9,7 +9,12 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
-# Usage: fm-merge-local.sh <task-id>
+#
+# A ship task with any accepted-blocked acceptance criterion is refused before
+# the fast-forward, naming the criteria and --captain-instruction, the only
+# override; bin/fm-merge-guard-lib.sh owns that guard and the override's
+# validation and durable record. Local-only work has no forge checks to read.
+# Usage: fm-merge-local.sh <task-id> [--captain-instruction <words>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,8 +28,22 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-merge-guard-lib.sh
+. "$SCRIPT_DIR/fm-merge-guard-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
-ID=${1:?usage: fm-merge-local.sh <task-id>}
+ID=${1:?usage: fm-merge-local.sh <task-id> [--captain-instruction <words>]}
+shift
+CAPTAIN_INSTRUCTION=
+case "$#:${1:-}" in
+  2:--captain-instruction) CAPTAIN_INSTRUCTION=$2 ;;
+esac
+if [ "$#" -gt 0 ] && ! fm_merge_guard_instruction_valid "$CAPTAIN_INSTRUCTION"; then
+  echo "error: usage: fm-merge-local.sh <task-id> [--captain-instruction <words>], with the captain's exact words on one non-blank line" >&2
+  exit 2
+fi
+fm_pr_task_id_valid "$ID" || { echo "error: invalid task id: $ID" >&2; exit 2; }
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
@@ -53,6 +72,10 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
   exit 1
 fi
+
+FM_MERGE_GUARD_DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+fm_merge_guard_check_accepted_blocked "$ID" "$META"
+fm_merge_guard_resolve "$ID" fm-merge-local "$BRANCH" "$CAPTAIN_INSTRUCTION" || exit 1
 
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null

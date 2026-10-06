@@ -43,9 +43,9 @@
 # short-option cluster such as -yR, because the repository comes only from the
 # URL.
 #
-# PR metadata recording and merge-poll arming happen once, unconditionally,
-# before the forge call: they are not a success claim, so they survive any
-# later refusal and a merge that actually lands never loses its poll.
+# After the pre-merge guards pass, PR metadata recording and merge-poll arming
+# happen once before the forge merge call: they are not a success claim, so
+# they survive any later refusal and a landed merge never loses its poll.
 # A verified merge leaves a durable role-routed outcome instead of living only
 # in the merging agent's memory; bin/fm-merge-outcome-lib.sh owns its
 # destination, normal-case deduplication, and at-least-once recovery. A queued
@@ -55,7 +55,22 @@
 # After a verified merge, best-effort CI arming calls bin/fm-main-ci-watch.sh;
 # arming failure warns without changing the merge outcome. Queued or refused
 # requests do not reach that hook.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+#
+# Before recording or merging, two guards refuse a merge that standing
+# authority does not cover: a ship task with any accepted-blocked acceptance
+# criterion, and a PR whose reported checks are not all green. Checks are read
+# with gh pr checks --json (gh-axi pr checks when gh is absent or its read
+# fails). gh buckets pass and skipping are green, pending is pending, and
+# every other bucket is failing. gh-axi conclusions pass, skip, skipping,
+# skipped, and neutral are green; pending, queued, in_progress, waiting,
+# requested, and expected are pending; every other conclusion is failing.
+# A PR with no reported checks has nothing red. Checks that cannot be read
+# refuse. Each refusal names the failing or pending checks or
+# the accepted-blocked criteria, plus --captain-instruction, the only override;
+# bin/fm-merge-guard-lib.sh owns the accepted-blocked guard and the override
+# flag's validation and durable record.
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--captain-instruction <words>]
+#          [-- <extra gh-axi pr merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,6 +82,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
+# shellcheck source=bin/fm-merge-guard-lib.sh
+. "$SCRIPT_DIR/fm-merge-guard-lib.sh"
 # The supervision branch never merges a PR: it reports a green PR and leaves the
 # merge to main (role partition: docs/omp-supervision-branch.md; no-op in homes
 # without a branch actor - contract: bin/fm-lease-lib.sh).
@@ -90,6 +107,16 @@ PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
+CAPTAIN_INSTRUCTION=
+case "${1:-}" in
+  --captain-instruction)
+    [ "$#" -ge 2 ] || { echo "error: --captain-instruction requires the captain's exact words" >&2; exit 2; }
+    CAPTAIN_INSTRUCTION=$2
+    shift 2
+    fm_merge_guard_instruction_valid "$CAPTAIN_INSTRUCTION" \
+      || { echo "error: --captain-instruction must carry the captain's exact words on one non-blank line" >&2; exit 2; }
+    ;;
+esac
 [ "${1:-}" = "--" ] && shift
 
 caller_has_merge_method() {
@@ -457,6 +484,72 @@ github_report_unmerged_outcome() {
   fi
   github_report_queue_rules
 }
+
+# The PR's reported checks, read before anything is recorded or merged. A PR
+# with no reported checks has nothing red; a read that fails is not green.
+FM_PR_CHECKS_FAILING=
+FM_PR_CHECKS_PENDING=
+github_read_checks_with_gh() {
+  local output rc=0
+  output=$(gh pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --json name,bucket 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    case "$output" in
+      "no checks reported"*) return 0 ;;
+    esac
+    return 1
+  fi
+  [ -n "$output" ] || return 0
+  FM_PR_CHECKS_FAILING=$(printf '%s' "$output" | jq -er '
+    if type == "array" then . else error("not a check list") end
+    | map(select(.bucket != "pass" and .bucket != "skipping" and .bucket != "pending") | .name)
+    | join(", ")' 2>/dev/null) || return 1
+  FM_PR_CHECKS_PENDING=$(printf '%s' "$output" | jq -r 'map(select(.bucket == "pending") | .name) | join(", ")')
+}
+
+github_read_checks_with_gh_axi() {
+  local output rows
+  output=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null) || return 1
+  [ -n "$output" ] || return 0
+  case "$output" in
+    *"no CI checks configured"*) return 0 ;;
+  esac
+  rows=$(printf '%s\n' "$output" | awk '
+    /^checks\[[0-9]+\]\{name,conclusion\}:/ { inside=1; found=1; next }
+    inside && /^  / {
+      line=substr($0, 3)
+      split_at=0
+      for (i = length(line); i > 0; i--) if (substr(line, i, 1) == ",") { split_at=i; break }
+      if (split_at == 0) { bad=1; next }
+      name=substr(line, 1, split_at - 1)
+      gsub(/^"|"$/, "", name)
+      print tolower(substr(line, split_at + 1)) "\t" name
+      next
+    }
+    { inside=0 }
+    END { if (!found || bad) exit 1 }
+  ') || return 1
+  FM_PR_CHECKS_FAILING=$(printf '%s\n' "$rows" | awk -F '\t' '
+    $1 !~ /^(pass|skip|skipping|skipped|neutral|pending|queued|in_progress|waiting|requested|expected)$/ { out = out sep $2; sep=", " }
+    END { print out }')
+  FM_PR_CHECKS_PENDING=$(printf '%s\n' "$rows" | awk -F '\t' '
+    $1 ~ /^(pending|queued|in_progress|waiting|requested|expected)$/ { out = out sep $2; sep=", " }
+    END { print out }')
+}
+
+github_check_checks_green() {
+  if ! { command -v gh >/dev/null 2>&1 && github_read_checks_with_gh; } \
+    && ! github_read_checks_with_gh_axi; then
+    fm_merge_guard_add_reason "the checks on $URL could not be read, so a failing or pending check cannot be ruled out"
+    return 0
+  fi
+  [ -z "$FM_PR_CHECKS_FAILING" ] || fm_merge_guard_add_reason "checks are failing: $FM_PR_CHECKS_FAILING"
+  [ -z "$FM_PR_CHECKS_PENDING" ] || fm_merge_guard_add_reason "checks are still pending: $FM_PR_CHECKS_PENDING"
+}
+
+FM_MERGE_GUARD_DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+fm_merge_guard_check_accepted_blocked "$ID" "$META"
+github_check_checks_green
+fm_merge_guard_resolve "$ID" fm-pr-merge "$URL" "$CAPTAIN_INSTRUCTION" || exit 1
 
 # Record before the forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
