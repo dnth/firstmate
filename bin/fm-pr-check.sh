@@ -1,14 +1,31 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, atomically arm a static merge poll, then
-# record PR-path validation completion only after publication succeeds.
+# exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
-# Full-no-mistakes PR-ready requires a bound validation_run_id and passes the
-# decision-evidence check owned by bin/fm-nm-run-lib.sh before arming the poll;
-# unreadable run data or insufficient decision records refuse registration.
+# Initial ship PR registration requires complete acceptance evidence
+# (bin/fm-receipt-check.sh <task-id> exits 0); missing or invalid receipts
+# refuse registration naming the criteria.
+# A no-mistakes task additionally proves its run from No-Mistakes' own status:
+# `axi status` in the task worktree must report a run whose branch is the task
+# branch, whose pr is this URL, and whose full head_sha equals the forge's PR
+# head, and the run must be passed or CI-green (fm_nm_run_is_pr_ready). That
+# run id is recorded as nm_run_id=<id>; the decision-evidence audit owned by
+# bin/fm-nm-run-lib.sh then runs against it as that guarantee's single
+# PR-ready owner, and unreadable run data or insufficient decision records
+# refuse registration. Nothing here reconstructs what the pipeline validated
+# from the worker's object store.
+# Re-registering the recorded pr= URL refreshes pr_head= and re-arms the poll
+# without re-running the handoff gates, provided a no-mistakes ship also has
+# nm_run_id= recorded. Older no-mistakes records without that run identity and
+# registrations of a different URL are gated in full. fm-pr-merge.sh calls this
+# before every merge, and reconciliation re-arms a skipped poll.
+# Publication is serialized per task through state/.<task-id>.pr-publication.lock
+# (a mkdir lock) so a concurrent registration cannot interleave its metadata
+# replacement with this one; bin/fm-watch.sh defers a pre-metadata poll while
+# that lock is fresh.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -27,7 +44,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
-NM_TIMEOUT=${FM_RECEIPT_NM_TIMEOUT:-10}
+NM_TIMEOUT=${FM_PR_CHECK_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 
 if [ "$#" -ne 2 ]; then
@@ -64,12 +81,12 @@ META_SNAPSHOT=$(mktemp "$STATE/.fm-pr-meta-snapshot.XXXXXX") || exit 1
 META_RECORDS=$(mktemp "$STATE/.fm-pr-meta-records.XXXXXX") || { rm -f -- "$META_SNAPSHOT"; exit 1; }
 META_UPDATED=$(mktemp "$STATE/.fm-pr-meta-updated.XXXXXX") \
   || { rm -f -- "$META_SNAPSHOT" "$META_RECORDS"; exit 1; }
-VALIDATION_LOCK=
+PUBLICATION_LOCK=
 pr_check_cleanup() {
   fm_lease_guard_release || true
   fm_pr_poll_cleanup
   rm -f -- "$META_SNAPSHOT" "$META_RECORDS" "$META_UPDATED"
-  [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
+  [ -z "$PUBLICATION_LOCK" ] || rmdir "$PUBLICATION_LOCK" 2>/dev/null || true
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -102,27 +119,66 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
-# Apply the shared decision-evidence check before publishing PR-ready.
-# bin/fm-nm-run-lib.sh owns the check; bin/fm-classify-lib.sh owns its
-# process-evidence limitation.
-VALIDATION_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
-if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
-  ASK_USER_RUN=$(grep '^validation_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
-  [ -n "$ASK_USER_RUN" ] || {
-    echo "error: full-no-mistakes PR-ready requires a bound validation_run_id" >&2
+# Every ship PR-ready requires complete acceptance evidence; a PR already
+# recorded for this task passed the handoff gates at its registration.
+KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
+MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+RECORDED_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+NM_RUN_ID=$(grep '^nm_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
+ALREADY_REGISTERED=0
+if [ "$RECORDED_PR" = "$URL" ]; then
+  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+    [ -z "$NM_RUN_ID" ] || ALREADY_REGISTERED=1
+  else
+    ALREADY_REGISTERED=1
+  fi
+fi
+if [ "$ALREADY_REGISTERED" -eq 0 ] && [ "$KIND" = ship ]; then
+  EVIDENCE_RC=0
+  EVIDENCE_OUT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-receipt-check.sh" "$ID" 2>&1) || EVIDENCE_RC=$?
+  if [ "$EVIDENCE_RC" -ne 0 ]; then
+    EVIDENCE_DETAIL=$(printf '%s' "$EVIDENCE_OUT" | jq -r '
+      if .status == "invalid" then "invalid evidence: " + (.invalid | join("; "))
+      elif .status == "missing" then "missing evidence: " + (.missing | join(", "))
+      else "evidence check failed" end' 2>/dev/null || printf 'evidence check failed')
+    echo "error: PR-ready refused for $ID: $EVIDENCE_DETAIL" >&2
     exit 1
-  }
-  ASK_USER_DIR=$WT
-  [ -d "$ASK_USER_DIR" ] || ASK_USER_DIR=$FM_HOME
+  fi
+fi
+
+# A no-mistakes task proves its run from No-Mistakes' own status, then passes
+# the decision-evidence audit owned by bin/fm-nm-run-lib.sh (process-evidence
+# limitation owned by bin/fm-classify-lib.sh).
+if [ "$ALREADY_REGISTERED" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  NM_RUN_ID=
+  [ -n "$WT" ] && [ -d "$WT" ] || { echo "error: no-mistakes PR-ready requires the task worktree" >&2; exit 1; }
+  NM_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status) \
+    || { echo "error: No-Mistakes status could not be observed for $ID" >&2; exit 1; }
+  NM_RUN_ID=$(fm_nm_field "$NM_OUT" id)
+  NM_BRANCH=$(fm_nm_field "$NM_OUT" branch)
+  NM_PR=$(fm_nm_field "$NM_OUT" pr)
+  NM_HEAD=$(fm_nm_field "$NM_OUT" head_sha)
+  case "$NM_RUN_ID" in ''|*[!A-Za-z0-9._-]*) echo "error: No-Mistakes status reports no run for $ID" >&2; exit 1 ;; esac
+  fm_nm_branch_matches_worktree "$WT" "$NM_BRANCH" \
+    || { echo "error: No-Mistakes run $NM_RUN_ID is on branch '$NM_BRANCH', not the task branch" >&2; exit 1; }
+  [ "$NM_PR" = "$URL" ] \
+    || { echo "error: No-Mistakes run $NM_RUN_ID opened '$NM_PR', not $URL" >&2; exit 1; }
+  [ -n "$PR_HEAD" ] \
+    || { echo "error: the forge's PR head could not be observed, so run $NM_RUN_ID cannot be matched to $URL" >&2; exit 1; }
+  [ "$NM_HEAD" = "$PR_HEAD" ] \
+    || { echo "error: No-Mistakes run $NM_RUN_ID validated head ${NM_HEAD:-<none>} but the PR head is $PR_HEAD; let the pipeline reconcile the branch and re-report" >&2; exit 1; }
+  fm_nm_run_is_pr_ready "$WT" "$NM_TIMEOUT" "$NM_OUT" "$NM_RUN_ID" \
+    || { echo "error: No-Mistakes run $NM_RUN_ID is neither passed nor CI-green" >&2; exit 1; }
   ASK_USER_RC=0
-  ASK_USER_REPORT=$(fm_nm_ask_user_decisions "$ASK_USER_DIR" "$NM_TIMEOUT" "$ASK_USER_RUN" "$STATE/$ID.status") \
+  ASK_USER_REPORT=$(fm_nm_ask_user_decisions "$WT" "$NM_TIMEOUT" "$NM_RUN_ID" "$STATE/$ID.status") \
     || ASK_USER_RC=$?
   if [ "$ASK_USER_RC" -ne 0 ]; then
     if [ "$ASK_USER_RC" -eq 1 ]; then
-      echo "error: bound No-Mistakes run $ASK_USER_RUN resolved ask-user findings without matching firstmate decisions" >&2
+      echo "error: No-Mistakes run $NM_RUN_ID resolved ask-user findings without matching firstmate decisions" >&2
       printf '%s\n' "$ASK_USER_REPORT" >&2
+      echo "error: firstmate must record one resolved [key=nm-$NM_RUN_ID-<step>] line per decision event in state/$ID.status" >&2
     else
-      echo "error: bound No-Mistakes run $ASK_USER_RUN ask-user decision evidence could not be read" >&2
+      echo "error: No-Mistakes run $NM_RUN_ID ask-user decision evidence could not be read" >&2
     fi
     exit 1
   fi
@@ -131,22 +187,15 @@ fi
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
-VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
-mkdir "$VALIDATION_LOCK" 2>/dev/null \
-  || { VALIDATION_LOCK=; echo "error: validation metadata is locked" >&2; exit 1; }
-EXPECTED_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
-VALIDATION_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
-VALIDATION_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
-[ "$VALIDATION_GENERATION" = "$EXPECTED_GENERATION" ] \
-  || { echo "error: validation generation changed during PR registration" >&2; exit 1; }
+PUBLICATION_LOCK="$STATE/.$ID.pr-publication.lock"
+mkdir "$PUBLICATION_LOCK" 2>/dev/null \
+  || { PUBLICATION_LOCK=; echo "error: PR publication is locked by another registration" >&2; exit 1; }
 printf 'pr=%s\n' "$URL" > "$META_RECORDS" || exit 1
 [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_RECORDS" || exit 1
 META_REPLACE_KEYS=pr,pr_head
-if [ "$VALIDATION_PATH" = direct-PR ] || [ "$VALIDATION_PATH" = receipts-mechanical ]; then
-  [ -n "$VALIDATION_GENERATION" ] \
-    || { echo "error: PR validation generation is missing" >&2; exit 1; }
-  printf 'validation_pr_published_generation=%s\n' "$VALIDATION_GENERATION" >> "$META_RECORDS" || exit 1
-  META_REPLACE_KEYS="$META_REPLACE_KEYS,validation_pr_published_generation"
+if [ -n "$NM_RUN_ID" ]; then
+  printf 'nm_run_id=%s\n' "$NM_RUN_ID" >> "$META_RECORDS" || exit 1
+  META_REPLACE_KEYS="$META_REPLACE_KEYS,nm_run_id"
 fi
 fm_pr_poll_publish_prepared defer-metadata || {
   echo "error: could not publish PR poll" >&2
@@ -166,10 +215,4 @@ fm_pr_metadata_identity_parse "$META" || { fm_pr_poll_revoke_final || true; exit
   || { fm_pr_poll_revoke_final || true; exit 1; }
 fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { fm_pr_poll_revoke_final || true; echo "error: published PR poll is invalid" >&2; exit 1; }
-if [ "$VALIDATION_PATH" = direct-PR ] || [ "$VALIDATION_PATH" = receipts-mechanical ]; then
-  rmdir "$VALIDATION_LOCK" || { echo "error: validation metadata lock could not be released" >&2; exit 1; }
-  VALIDATION_LOCK=
-  "$SCRIPT_DIR/fm-receipt-check.sh" "$ID" --complete --terminal-evidence pr-opened >/dev/null \
-    || { echo "error: PR validation completion could not be observed" >&2; exit 1; }
-fi
 printf 'armed: state/%s.check.sh\n' "$ID"

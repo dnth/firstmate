@@ -35,6 +35,40 @@ set -u
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
 fm_git_identity fmtest fmtest@example.invalid
+command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (done-time ask-user audit)"; exit 0; }
+
+# The done-time ask-user audit reads the no-mistakes state database read-only;
+# the suite gets an isolated fixture with every fake run id it reports, so a
+# fixture done never reads the operator's real daemon state.
+NM_DIR="$TMP_ROOT/nm-home"
+mkdir -p "$NM_DIR"
+python3 - "$NM_DIR" <<'PY'
+import os, sqlite3, sys
+db = sqlite3.connect(os.path.join(sys.argv[1], "state.sqlite"))
+db.executescript("""
+CREATE TABLE runs (id TEXT PRIMARY KEY);
+CREATE TABLE step_results (
+  id TEXT PRIMARY KEY, run_id TEXT, step_name TEXT, step_order INTEGER, status TEXT,
+  findings_json TEXT, approval_reason TEXT, override_reason TEXT, skip_reason TEXT
+);
+CREATE TABLE step_rounds (
+  id TEXT PRIMARY KEY, step_result_id TEXT, round INTEGER, selection_source TEXT,
+  selected_finding_ids TEXT, findings_json TEXT, user_findings_json TEXT
+);
+INSERT INTO runs VALUES ('01RUN'), ('01RUNLIVE');
+""")
+db.commit()
+PY
+export NM_HOME="$NM_DIR"
+
+nm_db() {  # <sql>
+  python3 - "$NM_DIR" "$1" <<'PY'
+import os, sqlite3, sys
+db = sqlite3.connect(os.path.join(sys.argv[1], "state.sqlite"))
+db.executescript(sys.argv[2])
+db.commit()
+PY
+}
 
 # A real git repo checked out on <branch>, so the helper's branch attribution
 # (git symbolic-ref) resolves like it would for a live crew worktree.
@@ -141,7 +175,7 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  local case_dir=$1 id=$2 brief ledger fixture_head fixture_mode added_mode=0
+  local case_dir=$1 id=$2 brief ledger fixture_mode
   if grep -qx 'kind=ship' "$case_dir/state/$id.meta" 2>/dev/null; then
     fixture_mode=$(sed -n 's/^mode=//p' "$case_dir/state/$id.meta" | tail -1)
     [ -n "$fixture_mode" ] || fixture_mode=no-mistakes
@@ -162,16 +196,10 @@ EOF
       printf '%s\n' '{"criterion":"AC1","type":"review","outcome":"success","summary":"fixture evidence","result":"complete"}' > "$ledger"
     fi
     [ -e "$case_dir/data/$id/.evidence.lock" ] || : > "$case_dir/data/$id/.evidence.lock"
+    # A fixture that never chose a mode is a registered no-mistakes task whose
+    # PR fm-pr-check already recorded, so run-step done reads as done.
     if ! grep -q '^mode=' "$case_dir/state/$id.meta" 2>/dev/null; then
-      printf 'mode=no-mistakes\n' >> "$case_dir/state/$id.meta"
-      added_mode=1
-    fi
-    if [ "$added_mode" -eq 1 ]; then
-      fixture_head=$(git -C "$case_dir/wt" rev-parse HEAD 2>/dev/null || true)
-      if [ -n "$fixture_head" ]; then
-        printf 'implementation_completed_at=1\nimplementation_completed_head=%s\nvalidation_generation=legacy-fixture\nvalidation_path=full-no-mistakes\nvalidation_head=%s\nvalidation_completed_generation=legacy-fixture\nvalidation_completed_path=full-no-mistakes\nvalidation_completed_head=%s\n' \
-          "$fixture_head" "$fixture_head" "$fixture_head" >> "$case_dir/state/$id.meta"
-      fi
+      printf 'mode=no-mistakes\npr=https://github.com/o/r/pull/1\n' >> "$case_dir/state/$id.meta"
     fi
   fi
   PATH="$case_dir/fakebin:$PATH" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$CREW_STATE" "$id"
@@ -1515,7 +1543,7 @@ test_ship_done_is_held_until_evidence_is_complete() {
   mkdir -p "$d/data/$id"
   cat > "$d/data/$id/brief.md" <<'EOF'
 # Task
-Exercise the completion evidence gate.
+Exercise the evidence gate.
 
 # Acceptance criteria
 - AC1: The implementation works.
@@ -1526,8 +1554,9 @@ Delivery contract: mode=no-mistakes
 EOF
   : > "$d/data/$id/evidence.jsonl"
   : > "$d/data/$id/.evidence.lock"
-  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=no-mistakes"
-  printf 'done: implementation complete\n' > "$d/state/$id.status"
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=no-mistakes" \
+    "pr=https://github.com/o/r/pull/1"
+  printf 'done: PR https://github.com/o/r/pull/1 checks green\n' > "$d/state/$id.status"
   arm_idle_record "$d/state" "$id"
   out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
   assert_contains "$out" "state: parked" "missing evidence must prevent done acceptance"
@@ -1541,20 +1570,10 @@ EOF
   assert_contains "$out" "missing evidence: AC2" "failed outcome must leave its criterion missing"
   FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "passed" --outcome success >/dev/null
   out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
-  assert_contains "$out" "state: parked" "complete evidence must still require implementation completion"
-  assert_contains "$out" "source: implementation-gate" "missing implementation completion must name its gate"
-  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt-check.sh" "$id" --implementation-complete >/dev/null \
-    || fail "implementation completion fixture could not be recorded"
-  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
-  assert_contains "$out" "state: done" "current-head implementation completion must release done acceptance"
+  assert_contains "$out" "state: done" "complete evidence with a registered PR must release done acceptance"
   assert_contains "$out" "source: status-log" "released completion retains status-log source"
-  printf 'head change\n' >> "$d/wt/file.txt"
-  git -C "$d/wt" add file.txt
-  git -C "$d/wt" commit -q -m 'advance implementation head'
-  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
-  assert_contains "$out" "state: parked" "stale implementation completion escaped after a head change"
-  assert_contains "$out" "source: implementation-gate" "stale implementation completion must name its gate"
-  pass "ship completion requires evidence and current-head implementation completion"
+  grep -q 'validation_\|implementation_completed' "$d/state/$id.meta" && fail "done acceptance wrote validation metadata"
+  pass "ship completion requires complete acceptance evidence"
 }
 
 test_ship_done_with_malformed_brief_fails_closed() {
@@ -1571,7 +1590,8 @@ Exercise a pre-evidence ship brief.
 # Definition of done
 Delivery contract: mode=direct-PR
 EOF
-  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=direct-PR"
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=direct-PR" \
+    "pr=https://github.com/o/r/pull/10"
   printf 'done: PR https://github.com/o/r/pull/10\n' > "$d/state/$id.status"
   arm_idle_record "$d/state" "$id"
   out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
@@ -1581,99 +1601,98 @@ EOF
   pass "ship completion fails closed when the evidence contract is malformed"
 }
 
-test_run_step_done_requires_current_plan_completion() {
+# One handoff per delivery mode: done is accepted only once the mode's delivery
+# record exists - pr= written by fm-pr-check for the PR modes, the clean fm/<id>
+# branch for local-only - with no validation metadata anywhere.
+test_pr_modes_done_requires_registered_pr() {
   reset_fakes
-  local d out id=validation-stage head
-  d=$(new_case validation-stage)
-  make_repo_on_branch "$d/wt" "fm/$id"
-  make_fakebin "$d" >/dev/null
-  head=$(git -C "$d/wt" rev-parse HEAD)
-  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
-    "mode=no-mistakes"
-  printf 'implementation_completed_at=1\nimplementation_completed_head=%s\n' "$head" >> "$d/state/$id.meta"
-  FM_FAKE_AXI_STATUS=$(run_passed "fm/$id")
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" "$id"
-  out=$(run_crew_state "$d" "$id")
-  assert_contains "$out" "state: parked" "passed run without a plan must remain parked"
-  printf 'validation_generation=plan-1\nvalidation_path=full-no-mistakes\nvalidation_head=%s\n' "$head" >> "$d/state/$id.meta"
-  out=$(run_crew_state "$d" "$id")
-  assert_contains "$out" "state: parked" "passed run without plan completion must remain parked"
-  assert_contains "$out" "source: validation-gate" "missing completion must name the validation gate"
-  printf 'validation_completed_generation=plan-1\nvalidation_completed_path=full-no-mistakes\nvalidation_completed_head=%s\n' "$head" \
-    >> "$d/state/$id.meta"
-  out=$(run_crew_state "$d" "$id")
-  assert_contains "$out" "state: done" "current plan completion must release final done"
-  pass "run-step done requires current-generation validation completion"
+  local d out id mode
+  for mode in no-mistakes direct-PR; do
+    id="delivery-gate-$mode"
+    d=$(new_case "$id")
+    make_repo_on_branch "$d/wt" "fm/$id"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=$mode"
+    printf 'done: PR https://github.com/o/r/pull/1 checks green\n' > "$d/state/$id.status"
+    if [ "$mode" = no-mistakes ]; then FM_FAKE_AXI_STATUS=$(run_passed "fm/$id"); else FM_FAKE_AXI_STATUS=; fi
+    FM_FAKE_RUNS_LIST=
+    FM_FAKE_BUSY=0
+    arm_idle_record "$d/state" "$id"
+    out=$(run_crew_state "$d" "$id")
+    assert_contains "$out" "state: parked" "$mode done escaped before PR registration"
+    assert_contains "$out" "source: delivery-gate" "$mode PR wait did not name the delivery gate"
+    assert_contains "$out" "PR not registered" "$mode PR wait did not say what is missing"
+    printf 'pr=https://github.com/o/r/pull/1\n' >> "$d/state/$id.meta"
+    [ "$mode" != no-mistakes ] || printf 'nm_run_id=01RUN\n' >> "$d/state/$id.meta"
+    out=$(run_crew_state "$d" "$id")
+    assert_contains "$out" "state: done" "$mode registered PR did not release done"
+    printf 'untracked\n' > "$d/wt/untracked.txt"
+    out=$(run_crew_state "$d" "$id")
+    assert_contains "$out" "state: parked" "$mode dirty worktree escaped final done acceptance"
+    assert_contains "$out" "worktree is dirty or could not be inspected" "$mode dirty gate omitted its reason"
+    rm -f "$d/wt/untracked.txt"
+  done
+  pass "PR-mode done requires the PR registered by fm-pr-check and a clean worktree"
 }
 
-test_status_log_done_requires_existing_plan_completion() {
+test_local_only_done_requires_clean_task_branch() {
   reset_fakes
-  local d out id=status-validation-stage head
-  d=$(new_case status-validation-stage)
-  make_repo_on_branch "$d/wt" "fm/$id"
+  local d out id=delivery-gate-local
+  d=$(new_case "$id")
+  make_repo_on_branch "$d/wt" other-branch
   make_fakebin "$d" >/dev/null
-  head=$(git -C "$d/wt" rev-parse HEAD)
-  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
-    "mode=direct-PR"
-  printf 'implementation_completed_at=1\nimplementation_completed_head=%s\n' "$head" >> "$d/state/$id.meta"
-  printf 'done: PR https://example.test/pull/1\n' > "$d/state/$id.status"
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=local-only"
+  printf 'done: ready in branch fm/%s\n' "$id" > "$d/state/$id.status"
   FM_FAKE_AXI_STATUS=
   FM_FAKE_RUNS_LIST=
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" "$id"
   out=$(run_crew_state "$d" "$id")
-  assert_contains "$out" "state: parked" "direct-PR done without a plan must remain parked"
-  printf 'validation_generation=plan-2\nvalidation_path=direct-PR\nvalidation_head=%s\n' "$head" >> "$d/state/$id.meta"
+  assert_contains "$out" "state: parked" "local-only done on another branch was accepted"
+  assert_contains "$out" "source: delivery-gate" "local-only branch gate did not name itself"
+  assert_contains "$out" "branch fm/$id is not checked out" "local-only branch gate did not say what is missing"
+  git -C "$d/wt" checkout -q -b "fm/$id"
   out=$(run_crew_state "$d" "$id")
-  assert_contains "$out" "state: parked" "status-log done with an incomplete plan must remain parked"
-  assert_contains "$out" "source: validation-gate" "status-log completion must name the validation gate"
-  pass "status-log done requires existing plan completion"
+  assert_contains "$out" "state: done" "local-only done on the clean task branch was refused"
+  pass "local-only done requires the clean fm/<id> branch and no PR"
 }
 
-test_low_validation_waits_for_pr_completion() {
+test_done_time_ask_user_audit_uses_recorded_run() {
   reset_fakes
-  local d out id=low-pr-stage head statusbin real_git
-  d=$(new_case low-pr-stage)
+  local d out id=done-ask-audit
+  d=$(new_case "$id")
   make_repo_on_branch "$d/wt" "fm/$id"
   make_fakebin "$d" >/dev/null
-  head=$(git -C "$d/wt" rev-parse HEAD)
-  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
-    "mode=no-mistakes" "implementation_completed_at=1" "implementation_completed_head=$head" \
-    "validation_generation=low-plan" "validation_path=receipts-mechanical" "validation_head=$head"
-  printf 'done: implementation complete\n' > "$d/state/$id.status"
+  nm_db "
+    INSERT INTO runs VALUES ('RUN-done-ask');
+    INSERT INTO step_results (id, run_id, step_name, step_order, status, findings_json)
+    VALUES ('sr-done', 'RUN-done-ask', 'review', 3, 'completed',
+      '{\"findings\":[{\"id\":\"R9\",\"action\":\"ask-user\"}]}');
+    INSERT INTO step_rounds (id, step_result_id, round, selection_source, selected_finding_ids, findings_json)
+    VALUES ('sr-done-1', 'sr-done', 1, 'user_declined', '[]', '{\"findings\":[{\"id\":\"R9\",\"action\":\"ask-user\"}]}');
+  "
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=no-mistakes" \
+    "pr=https://github.com/o/r/pull/1" "nm_run_id=RUN-done-ask"
+  printf 'done: PR https://github.com/o/r/pull/1 checks green\n' > "$d/state/$id.status"
   FM_FAKE_AXI_STATUS=
   FM_FAKE_RUNS_LIST=
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" "$id"
   out=$(run_crew_state "$d" "$id")
-  assert_contains "$out" "state: parked" "LOW implementation done escaped before PR completion"
-  assert_contains "$out" "source: validation-gate" "LOW PR wait did not name the validation gate"
-  printf 'validation_completed_generation=low-plan\nvalidation_completed_path=receipts-mechanical\nvalidation_completed_head=%s\n' "$head" \
-    >> "$d/state/$id.meta"
-  printf 'untracked\n' > "$d/wt/untracked.txt"
+  assert_contains "$out" "state: parked" "a self-answered ask-user finding was accepted as done"
+  assert_contains "$out" "source: decision-gate" "ask-user refusal did not name the decision gate"
+  assert_contains "$out" "RUN-done-ask" "ask-user refusal did not name the run"
+  # The decision record lands before the worker's final done: report, as it
+  # does live (firstmate answers the gate, the pipeline finishes, the worker
+  # reports); a resolved event alone is never current state.
+  printf 'resolved [key=nm-RUN-done-ask-review]: answered: approve R9\ndone: PR https://github.com/o/r/pull/1 checks green\n' \
+    > "$d/state/$id.status"
   out=$(run_crew_state "$d" "$id")
-  assert_contains "$out" "state: parked" "dirty worktree escaped final done acceptance"
-  assert_contains "$out" "worktree is dirty or could not be inspected" "dirty final gate omitted its reason"
-  rm -f "$d/wt/untracked.txt"
-  statusbin="$d/statusbin"
-  real_git=$(command -v git)
-  mkdir -p "$statusbin"
-  cat > "$statusbin/git" <<EOF
-#!/bin/sh
-case "\$*" in
-  *"status --porcelain --untracked-files=all"*) exit 7 ;;
-esac
-exec "$real_git" "\$@"
-EOF
-  chmod +x "$statusbin/git"
-  out=$(PATH="$statusbin:$PATH" run_crew_state "$d" "$id")
-  assert_contains "$out" "state: parked" "uninspectable worktree escaped final done acceptance"
-  rm -f "$statusbin/git"
-  out=$(run_crew_state "$d" "$id")
-  assert_contains "$out" "state: done" "clean LOW PR completion did not release final done"
-  pass "final done requires a clean inspectable worktree"
-  pass "LOW validation remains parked until PR completion"
+  assert_contains "$out" "state: done" "a firstmate-decided finding was still refused: $out"
+  out=$(NM_HOME="$TMP_ROOT/nm-missing" run_crew_state "$d" "$id")
+  assert_contains "$out" "state: parked" "unreadable decision data was accepted as done"
+  assert_contains "$out" "decision evidence could not be read" "unreadable decision data did not say so"
+  pass "done acceptance applies the ask-user decision audit to the recorded run"
 }
 
 test_fast_modes_skip_no_mistakes_lookup() {
@@ -1784,9 +1803,9 @@ test_pipeline_owned_terminal_run_not_exempt
 test_missing_run_head_falls_back_to_current_state
 test_ship_done_is_held_until_evidence_is_complete
 test_ship_done_with_malformed_brief_fails_closed
-test_run_step_done_requires_current_plan_completion
-test_status_log_done_requires_existing_plan_completion
-test_low_validation_waits_for_pr_completion
+test_pr_modes_done_requires_registered_pr
+test_local_only_done_requires_clean_task_branch
+test_done_time_ask_user_audit_uses_recorded_run
 test_fast_modes_skip_no_mistakes_lookup
 test_missing_or_malformed_ship_mode_fails_before_run_lookup
 

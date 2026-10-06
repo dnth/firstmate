@@ -102,6 +102,7 @@ state/               volatile runtime signals; gitignored
   .<id>.open-decisions-cursor  per-task byte cursor and folded open-decision set bounding the OPEN DECISIONS scan's cost to new status-log appends; written only by fm-classify-lib.sh's status_open_decisions_incremental, removed by teardown, safe to delete (forces one full re-fold)
   .status-presentation-cursor .status-presentation-lock  fleet-wide per-task status identity/byte-offset manifest (including the separate STATUS OUTCOME BACKSTOP delivered-frontier offset) and serialization lock preventing already-presented status lines from being replayed as new; owned by fm-classify-lib.sh, with each task's row retired by teardown
   .runpod-lifecycle-<id>.lock  per-secondmate RunPod provider lifecycle lock; never touch
+  .<id>.pr-publication.lock  per-task PR registration transaction lock held by fm-pr-check.sh while it publishes poll artifacts and replaces pr=/pr_head=/nm_run_id=; fm-watch.sh defers a pre-metadata poll only while it is fresh; never touch
   runpod-omp-auth/  workstation OMP broker, read-only facade, and per-pod tunnel supervisor records and logs; never touch
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks

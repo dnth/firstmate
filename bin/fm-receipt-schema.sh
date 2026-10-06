@@ -4,12 +4,13 @@
 # Usage: fm-receipt-schema.sh
 #
 # The input must be one JSON object with required criterion, type, outcome,
-# summary, and result string fields; optional command, artifact, file, and head
-# strings; no unknown keys; type set to test, build, lint, typecheck, api,
-# browser, manual, or review; outcome set to success, failure, negative, zero,
-# skipped, empty, placeholder, weak, passed, failed, or accepted-blocked; a
-# non-whitespace captain_exception string present exactly when the outcome is
-# accepted-blocked; and a 40- or 64-hex head when head is present.
+# summary, and result string fields; optional command, artifact, and file
+# strings; an optional 40- or 64-hex head string that older ledgers carry and no
+# current writer emits; no unknown keys; type set to test, build, lint,
+# typecheck, api, browser, manual, or review; outcome set to success, failure,
+# negative, zero, skipped, empty, placeholder, weak, passed, failed, or
+# accepted-blocked; and a non-whitespace captain_exception string present
+# exactly when the outcome is accepted-blocked.
 set -eu
 
 usage() {

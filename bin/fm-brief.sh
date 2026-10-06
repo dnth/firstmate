@@ -49,19 +49,20 @@
 # recorded task metadata cannot drift apart.
 # Every ship scaffold also declares stable acceptance-criterion ids in an exact
 # "# Acceptance criteria" section and creates the append-only evidence ledger at
-# data/<task-id>/evidence.jsonl. bin/fm-receipt-check.sh owns the section parser,
-# evidence gate, conservative binary risk plan, and validation timing.
+# data/<task-id>/evidence.jsonl. bin/fm-receipt-check.sh owns the section parser
+# and the acceptance-evidence gate; receipts certify nothing about review, CI,
+# No-Mistakes completion, or merge readiness.
 # When the repo argument resolves to a directory whose git common dir equals
 # this code root's git common dir (any worktree of it counts), the ship scaffold
 # appends reserved criterion AC99 as the section's last line; keep it and use
 # AC1..AC98 for task criteria. projects/<name> resolves under FM_HOME; unresolved
 # names, non-git directories, and other repos get no extra criterion.
 # AC99 requires bin/fm-test-run.sh --changed green and
-# FM_LINT_JOBS=1 bin/fm-lint.sh clean, recorded as an evidence line with the branch
-# head before validation planning. No local full-suite run is required; broad
-# regression is owned by the PR GitHub CI per .no-mistakes.yaml.
+# FM_LINT_JOBS=1 bin/fm-lint.sh clean, recorded as an evidence line naming the
+# branch head before the implementation-complete report. No local full-suite run
+# is required; broad regression is owned by the PR GitHub CI per .no-mistakes.yaml.
 # For local-only, AC99 drops the CI clause and binds the branch-head evidence to
-# reporting "ready in branch" instead of validation planning.
+# reporting "ready in branch".
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -146,8 +147,8 @@ Before reporting implementation complete, record at least one compact receipt fo
 Only \`--outcome success\` evidences a criterion; \`accepted-blocked\` requires a non-empty \`--captain-exception "<text>"\` (the date plus the captain's own words or the board key that holds them) and accounts for the criterion without evidencing it; every other structured outcome records an unevidenced negative or inconclusive result.
 A task with any accepted-blocked criterion is never auto-merged; state those criteria and their exception references plainly in the PR description.
 Run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id\` and do not append \`done:\` unless its JSON status is \`complete\`.
-After the implementation is committed and evidence is complete, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --implementation-complete\` before any validation plan or implementation-complete \`done:\` report.
-Receipts are audit inputs rather than proof that every claim is trustworthy; keep summaries and results compact and point to commands or artifacts when useful.
+The latest receipt per criterion decides it: when a finding or a later test shows a criterion unsatisfied, record a \`--outcome failure\` receipt for it, fix, and record a fresh \`--outcome success\`.
+Receipts establish that you accounted for every declared criterion; they certify nothing about review, CI, No-Mistakes completion, or merge readiness, so keep summaries and results compact and point to commands or artifacts when useful.
 When a cited artifact lives inside this scratch worktree (for example \`.qa/evidence/<run_id>/report.json\`), copy it into \`$artifact_dir/\` (gitignored, survives teardown) before \`done:\` and cite the copied path; worktree-relative paths die with the worktree.
 
 EOF
@@ -158,9 +159,9 @@ EOF
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
-When it is implemented and committed, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --plan\`, then push your branch and open a PR with \`gh-axi\`.
-After the PR opens, append \`done: PR {url}\` to the status file and stop; Firstmate's canonical PR-ready helper records the observed completion.
-The \`done:\` line must carry the PR URL - it is the delivery artifact - and completion recording and teardown refuse a \`done:\` that names none.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`.
+After the PR opens, append \`done: PR {url}\` to the status file and stop; Firstmate's canonical PR-ready helper registers the PR.
+The \`done:\` line must carry the PR URL - it is the delivery artifact - and PR registration and teardown refuse a \`done:\` that names none.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -171,8 +172,8 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$task_id\` and every declared acceptance criterion has a receipt. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented, committed, and ready in the branch, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --plan\`, then append \`done: ready in branch fm/$task_id\` to the status file, then run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --complete --terminal-evidence branch-ready\` and stop.
-The \`done:\` line must carry the \`ready in branch\` marker - it is the delivery artifact - and completion recording and teardown refuse a \`done:\` that names none.
+When it is implemented, committed, and ready in the branch, append \`done: ready in branch fm/$task_id\` to the status file and stop.
+The \`done:\` line must carry the \`ready in branch\` marker - it is the delivery artifact - and teardown refuses a \`done:\` that names none.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
@@ -182,24 +183,23 @@ EOF
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then classify validation risk; follow the receipt checker's plan output and help for the exact recorded receipts-mechanical or full No-Mistakes path.
+Firstmate will then start full No-Mistakes validation on this worker.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
-Include the exact line \`Firstmate-Validation-Generation: <plan-generation>\` in the No-Mistakes \`--intent\`, then immediately bind the returned run id with \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --bind-run <run-id> --generation <plan-generation>\` so completion can prove that exact run, generation, path, and head.
-If binding refuses because the run predates the plan or a mid-run rebase moved the base, do not replan - reconcile the branch to the run's own pushed head and retry the same \`--bind-run\`; the checker binds by content identity once run ownership is proven.
-Do not hand-edit, commit, or fix findings yourself while a run is active; fix ordinary findings from any validation tier only after Firstmate directs the supported abort and branch-custody return sequence.
+Do not hand-edit, commit, or fix findings yourself while a run is active; fix ordinary findings only after Firstmate directs the supported abort and branch-custody return sequence, and when a finding shows a criterion unsatisfied, record its failure receipt before the fix and a fresh success after it.
+Firstmate's PR-ready helper reads No-Mistakes' own status for your run - branch, PR URL, full head SHA, and outcome - so never push foreign commits over the pipeline's head.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Report each parked gate as \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,...\` naming every ask-user finding id the gate presents; the completion gate refuses any recorded ask-user resolution that lacks a matching firstmate \`resolved [key=nm-<run>-<step>]\` record.
+  Report each parked gate as \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,...\` naming every ask-user finding id the gate presents; PR registration and done acceptance refuse any recorded ask-user resolution that lacks a matching firstmate \`resolved [key=nm-<run>-<step>]\` record.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` to the status file, then run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --complete --terminal-evidence no-mistakes-passed\`, and stop. You are finished.
-The \`done:\` line must carry the PR URL - it is the delivery artifact - and completion recording and teardown refuse a \`done:\` that names none.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` to the status file and stop. You are finished.
+The \`done:\` line must carry the PR URL - it is the delivery artifact - and PR registration and teardown refuse a \`done:\` that names none.
 EOF
       ;;
   esac
@@ -476,7 +476,7 @@ if repo_is_firstmate_code_root "$REPO"; then
       ;;
     *)
       # shellcheck disable=SC2016  # single quotes are deliberate: the backticks are literal brief text
-      FIRSTMATE_VERIFICATION_AC='- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line with the branch head before validation planning; no local full-suite run is required; broad regression is owned by the PR GitHub CI per .no-mistakes.yaml.'
+      FIRSTMATE_VERIFICATION_AC='- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line naming the branch head before the implementation-complete report; no local full-suite run is required; broad regression is owned by the PR GitHub CI per .no-mistakes.yaml.'
       ;;
   esac
 fi

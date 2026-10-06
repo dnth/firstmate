@@ -19,7 +19,10 @@
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #   A ship relaunch recovers --mode and --yolo from the recorded task metadata
-#   when the caller does not repeat them, and a non-secondmate OMP relaunch also
+#   when the caller does not repeat them, carries the delivery identity records
+#   pr=, pr_head=, and nm_run_id= (written only by bin/fm-pr-check.sh) into the
+#   replacement record so a restart mid-handoff keeps the registered PR and
+#   No-Mistakes run, and a non-secondmate OMP relaunch also
 #   recovers --prewalk-into and --allow-project-omp-extensions so the replacement
 #   worker keeps the prior launch intent.
 #   A relaunch validates the recorded endpoint before reusing it. A
@@ -4974,6 +4977,15 @@ fi
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   echo "spawn_gen=$SPAWN_GEN"
+  # Delivery identity survives a relaunch: fm-pr-check.sh is the only writer of
+  # these records and a restarted worker cannot recreate them, so the done and
+  # PR-ready gates would otherwise never be satisfiable after a restart.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    for delivery_key in pr pr_head nm_run_id; do
+      delivery_value=$(fm_meta_get "$RELAUNCH_META" "$delivery_key")
+      [ -z "$delivery_value" ] || echo "$delivery_key=$delivery_value"
+    done
+  fi
   # The relaunch transaction id lets fm-control classify a post-publish
   # failure as "new record published" rather than "replacement never
   # launched"; only a relaunch under fm-control writes it.

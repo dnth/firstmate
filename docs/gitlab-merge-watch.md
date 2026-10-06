@@ -176,3 +176,4 @@ It refuses a GitLab merge request URL rather than sending it to the wrong forge,
 A GitLab task records no `pr_head=`.
 `gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.
 Both consumers already treat it as optional: `bin/fm-teardown.sh` reads the head from the forge at teardown rather than from metadata and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
+The one consumer that requires it is the no-mistakes PR-ready check in `bin/fm-pr-check.sh`, which compares the forge head with the pipeline run's `head_sha`; that is consistent with No-Mistakes publishing GitHub pull requests only, so a GitLab merge request is registered by `direct-PR` tasks alone.

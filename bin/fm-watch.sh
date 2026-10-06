@@ -162,7 +162,7 @@ case "$REMOTE_TIMEOUT" in
   *) [ "$REMOTE_TIMEOUT" -le 15 ] || REMOTE_TIMEOUT=5 ;;
 esac
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
-VALIDATION_PLAN_LOCK_STALE_SECS=30
+PR_PUBLICATION_LOCK_STALE_SECS=30
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -1764,14 +1764,14 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
-        elif [ -d "$STATE/.$id.validation-plan.lock" ] \
-          && [ ! -L "$STATE/.$id.validation-plan.lock" ] \
-          && validation_lock_age=$(fm_path_age "$STATE/.$id.validation-plan.lock") \
-          && [ "$validation_lock_age" -ge 0 ] \
-          && [ "$validation_lock_age" -lt "$VALIDATION_PLAN_LOCK_STALE_SECS" ] \
+        elif [ -d "$STATE/.$id.pr-publication.lock" ] \
+          && [ ! -L "$STATE/.$id.pr-publication.lock" ] \
+          && publication_lock_age=$(fm_path_age "$STATE/.$id.pr-publication.lock") \
+          && [ "$publication_lock_age" -ge 0 ] \
+          && [ "$publication_lock_age" -lt "$PR_PUBLICATION_LOCK_STALE_SECS" ] \
           && fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" defer-metadata; then
           # fm-pr-check publishes the authenticated poll tuple before its
-          # atomic metadata replacement while holding this transaction lock.
+          # atomic metadata replacement while holding its publication lock.
           # Retry on the next cycle instead of surfacing that brief, valid
           # pre-metadata state as an unauthenticated check.
           continue

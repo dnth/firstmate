@@ -9,10 +9,15 @@
 # still does not describe the crew's current state as it resumes, fixes, or
 # re-validates. This helper never infers the current state from a tail of the log:
 # it reads the authoritative source (a
-# no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, with a
-# current-generation, path-matching completion receipt at the exact current
-# head allowing pipeline advances and content-identity recovery, else the pane
-# busy-signature) and reconciles the possibly-stale log against it.
+# no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, else
+# the pane busy-signature) and reconciles the possibly-stale log against it.
+# A ship `done` is accepted only through the delivery gate in emit(): a clean
+# worktree, complete acceptance evidence (bin/fm-receipt-check.sh), pr= recorded
+# by bin/fm-pr-check.sh for the PR modes or a clean checked-out fm/<id> branch
+# for local-only. For no-mistakes, it also applies the ask-user decision audit
+# owned by bin/fm-nm-run-lib.sh when a recorded or attributed full run is
+# available; absence of that identity does not itself refuse done. PR-ready
+# registration owns the required audit before recording the PR.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -82,7 +87,7 @@ SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local state=$1 source=$2 detail=${3:-} gate_detail line generation completed_generation validation_head completed_head validation_path completed_path current_head mode implementation_completed implementation_head requires_validation=0 completion_is_current=0
+  local state=$1 source=$2 detail=${3:-} gate_detail line mode pr audit_run audit_rc
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
     if ! fm_worktree_is_clean "${WT:-}"; then
       state=parked
@@ -98,59 +103,44 @@ emit() {  # <state> <source> [detail]
     }
   fi
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
-    implementation_completed=$(grep '^implementation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
-    implementation_head=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
-    mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
-    current_head=$(git -C "${WT:-}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
-    generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
-    completed_generation=$(grep '^validation_completed_generation=' "$META" | tail -1 | cut -d= -f2- || true)
-    validation_path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
-    completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
-    completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
-    if [ "$mode" = no-mistakes ] && [ -n "$generation" ] \
-      && [ "$completed_generation" = "$generation" ] \
-      && [ "$validation_path" = full-no-mistakes ] && [ "$completed_path" = "$validation_path" ] \
-      && [ -n "$current_head" ] && [ "$completed_head" = "$current_head" ]; then
-      completion_is_current=1
-    fi
-    case "$implementation_completed" in
-      ''|*[!0-9]*)
-        state=parked
-        source=implementation-gate
-        detail='implementation completion is missing or invalid for the current head'
-        ;;
-      *)
-        implementation_head_ok=0
-        if [ -n "$current_head" ] && [ "$implementation_head" = "$current_head" ]; then
-          implementation_head_ok=1
-        elif [ "$completion_is_current" -eq 1 ] \
-          && git -C "${WT:-}" rev-parse --verify "$implementation_head^{commit}" >/dev/null 2>&1; then
-          implementation_head_ok=1
-        fi
-        if [ "$implementation_head_ok" -ne 1 ]; then
+    mode=$(meta_value mode)
+    pr=$(meta_value pr)
+    case "$mode" in
+      no-mistakes|direct-PR)
+        if [ -z "$pr" ]; then
           state=parked
-          source=implementation-gate
-          detail='implementation completion is missing or stale for the current head'
+          source=delivery-gate
+          detail='PR not registered; run fm-pr-check on the PR-ready report'
+        fi
+        ;;
+      local-only)
+        if [ "${CREW_BRANCH:-}" != "fm/$ID" ]; then
+          state=parked
+          source=delivery-gate
+          detail="branch fm/$ID is not checked out"
         fi
         ;;
     esac
   fi
-  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
-    [ -z "$generation" ] || requires_validation=1
-    if [ "$source" = 'run-step' ] && [ "$mode" = no-mistakes ]; then requires_validation=1; fi
-    case "$mode" in direct-PR|local-only) requires_validation=1 ;; esac
-    validation_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
-    validation_head_ok=0
-    if [ "$completed_head" = "$validation_head" ] && [ "$current_head" = "$validation_head" ]; then
-      validation_head_ok=1
-    elif [ "$completion_is_current" -eq 1 ] && [ -n "$validation_head" ]; then
-      validation_head_ok=1
+  # The done-time ask-user decision audit: the same predicate PR-ready applies,
+  # against the recorded nm_run_id or, before registration, the attributed run.
+  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ] && [ "$mode" = no-mistakes ]; then
+    audit_run=$(meta_value nm_run_id)
+    if [ -z "$audit_run" ] && [ "${HAVE_RUN:-0}" = 1 ] && [ "${RUN_SOURCE:-}" = full ]; then
+      audit_run=$(strip_quotes "$(nm_field id)")
     fi
-    if [ "$requires_validation" -eq 1 ] && { [ -z "$generation" ] || [ "$completed_generation" != "$generation" ] \
-      || [ "$validation_head_ok" -ne 1 ] || [ "$completed_path" != "$validation_path" ]; }; then
-      state=parked
-      source=validation-gate
-      detail='validation completion is missing or stale for the current plan'
+    if [ -n "$audit_run" ]; then
+      audit_rc=0
+      fm_nm_ask_user_decisions "$WT" "$NM_TIMEOUT" "$audit_run" "$LOG" >/dev/null || audit_rc=$?
+      if [ "$audit_rc" -eq 1 ]; then
+        state=parked
+        source=decision-gate
+        detail="run $audit_run resolved ask-user findings without matching firstmate decisions"
+      elif [ "$audit_rc" -ne 0 ]; then
+        state=parked
+        source=decision-gate
+        detail="run $audit_run ask-user decision evidence could not be read"
+      fi
     fi
   fi
   line="state: $state${SEP}source: $source"

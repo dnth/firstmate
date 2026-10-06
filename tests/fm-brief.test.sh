@@ -231,19 +231,26 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "certify nothing about review, CI, No-Mistakes completion, or merge readiness" "$brief" \
+      "$id: brief did not state the accounting-only scope of receipts"
+    assert_grep "record a \`--outcome failure\` receipt for it, fix, and record a fresh \`--outcome success\`" "$brief" \
+      "$id: brief omitted the receipt invalidation rule"
+    case "$(grep -o 'fm-receipt-check.sh [^ ]* --[a-z-]*' "$brief" || true)" in
+      '') ;;
+      *) fail "$id: brief still instructs a removed receipt-check action: $(grep -o 'fm-receipt-check.sh [^ ]* --[a-z-]*' "$brief")" ;;
+    esac
+    assert_no_grep "Firstmate-Validation-Generation" "$brief" "$id: brief still carries the plan generation"
     case "$mode" in
       direct-PR)
-        assert_grep "fm-receipt-check.sh $id --plan" "$brief" "$id: direct-PR brief omitted validation start"
-        assert_grep "canonical PR-ready helper records the observed completion" "$brief" "$id: direct-PR brief omitted observed PR completion"
+        assert_grep "canonical PR-ready helper registers the PR" "$brief" "$id: direct-PR brief omitted PR registration"
         ;;
       local-only)
-        assert_grep "fm-receipt-check.sh $id --plan" "$brief" "$id: local-only brief omitted validation start"
-        assert_grep "fm-receipt-check.sh $id --complete" "$brief" "$id: local-only brief omitted branch-ready completion"
+        assert_grep "done: ready in branch fm/$id" "$brief" "$id: local-only brief omitted its ready report"
         ;;
       no-mistakes)
-        assert_grep "fm-receipt-check.sh $id --complete" "$brief" "$id: no-mistakes brief omitted pipeline completion"
-        assert_grep "fm-receipt-check.sh $id --bind-run" "$brief" "$id: no-mistakes brief omitted exact run binding"
-        assert_grep "ordinary findings from any validation tier" "$brief" "$id: no-mistakes brief narrowed original-worker fixes"
+        assert_grep "Firstmate will then start full No-Mistakes validation on this worker" "$brief" "$id: no-mistakes brief omitted the full-validation handoff"
+        assert_grep "fix ordinary findings only after Firstmate directs" "$brief" "$id: no-mistakes brief narrowed original-worker fixes"
+        assert_grep "branch, PR URL, full head SHA, and outcome" "$brief" "$id: no-mistakes brief omitted how PR-ready proves the run"
         ;;
     esac
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
@@ -299,8 +306,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then classify validation risk" "$brief" \
-    "explicit no-mistakes brief did not render risk-based validation"
+  assert_grep "Firstmate will then start full No-Mistakes validation on this worker" "$brief" \
+    "explicit no-mistakes brief did not render the full-validation handoff"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -1033,7 +1040,7 @@ test_firstmate_repo_ship_brief_prefills_verification_criterion() {
       "firstmate-repo scaffold dropped the placeholder-replacement instruction"
     brief="$home/data/brief-fm-ac99-$mode/brief.md"
     # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
-    assert_grep '- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line with the branch head before validation planning;' "$brief" \
+    assert_grep '- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line naming the branch head before the implementation-complete report;' "$brief" \
       "firstmate-repo AC99 cannot be evidenced before PR creation"
     assert_grep 'broad regression is owned by the PR GitHub CI per .no-mistakes.yaml' "$brief" \
       "firstmate-repo AC99 did not identify CI as the broad regression owner"

@@ -212,6 +212,19 @@ write_meta() {
     "spawn_gen=teardown-test-task-x1"
 }
 
+# A direct-PR task with complete acceptance evidence: fm-pr-check.sh gates every
+# ship registration on bin/fm-receipt-check.sh before it records pr=; the
+# handoff gates themselves are owned by tests/fm-pr-check-handoff.test.sh.
+write_evidence_contract() {  # <case_dir>
+  local case_dir=$1
+  mkdir -p "$case_dir/data/task-x1"
+  printf '# Task\nFixture.\n\n# Acceptance criteria\n- AC1: Fixture works.\n\n# Definition of done\nDelivery contract: mode=direct-PR\n' \
+    > "$case_dir/data/task-x1/brief.md"
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"success","summary":"fixture","result":"passed"}' \
+    > "$case_dir/data/task-x1/evidence.jsonl"
+  : > "$case_dir/data/task-x1/.evidence.lock"
+}
+
 # Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
 # exercises the fused close transition against the real tasks-axi CLI.
 seed_backlog_in_flight() {
@@ -868,13 +881,15 @@ test_merged_pr_with_later_local_commit_refuses() {
 test_pr_check_does_not_refresh_stale_pr_head() {
   local case_dir rc pr_head new_head count
   case_dir=$(make_case pr-check-stale)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
+  write_evidence_contract "$case_dir"
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
@@ -883,6 +898,7 @@ test_pr_check_does_not_refresh_stale_pr_head() {
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
@@ -904,7 +920,8 @@ test_pr_check_does_not_refresh_stale_pr_head() {
 test_pr_check_records_remote_head_when_local_lags() {
   local case_dir local_head pr_head
   case_dir=$(make_case pr-check-local-lags)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
+  write_evidence_contract "$case_dir"
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
@@ -912,6 +929,7 @@ test_pr_check_records_remote_head_when_local_lags() {
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 

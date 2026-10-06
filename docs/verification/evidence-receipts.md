@@ -1,237 +1,105 @@
-# Evidence receipts and risk routing verification
+# Evidence receipts verification
 
-This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-10-04.
-The exact receipt key and type schema is owned by the header and `--help` output of `bin/fm-receipt-schema.sh`; the criterion parser, classifier thresholds, metadata fields, and lifecycle commands are owned by the headers and help output of `bin/fm-receipt-check.sh`, `bin/fm-receipt.sh`, and `bin/fm-receipt-store.sh` at their respective executable boundaries.
+This record captures the active maintainer evidence for ship-task acceptance receipts as of 2026-10-06.
+Evidence receipts establish whether the implementing worker accounted for every acceptance criterion the ship brief declares; they certify nothing about review, CI, No-Mistakes completion, or merge readiness.
+The exact receipt key and type schema is owned by the header and `--help` output of `bin/fm-receipt-schema.sh`; the criterion parser and accounting contract are owned by `bin/fm-receipt-check.sh`, the writer by `bin/fm-receipt.sh`, and pinned storage by `bin/fm-receipt-store.sh`, each at its executable boundary.
+Delivery gates that consume the accounting result are owned by `bin/fm-pr-check.sh` (PR-ready) and `bin/fm-crew-state.sh` (done acceptance); No-Mistakes run attribution and the ask-user decision audit are owned by `bin/fm-nm-run-lib.sh`.
 
 ## Guarantees under test
 
 - New ship briefs receive stable acceptance-criterion ids plus an empty append-only evidence ledger and lock through one atomic pinned-directory publication, while scout and secondmate scaffolds remain outside the receipt contract.
 - Concurrent ship scaffolds use one exclusive brief identity, so a losing invocation cannot remove the winning brief or evidence contract.
 - Ship scaffold output requires replacing both task and acceptance-criterion placeholders, and spawn refuses unresolved task text or criteria before endpoint creation.
-- Legacy ship briefs without an acceptance-criteria section may still launch with an explicit migration warning, but the completion gate remains parked until Firstmate installs a valid evidence contract.
-- Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid receipts account for every required criterion.
-- Low-risk routing is limited to CHANGELOG formatting or reflow changes whose non-whitespace byte sequence is identical and which have file-bound mechanical proof, while every content-byte or uncertain change defaults high.
-- High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
-- `direct-PR` and `local-only` retain the evidence gate and current-state reconciliation without entering No-Mistakes.
-- The explicit implementation-complete action records one current timestamp for the current clean commit, refreshes that timestamp when the head changes, remains idempotent for the same head, and supplies the plan interval origin.
-- Completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence plus the decision-evidence check owned by `bin/fm-nm-run-lib.sh`, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
+- Legacy ship briefs without an acceptance-criteria section may still launch with an explicit migration warning, but done acceptance remains parked until Firstmate installs a valid evidence contract.
+- `fm-receipt-check.sh <id>` offers only the default check, `--criterion`, and `--parse-criteria`, emits one `fm-evidence-check.v2` object with `required`, `evidenced`, `accepted_blocked`, `missing`, and `invalid`, refuses every removed validation action as an unknown option, and writes no task metadata.
+- The latest structurally valid receipt per criterion decides it: only `outcome=success` evidences a criterion, a later failure receipt revokes an earlier success until a fresh success lands, and `result` stays descriptive so an expected observation such as `401` recorded as success is evidence.
+- A receipt naming an undeclared criterion, a malformed record, or a blank line makes the ledger invalid rather than silently disappearing.
+- `outcome=accepted-blocked` is valid only with a non-empty `captain_exception` reference recorded verbatim; such a criterion is accounted for without being evidenced and is reported in the distinct always-present `accepted_blocked` list, never in `evidenced`.
+- The checker never consults No-Mistakes: a tripwire `no-mistakes` binary records zero invocations across the whole accounting suite.
 - Receipt append and check share one executable owner that resolves and pins every raw data-path component inside the store process, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
 - Receipt storage physicalizes the trusted Firstmate-home prefix for standard system symlinks, then retains no-follow checks for the data suffix, task directory, and task artifacts.
-- Promotion pins and verifies its scout task directory before reading or replacing the brief and ledger, and refuses symlinked or out-of-root task paths before mutation.
-- Promotion retries distinguish identity-bound unfinished rollback from committed retirement recovery, while post-commit reporting cannot reverse durable success.
-- Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
-- The checker parent owns a read/write release descriptor before snapshot spawn, so early child failures cannot block cleanup waiting for a FIFO reader.
-- Snapshot readiness status is checked and terminal on publication failure; hold documents ready `0`, refusal `1`, missing-ledger `3`, and pinned non-ship `4` statuses.
-- Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
-- Structurally valid receipts require non-whitespace summary and result strings plus an explicit structured outcome; only `outcome=success` evidences a criterion, while failure, negative, zero, skipped, empty, placeholder, weak, and legacy outcomes remain unevidenced and `result` stays descriptive so expected observations such as `401` are unambiguous.
-- `outcome=accepted-blocked` is valid only with a non-empty `captain_exception` reference recorded verbatim (the date plus the captain's own words or the board key that holds them); a criterion whose latest receipt is a valid accepted-blocked is accounted for without being evidenced, so planning, readiness, and completion can proceed while the evidence check reports it in the distinct always-present `accepted_blocked` list, never in `evidenced`.
-- A task carrying any accepted-blocked criterion is never auto-merged; plan, readiness, and completion output surfaces the criteria and their exception references plainly so the PR description states them.
-- Head-bound receipts store only the exact canonical 40- or 64-character lowercase hexadecimal commit id reported by Git.
-- The ship brief's acceptance-evidence template instructs workers to copy any cited worktree-resident artifact into `data/<task-id>/artifacts/` before `done:` and cite the copied path, and `bin/fm-receipt.sh` warns on a relative `--artifact` path without refusing the append.
 - Receipt append holds a stable task lock, copies the canonical single-link ledger plus one complete record to a synced mode-0600 single-link temporary file, and atomically renames it over the canonical ledger so concurrent hard-link aliases retain the old inode.
-- Criterion parsing rejects known scaffold placeholder tokens in balanced or unmatched brace forms while allowing concrete brace syntax such as JSON examples.
-- One shared cleanliness predicate requires `git status` with submodule ignores disabled to succeed with empty tracked, staged, untracked, and submodule output for implementation completion, planning, binding, terminal completion, and final done acceptance.
-- Every plan requires a resolved authoritative base and commit diff before it can publish any delivery path.
-- Every diff input, including the special-mode summary probe, must execute successfully before risk classification.
-- Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
-- The pinned brief and task metadata must record the same concrete delivery mode before validation can proceed.
-- Ship state requires exactly one valid recorded delivery mode before any No-Mistakes lookup.
-- Findings that invalidate a receipt or acceptance claim atomically bind one generation-scoped idempotent finding-to-criterion marker to the invalidation-time head and receipt boundary, then require a strict non-empty descendant delta and a later successful receipt bound to the new head before replanning or completion.
-- One pinned state-directory owner snapshots single-link no-follow metadata and performs compare-bound atomic replacements for every validation metadata update.
-- PR registration publishes canonical PR identity and its validation publication generation through one compare-bound pinned metadata replacement after the watcher artifacts publish, and revokes those artifacts if that replacement fails.
-- Binding fixtures cover planned heads and faithful restamps separately from advances and preplan recovery, using the eligibility rules owned by `bin/fm-receipt-check.sh`.
-- Recovery fixtures exercise late planning, mid-run rebasing, and identical-replan refusal through the binding and completion contract owned by `bin/fm-receipt-check.sh`.
-- No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
-- Every completion requires path-specific terminal evidence and records its plan path and authoritative completed head.
-- Head-accounting fixtures cover descendants, faithful restamps, descendants of restamps, and owned content identity, with refusal cases for unvalidated checkout content, mismatched branches, incomplete ownership evidence, failed runs, and cancelled runs.
-- Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
-- Planning and completion refuse tracked, staged, or untracked worktree changes.
-- Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
-- Ordinary No-Mistakes findings return to the original worker through guarded custody return and then full revalidation.
-- Direct-PR registration publishes its watcher before recording completion, while other paths preserve their earlier path-specific completion boundary.
-
-## Head-accounting regression coverage
-
-The binding and completion contract is owned by the header and help of [`bin/fm-receipt-check.sh`](../../bin/fm-receipt-check.sh); the tree, chain-provenance, and branch-ownership predicates are owned by [`bin/fm-nm-run-lib.sh`](../../bin/fm-nm-run-lib.sh).
-The executable-interface fixtures in [`tests/fm-receipt-check.test.sh`](../../tests/fm-receipt-check.test.sh) exercise these guarantees:
-
-- The late-plan fixture records an already-existing run as the plan boundary, refuses it without ownership, then checks, binds, and completes its terminal pass through content identity without changing the plan.
-- The mid-run rebase fixture advances main with real content, replays the task chain, and adds pipeline fixes, asserting that the resulting head neither descends from the planned head nor shares its tree before checking binding and completion.
-- The replan fixture refuses an identical plan without clearing the live binding, then verifies that changed-content replanning clears stale run and completion bindings.
-- The synchronized fixture checks completion with a self-submitted descendant after content binding and after ancestry binding transitions from pipeline custody to synchronized ownership.
-- The rebase fixture also checks fleet done acceptance through `bin/fm-crew-state.sh` with original and refreshed implementation heads, rejecting stale completion generations and mismatched paths.
-- The refusal fixtures separate tree identity from ownership and branch identity, and reject run or checkout content that the run did not validate, as well as failed and cancelled runs.
-- The binding-check prerequisite fixture verifies the single read-only verdict surface for missing or invalid receipts, dirty or missing worktrees, invalid plans or generations, and unobservable runs.
-
-Commands and captured results are recorded below.
+- The writer stamps no commit head onto a receipt; the schema still reads legacy head-stamped records.
+- Promotion pins and verifies its scout task directory before reading or replacing the brief and ledger, refuses symlinked or out-of-root task paths before mutation, and distinguishes identity-bound unfinished rollback from committed retirement recovery.
+- Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions and rejects scaffold placeholder tokens while allowing concrete brace syntax.
+- The pinned brief and task metadata must record the same concrete delivery mode before accounting proceeds.
+- Initial ship PR registration exercises the acceptance-evidence gate owned by `bin/fm-pr-check.sh` and names missing or invalid criteria when it refuses; direct-PR registration never consults No-Mistakes.
+- Initial no-mistakes PR registration exercises the run-identity gate owned by `bin/fm-pr-check.sh`, records `nm_run_id=`, and refuses runs on another branch or PR, foreign heads, failed, cancelled, unfinished, or unobservable runs.
+- The PR-ready and done-acceptance audit fixtures exercise the decision-evidence predicate owned by `bin/fm-nm-run-lib.sh`, including refusal of unmatched answers and unreadable run data; the conditional done-time audit is owned by `bin/fm-crew-state.sh`.
+- `bin/fm-crew-state.sh` accepts a ship done only with a clean worktree, complete evidence, and `pr=` recorded for the PR modes or a clean checked-out `fm/<id>` branch for local-only.
+- `bin/fm-spawn.sh --relaunch` carries `pr=`, `pr_head=`, and `nm_run_id=` into the replacement record, including a restart mid-handoff, and invents none for an unregistered task.
+- PR registration publishes canonical PR identity through one compare-bound pinned metadata replacement after the watcher artifacts publish, revokes those artifacts if that replacement fails, serializes per task on `state/.<id>.pr-publication.lock`, and the watcher defers a valid pre-metadata poll only while that lock is fresh.
 
 ## Known limitations
 
-- Claim invalidation reads the worktree head immediately before acquiring the validation metadata lock, so an unsupported concurrent ref mutation can bind the marker to the earlier head; the single-operator workflow excludes that mutation during validation.
-- PR registration snapshots and replaces metadata through separate pinned-store processes, so an unsupported concurrent byte-identical state-directory swap can move the transaction to the replacement directory; the single-operator workflow excludes state-directory replacement during validation.
+- PR registration snapshots and replaces metadata through separate pinned-store processes, so an unsupported concurrent byte-identical state-directory swap can move the transaction to the replacement directory; the single-operator workflow excludes state-directory replacement during registration.
+- The ask-user decision audit compares recorded gate responses with status-ledger records; it proves matching process records, not authenticated authorship (`bin/fm-classify-lib.sh` owns that limitation).
 
 ## Verification environment
 
-- Date: 2026-10-04.
+- Date: 2026-10-06.
 - ShellCheck: 0.11.0.
 - Git: 2.34.1.
 
 ## Commands and results
 
-On 2026-10-04, the focused completion regressions and both owning suites passed with the command below (exit 0).
-The synchronized fixture exercises completion with a self-submitted descendant head after content binding and after ancestry binding transitions from pipeline custody to synchronized ownership.
-The rebase fixture exercises fleet done acceptance with both original and refreshed implementation heads and refuses stale completion generations and mismatched paths.
+The owning suites passed with these exact commands on 2026-10-06 (each exit 0).
 
 ```text
-$ TMPDIR="$PWD/.review-tmp" bash -c 'bash tests/fm-receipt-check.test.sh && bash tests/fm-crew-state.test.sh'
-ok - converged synchronized binding requires the full run-owned sync evidence
-ok - mid-run rebase onto newer main binds and completes by content identity
-all fm-crew-state tests passed
-```
-
-The ownership-transition and prerequisite-refusal regressions were refreshed on 2026-10-04 with `TMPDIR="$PWD/.review-tmp" bash tests/fm-receipt-check.test.sh` (exit 0), including `ok - converged synchronized binding requires the full run-owned sync evidence` and `ok - bind-check prerequisite refusals preserve one read-only binding verdict contract`.
-
-The focused behavioral suites passed with these exact commands.
-
-```text
-$ tests/fm-receipt.test.sh
-ok - fm-receipt appends one compact validated receipt
-ok - fm-receipt preserves prior records and accepts --result
-ok - fm-receipt warns on relative --artifact while still appending
-ok - fm-receipt gates accepted-blocked on a verbatim captain exception
-ok - fm-receipt stores and validates an exact canonical commit id
-ok - fm-receipt appends complete large JSONL records
-ok - fm-receipt rejects invalid types, ids, missing results, and undeclared criteria
-ok - fm-receipt uses portable paths and rolls back incomplete appends
-ok - fm-receipt refuses non-ship tasks and unsafe ledger paths
-ok - fm-receipt rejects task-directory replacement before its no-follow open
-ok - fm-receipt rejects data-directory replacement before its pinned open
-ok - fm-receipt rejects regular data replacement after pinning
-ok - fm-receipt atomically replaces the ledger without mutating hard-link aliases
-ok - fm-receipt physicalizes trusted home prefixes but rejects data symlinks
-
-$ tests/fm-receipt-check.test.sh
-ok - fm-receipt-check help renders an executable generation-bound bind command
-ok - fm-receipt-check reports required, evidenced, and missing ids deterministically
-ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
-ok - structured success and negative outcomes control criterion evidence
+$ bash tests/fm-receipt-check.test.sh
+ok - complete evidence reports the fm-evidence-check.v2 shape and exits 0
+ok - a missing criterion is named and exits 1
+ok - failure never satisfies, expected-negative success does, and the latest receipt per criterion wins
+ok - unknown criteria and malformed records make the ledger invalid instead of vanishing
+ok - accepted-blocked accounts for its criterion visibly without evidencing it
+ok - receipt append, --criterion, and --parse-criteria consume one criterion grammar
+ok - fm-receipt-check offers only accounting actions and writes no validation metadata
 ok - pinned brief and metadata delivery modes must match exactly
-ok - pinned metadata owner rejects hard-linked validation records
+ok - pinned metadata owner rejects hard-linked task records
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
 ok - early snapshot failures release cleanup without a FIFO reader
 ok - snapshot readiness publication failures terminate without waiting
 ok - fm-receipt-check pins task evidence and rejects hard-linked ledgers
-ok - receipt append and check consume one criterion grammar
-ok - exact bound runs complete from the shared current CI-log readiness predicate
-ok - finding-to-criterion invalidations remain inspectable in task metadata
-ok - run binding resolves abbreviated heads and rejects non-planned commits
-ok - binding and completion work against the real agent-supplied intent-log shape while wrong runs fail closed
-ok - terminal passed runs seal their own pipeline advance and refuse foreign drift
-ok - pipeline rebase restamps bind and seal their validated content
-ok - restamped chains enforce provenance and ownership
-ok - active pipeline-owned descendant binds without replan
-ok - terminal pipeline-owned descendant binds and completes
-ok - restamp chain followed by pipeline doc commit binds and completes
-ok - active descendant binds using axi sync fallback when axi status omits branch_sync
-ok - unowned active descendant binding is rejected
-ok - converged synchronized run binds and completes while monitoring its PR
-ok - converged synchronized binding requires the full run-owned sync evidence
-ok - descendant bind rejects the wrong branch
-ok - low-risk mechanical changes can skip a full No-Mistakes run
-ok - low risk requires safe changelog prose and file-bound mechanical evidence
-ok - implementation completion refreshes per head and remains idempotent
-ok - plan publication holds the pinned ledger boundary against concurrent receipts
-ok - diff summary errors fail closed before risk classification
-ok - successful terminal runs bind while failed runs remain rejected
-ok - No-Mistakes status and CI-log observations are bounded
-ok - authoritative documentation remains high
-ok - terminal delivery paths record one completion timestamp at their boundary
-ok - completion signals release the validation lock for retry
-ok - replanning invalidates prior run and completion bindings
-ok - a passed run recorded before its plan binds and completes by content identity
-ok - mid-run rebase onto newer main binds and completes by content identity
-ok - content-identity binding still refuses unreviewed content and unowned or failed runs
-ok - dirty worktrees cannot be planned or completed
-ok - git status errors fail implementation, planning, and completion cleanliness gates
-ok - shared cleanliness inspects ignored submodules
-ok - direct and local plans never invoke No-Mistakes
-ok - local completion requires fast-forward readiness
-ok - local readiness and landing share one fail-closed default resolver
-ok - security and uncertain changes retain full No-Mistakes validation
-ok - direct-PR and local-only retain evidence gates without invoking No-Mistakes
-ok - completion refuses a standing done: claim that carries no delivery artifact
-ok - accepted-blocked accounts for its criterion without evidencing it and still refuses real gaps
+ok - receipt accounting never consults No-Mistakes
 
-$ tests/fm-crew-state.test.sh
-ok - ship completion requires evidence and current-head implementation completion
+$ bash tests/fm-pr-check-handoff.test.sh
+ok - direct-PR handoff proceeds on complete evidence and never consults No-Mistakes
+ok - no-mistakes handoff records nm_run_id from a passed run matching branch, PR, and head
+ok - an active run whose CI log reads green is PR-ready
+ok - runs on another branch or PR, foreign heads, failed, unfinished, or unobservable runs never arm
+ok - PR-ready refuses a self-answered ask-user finding until a firstmate decision record exists
+ok - unreadable No-Mistakes decision data refuses PR-ready with its own reason
+
+$ bash tests/fm-crew-state.test.sh
+ok - ship completion requires complete acceptance evidence
 ok - ship completion fails closed when the evidence contract is malformed
-ok - run-step done requires current-generation validation completion
-ok - status-log done requires existing plan completion
-ok - final done requires a clean inspectable worktree
-ok - LOW validation remains parked until PR completion
-ok - direct-PR and local-only state reads skip No-Mistakes
-ok - ship state requires one valid mode before run lookup
+ok - PR-mode done requires the PR registered by fm-pr-check and a clean worktree
+ok - local-only done requires the clean fm/<id> branch and no PR
+ok - done acceptance applies the ask-user decision audit to the recorded run
 all fm-crew-state tests passed
 
-$ tests/fm-brief.test.sh
-ok - fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly
-ok - fm-brief: scout and secondmate code paths still scaffold well-formed briefs
-ok - fm-brief: concurrent ship scaffolds preserve one complete owner
-ok - fm-brief: ship evidence publication is atomic and retryable
+$ env -u FM_TASK_ID bash tests/fm-spawn-relaunch-dead-endpoint.test.sh
+ok - fm-spawn --relaunch: pr=, pr_head=, and nm_run_id= survive a restart mid-handoff
+ok - fm-spawn --relaunch: a task not yet registered gains no empty delivery records
 
-$ bin/fm-lint.sh
-fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
-exit 0
+$ env -u FM_TASK_ID bash tests/fm-pr-check-security.test.sh
+ok - PR registration serializes on the per-task publication lock and releases it
+ok - watcher defers valid pre-metadata polls while the publication lock is held
+ok - watcher bounds pre-metadata deferral by publication lock freshness
+
+$ bash tests/fm-receipt.test.sh
+ok - fm-receipt writes no commit head while the schema still reads legacy head-stamped records
+ok - fm-receipt gates accepted-blocked on a verbatim captain exception
 ```
 
-The named safety regressions also passed.
+`bash tests/fm-brief.test.sh` and `bash tests/fm-task-delivery.test.sh` passed on the same date, asserting that no generated or promoted ship brief instructs a removed receipt-check action or carries a plan generation.
+`bin/fm-lint.sh` exited 0 with ShellCheck 0.11.0.
 
-```text
-$ tests/fm-watch-triage.test.sh
-exit 0
+## Line accounting
 
-$ bash tests/fm-ask-user-authority.test.sh
-ok - primary workers and secondmates receive the authority rule through generated instructions
+`git diff --numstat dad3e4a58cac6f3f450523b9dcd72e754d8e1753 44dbd3f1483e4050f93cff9e85d6436f870d7f67 -- bin/ tests/` reports the following totals for the reviewed change.
 
-$ tests/fm-tangle-guard.test.sh
-ok - fm-brief: ship brief asserts worktree isolation before the branch step
-ok - fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree
-
-$ tests/fm-pr-merge.test.sh
-ok - fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge
-ok - fm-pr-merge refuses before merging when task meta is missing
-
-$ tests/fm-pr-check-security.test.sh
-ok - valid direct and merge flows record exact metadata and reject multiline head metadata
-ok - PR registration serializes with validation planning
-ok - fast PR registration completes and keeps its watcher armed
-ok - PR metadata publication rejects post-snapshot redirection
-exit 0
-
-$ tests/fm-task-delivery.test.sh
-ok - fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created
-ok - fm-promote-transaction: help renders successfully
-ok - fm-spawn: unresolved task and criterion placeholders refuse before launch
-ok - fm-spawn: legacy ship briefs launch but disclose deferred evidence migration
-ok - fm-spawn: scout and secondmate spawns refuse ship delivery flags
-ok - fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree
-ok - fm-spawn: a rigor downgrade against the registered posture is announced, never blocked
-ok - fm-spawn: a scout spawn resolves no delivery posture from the registry
-ok - fm-promote: promotion installs a fail-closed ship evidence contract
-ok - fm-promote: symlinked task directories refuse before mutation
-ok - fm-promote: configured data symlinks remain visible to no-follow pinning
-ok - fm-promote: concurrent losers cannot remove the winner lock
-ok - fm-promote: signal-terminated transactions fail closed
-ok - fm-promote: interrupted task replacement rolls back atomically
-ok - fm-promote: store signals before commit roll back both replacements
-ok - fm-promote: intermediate state symlinks fail closed
-ok - fm-promote: state path replacement cannot redirect metadata
-ok - fm-promote: retry recovers an identity-bound crashed transaction
-ok - fm-promote: post-commit reporting cannot reverse success
-ok - fm-promote: committed retirement recovery preserves ship state
-ok - fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw
-# all fm-task-delivery tests passed
-
-$ tests/fm-teardown-endpoint-safety.test.sh
-ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
-```
+| Scope | Lines removed | Lines added |
+| --- | ---: | ---: |
+| Production (`bin/`) | 1,550 | 297 |
+| Tests (`tests/`) | 2,892 | 750 |

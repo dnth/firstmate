@@ -152,7 +152,7 @@ The preference persists for the effective Firstmate home, and toggling it off re
 # Minutes later:
 
   PR ready for review, captain: https://github.com/you/xyz/pull/42
-  (fix flaky login test - risk: low - CI green)
+  (fix flaky login test - CI green)
 
 > alright merge it
 ```

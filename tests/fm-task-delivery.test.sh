@@ -376,7 +376,7 @@ EOF
   assert_present "$home/data/promote-d1/.evidence.lock" "promotion did not install the evidence lock"
   assert_no_grep 'Never push to any remote' "$brief" "promoted direct-PR brief retained scout push prohibition"
   assert_grep 'Preserve this requirement when the scout becomes a ship task.' "$brief" "promotion truncated task content at an embedded setup heading"
-  assert_grep "fm-receipt-check.sh promote-d1 --plan" "$brief" "promoted direct-PR brief omitted validation planning"
+  assert_no_grep "fm-receipt-check.sh promote-d1 --" "$brief" "promoted direct-PR brief instructs a removed receipt-check action"
   assert_grep 'done: PR {url}' "$brief" "promoted direct-PR brief omitted its terminal sequence"
   assert_grep 'AC1: API returns {"ok":true}' "$brief" "promotion rejected concrete brace syntax"
   expected_delivery=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --render-ship-delivery promote-d1 direct-PR)
@@ -401,9 +401,9 @@ EOF
     "$PROMOTE" promote-nm --mode no-mistakes --yolo off --criterion 'AC1: Fixture works' 2>&1)
   status=$?
   expect_code 0 "$status" "a No-Mistakes promotion should succeed"
-  assert_grep 'Firstmate-Validation-Generation: <plan-generation>' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted generation-bound run creation"
-  assert_grep 'fm-receipt-check.sh promote-nm --bind-run <run-id> --generation <plan-generation>' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted run binding"
-  assert_grep 'fm-receipt-check.sh promote-nm --complete --terminal-evidence no-mistakes-passed' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted completion recording"
+  assert_no_grep 'Firstmate-Validation-Generation' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief still carries a plan generation"
+  assert_no_grep 'fm-receipt-check.sh promote-nm --' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief instructs a removed receipt-check action"
+  assert_grep 'ask-user findings are never yours to answer' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted the ask-user escalation rule"
   assert_grep 'done: PR {url} checks green' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted its CI-ready terminal status"
   expected_delivery=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --render-ship-delivery promote-nm no-mistakes)
   actual_delivery=$(awk '/^# Acceptance evidence$/{delivery=""; emit=1} emit{delivery=delivery $0 ORS} END{printf "%s", delivery}' "$home/data/promote-nm/brief.md")

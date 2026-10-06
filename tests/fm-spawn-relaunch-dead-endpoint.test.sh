@@ -1217,9 +1217,59 @@ test_backend_flag_refused_off_relaunch() {
   pass "fm-control --backend: non-relaunch verbs refuse the pin"
 }
 
+# --- delivery identity survives a relaunch -----------------------------------
+# bin/fm-pr-check.sh is the only writer of pr=, pr_head=, and nm_run_id=; a
+# replacement worker cannot recreate them, so the done and PR-ready gates
+# depend on the relaunch carrying them forward. A restart mid-handoff is the
+# shape that bit live: the PR was registered but the task was not yet done.
+
+test_relaunch_preserves_delivery_identity_mid_handoff() {
+  local rec id head=0123456789abcdef0123456789abcdef01234567
+  id=$(case_id delivery-meta)
+  rec=$(make_case delivery-meta "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" tmux "$WT_DIR" "$PROJ_DIR"
+  printf 'pr=https://github.com/o/r/pull/77\npr_head=%s\nnm_run_id=01RUNMIDHANDOFF\n' "$head" >> "$HOME_DIR/state/$id.meta"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  printf 'done: PR https://github.com/o/r/pull/77 checks green\n' > "$HOME_DIR/state/$id.status"
+  : > "$CASE_DIR/fake/tmux-state/ses-$id.windows"
+
+  run_spawn "$CASE_DIR" "$HOME_DIR" "$id"
+  expect_code 0 "$SPAWN_STATUS" "mid-handoff relaunch should succeed; got: $SPAWN_OUT"
+  assert_grep "pr=https://github.com/o/r/pull/77" "$HOME_DIR/state/$id.meta" "relaunch dropped the registered pr="
+  assert_grep "pr_head=$head" "$HOME_DIR/state/$id.meta" "relaunch dropped the forge pr_head="
+  assert_grep "nm_run_id=01RUNMIDHANDOFF" "$HOME_DIR/state/$id.meta" "relaunch dropped the No-Mistakes run id"
+  [ "$(grep -c '^pr=' "$HOME_DIR/state/$id.meta")" -eq 1 ] || fail "relaunch duplicated pr="
+  [ "$(grep -c '^nm_run_id=' "$HOME_DIR/state/$id.meta")" -eq 1 ] || fail "relaunch duplicated nm_run_id="
+  pass "fm-spawn --relaunch: pr=, pr_head=, and nm_run_id= survive a restart mid-handoff"
+}
+
+test_relaunch_without_delivery_identity_writes_none() {
+  local rec id
+  id=$(case_id delivery-none)
+  rec=$(make_case delivery-none "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" tmux "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  : > "$CASE_DIR/fake/tmux-state/ses-$id.windows"
+
+  run_spawn "$CASE_DIR" "$HOME_DIR" "$id"
+  expect_code 0 "$SPAWN_STATUS" "pre-handoff relaunch should succeed; got: $SPAWN_OUT"
+  assert_no_grep "pr=" "$HOME_DIR/state/$id.meta" "relaunch invented a pr= record"
+  assert_no_grep "pr_head=" "$HOME_DIR/state/$id.meta" "relaunch invented a pr_head= record"
+  assert_no_grep "nm_run_id=" "$HOME_DIR/state/$id.meta" "relaunch invented an nm_run_id= record"
+  pass "fm-spawn --relaunch: a task not yet registered gains no empty delivery records"
+}
+
 # --- run ---------------------------------------------------------------------
 
 test_tmux_gone_relaunch_recreates_in_worktree
+test_relaunch_preserves_delivery_identity_mid_handoff
+test_relaunch_without_delivery_identity_writes_none
 test_tmux_gone_relaunch_durable_lease_ownership
 test_tmux_gone_relaunch_claim_without_lease_refuses
 test_control_relaunch_treats_missing_endpoint_as_stopped

@@ -6,7 +6,6 @@
 #   fm-receipt-store.sh <task-id> hold <brief-out> <ledger-out> <meta-out> <ready-file> <release-fifo>
 #   fm-receipt-store.sh <task-id> append <criterion> <criterion-parser>
 #   fm-receipt-store.sh <task-id> meta-read <meta-out>
-#   fm-receipt-store.sh <task-id> meta-append <expected-meta> <records> <updated-meta-out>
 #   fm-receipt-store.sh <task-id> meta-replace <expected-meta> <records> <updated-meta-out>
 #   fm-receipt-store.sh <task-id> promote <transaction-command> [<arg> ...]
 #
@@ -18,6 +17,9 @@
 # one line before exiting with the same status.
 # append validates the pinned ship brief and criterion, then appends the compact
 # JSON payload from FM_RECEIPT_PAYLOAD under an exclusive ledger lock.
+# meta-read copies the pinned state/<task-id>.meta; meta-replace replaces the
+# FM_RECEIPT_META_REPLACE_KEYS records atomically after confirming the file still
+# equals expected-meta, so a PR publication cannot overwrite a concurrent change.
 # promote holds the exclusive task lock across the transaction child's documented
 # phases, durably commits task and state replacements, recovers identity-bound
 # unfinished work, and retains the committed record through retirement.
@@ -59,7 +61,7 @@ ID=$1
 MODE=$2
 shift 2
 case "$MODE" in
-  meta-read|meta-append|meta-replace)
+  meta-read|meta-replace)
     case "$ID" in ''|.*|*[!A-Za-z0-9._-]*) echo "error: invalid task id: $ID" >&2; exit 2 ;; esac
     ;;
   *)
@@ -67,7 +69,7 @@ case "$MODE" in
     ;;
 esac
 case "$MODE:$#" in
-  scaffold:0|hold:5|append:2|meta-read:1|meta-append:3|meta-replace:3) ;;
+  scaffold:0|hold:5|append:2|meta-read:1|meta-replace:3) ;;
   promote:0) usage >&2; exit 2 ;;
   promote:*) ;;
   *) usage >&2; exit 2 ;;
@@ -235,30 +237,27 @@ sub run_metadata_operation {
     or refuse("metadata update input could not be read");
   refuse("task metadata changed during validation") unless $current_text eq $expected_text;
   refuse("metadata records are empty") unless length($records_text);
-  my $new_text = $current_text;
-  if ($mode eq "meta-replace") {
-    my $keys_text = $ENV{FM_RECEIPT_META_REPLACE_KEYS} // "";
-    my @keys = split(/,/, $keys_text, -1);
-    refuse("metadata replacement keys are missing") unless @keys;
-    my %replace;
-    for my $key (@keys) {
-      refuse("metadata replacement key is invalid") unless $key =~ /\A[A-Za-z][A-Za-z0-9_]*\z/;
-      refuse("metadata replacement key is duplicated") if $replace{$key}++;
-    }
-    my %recorded;
-    for my $line (split(/\n/, $records_text, -1)) {
-      next unless length($line);
-      my ($key) = $line =~ /\A([A-Za-z][A-Za-z0-9_]*)=/;
-      refuse("metadata replacement record is invalid") unless defined($key) && $replace{$key};
-      refuse("metadata replacement record is duplicated") if $recorded{$key}++;
-    }
-    my @kept = grep {
-      my ($key) = /\A([A-Za-z][A-Za-z0-9_]*)=/;
-      !defined($key) || !$replace{$key}
-    } split(/\n/, $current_text, -1);
-    $new_text = join("\n", @kept);
-    $new_text =~ s/\n*\z//;
+  my $keys_text = $ENV{FM_RECEIPT_META_REPLACE_KEYS} // "";
+  my @keys = split(/,/, $keys_text, -1);
+  refuse("metadata replacement keys are missing") unless @keys;
+  my %replace;
+  for my $key (@keys) {
+    refuse("metadata replacement key is invalid") unless $key =~ /\A[A-Za-z][A-Za-z0-9_]*\z/;
+    refuse("metadata replacement key is duplicated") if $replace{$key}++;
   }
+  my %recorded;
+  for my $line (split(/\n/, $records_text, -1)) {
+    next unless length($line);
+    my ($key) = $line =~ /\A([A-Za-z][A-Za-z0-9_]*)=/;
+    refuse("metadata replacement record is invalid") unless defined($key) && $replace{$key};
+    refuse("metadata replacement record is duplicated") if $recorded{$key}++;
+  }
+  my @kept = grep {
+    my ($key) = /\A([A-Za-z][A-Za-z0-9_]*)=/;
+    !defined($key) || !$replace{$key}
+  } split(/\n/, $current_text, -1);
+  my $new_text = join("\n", @kept);
+  $new_text =~ s/\n*\z//;
   $new_text .= "\n" if length($new_text) && $new_text !~ /\n\z/;
   $new_text .= $records_text;
   $new_text .= "\n" if $new_text !~ /\n\z/;
@@ -319,8 +318,7 @@ sub retire_promotion_task_artifacts {
 }
 
 my $task_name = $ENV{FM_RECEIPT_STORE_ID};
-if ($ENV{FM_RECEIPT_STORE_MODE} eq "meta-read" || $ENV{FM_RECEIPT_STORE_MODE} eq "meta-append"
-  || $ENV{FM_RECEIPT_STORE_MODE} eq "meta-replace") {
+if ($ENV{FM_RECEIPT_STORE_MODE} eq "meta-read" || $ENV{FM_RECEIPT_STORE_MODE} eq "meta-replace") {
   run_metadata_operation($ENV{FM_RECEIPT_STORE_STATE}, "$task_name.meta", $ENV{FM_RECEIPT_STORE_MODE}, @ARGV);
   exit 0;
 }
@@ -679,40 +677,8 @@ open(my $criterion_parser, "|-", $parser, "--parse-criteria", "-", "--require", 
 print {$criterion_parser} $brief_text or refuse("task brief could not reach the acceptance-criterion parser");
 close($criterion_parser) or refuse("criterion is not declared by a valid ship brief: $criterion");
 
-chdir($state) or refuse("pinned state directory could not be re-entered for receipt binding");
-my @receipt_meta_identity = lstat($meta_name);
-if (!@receipt_meta_identity || S_ISLNK($receipt_meta_identity[2])
-  || $receipt_meta_identity[0] != $meta_identity[0]
-  || $receipt_meta_identity[1] != $meta_identity[1]) {
-  close($meta) or refuse("superseded task metadata could not be closed");
-  sysopen($meta, $meta_name, O_RDONLY | O_NOFOLLOW)
-    or refuse("current task metadata is missing or unsafe");
-  @meta_identity = stat($meta);
-  refuse("current task metadata must be a single-link regular file") unless @meta_identity
-    && S_ISREG($meta_identity[2]) && $meta_identity[3] == 1;
-  @receipt_meta_identity = lstat($meta_name);
-  refuse("current task metadata identity changed during receipt binding") unless @receipt_meta_identity
-    && !S_ISLNK($receipt_meta_identity[2])
-    && $receipt_meta_identity[0] == $meta_identity[0]
-    && $receipt_meta_identity[1] == $meta_identity[1];
-}
-chdir($task) or refuse("pinned task directory could not be re-entered after receipt binding");
-sysseek($meta, 0, 0) or refuse("task metadata could not be rewound for receipt binding");
-local $/;
-my $meta_text = <$meta>;
-defined($meta_text) or refuse("task metadata could not be read for receipt binding");
-my @worktrees = ($meta_text =~ /^worktree=(.*)$/mg);
 my $payload = eval { decode_json($ENV{FM_RECEIPT_PAYLOAD}) };
 refuse("evidence receipt payload is invalid") unless defined($payload) && ref($payload) eq "HASH";
-if (@worktrees == 1 && length($worktrees[0])) {
-  if (open(my $git_head, "-|", "git", "-C", $worktrees[0], "rev-parse", "--verify", "HEAD^{commit}")) {
-    my $head = <$git_head>;
-    if (close($git_head) && defined($head)) {
-      $head =~ s/\r?\n\z//;
-      $payload->{head} = $head if $head =~ /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-    }
-  }
-}
 my $payload_text = encode_json($payload);
 my $record = "$payload_text\n";
 sysopen(my $random, "/dev/urandom", O_RDONLY | O_NOFOLLOW)
