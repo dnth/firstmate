@@ -1172,7 +1172,7 @@ sleep_abort() {  # <id> <lifecycle> <message>
 }
 
 cmd_sleep() {
-  local id=${1:-} pod_id raw rc=0 lifecycle_before lifecycle_after
+  local id=${1:-} pod_id raw rc=0 lifecycle_before lifecycle_after observed
   shift || true
   [ "$#" -eq 0 ] || usage
   require_id "$id"
@@ -1211,10 +1211,12 @@ cmd_sleep() {
     sleep_abort "$id" "$lifecycle_before" "secondmate $id still has an unhandled captured reply; handle it before suspending"
   fi
 
-  if [ "${FM_IDLE_SLEEP_RECHECK:-}" = 1 ] \
-     && ! "$SCRIPT_DIR/fm-idle-sleep.sh" check "$id"; then
-    "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$id" >/dev/null 2>&1 || true
-    return 75
+  if [ "${FM_IDLE_SLEEP_RECHECK:-}" = 1 ]; then
+    observed=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh observe "$id" </dev/null 2>/dev/null) || observed=
+    if [ "$observed" != idle ] || ! "$SCRIPT_DIR/fm-idle-sleep.sh" check "$id"; then
+      "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$id" >/dev/null 2>&1 || true
+      return 75
+    fi
   fi
   if ! (record_set_lifecycle "$id" suspending); then
     sleep_abort "$id" "$lifecycle_before" "secondmate $id could not record its suspending lifecycle; it is left running"

@@ -32,7 +32,27 @@ cat > "$BIN/fm-on.sh" <<SH
 #!/usr/bin/env bash
 printf 'on %s\n' "\$*" >> "$FAKE/calls"
 case "\$3" in
-  observe) cat "$FAKE/observe" ;;
+  observe)
+    if [ -f "$FAKE/final-observe" ]; then
+      if [ -f "$FAKE/observed-\$1" ]; then
+        . "$BIN/fm-secondmate-registry-lib.sh"
+        handoff=\$(secondmate_handoff_lock_path "$STATE" "\$1")
+        reply=\$(secondmate_reply_lifecycle_lock_path "$STATE" "\$1")
+        [ -e "\$handoff" ] && [ -e "\$reply" ] || exit 90
+        [ "\$(tail -1 "$FAKE/reply-actions")" = retire-quiesce-locked ] || exit 91
+        value=\$(cat "$FAKE/final-observe")
+        printf 'final %s %s\n' "\$1" "\$value" >> "$FAKE/observations"
+        [ "\$value" != unreadable ] || exit 255
+        printf '%s\n' "\$value"
+      else
+        touch "$FAKE/observed-\$1"
+        printf 'initial %s idle\n' "\$1" >> "$FAKE/observations"
+        printf 'idle\n'
+      fi
+    else
+      cat "$FAKE/observe"
+    fi
+    ;;
   sleep-reconcile) exit 0 ;;
   children)
     if [ -f "$FAKE/activity-on-children" ]; then
@@ -316,14 +336,35 @@ for stage in children quiesce generation-children generation-quiesce; do
   fi
   rm -f "$FAKE/activity-on-$stage"
 done
+for observation in busy unknown fallback-idle unreadable; do
+  reset_awake
+  printf '%s\n' "$observation" > "$FAKE/final-observe"
+  rm -f "$FAKE/observed-ios" "$FAKE/observed-web"
+  : > "$FAKE/observations"
+  for id in "${ids[@]}"; do
+    idle run "$id" || fail "final $observation observation must defer $id"
+    assert_absent "$STATE/idle-sleep/$id.refused" "final observation deferral must not record a refusal"
+    grep -qx "initial $id idle" "$FAKE/observations" || fail "the initial observation must be idle"
+    grep -qx "final $id $observation" "$FAKE/observations" || fail "the final observation must run under both locks"
+  done
+  [ ! -s "$FAKE/stops" ] || fail "final $observation observation allowed compute to stop"
+  [ "$(grep -c '^arm-locked$' "$FAKE/reply-actions")" = 2 ] || fail "observation deferral did not restore both reply sources"
+  grep -qx 'lifecycle=ready' "$DATA/boat/ios.meta" || fail "Boat observation deferral changed lifecycle"
+  grep -qx 'lifecycle=ready' "$DATA/runpod/web.meta" || fail "RunPod observation deferral changed lifecycle"
+done
+rm -f "$FAKE/final-observe"
+pass "auto-sleep reobserves remote idle under locks and defers busy or unreadable agents"
 reset_awake
 for id in "${ids[@]}"; do idle run "$id" || fail "quiet placement $id did not sleep"; done
 [ "$(wc -l < "$FAKE/stops")" -eq 2 ] || fail "ordinary auto-sleep did not stop both providers"
 reset_awake
+printf 'busy\n' > "$FAKE/observe"
+: > "$FAKE/calls"
 for id in "${ids[@]}"; do
   touch "$STATE/$id.status"
   provider=boat; [ "$id" != web ] || provider=runpod
   idle_env "$BIN/fm-$provider.sh" sleep "$id" || fail "explicit sleep inherited auto-sleep window"
 done
 [ "$(wc -l < "$FAKE/stops")" -eq 2 ] || fail "explicit sleep did not stop both providers"
+assert_no_grep 'observe' "$FAKE/calls" "explicit operator sleeps must not require remote idle"
 pass "locked provider rechecks defer fresh activity while ordinary and explicit sleeps succeed"
