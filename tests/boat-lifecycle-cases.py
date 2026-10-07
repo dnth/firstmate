@@ -194,10 +194,19 @@ class LifecycleTests(unittest.TestCase):
     def test_sleep_guards_refuse_unresolved_reply_and_decision(self):
         self.provision(); self.call('wake')
         state = self.lab.home / 'state'; pending = state / 'pending-replies'; pending.mkdir()
-        (pending / 'fixture').write_text('task_id=mate\nphase=waiting\n')
-        self.call('sleep', ok=False); self.assertEqual(self.provider()['state'], 'ready')
+        (pending / 'fixture').write_text('task_id=mate\nphase=escalated\n')
+        refused = self.call('sleep', ok=False); self.assertEqual(self.provider()['state'], 'ready')
+        self.assertIn('unresolved routed reply: fixture(escalated)', refused.stderr)
         (pending / 'fixture').unlink(); (state / 'mate.status').write_text('needs-decision: [key=fixture] unresolved\n')
-        self.call('sleep', ok=False); self.assertEqual(self.provider()['state'], 'ready')
+        refused = self.call('sleep', ok=False); self.assertEqual(self.provider()['state'], 'ready')
+        self.assertIn('unresolved decisions', refused.stderr)
+    def test_sleep_refusal_names_unhandled_captured_reply(self):
+        self.provision(); self.call('wake')
+        state = self.lab.home / 'state'; inbox = state / 'procevent-inbox'; inbox.mkdir(parents=True)
+        (state / 'mate.meta').write_text('kind=secondmate\n')
+        for suffix in ('result', 'adapter'): (inbox / f'remote-reply-mate.37.{suffix}').write_text('fixture\n')
+        refused = self.call('sleep', ok=False); self.assertEqual(self.provider()['state'], 'ready')
+        self.assertIn('remote reply retirement refused with 1 unhandled captured result(s)', refused.stderr)
     def boat_py(self, verb, *args, ok=True, **env_extra):
         result = subprocess.run(['uv', 'run', '--no-project', str(ROOT / 'bin/fm-boat.py'),
                                  verb, 'mate', *args],

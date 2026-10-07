@@ -25,22 +25,25 @@ case "${1:-}" in
     case "$id" in ''|.*|*[!A-Za-z0-9._-]*) exit 2 ;; esac
     handoff=$(secondmate_handoff_lock_path "$STATE" "$id")
     reply=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
-    fm_lock_acquire_wait "$handoff"
+    fm_lock_acquire_wait "$handoff" || { printf 'error: cannot lock the backlog handoff for %s\n' "$id" >&2; exit 1; }
     trap 'fm_lock_release "$handoff"' EXIT
-    fm_lock_acquire_wait "$reply"
+    fm_lock_acquire_wait "$reply" || { printf 'error: cannot lock the remote reply lifecycle for %s\n' "$id" >&2; exit 1; }
     trap 'fm_lock_release "$reply"; fm_lock_release "$handoff"' EXIT
     if [ "$1" = sleep ] && [ "${FM_IDLE_SLEEP_RECHECK:-}" = 1 ] \
        && ! "$SCRIPT_DIR/fm-idle-sleep.sh" check "$id"; then
       exit 75
     fi
     [ ! -e "$DATA/handoff/$id.outbox.md" ] || { printf 'error: undelivered backlog handoff\n' >&2; exit 1; }
-    fm_pending_reply_reconcile_task "$STATE" "$id" "$STATE/$id.status"
+    # Reconcile first; the scan below names every request still unresolved.
+    fm_pending_reply_reconcile_task "$STATE" "$id" "$STATE/$id.status" || true
+    unresolved=
     for path in "$STATE/pending-replies/"*; do
       [ -f "$path" ] || continue
-      if [ "$(fm_pending_reply_get "$path" task_id)" = "$id" ] && [ "$(fm_pending_reply_get "$path" phase)" != resolved ]; then
-        printf 'error: unresolved routed reply\n' >&2; exit 1
-      fi
+      [ "$(fm_pending_reply_get "$path" task_id)" = "$id" ] || continue
+      phase=$(fm_pending_reply_get "$path" phase) || phase=
+      [ "$phase" = resolved ] || unresolved="$unresolved ${path##*/}(${phase:-unknown})"
     done
+    [ -z "$unresolved" ] || { printf 'error: unresolved routed reply:%s\n' "$unresolved" >&2; exit 1; }
     [ -z "$(status_open_decisions "$STATE/$id.status")" ] || { printf 'error: unresolved decisions\n' >&2; exit 1; }
     dormant_destroy=0
     checked=0
@@ -61,8 +64,10 @@ case "${1:-}" in
       esac
     fi
     if [ "$remote_route" = 1 ] && [ "$dormant_destroy" = 0 ]; then
-      "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sleep-reconcile "$id"
-      children=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh children "$id")
+      "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sleep-reconcile "$id" \
+        || { printf 'error: remote finished-work cleanup failed\n' >&2; exit 1; }
+      children=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh children "$id") \
+        || { printf 'error: remote child work count is unavailable\n' >&2; exit 1; }
       [ "$children" = children=0 ] || { printf 'error: remote child work is active or unknown\n' >&2; exit 1; }
       checked=1
     fi

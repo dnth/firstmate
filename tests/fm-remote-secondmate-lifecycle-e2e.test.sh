@@ -977,6 +977,94 @@ resolve_ios_pending() {
 }
 resolve_ios_pending
 
+# A remote mate's merged-PR reply settles its landing through the real reconcile
+# plane: fm-send, the SSH boundary, and the remote control's carrier check.
+# A carrier-less notice (what the landing notifier used to send) is refused
+# there, which fails the reply's handle and keeps the record; the retry then
+# delivers exactly one notice under the same identity and acknowledges the reply.
+LANDING_URL=https://github.com/acme/alpha/pull/44
+LANDING_FAKEBIN="$TMP_ROOT/landing-fake"
+mkdir -p "$LANDING_FAKEBIN"
+cat > "$LANDING_FAKEBIN/gh" <<SH
+#!/usr/bin/env bash
+[ "\$1 \$2 \$3" = "pr view $LANDING_URL" ] && { echo MERGED; exit 0; }
+exit 2
+SH
+cat > "$LANDING_FAKEBIN/sync" <<'SH'
+#!/usr/bin/env bash
+echo synced
+SH
+cat > "$LANDING_FAKEBIN/carrierless-send" <<SH
+#!/usr/bin/env bash
+. "$ROOT/bin/fm-operational-input.sh"
+exec "$ROOT/bin/fm-send.sh" "\$1" "\$2" "\$3" "\${4#"\$FM_FROMFIRST_MARK"}"
+SH
+chmod +x "$LANDING_FAKEBIN/gh" "$LANDING_FAKEBIN/sync" "$LANDING_FAKEBIN/carrierless-send"
+landing_env() {
+  PATH="$LANDING_FAKEBIN:$PATH" FM_LANDING_FLEET_SYNC_BIN="$LANDING_FAKEBIN/sync" remote_env "$@"
+}
+landing_notices() {
+  { grep -h -F "Landing notice: $LANDING_URL was merged" "$HERDR_LOG" "$REMOTE_HOME"/state/ios.inbox/*.msg \
+      "$REMOTE_HOME"/state/ios.inbox/handled/*.msg 2>/dev/null || true; } | wc -l | tr -d ' '
+}
+# The reply runner's automatic handling inherits the runner's environment, so
+# re-arm it under the carrier-less sender before the reply arrives.
+remote_env "$ROOT/bin/fm-procevent.sh" retire "$SID" >/dev/null \
+  || fail "could not retire the reply runner before the landing reply"
+FM_LANDING_SEND_BIN="$LANDING_FAKEBIN/carrierless-send" landing_env \
+  "$ROOT/bin/fm-procevent-remote-reply.sh" arm ios >/dev/null \
+  || fail "could not re-arm the reply runner before the landing reply"
+FM_LANDING_SEND_BIN="$LANDING_FAKEBIN/carrierless-send" landing_env \
+  "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 || true
+landing_results_before=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" -print | sort)
+printf 'done [key=alpha-landing]: shipped PR %s merged as c3ee504e\n' "$LANDING_URL" \
+  >> "$REMOTE_HOME/state/parent-replies.status"
+LANDING_RESULT='' n=200
+while [ -z "$LANDING_RESULT" ] && [ "$n" -gt 0 ]; do
+  LANDING_RESULT=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" -print | sort \
+    | grep -vxF -f <(printf '%s\n' "$landing_results_before") | tail -1 || true)
+  [ -n "$LANDING_RESULT" ] || { n=$((n - 1)); sleep 0.1; }
+done
+[ -n "$LANDING_RESULT" ] || fail "remote reply source did not capture the merged-PR reply"
+LANDING_SEQ=${LANDING_RESULT%.result}
+LANDING_SEQ=${LANDING_SEQ##*.}
+set +e
+FM_LANDING_SEND_BIN="$LANDING_FAKEBIN/carrierless-send" landing_env \
+  "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios "$LANDING_SEQ" "$LANDING_RESULT" \
+  > "$TMP_ROOT/landing-refused.out" 2>&1
+landing_rc=$?
+set -e
+[ "$landing_rc" -ne 0 ] \
+  || { cat "$TMP_ROOT/landing-refused.out" >&2; fail "a carrier-less landing notice was accepted by the reconcile plane"; }
+assert_grep 'reconcile payload lacks the from-firstmate carrier' "$TMP_ROOT/landing-refused.out" \
+  "the carrier-less landing notice was not refused by the remote carrier check"
+assert_grep 'DRIFT landing-notify-failed' "$TMP_ROOT/landing-refused.out" \
+  "the refused landing notice did not keep its record for retry"
+LANDING_META=$(find "$PARENT/state" -maxdepth 1 -name 'land-ios-44-*.meta' -print | head -1)
+[ -n "$LANDING_META" ] || fail "the refused landing notice lost its landing record"
+[ -z "$(find "$PARENT/state" -maxdepth 1 -name 'landing-settled-*' -print)" ] \
+  || fail "the refused landing notice wrote a settled marker"
+[ "$(landing_notices)" -eq 0 ] || fail "the refused landing notice reached the remote mate"
+landing_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios "$LANDING_SEQ" "$LANDING_RESULT" \
+  > "$TMP_ROOT/landing-retry.out" 2>&1 \
+  || { cat "$TMP_ROOT/landing-retry.out" >&2; fail "the merged-PR reply was not ingested after the carrier fix"; }
+assert_grep 'DRIFT landing-merged' "$TMP_ROOT/landing-retry.out" "the retried landing did not settle as merged"
+assert_absent "$LANDING_META" "the settled landing record was not retired"
+assert_present "$PARENT/state/procevent-inbox/$SID.$LANDING_SEQ.handled" \
+  "the merged-PR reply was not acknowledged"
+assert_grep "done [key=alpha-landing]: shipped PR $LANDING_URL" "$PARENT/state/ios.status" \
+  "the merged-PR reply did not reach the parent status channel"
+[ "$(landing_notices)" -eq 1 ] || fail "the retried landing notice was not delivered exactly once"
+landing_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios "$LANDING_SEQ" "$LANDING_RESULT" \
+  >/dev/null 2>&1 || fail "re-handling the acknowledged merged-PR reply failed"
+landing_env "$ROOT/bin/fm-landing.sh" register ios "$LANDING_URL" >/dev/null \
+  || fail "a repeated merged-PR report was not a no-op"
+[ "$(landing_notices)" -eq 1 ] || fail "a repeated merged-PR report sent a second landing notice"
+[ -z "$(find "$PARENT/state" -maxdepth 1 -name 'land-ios-44-*.meta' -print)" ] \
+  || fail "a repeated merged-PR report filed a second landing record"
+pass "a remote mate's merged-PR reply settles its landing through the reconcile carrier check and retries without duplication"
+rm -f "$PARENT/state/.wake-queue"
+
 # Structured fleet state comes from each home's own snapshot. The remote host is
 # explicit, and the local route remains alongside it.
 SNAPSHOT=$(remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
