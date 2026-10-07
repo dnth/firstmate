@@ -37,6 +37,20 @@ RunPod is an optional compute lifecycle provider beneath a whole-home remote sec
 
 A home with no `data/runpod/` records behaves exactly as it did before this provider existed.
 
+## Idle auto-sleep (config/idle-sleep)
+
+`config/idle-sleep` is a local, gitignored, primary-home-only file that opts Boat and RunPod second-mate placements in to automatic sleep; it is not inherited into secondmate homes.
+Each non-comment line is `<secondmate-id> [<minutes>]`, and a blank minutes field means 30.
+A home without the file, and a placement it does not name, behave exactly as before: sleep stays an explicit operator or firstmate action.
+A line that does not match that shape is ignored and surfaced once, never guessed at.
+
+The primary watcher drives it from its existing cycle through `bin/fm-idle-sleep.sh`, whose header owns the cadence, records, and overrides; there is no second watcher.
+A placement qualifies only when its compute is awake and this home holds no undelivered backlog handoff, no unresolved routed reply, and no open decision for it, and none of its records has changed for the whole window.
+Before sleeping, the attempt also requires the second-mate agent to read idle and its home to supervise no live worker; a busy or unreadable agent keeps the placement awake.
+It then runs the provider's own guarded `sleep` (`bin/fm-boat.sh` or `bin/fm-runpod.sh`), which re-checks every guard and retires finished ships through ordinary teardown, and the next delivery wakes the placement as usual.
+Nothing in this path forces, discards, or deletes: a guard refusal leaves the placement awake and is surfaced as one notification naming the placement and the reason, repeated only if the reason changes after new activity.
+Each auto-sleep appends one line to `state/idle-sleep.log`.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.

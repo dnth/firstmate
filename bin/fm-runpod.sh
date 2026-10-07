@@ -75,12 +75,14 @@
 # 255, because unknown remote completion must be reconciled on the same host.
 # Sleep never retires the logical second mate: the route, the registry record,
 # the reply cursor, and the volume all survive it.
-# Before counting remote children, sleep safely tears down only direct-PR ship
-# tasks that report done and pass fm-teardown's ordinary landed-work guards.
+# Before counting remote children, sleep tears down every finished ship task,
+# whatever its delivery mode, through fm-teardown's ordinary landed-work guards,
+# and the child count then covers live workers only. A finished ship that still
+# holds unlanded work refuses the sleep.
 #
-# Automatic idle sleep is deliberately NOT implemented. Every suspension is an
-# explicit `sleep` from an operator or from firstmate, so a second mate is never
-# taken away mid-thought. Nothing in this repo schedules or triggers one.
+# Suspension is an explicit `sleep` unless the operator opts a second mate in to
+# idle auto-sleep (config/idle-sleep, owned by bin/fm-idle-sleep.sh), which runs
+# this same guarded `sleep` and never forces it.
 #
 # Environment overrides (tests and self-hosted API mirrors only):
 #   FM_RUNPOD_API_BASE      REST base URL, default https://rest.runpod.io/v1
@@ -1125,7 +1127,7 @@ remote_sleep_reconcile() {  # <id>
   fi
   if [ "$rc" -ne 0 ]; then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    die "secondmate $id could not reconcile finished direct-PR work before suspension"
+    die "secondmate $id could not reconcile finished ship work before suspension"
   fi
 }
 

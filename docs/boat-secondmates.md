@@ -34,11 +34,12 @@ Fresh endpoints may change IP or port without changing identity.
 
 ## Cost and sleep policy
 
-Sleep is explicit, never an automatic idle action.
+Sleep is explicit unless the placement opts in to idle auto-sleep, which runs this same guarded sleep after a quiet window; [Idle auto-sleep](configuration.md#idle-auto-sleep-configidle-sleep) owns that contract.
 A dormant route wakes before a requested delivery or remote launch; health polling, startup convergence, configuration propagation, and reply polling do not wake it.
 Wake-on-delivery follows the shared [agent restoration contract](remote-secondmates.md#compute-wake-and-agent-restoration).
-Sleep refuses pending routed replies, open decisions, undelivered handoffs, or active or unknown remote child work.
-A finished worker may be released at PR-ready because the primary tracks the PR to merge under a [landing record](remote-secondmates.md#landing-owner), so review time does not need a live worker.
+Sleep first retires every finished ship, whatever its delivery mode, through the ordinary landed-work teardown guard.
+It then refuses pending routed replies, open decisions, undelivered handoffs, live or unknown remote child work, and any remaining finished ship whose work has not landed.
+A finished worker may be released at PR-ready because the primary tracks the PR to merge under a [landing record](remote-secondmates.md#landing-owner), so review time does not need a live worker or leave a worker record blocking sleep.
 
 | Size | Compute rate per hour |
 | --- | ---: |
@@ -50,7 +51,7 @@ A finished worker may be released at PR-ready because the primary tracks the PR 
 These are the adapter's reference rates, not a guarantee of account pricing or storage charges.
 Inspect the provider's current pricing before authorizing paid work.
 Every allocation and resume has a finite provider TTL; the default is 86,400 seconds, and the adapter accepts 1 through 2,592,000 seconds.
-TTL is a server-side cost backstop, not an idle-sleep policy or proof that local credential cleanup succeeded.
+TTL is a server-side cost backstop, not the idle-sleep policy or proof that local credential cleanup succeeded.
 
 ```bash
 bash bin/fm-boat.sh status ios

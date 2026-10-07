@@ -70,7 +70,7 @@ A RunPod second mate keeps its whole durable state on a network volume and rents
 A 100 GB volume therefore idles at about $7/month with no compute running at all.
 `bin/fm-runpod.sh cost <id>` prints that home's real numbers, reading the live pod's current rate rather than a table in this file.
 
-Automatic idle sleep is deliberately not implemented yet: suspension is an explicit operator or firstmate decision, so a second mate is never taken away mid-thought.
+Suspension is an explicit operator or firstmate decision unless the second mate opts in to idle auto-sleep, which runs this same guarded `sleep` after a quiet window and never forces it; [Idle auto-sleep](configuration.md#idle-auto-sleep-configidle-sleep) owns that contract.
 
 ## Durable pod storage
 
@@ -234,8 +234,8 @@ Run `recover-stuck --yes` to acknowledge and clear that attempt before another o
 
 ## Suspending safely
 
-Before evaluating these guards, `sleep` reconciles handled correlated replies and sends each finished delivered direct-PR child through the ordinary landed-work teardown guard.
-That cleanup removes only work already proven safe to tear down; unlanded or otherwise unsafe children remain and block suspension.
+Before evaluating these guards, `sleep` reconciles handled correlated replies and sends each finished ship, whatever its delivery mode, through the ordinary landed-work teardown guard.
+That cleanup removes only work already proven safe to tear down; a finished ship with unlanded work refuses suspension, and the worker count that follows covers live workers only.
 
 `sleep` refuses, and leaves the pod running, while any of these is true:
 

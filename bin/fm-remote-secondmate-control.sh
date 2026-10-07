@@ -512,46 +512,61 @@ cmd_observe() {
   printf '\n'
 }
 
-# Read-only count of the work this home supervises, so a caller can ask whether
-# the host is idle without retiring anything. It counts exactly what teardown's
-# child sweep walks: the home's own state/*.meta records. The secondmate agent's
-# own endpoint record lives under state/parent-route/ and is deliberately not
-# one of them.
-cmd_children() {
-  local id=$1 meta count=0
-  validate_id "$id"
-  validate_home "$id"
-  for meta in "$TARGET_HOME/state"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-    count=$((count + 1))
-  done
-  printf 'children=%s\n' "$count"
+# Finished ship tasks are the only records a sleep may retire, and only through
+# fm-teardown's ordinary landed-work guard. A ship counts as finished when
+# fm-crew-state reports `state: done` for it, whatever its delivery mode; a
+# scout, a secondmate, a working or parked ship, and any state the read cannot
+# prove all stay live.
+child_is_finished_ship() { # <meta-file> <child-id>
+  local meta=$1 child=$2 state
+  [ "$(fm_meta_get "$meta" kind)" = ship ] || return 1
+  state=$(FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$TARGET_HOME/state" FM_DATA_OVERRIDE="$TARGET_HOME/data" \
+    FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \
+    "$SCRIPT_DIR/fm-crew-state.sh" "$child" 2>/dev/null || true)
+  case "$state" in
+    'state: done'|'state: done '*) return 0 ;;
+  esac
+  return 1
 }
 
-cmd_sleep_reconcile() {
-  local id=$1 meta child mode kind state reconciled=0
+# Read-only count of the LIVE work this home supervises, so a caller can ask
+# whether the host is idle without retiring anything. It walks the home's own
+# state/*.meta records, the same set teardown's child sweep walks, and leaves
+# out finished ships: sleep-reconcile owns those, and it refuses the sleep when
+# one still holds unlanded work. The secondmate agent's own endpoint record
+# lives under state/parent-route/ and is deliberately not one of them.
+cmd_children() {
+  local id=$1 meta child count=0
   validate_id "$id"
   validate_home "$id"
   for meta in "$TARGET_HOME/state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     child=${meta##*/}
     child=${child%.meta}
-    mode=$(fm_meta_get "$meta" mode)
-    kind=$(fm_meta_get "$meta" kind)
-    [ "$mode" = direct-PR ] && [ "$kind" = ship ] || continue
-    state=$(FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
-      FM_STATE_OVERRIDE="$TARGET_HOME/state" FM_DATA_OVERRIDE="$TARGET_HOME/data" \
-      FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$child" 2>/dev/null || true)
-    case "$state" in
-      'state: done'|'state: done '*) ;;
-      *) continue ;;
-    esac
+    child_is_finished_ship "$meta" "$child" && continue
+    count=$((count + 1))
+  done
+  printf 'children=%s\n' "$count"
+}
+
+# Retire every finished ship, of any delivery mode, through ordinary teardown
+# and never forced: teardown refuses work that has not landed, and that refusal
+# fails this command so the sleep stops and the work is kept.
+cmd_sleep_reconcile() {
+  local id=$1 meta child reconciled=0
+  validate_id "$id"
+  validate_home "$id"
+  for meta in "$TARGET_HOME/state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    child=${meta##*/}
+    child=${child%.meta}
+    child_is_finished_ship "$meta" "$child" || continue
     FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$TARGET_HOME/state" FM_DATA_OVERRIDE="$TARGET_HOME/data" \
       FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \
       "$SCRIPT_DIR/fm-teardown.sh" "$child" >/dev/null \
-      || die "finished direct-PR child $child could not be torn down safely"
+      || die "finished ship $child could not be torn down safely"
     reconciled=$((reconciled + 1))
   done
   printf 'reconciled=%s\n' "$reconciled"

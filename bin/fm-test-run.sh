@@ -158,7 +158,7 @@ family_for_basename() {
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
     fm-wake-queue.test.sh|fm-inbox.test.sh|fm-inbox-result.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
-    fm-watch-triage.test.sh|fm-task-inbox.test.sh|\
+    fm-watch-triage.test.sh|fm-task-inbox.test.sh|fm-idle-sleep-watch.test.sh|\
     fm-watcher-lock.test.sh|fm-omp-branch-bash.test.sh|fm-omp-branch-supervision.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
@@ -172,6 +172,7 @@ family_for_basename() {
       ;;
     fm-backlog-handoff.test.sh|fm-omp-secondmate.test.sh|fm-on.test.sh|fm-remote-backlog-handoff.test.sh|\
     fm-remote-doctor.test.sh|fm-remote-job.test.sh|fm-pending-reply-sleep-reconcile.test.sh|\
+    fm-idle-sleep.test.sh|fm-remote-secondmate-sleep-reconcile.test.sh|\
     fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
     fm-remote-secondmate-trace-context.test.sh|\
     fm-runpod-lifecycle.test.sh|fm-runpod-routing.test.sh|fm-runpod-pod-boot.test.sh|fm-runpod-omp-auth.test.sh|\
@@ -426,6 +427,8 @@ tests/fm-herdr-session-cleanup.test.sh 4832
 tests/fm-herdr-submit-confirm-live-e2e.test.sh 21
 tests/fm-hermes-harness.test.sh 146669
 tests/fm-hermes-live-e2e.test.sh 28
+tests/fm-idle-sleep-watch.test.sh 8000
+tests/fm-idle-sleep.test.sh 15000
 tests/fm-inbox-result.test.sh 7377
 tests/fm-inbox.test.sh 7022
 tests/fm-kimi-harness.test.sh 16139
@@ -472,6 +475,7 @@ tests/fm-remote-job.test.sh 48694
 tests/fm-remote-reply.test.sh 99366
 tests/fm-remote-secondmate-lifecycle-e2e.test.sh 700000
 tests/fm-remote-secondmate-parent-binding.test.sh 15892
+tests/fm-remote-secondmate-sleep-reconcile.test.sh 3000
 tests/fm-remote-secondmate-trace-context.test.sh 49391
 tests/fm-runpod-lifecycle.test.sh 56695
 tests/fm-runpod-omp-auth.test.sh 1012
