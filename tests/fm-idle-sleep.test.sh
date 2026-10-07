@@ -38,6 +38,9 @@ case "\$3" in
     if [ -f "$FAKE/activity-on-children" ]; then
       touch "$STATE/\$1.status"
     fi
+    if [ -f "$FAKE/activity-on-generation-children" ]; then
+      printf '1\n' > "$STATE/.remote-handoff-\$1.generation"
+    fi
     printf 'children=%s\n' "\$(cat "$FAKE/children")" ;;
   *) exit 64 ;;
 esac
@@ -104,6 +107,34 @@ touch "$STATE/ios.status"
 out=$(idle check ios) && fail "recent activity must keep ios awake"
 assert_contains "$out" "active within the idle window" "the verdict must name the window"
 pass "activity inside the window blocks"
+
+for id in "${ids[@]}"; do
+  age_everything
+  printf '1\n' > "$STATE/.remote-handoff-$id.generation"
+  out=$(idle check "$id") && fail "a completed handoff must restart $id's quiet window"
+  assert_contains "$out" "active within the idle window" "handoff generation verdict"
+  : > "$FAKE/calls"
+  idle run "$id" || fail "recent handoff run must defer successfully"
+  [ ! -s "$FAKE/calls" ] || fail "a recent generation allowed a remote attempt"
+done
+age_everything
+pass "a recent handoff generation alone restarts the quiet window"
+
+printf -- '- docs - Docs domain. (host: fm-sm-docs; root: /srv/fm; home: /srv/sm-docs; scope: docs work; projects: alpha; added 2026-08-12)\n' >> "$DATA/secondmates.md"
+printf 'lifecycle=ready\n' > "$DATA/boat/docs.meta"
+printf 'doc? 30\n' > "$CONFIG/idle-sleep"
+mkdir -p "$TMP_ROOT/docs"
+age_everything
+out=$(cd "$TMP_ROOT" && idle check docs) && fail "a literal malformed ID opted in a glob match"
+assert_contains "$out" "not opted in" "glob syntax must not opt in docs"
+: > "$FAKE/calls"
+report=$(cd "$TMP_ROOT" && idle tick)
+assert_contains "$report" "doc? 30" "malformed wake must preserve literal tokens"
+settle
+[ ! -s "$FAKE/calls" ] || fail "a malformed glob attempted provider work"
+[ -z "$(cd "$TMP_ROOT" && idle tick)" ] || fail "literal malformed line reported twice"
+printf 'ios 2\nweb\n' > "$CONFIG/idle-sleep"
+pass "configuration parsing validates literal tokens despite matching paths"
 
 # Each local blocker, one at a time, past the window.
 age_everything
@@ -193,10 +224,11 @@ pass "a guard refusal is reported once and never forced"
 
 # A different reason after new activity is a new report.
 printf 'error: unresolved decisions\n' > "$FAKE/sleep-msg"
-touch "$STATE/ios.status"
+printf '2\n' > "$STATE/.remote-handoff-ios.generation"
 idle tick >/dev/null; settle
+assert_absent "$STATE/idle-sleep/ios.refused" "completed handoff must clear an old refusal"
+assert_absent "$STATE/idle-sleep/ios.reported" "completed handoff must clear old reporting state"
 age_everything; perl -e 'utime(time-7200,time-7200,@ARGV)' "$STATE/idle-sleep/ios.attempt"
-rm -f "$STATE/idle-sleep/ios.refused" "$STATE/idle-sleep/ios.reported"
 idle tick >/dev/null; wait_for_calls 4; settle; age_everything
 report=$(idle tick)
 assert_contains "$report" "unresolved decisions" "a new refusal reason must be reported"
@@ -216,7 +248,7 @@ for id in "${ids[@]}"; do
 done
 printf 'web 2\nweb 2 extra\nios invalid\nios 2\n' > "$CONFIG/idle-sleep"
 [ -z "$(idle tick)" ] || fail "alternating malformed lines were reported again"
-[ "$(grep -c 'idle-sleep-config:' "$STATE/.wake-queue")" = 2 ] || fail "expected one wake per malformed line"
+[ "$(grep -c 'idle-sleep-config:' "$STATE/.wake-queue")" = 3 ] || fail "expected one wake per malformed line including the literal glob"
 settle
 [ "$(sleep_calls)" = 0 ] || fail "malformed configuration attempted sleep"
 pass "distinct malformed lines disable placements and each report once"
@@ -248,6 +280,9 @@ printf '%s\n' "\$1" >> "$FAKE/reply-actions"
 if [ "\$1" = retire-quiesce-locked ] && [ -f "$FAKE/activity-on-quiesce" ]; then
   touch "$STATE/\$2.status"
 fi
+if [ "\$1" = retire-quiesce-locked ] && [ -f "$FAKE/activity-on-generation-quiesce" ]; then
+  printf '1\n' > "$STATE/.remote-handoff-\$2.generation"
+fi
 SH
 chmod +x "$FAKEBIN/uv" "$FAKEBIN/curl" "$FAKEBIN/auth-stop" "$BIN/fm-procevent-remote-reply.sh"
 export PATH="$FAKEBIN:$PATH"
@@ -266,7 +301,7 @@ reset_awake() {
   : > "$FAKE/stops"; : > "$FAKE/reply-actions"
   age_everything
 }
-for stage in children quiesce; do
+for stage in children quiesce generation-children generation-quiesce; do
   reset_awake
   touch "$FAKE/activity-on-$stage"
   for id in "${ids[@]}"; do
@@ -276,7 +311,7 @@ for stage in children quiesce; do
   [ ! -s "$FAKE/stops" ] || fail "fresh activity did not block provider compute stop"
   grep -qx 'lifecycle=ready' "$DATA/boat/ios.meta" || fail "Boat deferral changed lifecycle"
   grep -qx 'lifecycle=ready' "$DATA/runpod/web.meta" || fail "RunPod deferral changed lifecycle"
-  if [ "$stage" = quiesce ]; then
+  if [ "${stage##*-}" = quiesce ]; then
     [ "$(grep -c '^arm-locked$' "$FAKE/reply-actions")" = 2 ] || fail "deferred providers did not restore reply sources"
   fi
   rm -f "$FAKE/activity-on-$stage"

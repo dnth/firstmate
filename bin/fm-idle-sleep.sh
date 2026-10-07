@@ -69,11 +69,12 @@ positive_int() { case "$1" in ''|*[!0-9]*|0*) return 1 ;; esac; }
 # one, so a typo is reported rather than silently opting a placement in or out.
 config_entries() {
   local line id minutes extra
+  local -a fields
   [ -f "$CONFIG_FILE" ] && [ ! -L "$CONFIG_FILE" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line%%#*}
-    # shellcheck disable=SC2086 # word splitting is the parse
-    set -- $line
+    IFS=$' \t\n' read -r -a fields <<< "$line"
+    set -- "${fields[@]}"
     [ "$#" -gt 0 ] || continue
     id=$1 minutes=${2:-$DEFAULT_MINUTES} extra=${3:-}
     if [ -n "$extra" ] || ! id_valid "$id" || ! positive_int "$minutes"; then
@@ -100,7 +101,8 @@ window_minutes() { # <id> -> minutes, or empty when not opted in
 # The newest change this home recorded for the placement.
 last_activity() { # <id> -> epoch
   local id=$1 newest=0 path m task_id
-  for path in "$STATE/$id.status" "$STATE/$id.meta" "$DATA/boat/$id.meta" \
+  for path in "$STATE/$id.status" "$STATE/$id.meta" "$STATE/.remote-handoff-$id.generation" \
+              "$DATA/boat/$id.meta" \
               "$DATA/runpod/$id.meta" "$DATA/handoff/$id".*; do
     [ -e "$path" ] || continue
     m=$(fm_path_mtime "$path") || continue
