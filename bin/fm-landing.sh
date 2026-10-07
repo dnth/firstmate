@@ -65,6 +65,8 @@ case "$FORGE_TIMEOUT" in ''|0|*[!0-9]*) FORGE_TIMEOUT=20 ;; esac
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
+# shellcheck source=bin/fm-operational-input.sh
+. "$SCRIPT_DIR/fm-operational-input.sh"
 
 usage() {
   awk '
@@ -363,6 +365,9 @@ cmd_settle() {
   else
     text="Landing notice: $url was closed without merging. Close or re-plan any row you kept open for it; the main home no longer tracks it."
   fi
+  # The reconcile plane carries only from-firstmate payloads, like every other
+  # reconcile delivery; the delivery id stays URL-bound so a retry is identical.
+  fm_message_mark_from_firstmate "$text" text
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     if [ -L "$marker" ] || ! grep -qxF "$url" "$marker"; then
       die "invalid settled marker for $url"

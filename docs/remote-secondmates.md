@@ -246,7 +246,7 @@ The landing record keeps that custody, so it outlives the worker; the [landing s
 The record is not a board item and not a worker; the second mate's own id never owns a poll, and `bin/fm-pr-check.sh` and the arming library refuse a second mate's id.
 The mate may therefore release a finished worker at PR-ready without losing tracking.
 Merge authority is unchanged: the primary merges through the landing id under the [ship-landing procedure](../.agents/skills/ship-landing/SKILL.md), with custody refusals and captain overrides owned by the [merge guard](../bin/fm-merge-guard-lib.sh).
-A merge, by the primary or on the forge, wakes the primary, and the merged-PR reconcile in `bin/fm-todo-project.sh` settles the record: it attempts to refresh the project clone through the guarded fleet sync, tells the mate through `bin/fm-send.sh` so it can close its own row, and retires the record.
+A merge, by the primary or on the forge, wakes the primary, and the merged-PR reconcile in `bin/fm-todo-project.sh` settles the record: it attempts to refresh the project clone through the guarded fleet sync, sends the mate a from-firstmate landing notice through `bin/fm-send.sh` reconciliation delivery so it can close its own row, and retires the record.
 A PR closed without merging is settled by the same reconcile on GitHub, noticed at the next heartbeat rather than by the poll.
 Settlement reports failed or skipped clone refreshes.
 A genuinely undelivered notice, including a refusal before delivery because restoration or the endpoint is unconfirmed, keeps the record for retry through the same reconciliation delivery identity.
