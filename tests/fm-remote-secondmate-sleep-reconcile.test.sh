@@ -72,9 +72,9 @@ pass "reconcile retires finished ships in every mode and refuses remaining live 
 rm -f "$HOME_DIR/state/live.meta" "$HOME_DIR/state/scout.meta" "$HOME_DIR/state/blind.meta"
 [ "$(ctl sleep-reconcile ios)" = reconciled=0 ] || fail "an empty reconciled home must permit sleep"
 [ "$(ctl children ios)" = children=0 ] || fail "an empty home must have no live workers"
-add_child shipnm ship no-mistakes done
-add_child shipdp ship direct-PR done
-add_child shiplo ship local-only done
+add_child shipnm ship no-mistakes 'done'
+add_child shipdp ship direct-PR 'done'
+add_child shiplo ship local-only 'done'
 [ "$(ctl sleep-reconcile ios)" = reconciled=3 ] || fail "finished landed ships must permit reconciliation"
 [ "$(ctl children ios)" = children=0 ] || fail "successful reconciliation left workers behind"
 pass "reconciliation succeeds for empty homes and finished landed ships in every mode"

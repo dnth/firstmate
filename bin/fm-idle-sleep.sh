@@ -205,7 +205,8 @@ cmd_run() {
   id_valid "$id" || usage
   mkdir -p "$RECORDS" || exit 1
   fm_lock_try_acquire "$lock" || exit 0
-  trap "fm_lock_release $(printf '%q' "$lock")" EXIT
+  FM_IDLE_SLEEP_LOCK=$lock
+  trap 'fm_lock_release "$FM_IDLE_SLEEP_LOCK"' EXIT
   local_verdict "$id" >/dev/null || exit 0
   observed=$(run_remote_read "$id" observe) || exit 0
   case "$observed" in idle) ;; *) exit 0 ;; esac
