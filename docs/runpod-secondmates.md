@@ -234,7 +234,7 @@ Run `recover-stuck --yes` to acknowledge and clear that attempt before another o
 
 ## Suspending safely
 
-Before evaluating these guards, `sleep` reconciles handled correlated replies and runs the [remote control script's finished-worker reconciliation](../bin/fm-remote-secondmate-control.sh).
+`sleep` reconciles handled correlated replies and runs the [remote control script's finished-worker reconciliation](../bin/fm-remote-secondmate-control.sh) before suspending compute.
 Unlanded work still blocks suspension even when the live-worker count is zero.
 
 `sleep` refuses, and leaves the pod running, while any of these is true:

@@ -38,8 +38,8 @@ Sleep is explicit unless the placement opts in to idle auto-sleep, which runs th
 A dormant route wakes before a requested delivery or remote launch; health polling, startup convergence, configuration propagation, and reply polling do not wake it.
 Wake-on-delivery follows the shared [agent restoration contract](remote-secondmates.md#compute-wake-and-agent-restoration).
 The [remote control script](../bin/fm-remote-secondmate-control.sh) owns finished-worker reconciliation before sleep.
-It then refuses pending routed replies, open decisions, undelivered handoffs, live or unknown remote child work, and any remaining finished ship whose work has not landed.
-A finished worker may be released at PR-ready because the primary tracks the PR to merge under a [landing record](remote-secondmates.md#landing-owner), so review time does not need a live worker or leave a worker record blocking sleep.
+Sleep refuses pending routed replies, open decisions, undelivered handoffs, live or unknown remote child work, and any remaining finished ship whose work has not landed.
+Worker release at PR-ready follows the shared [landing-owner contract](remote-secondmates.md#landing-owner).
 
 | Size | Compute rate per hour |
 | --- | ---: |

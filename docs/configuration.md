@@ -48,7 +48,7 @@ A malformed line disables auto-sleep for its named placement, even if another li
 Each distinct malformed line is reported via one wake, with deduplication retained across ticks and alternating malformed lines.
 
 The primary watcher drives it from its existing cycle through `bin/fm-idle-sleep.sh`, whose header owns the cadence, records, and overrides; there is no second watcher.
-A placement qualifies only when its compute is awake and this home holds no undelivered backlog handoff, no unresolved routed reply, and no open decision for it, and none of its records has changed for the whole window.
+A placement qualifies only when its compute is awake and this home holds no undelivered backlog handoff, no unresolved routed reply, and no open decision for it, and none of the activity records tracked by that script has changed for the whole window.
 Before sleeping, the attempt also requires the second-mate agent to read authoritative idle and its home to supervise no live worker; busy, unknown, and fallback-idle observations keep the placement awake.
 It then runs the provider's own guarded `sleep` (`bin/fm-boat.sh` or `bin/fm-runpod.sh`), which re-checks every guard and retires finished ships through ordinary teardown, and the next delivery wakes the placement as usual.
 Auto-sleep eligibility and authoritative remote idle are rechecked under the provider delivery and reply locks after worker reconciliation and immediately before stopping compute; fresh activity, a busy agent, or an unreadable observation defers the attempt without a refusal notification.
