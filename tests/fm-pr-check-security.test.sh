@@ -1477,7 +1477,11 @@ test_self_merge_and_poll_publish_one_outcome() {
   set -e
   [ "$rc" -eq 0 ] \
     || fail "merge-outcome-committed: watcher failed: $(cat "$dir/watch.err")"
-  [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
+  # The parent-reply protocol also carries PR custody; only the exact merge
+  # outcome record participates in merge-notice deduplication.
+  assert_grep "PR $url custody task=task-a " "$replies" \
+    "merge-outcome-committed: PR-ready did not report custody"
+  [ "$(grep -c -x -F "done [key=merged-task-a]: merged task-a $url" "$replies")" -eq 1 ] \
     || fail "merge-outcome-committed: self and poll reports produced duplicate outcomes"
   assert_no_grep "check: $state/task-a.check.sh: merged" "$state/.wake-queue" \
     "merge-outcome-committed: absorbed poll published a second outcome"
@@ -1557,7 +1561,7 @@ test_merged_poll_reports_upward_from_a_secondmate_home_once() {
   esac
   assert_grep "done [key=merged-task-a]: merged task-a $url" "$replies" \
     "merged-poll-upward: a merge this home did not perform was never reported upward"
-  [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
+  [ "$(grep -c -x -F "done [key=merged-task-a]: merged task-a $url" "$replies")" -eq 1 ] \
     || fail "merged-poll-upward: one detected merge produced more than one upward line"
   ack_watcher_cycle "$state" || fail "merged-poll-upward: acknowledgement failed"
 
@@ -1570,7 +1574,7 @@ test_merged_poll_reports_upward_from_a_secondmate_home_once() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "merged-poll-upward: second watcher cycle failed: $(cat "$dir/watch-2.err")"
-  [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
+  [ "$(grep -c -x -F "done [key=merged-task-a]: merged task-a $url" "$replies")" -eq 1 ] \
     || fail "merged-poll-upward: an absorbed duplicate detection reported the merge again"
   pass "a merge detected by the poll is reported upward from a secondmate home exactly once"
 }
@@ -1618,9 +1622,9 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
   pass "a different merged PR for the same task gets its own first notification"
 }
 
-test_persistent_secondmate_retirement_is_poll_only() {
-  local dir state meta_before status_before registry_before endpoint_before rc
-  dir=$(make_case merged-retirement-secondmate)
+test_persistent_secondmate_refuses_poll_registration() {
+  local dir state meta_before status_before registry_before endpoint_before
+  dir=$(make_case poll-refusal-secondmate)
   state="$dir/home/state"
   fm_write_meta "$state/domain.meta" \
     'window=session:fm-domain' \
@@ -1640,20 +1644,16 @@ test_persistent_secondmate_retirement_is_poll_only() {
   status_before=$(shasum -a 256 "$state/domain.status")
   registry_before=$(shasum -a 256 "$dir/home/data/secondmates.md")
   endpoint_before=$(shasum -a 256 "$dir/endpoint-sentinel")
-  seed_canonical_poll "$dir" domain https://github.com/o/r/pull/2
-
-  set +e
-  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "persistent secondmate merged watcher failed: $(cat "$dir/watch.err")"
+  if fm_pr_poll_prepare "$state" domain github https://github.com/o/r/pull/2 github.com o/r 2 "$POLL"; then
+    fail "persistent secondmate accepted a poll under its own id"
+  fi
   assert_poll_absent "$state" domain
-  [ "$(shasum -a 256 "$state/domain.meta")" = "$meta_before" ] || fail "retirement changed secondmate metadata"
-  [ "$(shasum -a 256 "$state/domain.status")" = "$status_before" ] || fail "retirement changed secondmate status"
-  [ "$(shasum -a 256 "$dir/home/data/secondmates.md")" = "$registry_before" ] || fail "retirement changed secondmate registry"
-  [ "$(shasum -a 256 "$dir/endpoint-sentinel")" = "$endpoint_before" ] || fail "retirement changed secondmate endpoint evidence"
-  [ -d "$dir/secondmate-home" ] || fail "retirement removed the persistent secondmate home"
-  pass "merged poll retirement preserves every persistent secondmate lifecycle artifact"
+  [ "$(shasum -a 256 "$state/domain.meta")" = "$meta_before" ] || fail "poll refusal changed secondmate metadata"
+  [ "$(shasum -a 256 "$state/domain.status")" = "$status_before" ] || fail "poll refusal changed secondmate status"
+  [ "$(shasum -a 256 "$dir/home/data/secondmates.md")" = "$registry_before" ] || fail "poll refusal changed secondmate registry"
+  [ "$(shasum -a 256 "$dir/endpoint-sentinel")" = "$endpoint_before" ] || fail "poll refusal changed secondmate endpoint evidence"
+  [ -d "$dir/secondmate-home" ] || fail "poll refusal removed the persistent secondmate home"
+  pass "poll registration refuses secondmate ids and preserves their lifecycle artifacts"
 }
 
 test_retirement_crash_recovery() {
@@ -2214,7 +2214,7 @@ test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome
 test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_different_merged_pr_for_same_task_is_not_absorbed
-test_persistent_secondmate_retirement_is_poll_only
+test_persistent_secondmate_refuses_poll_registration
 test_retirement_crash_recovery
 test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
