@@ -82,8 +82,7 @@
 #   DRIFT landing-<merged|closed>: <id> - <reason>
 #     A remote second mate's main-owned landing record (bin/fm-landing.sh) names a
 #     PR the forge shows merged or closed. Under --reconcile this is settled
-#     instead of reported: the clone is refreshed on merge, the second mate is
-#     told, and the record is retired (DRIFT landing-notify-failed keeps it).
+#     instead of reported; bin/fm-landing.sh owns settlement and retry semantics.
 #     A second mate's own id is never a PR owner here.
 #
 # The caller re-projects the session todo after every board mutation, including

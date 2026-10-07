@@ -292,15 +292,15 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
-# Reads the canonical PR identity out of state/<id>.meta under the
-# order-independent contract stated in this file's header: a second pr= line
-# or a malformed pr_head= field is the only content-level refusal.
 # 0 iff the task record carries exactly this kind= value (an absent record or
 # kind never matches).
 fm_pr_meta_kind_is() {  # <meta-file> <kind>
   [ -f "$1" ] && grep -qx "kind=$2" "$1" 2>/dev/null
 }
 
+# Reads the canonical PR identity out of state/<id>.meta under the
+# order-independent contract stated in this file's header: a second pr= line
+# or a malformed pr_head= field is the only content-level refusal.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0
   FM_PR_META_PROVIDER=

@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 # fm-landing.sh - main-owned landing records for a remote second mate's PRs.
 #
-# A remote second mate sleeps between turns, and its merge poll runs only while
-# it is awake, so the home that must notice a merge cannot be the mate's. When
-# the remote reply relay (bin/fm-procevent-remote-reply.sh) ingests a mate's
-# `done` line naming `PR <url>`, this home records one landing record for that
-# PR under a main-owned id and arms the ordinary merge poll on it. The mate may
-# then release its finished worker at PR-ready: main keeps the PR tracked.
+# docs/remote-secondmates.md#landing-owner owns the remote PR landing lifecycle.
 # Merge authority is unchanged and lives in .agents/skills/ship-landing/SKILL.md.
 #
 # Usage:
@@ -36,23 +31,16 @@
 #       bin/fm-todo-project.sh runs this under --check --reconcile, which the
 #       merged-PR check wake already triggers.
 #   fm-landing.sh settle <landing-id> <merged|closed>
-#       Finish a landed or closed PR: on merge refresh the project's clone
-#       through bin/fm-fleet-sync.sh (best effort), tell the second mate through bin/fm-send.sh
-#       so it can close its own row, then retire the poll and the record. A mate
-#       that cannot be told keeps the record for identity-bound delivery retry.
-#       Delivered or durable notices are never resent; diagnostics remain visible.
+#       Finish a landed or closed PR: on merge refresh the project's clone through bin/fm-fleet-sync.sh (best effort), tell the second mate through bin/fm-send.sh so it can close its own row, then retire the poll and the record.
+#       A mate that cannot be told keeps the record for identity-bound delivery retry.
+#       Delivered notices, durable requests, and unknown completion after delivery are never resent; pre-delivery refusals keep the record without writing a settled marker.
+#       Diagnostics remain visible.
 #       Failed or skipped clone refreshes are reported in the settlement output.
 #
-# Record: state/<landing-id>.meta holding kind=landing, secondmate=<id>, the
-# canonical pr=<url>, and the custody the mate reported (pr_head=, nm_run_id=,
-# custody_task=, custody_mode=, custody_evidence=, custody_blocked=), plus the
-# standard PR-poll sidecars. bin/fm-merge-guard-lib.sh judges a merge of a
-# landing record by that custody: none or incomplete refuses standing authority
-# and any accepted-blocked criterion refuses it, so only the captain's explicit
-# --captain-instruction merges those, exactly as for a local ship task. The record is a state
-# record, not a board item and not a worker: the poll, merge outcome, and
-# cleanup reuse bin/fm-pr-lib.sh and bin/fm-merge-outcome-lib.sh unchanged. Its
-# presence also keeps supervision armed, which the merge poll needs.
+# Record: state/land-<secondmate-id>-<number>-<digest>.meta holding kind=landing, secondmate=<id>, the canonical pr=<url>, and the custody the mate reported (pr_head=, nm_run_id=, custody_task=, custody_mode=, custody_evidence=, custody_blocked=), plus the standard PR-poll sidecars.
+# bin/fm-merge-guard-lib.sh owns custody merge guards.
+# The record is a state record, not a board item and not a worker: the poll, merge outcome, and cleanup reuse bin/fm-pr-lib.sh and bin/fm-merge-outcome-lib.sh unchanged.
+# Its presence also keeps supervision armed, which the merge poll needs.
 # state/landing-settled-<digest> records the canonical PR URL after notification.
 # FM_LANDING_SEND_BIN and FM_LANDING_FLEET_SYNC_BIN replace the notifier and the
 # clone refresh; FM_LANDING_FORGE_TIMEOUT (default 20) bounds each forge read.
