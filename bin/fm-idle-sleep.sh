@@ -65,7 +65,7 @@ usage() { sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 id_valid() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
 positive_int() { case "$1" in ''|*[!0-9]*|0*) return 1 ;; esac; }
 
-# Print `<id> <minutes>` for each valid line and `bad <line>` for each invalid
+# Print `<id> <minutes>` for each valid line and `!invalid <line>` for each invalid
 # one, so a typo is reported rather than silently opting a placement in or out.
 config_entries() {
   local line id minutes extra
@@ -77,7 +77,7 @@ config_entries() {
     [ "$#" -gt 0 ] || continue
     id=$1 minutes=${2:-$DEFAULT_MINUTES} extra=${3:-}
     if [ -n "$extra" ] || ! id_valid "$id" || ! positive_int "$minutes"; then
-      printf 'bad %s\n' "$*"
+      printf '!invalid %s\n' "$*"
       continue
     fi
     printf '%s %s\n' "$id" "$minutes"
@@ -85,11 +85,15 @@ config_entries() {
 }
 
 window_minutes() { # <id> -> minutes, or empty when not opted in
-  local id=$1 entry_id minutes
+  local id=$1 entry_id minutes selected=
   while read -r entry_id minutes; do
-    [ "$entry_id" = bad ] && continue
-    [ "$entry_id" = "$id" ] && { printf '%s\n' "$minutes"; return 0; }
+    if [ "$entry_id" = "!invalid" ]; then
+      [ "${minutes%% *}" != "$id" ] || return 0
+      continue
+    fi
+    [ "$entry_id" != "$id" ] || [ -n "$selected" ] || selected=$minutes
   done < <(config_entries)
+  [ -z "$selected" ] || printf '%s\n' "$selected"
   return 0
 }
 
@@ -166,14 +170,13 @@ cmd_tick() {
   marker="$STATE/.idle-sleep-tick"
   [ "$(fm_path_age "$marker")" -ge "$TICK_SECONDS" ] || return 0
   mkdir -p "$RECORDS" && touch "$marker" || return 0
-  bad_marker="$RECORDS/.config-reported"
   while read -r entry_id minutes; do
-    if [ "$entry_id" = bad ]; then
-      bad_hash=$(printf '%s' "$minutes" | cksum)
-      [ "$(cat "$bad_marker" 2>/dev/null || true)" = "$bad_hash" ] && continue
-      printf '%s\n' "$bad_hash" > "$bad_marker"
-      fm_wake_append check idle-sleep-config "check: idle-sleep config line ignored (expected '<id> [<minutes>]'): $minutes" \
-        && printf 'check: idle-sleep config line ignored (expected '"'"'<id> [<minutes>]'"'"'): %s\n' "$minutes"
+    if [ "$entry_id" = "!invalid" ]; then
+      bad_hash=$(printf '%s' "$minutes" | cksum | tr ' ' '-')
+      bad_marker="$RECORDS/.config-reported-$bad_hash"
+      [ ! -f "$bad_marker" ] || continue
+      fm_wake_append check "idle-sleep-config:$bad_hash" "check: idle-sleep config line ignored (expected '<id> [<minutes>]'): $minutes" \
+        && touch "$bad_marker" && printf 'check: idle-sleep config line ignored (expected '"'"'<id> [<minutes>]'"'"'): %s\n' "$minutes"
       continue
     fi
     if [ -f "$RECORDS/$entry_id.refused" ] \
@@ -201,19 +204,20 @@ cmd_run() {
   id_valid "$id" || usage
   mkdir -p "$RECORDS" || exit 1
   fm_lock_try_acquire "$lock" || exit 0
-  trap 'fm_lock_release "$lock"' EXIT
+  trap "fm_lock_release $(printf '%q' "$lock")" EXIT
   local_verdict "$id" >/dev/null || exit 0
   observed=$(run_remote_read "$id" observe) || exit 0
-  case "$observed" in idle|fallback-idle) ;; *) exit 0 ;; esac
+  case "$observed" in idle) ;; *) exit 0 ;; esac
   children=$(run_remote_read "$id" children) || exit 0
   [ "$children" = children=0 ] || exit 0
   provider=$(fm_compute_provider "$DATA" "$id") || exit 0
-  out=$("$SCRIPT_DIR/fm-$provider.sh" sleep "$id" 2>&1 </dev/null) || rc=$?
+  out=$(FM_IDLE_SLEEP_RECHECK=1 "$SCRIPT_DIR/fm-$provider.sh" sleep "$id" 2>&1 </dev/null) || rc=$?
   if [ "$rc" -eq 0 ]; then
     log_line "idle-sleep: $id ($provider) slept after an idle window"
     rm -f "$refused" "$RECORDS/$id.reported"
     return 0
   fi
+  [ "$rc" -ne 75 ] || return 0
   msg=$(printf '%s\n' "$out" | fm_wake_clean_field | grep -v '^[[:space:]]*$' | tail -1)
   [ -n "$msg" ] || msg="sleep exited $rc without a message"
   log_line "idle-sleep: $id ($provider) refused: $msg"

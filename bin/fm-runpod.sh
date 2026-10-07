@@ -1200,6 +1200,10 @@ cmd_sleep() {
   fm_lock_acquire_wait "$REPLY_LOCK" || die "cannot lock the reply lifecycle for $id"
   REPLY_LOCK_HELD=1
 
+  if [ "${FM_IDLE_SLEEP_RECHECK:-}" = 1 ] \
+     && ! "$SCRIPT_DIR/fm-idle-sleep.sh" check "$id"; then
+    return 75
+  fi
   sleep_guards "$id"
 
   if route_is_remote "$id" \
@@ -1207,6 +1211,11 @@ cmd_sleep() {
     sleep_abort "$id" "$lifecycle_before" "secondmate $id still has an unhandled captured reply; handle it before suspending"
   fi
 
+  if [ "${FM_IDLE_SLEEP_RECHECK:-}" = 1 ] \
+     && ! "$SCRIPT_DIR/fm-idle-sleep.sh" check "$id"; then
+    "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$id" >/dev/null 2>&1 || true
+    return 75
+  fi
   if ! (record_set_lifecycle "$id" suspending); then
     sleep_abort "$id" "$lifecycle_before" "secondmate $id could not record its suspending lifecycle; it is left running"
   fi

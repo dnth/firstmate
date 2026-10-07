@@ -33,7 +33,12 @@ cat > "$BIN/fm-on.sh" <<SH
 printf 'on %s\n' "\$*" >> "$FAKE/calls"
 case "\$3" in
   observe) cat "$FAKE/observe" ;;
-  children) printf 'children=%s\n' "\$(cat "$FAKE/children")" ;;
+  sleep-reconcile) exit 0 ;;
+  children)
+    if [ -f "$FAKE/activity-on-children" ]; then
+      touch "$STATE/\$1.status"
+    fi
+    printf 'children=%s\n' "\$(cat "$FAKE/children")" ;;
   *) exit 64 ;;
 esac
 SH
@@ -135,7 +140,10 @@ assert_no_grep "children ios" "$FAKE/calls" "a busy agent must stop the attempt 
 printf 'unknown\n' > "$FAKE/observe"; : > "$FAKE/calls"
 age_everything; idle tick; settle
 [ "$(sleep_calls)" = 0 ] || fail "a placement whose agent state is unreadable was slept"
-pass "a live worker, a busy agent, or an unreadable agent state keeps the placement awake"
+printf 'fallback-idle\n' > "$FAKE/observe"; : > "$FAKE/calls"
+age_everything; idle tick; settle
+[ "$(sleep_calls)" = 0 ] || fail "weak fallback-idle evidence permitted sleep"
+pass "live workers and all non-authoritative idle observations keep placements awake"
 
 # Idle past the window: the guarded sleep runs exactly once per placement, on the
 # right provider, with no force flag, and a later tick finds it dormant.
@@ -151,6 +159,10 @@ grep -qx 'lifecycle=suspended' "$DATA/boat/ios.meta" || fail "the fake provider 
 age_everything; idle tick; settle
 [ "$(sleep_calls)" = 0 ] || fail "a dormant placement was slept again"
 [ "$(grep -c 'slept after an idle window' "$STATE/idle-sleep.log")" = 2 ] || fail "expected one log line per auto-sleep"
+for id in "${ids[@]}"; do
+  [ ! -e "$STATE/.idle-sleep-$id.lock" ] && [ ! -L "$STATE/.idle-sleep-$id.lock" ] \
+    || fail "successful attempt leaked its lock"
+done
 pass "an idle placement is slept through the guarded provider path exactly once"
 
 # A guard refusal is left as is, never forced, and reported exactly once.
@@ -174,6 +186,9 @@ idle tick; settle
 again=$(idle tick)
 [ -z "$again" ] || fail "the same refusal was reported twice: $again"
 [ "$(grep -c 'idle-sleep:ios' "$STATE/.wake-queue")" = 1 ] || fail "the repeated refusal queued another wake"
+settle
+[ ! -e "$STATE/.idle-sleep-ios.lock" ] && [ ! -L "$STATE/.idle-sleep-ios.lock" ] \
+  || fail "refused attempt leaked its lock"
 pass "a guard refusal is reported once and never forced"
 
 # A different reason after new activity is a new report.
@@ -187,11 +202,93 @@ report=$(idle tick)
 assert_contains "$report" "unresolved decisions" "a new refusal reason must be reported"
 pass "a new refusal reason is reported again"
 
-# A malformed config line is reported once and opts nothing in.
-printf 'ios 2\nbad id here 3\n' > "$CONFIG/idle-sleep"
-rm -f "$STATE/.idle-sleep-tick"
-report=$(idle tick)
-assert_contains "$report" "config line ignored" "a malformed line must be surfaced"
-[ -z "$(idle tick)" ] || fail "the malformed line was reported twice"
-pass "a malformed config line is reported once"
+# Malformed entries override valid opt-ins regardless of order.
 settle
+printf 'ios 2\nios invalid\nweb 2 extra\nweb 2\n' > "$CONFIG/idle-sleep"
+rm -f "$STATE/.idle-sleep-tick"
+: > "$FAKE/calls"
+report=$(idle tick)
+assert_contains "$report" "ios invalid" "first malformed line must be surfaced"
+assert_contains "$report" "web 2 extra" "second malformed line must be surfaced"
+for id in "${ids[@]}"; do
+  out=$(idle check "$id") && fail "malformed entry left $id opted in"
+  assert_contains "$out" "not opted in" "malformed entry disables its placement"
+done
+printf 'web 2\nweb 2 extra\nios invalid\nios 2\n' > "$CONFIG/idle-sleep"
+[ -z "$(idle tick)" ] || fail "alternating malformed lines were reported again"
+[ "$(grep -c 'idle-sleep-config:' "$STATE/.wake-queue")" = 2 ] || fail "expected one wake per malformed line"
+settle
+[ "$(sleep_calls)" = 0 ] || fail "malformed configuration attempted sleep"
+pass "distinct malformed lines disable placements and each report once"
+
+# Exercise both real provider lock boundaries with fake compute interfaces.
+cp "$ROOT/bin/fm-boat.sh" "$ROOT/bin/fm-runpod.sh" "$BIN/"
+FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+cat > "$FAKEBIN/uv" <<SH
+#!/usr/bin/env bash
+printf 'boat stopped\n' >> "$FAKE/stops"
+printf 'lifecycle=suspended\n' > "$DATA/boat/ios.meta"
+SH
+cat > "$FAKEBIN/curl" <<SH
+#!/usr/bin/env bash
+printf 'runpod stopped\n' >> "$FAKE/stops"
+printf '{}\n200'
+SH
+cat > "$FAKEBIN/auth-stop" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat > "$BIN/fm-procevent-remote-reply.sh" <<SH
+#!/usr/bin/env bash
+. "$BIN/fm-secondmate-registry-lib.sh"
+handoff=\$(secondmate_handoff_lock_path "$STATE" "\$2")
+reply=\$(secondmate_reply_lifecycle_lock_path "$STATE" "\$2")
+[ -e "\$handoff" ] && [ -e "\$reply" ] || exit 90
+printf '%s\n' "\$1" >> "$FAKE/reply-actions"
+if [ "\$1" = retire-quiesce-locked ] && [ -f "$FAKE/activity-on-quiesce" ]; then
+  touch "$STATE/\$2.status"
+fi
+SH
+chmod +x "$FAKEBIN/uv" "$FAKEBIN/curl" "$FAKEBIN/auth-stop" "$BIN/fm-procevent-remote-reply.sh"
+export PATH="$FAKEBIN:$PATH"
+export FM_RUNPOD_OMP_AUTH_BIN="$FAKEBIN/auth-stop"
+printf 'RUNPOD_API_KEY=fixture_key\n' > "$CONFIG/runpod.env"
+chmod 600 "$CONFIG/runpod.env"
+printf 'ios 2\nweb 2\n' > "$CONFIG/idle-sleep"
+printf '0\n' > "$FAKE/sleep-rc"
+reset_awake() {
+  printf 'lifecycle=ready\n' > "$DATA/boat/ios.meta"
+  printf 'lifecycle=ready\never_ready=1\npod_id=fixture-pod\n' > "$DATA/runpod/web.meta"
+  for id in "${ids[@]}"; do
+    printf 'kind=secondmate\n' > "$STATE/$id.meta"
+    rm -f "$STATE/idle-sleep/$id.refused" "$STATE/idle-sleep/$id.reported"
+  done
+  : > "$FAKE/stops"; : > "$FAKE/reply-actions"
+  age_everything
+}
+for stage in children quiesce; do
+  reset_awake
+  touch "$FAKE/activity-on-$stage"
+  for id in "${ids[@]}"; do
+    idle run "$id" || fail "changed eligibility should defer $id successfully"
+    assert_absent "$STATE/idle-sleep/$id.refused" "deferral must not record refusal"
+  done
+  [ ! -s "$FAKE/stops" ] || fail "fresh activity did not block provider compute stop"
+  grep -qx 'lifecycle=ready' "$DATA/boat/ios.meta" || fail "Boat deferral changed lifecycle"
+  grep -qx 'lifecycle=ready' "$DATA/runpod/web.meta" || fail "RunPod deferral changed lifecycle"
+  if [ "$stage" = quiesce ]; then
+    [ "$(grep -c '^arm-locked$' "$FAKE/reply-actions")" = 2 ] || fail "deferred providers did not restore reply sources"
+  fi
+  rm -f "$FAKE/activity-on-$stage"
+done
+reset_awake
+for id in "${ids[@]}"; do idle run "$id" || fail "quiet placement $id did not sleep"; done
+[ "$(wc -l < "$FAKE/stops")" -eq 2 ] || fail "ordinary auto-sleep did not stop both providers"
+reset_awake
+for id in "${ids[@]}"; do
+  touch "$STATE/$id.status"
+  provider=boat; [ "$id" != web ] || provider=runpod
+  idle_env "$BIN/fm-$provider.sh" sleep "$id" || fail "explicit sleep inherited auto-sleep window"
+done
+[ "$(wc -l < "$FAKE/stops")" -eq 2 ] || fail "explicit sleep did not stop both providers"
+pass "locked provider rechecks defer fresh activity while ordinary and explicit sleeps succeed"
