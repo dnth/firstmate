@@ -1629,6 +1629,15 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   wake "$reason"
 fi
 
+idle_sleep_tick() {
+  local reason
+  [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/idle-sleep" ] || return 0
+  reason=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-idle-sleep.sh" tick 2>/dev/null | head -1) || true
+  [ -n "$reason" ] || return 0
+  triage_log "$reason"
+  wake "$reason"
+}
+
 resurface_after_downtime() {
   local reason
   # Handling successors already have a predecessor-delivered wake on the way.
@@ -1713,6 +1722,11 @@ while :; do
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
+
+  # Opt-in idle auto-sleep (config/idle-sleep). The tick reads only local
+  # records and detaches any guarded sleep attempt, so it never blocks this
+  # cycle; it prints reasons for previously unreported refusals or malformed lines.
+  idle_sleep_tick
 
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.

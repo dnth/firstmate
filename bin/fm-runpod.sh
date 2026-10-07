@@ -75,12 +75,12 @@
 # 255, because unknown remote completion must be reconciled on the same host.
 # Sleep never retires the logical second mate: the route, the registry record,
 # the reply cursor, and the volume all survive it.
-# Before counting remote children, sleep safely tears down only direct-PR ship
-# tasks that report done and pass fm-teardown's ordinary landed-work guards.
+# bin/fm-remote-secondmate-control.sh owns finished-ship reconciliation and the
+# live-only child count; reconciliation must succeed before suspension.
 #
-# Automatic idle sleep is deliberately NOT implemented. Every suspension is an
-# explicit `sleep` from an operator or from firstmate, so a second mate is never
-# taken away mid-thought. Nothing in this repo schedules or triggers one.
+# Suspension is an explicit `sleep` unless the operator opts a second mate in to
+# idle auto-sleep (docs/configuration.md owns the config contract).
+# bin/fm-idle-sleep.sh owns the additional auto-sleep recheck mechanics.
 #
 # Environment overrides (tests and self-hosted API mirrors only):
 #   FM_RUNPOD_API_BASE      REST base URL, default https://rest.runpod.io/v1
@@ -1125,7 +1125,7 @@ remote_sleep_reconcile() {  # <id>
   fi
   if [ "$rc" -ne 0 ]; then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    die "secondmate $id could not reconcile finished direct-PR work before suspension"
+    die "secondmate $id could not reconcile finished ship work before suspension"
   fi
 }
 
@@ -1170,7 +1170,7 @@ sleep_abort() {  # <id> <lifecycle> <message>
 }
 
 cmd_sleep() {
-  local id=${1:-} pod_id raw rc=0 lifecycle_before lifecycle_after
+  local id=${1:-} pod_id raw rc=0 lifecycle_before lifecycle_after observed
   shift || true
   [ "$#" -eq 0 ] || usage
   require_id "$id"
@@ -1198,6 +1198,10 @@ cmd_sleep() {
   fm_lock_acquire_wait "$REPLY_LOCK" || die "cannot lock the reply lifecycle for $id"
   REPLY_LOCK_HELD=1
 
+  if [ "${FM_IDLE_SLEEP_RECHECK:-}" = 1 ] \
+     && ! "$SCRIPT_DIR/fm-idle-sleep.sh" check "$id"; then
+    return 75
+  fi
   sleep_guards "$id"
 
   if route_is_remote "$id" \
@@ -1205,6 +1209,13 @@ cmd_sleep() {
     sleep_abort "$id" "$lifecycle_before" "secondmate $id still has an unhandled captured reply; handle it before suspending"
   fi
 
+  if [ "${FM_IDLE_SLEEP_RECHECK:-}" = 1 ]; then
+    observed=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh observe "$id" </dev/null 2>/dev/null) || observed=
+    if [ "$observed" != idle ] || ! "$SCRIPT_DIR/fm-idle-sleep.sh" check "$id"; then
+      "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$id" >/dev/null 2>&1 || true
+      return 75
+    fi
+  fi
   if ! (record_set_lifecycle "$id" suspending); then
     sleep_abort "$id" "$lifecycle_before" "secondmate $id could not record its suspending lifecycle; it is left running"
   fi

@@ -29,6 +29,10 @@ case "${1:-}" in
     trap 'fm_lock_release "$handoff"' EXIT
     fm_lock_acquire_wait "$reply"
     trap 'fm_lock_release "$reply"; fm_lock_release "$handoff"' EXIT
+    if [ "$1" = sleep ] && [ "${FM_IDLE_SLEEP_RECHECK:-}" = 1 ] \
+       && ! "$SCRIPT_DIR/fm-idle-sleep.sh" check "$id"; then
+      exit 75
+    fi
     [ ! -e "$DATA/handoff/$id.outbox.md" ] || { printf 'error: undelivered backlog handoff\n' >&2; exit 1; }
     fm_pending_reply_reconcile_task "$STATE" "$id" "$STATE/$id.status"
     for path in "$STATE/pending-replies/"*; do
@@ -69,6 +73,13 @@ case "${1:-}" in
         "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$id" \
           || printf 'error: reply-source restoration incomplete\n' >&2
         exit 1
+      fi
+    fi
+    if [ "$1" = sleep ] && [ "${FM_IDLE_SLEEP_RECHECK:-}" = 1 ]; then
+      observed=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh observe "$id" </dev/null 2>/dev/null) || observed=
+      if [ "$observed" != idle ] || ! "$SCRIPT_DIR/fm-idle-sleep.sh" check "$id"; then
+        [ "$remote" = 0 ] || "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$id" >/dev/null 2>&1 || true
+        exit 75
       fi
     fi
     if FM_BOAT_SLEEP_QUIESCED=$checked FM_BOAT_DESTROY_DORMANT=$dormant_destroy \

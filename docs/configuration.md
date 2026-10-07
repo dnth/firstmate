@@ -37,6 +37,23 @@ RunPod is an optional compute lifecycle provider beneath a whole-home remote sec
 
 A home with no `data/runpod/` records behaves exactly as it did before this provider existed.
 
+## Idle auto-sleep (config/idle-sleep)
+
+`config/idle-sleep` is a local, gitignored, primary-home-only file that opts Boat and RunPod second-mate placements in to automatic sleep; it is not inherited into secondmate homes.
+Each non-comment line is `<secondmate-id> [<minutes>]`, and a blank minutes field means 30.
+IDs use letters, digits, dots, underscores, or dashes and cannot start with a dot; minutes must be a positive integer without leading zeros, and `#` starts a comment.
+If an ID has multiple valid entries, the first supplies its window.
+A home without the file, and a placement it does not name, behave exactly as before: sleep stays an explicit operator or firstmate action.
+A malformed line disables auto-sleep for its named placement, even if another line opts that placement in.
+Each distinct malformed line is reported via one wake, with deduplication retained across ticks and alternating malformed lines.
+
+The primary watcher drives it from its existing cycle through `bin/fm-idle-sleep.sh`, whose header owns the cadence, records, and overrides; there is no second watcher.
+A placement qualifies only when its compute is awake and this home holds no undelivered backlog handoff, no unresolved routed reply, and no open decision for it, and none of the activity records tracked by that script has changed for the whole window.
+Before sleeping, the attempt also requires the second-mate agent to read authoritative idle and its home to supervise no live worker; busy, unknown, and fallback-idle observations keep the placement awake.
+It then runs the provider's own guarded `sleep` (`bin/fm-boat.sh` or `bin/fm-runpod.sh`), which re-checks every guard and retires finished ships through ordinary teardown, and the next delivery wakes the placement as usual.
+Auto-sleep eligibility and authoritative remote idle are rechecked under the provider delivery and reply locks after worker reconciliation and immediately before stopping compute; fresh activity, a busy agent, or an unreadable observation defers the attempt without a refusal notification.
+Nothing in this path forces cleanup, discards unlanded work, or destroys the placement: a guard refusal leaves it awake, and an unchanged reason is surfaced once; a changed reason or new activity permits another notification.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
