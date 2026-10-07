@@ -524,7 +524,7 @@ test_non_resend_delivery_outcomes_retire_once() {
     printf 'MERGED\n' > "$home/forge/7"
     printf '%s\n' "$rc" > "$home/send.fail.rc"
     printf 'delivery diagnostic for exit %s\n' "$rc" > "$home/send.fail"
-    if [ "$rc" -eq 1 ]; then printf 'text delivery is unknown; do not resend\n' >> "$home/send.fail"; fi
+    if [ "$rc" -eq 1 ]; then printf 'error: text delivery to remote secondmate ios is unknown; do not resend - same-host reconciliation is required\n' >> "$home/send.fail"; fi
     out=$(home_env "$home" "$LANDING" sweep 2>&1) || fail "non-resend delivery was retried: $out"
     case "$out" in *"delivery diagnostic for exit $rc"*) ;; *) fail "delivery diagnostic was hidden: $out" ;; esac
     [ -z "$(landing_ids "$home")" ] || fail "non-resend delivery retained an automatic retry"
@@ -550,6 +550,49 @@ test_non_resend_delivery_outcomes_retire_once() {
     [ "$(wc -l < "$home/send.log.ids" | tr -d ' ')" -eq 2 ] || fail "identity-bound delivery was not retried"
   done
   pass "delivery distinctions preserve diagnostics and retry only with the same identity"
+}
+
+test_pre_delivery_refusals_keep_the_landing_unsettled() {
+  local home diagnostic outcome id out marker
+  for diagnostic in restoration endpoint; do
+    for outcome in merged closed; do
+      home=$(make_home "pre-delivery-$diagnostic-$outcome")
+      relay_line "$home" "done: PR $URL7"
+      id=$(assert_one_landing "$home" "$URL7")
+      if [ "$outcome" = merged ]; then
+        printf 'MERGED\n' > "$home/forge/7"
+      else
+        printf 'CLOSED\n' > "$home/forge/7"
+      fi
+      printf '1\n' > "$home/send.fail.rc"
+      if [ "$diagnostic" = restoration ]; then
+        printf 'error: remote secondmate ios restoration is unknown; nothing was delivered and same-host reconciliation is required - do not resend\n' > "$home/send.fail"
+      else
+        printf 'error: remote secondmate ios was restored but its endpoint reports state=unreachable; nothing was delivered - do not resend\n' > "$home/send.fail"
+      fi
+      if out=$(home_env "$home" "$LANDING" sweep 2>&1); then
+        fail "pre-delivery $diagnostic failure falsely settled: $out"
+      fi
+      case "$out" in *"nothing was delivered"*"landing-notify-failed: $id"*) ;; *) fail "pre-delivery diagnostic was hidden: $out" ;; esac
+      assert_one_landing "$home" "$URL7" >/dev/null
+      for marker in "$home"/state/landing-settled-*; do
+        [ ! -e "$marker" ] && [ ! -L "$marker" ] || fail "pre-delivery failure wrote a settled marker"
+      done
+      if home_env "$home" "$LANDING" register ios "$URL7" >/dev/null 2>&1; then
+        fail "terminal registration bypassed the unresolved delivery"
+      fi
+      assert_one_landing "$home" "$URL7" >/dev/null
+      for marker in "$home"/state/landing-settled-*; do
+        [ ! -e "$marker" ] && [ ! -L "$marker" ] || fail "terminal registration falsely marked settlement"
+      done
+      rm "$home/send.fail"
+      home_env "$home" "$LANDING" settle "$id" "$outcome" >/dev/null || fail "restored delivery did not settle"
+      [ -z "$(landing_ids "$home")" ] || fail "successful delivery did not retire the record"
+      [ "$(sort -u "$home/send.log.ids" | wc -l | tr -d ' ')" -eq 1 ] || fail "pre-delivery retry changed delivery identity"
+      [ "$(wc -l < "$home/send.log" | tr -d ' ')" -eq 3 ] || fail "pre-delivery record did not remain retryable"
+    done
+  done
+  pass "restoration and endpoint refusals preserve merged and closed landings without settled markers"
 }
 
 test_clone_sync_outcomes_are_reported() {
@@ -609,5 +652,6 @@ test_a_second_mate_id_never_owns_a_pr_poll_and_a_landing_id_rearms
 test_latest_custody_wins_after_reverting_an_exception
 test_first_terminal_reports_settle_once
 test_non_resend_delivery_outcomes_retire_once
+test_pre_delivery_refusals_keep_the_landing_unsettled
 test_clone_sync_outcomes_are_reported
 test_forge_reads_are_bounded_without_timeout_binaries

@@ -385,7 +385,7 @@ cmd_settle() {
     case "$send_rc" in
       0|4|5|6|7|8|255) ;;
       *)
-        if [ "$send_rc" -ne 1 ] || ! printf '%s\n' "$result" | grep -qiE 'do not resend|text was delivered|text delivery .* unknown'; then
+        if [ "$send_rc" -ne 1 ] || ! printf '%s\n' "$result" | grep -qE '^error: text was delivered to .+, but its pending-reply delivery commit|^error: text delivery to remote secondmate [A-Za-z0-9._-]+ is unknown;'; then
           printf 'DRIFT landing-notify-failed: %s - second mate %s delivery unresolved (exit %s); record kept for identity-bound retry\n' "$id" "$sm" "$send_rc"
           exit 1
         fi
