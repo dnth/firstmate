@@ -79,6 +79,12 @@
 #   DRIFT queued-has-worker: <id> - <reason>
 #     A queued board row has a current-state source, so a local worker already
 #     exists even though the board still presents the work as dispatchable.
+#   DRIFT landing-<merged|closed>: <id> - <reason>
+#     A remote second mate's main-owned landing record (bin/fm-landing.sh) names a
+#     PR the forge shows merged or closed. Under --reconcile this is settled
+#     instead of reported: the clone is refreshed on merge, the second mate is
+#     told, and the record is retired (DRIFT landing-notify-failed keeps it).
+#     A second mate's own id is never a PR owner here.
 #
 # The caller re-projects the session todo after every board mutation, including
 # this script's merged-PR close. Deferred work is put on hold at deferral time,
@@ -749,6 +755,9 @@ check_pr_lifecycle() {  # <listing>...
     while IFS= read -r id; do
       [ -n "$id" ] || continue
       fm_pr_task_id_valid "$id" || continue
+      # A second mate never owns a PR poll under its own id; main-owned landing
+      # records (bin/fm-landing.sh) track its PRs.
+      ! fm_pr_meta_kind_is "$STATE/$id.meta" secondmate || continue
       id_in_set "$PR_CHECKED_IDS" "$id" && continue
       PR_CHECKED_IDS="${PR_CHECKED_IDS}${id}"$'\n'
       recorded_pr_identity "$id" || continue
@@ -837,6 +846,15 @@ check_holds() {  # <listing>...
 run_check() {
   local reason in_flight queued
   local in_flight_valid=0 queued_valid=0 secondmate_projects_valid=0
+  # Landing records need no board: settling them is lifecycle reconciliation
+  # under the same authority as the merged-PR close below.
+  if [ "$RECONCILE" -eq 1 ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-landing.sh" sweep || true
+  else
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-landing.sh" sweep --report || true
+  fi
   reason=$(board_unavailable_reason)
   if [ -n "$reason" ]; then
     printf 'DRIFT-CHECK-SKIPPED: %s\n' "$reason"

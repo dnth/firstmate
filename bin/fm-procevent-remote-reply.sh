@@ -49,6 +49,11 @@
 # autohandle retries it rather than acknowledging a half-ingested delta. Exact
 # lines are appended at most once to the parent's state/<id>.status.
 #
+# An accepted `done` line that reports `PR <url>` also files a main-owned
+# landing record through bin/fm-landing.sh, so the merge stays tracked while
+# the remote mate sleeps; a failed registration fails the handle like a failed
+# document fetch.
+#
 # `handled-gate` is the generic runner's acknowledgement gate: a remote-reply
 # generation may be marked handled only after its ingest receipt exists, the
 # cursor covers its range, or its continuity break is recorded - a never-ingested
@@ -84,7 +89,7 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,71p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -430,6 +435,21 @@ quarantine_line() {  # <id> <qseq> <index> <line-file>
   printf '%s %s\n' "$hash" "$bytes"
 }
 
+# Canonical PR URLs a second mate's `done` line reports as `PR <url>`, one per
+# line, so a PR-ready report is recognised and a merged or other outcome line
+# that merely carries a URL is not.
+landing_pr_urls() {  # <status line>
+  local line=$1 rest url
+  [[ "$line" =~ ^done(\ \[[^]]*\])*:\ (.*)$ ]] || return 0
+  rest=${BASH_REMATCH[2]}
+  while [[ "$rest" =~ (^|[[:space:]])PR[[:space:]]+(https://[^[:space:]]+) ]]; do
+    url=${BASH_REMATCH[2]}
+    rest=${rest#*"${BASH_REMATCH[0]}"}
+    url=${url%[.,;:\)]}
+    printf '%s\n' "$url"
+  done
+}
+
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
@@ -554,6 +574,18 @@ cmd_ingest() {
     fi
     index=$((index + 1))
   done < "$tmp/manifest"
+  # A mate's PR-ready report gets a main-owned landing record so the merge is
+  # tracked while the mate sleeps. A failure fails the handle, like a failed
+  # document fetch, so autohandle retries instead of acknowledging an untracked PR.
+  if [ -f "$tmp/accepted" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      while IFS= read -r url; do
+        [ -n "$url" ] || continue
+        "$SCRIPT_DIR/fm-landing.sh" register "$id" "$url" >/dev/null \
+          || { fm_lock_release "$lock"; die "could not record a landing for $url"; }
+      done < <(landing_pr_urls "$line")
+    done < "$tmp/accepted"
+  fi
   # Only accepted lines may resolve a pending parent request: a rejected line's
   # correlation token is never trusted.
   while IFS= read -r corr; do

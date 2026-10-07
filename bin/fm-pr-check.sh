@@ -26,6 +26,9 @@
 # (a mkdir lock) so a concurrent registration cannot interleave its metadata
 # replacement with this one; bin/fm-watch.sh defers a pre-metadata poll while
 # that lock is fresh.
+# A second mate's id is refused: its PRs are tracked under a main-owned landing
+# record, and a landing id re-arms its poll through bin/fm-landing.sh instead of
+# the ship gates above.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -62,6 +65,17 @@ PROVIDER=$FM_PR_PROVIDER
 HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
+
+# A second mate's id never owns a PR: the mate's own record is rewritten on
+# every restore, so a poll armed under it is orphaned. Its PRs are tracked by
+# a main-owned landing record, whose re-arm bin/fm-landing.sh owns.
+if fm_pr_meta_kind_is "$STATE/$ID.meta" secondmate; then
+  echo "error: $ID is a second mate; its PRs are landed under a main-owned landing record (bin/fm-landing.sh), never under its own id" >&2
+  exit 2
+fi
+if fm_pr_meta_kind_is "$STATE/$ID.meta" landing; then
+  exec "$SCRIPT_DIR/fm-landing.sh" rearm "$ID" "$URL"
+fi
 
 pr_check_lease_cleanup() {
   fm_lease_guard_release || true
