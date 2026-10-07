@@ -12,8 +12,8 @@
 #   (c) a PR closed without merging is settled the same way, without a refresh
 #   (d) a mate that cannot be told keeps the record; the next sweep retries
 #   (e) a non-reconcile check only reports
-#   (f) PRs the forge already shows settled, non-PR lines, and unregistered
-#       mates file nothing
+#   (f) first-time terminal reports settle once; repeated reports, non-PR
+#       lines, and unregistered mates file nothing
 #   (h) custody crosses the relay: the mate's own PR-ready gate reports it, main's
 #       landing record keeps it after the worker is released, and the merge
 #       through fm-pr-merge on the landing id keeps its guards - complete
@@ -94,12 +94,19 @@ exit 0
 SH
   cat > "$fakebin/send" <<'SH'
 #!/usr/bin/env bash
-printf '%s\t%s\n' "$1" "$2" >> "$FM_TEST_SEND_LOG"
-[ ! -e "$FM_TEST_SEND_FAIL" ]
+[ "${FM_SEND_RECONCILE_AUTH:-}" = 1 ] && [ "$2" = --reconcile-delivery ] || exit 2
+printf '%s\t%s\n' "$1" "$4" >> "$FM_TEST_SEND_LOG"
+printf '%s\n' "$3" >> "$FM_TEST_SEND_LOG.ids"
+if [ -f "$FM_TEST_SEND_FAIL" ]; then
+  cat "$FM_TEST_SEND_FAIL" >&2
+  exit "$(cat "$FM_TEST_SEND_FAIL.rc" 2>/dev/null || echo 1)"
+fi
 SH
   cat > "$fakebin/sync" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$1" >> "$FM_TEST_SYNC_LOG"
+if [ -f "$FM_TEST_SYNC_LOG.result" ]; then cat "$FM_TEST_SYNC_LOG.result"; fi
+if [ -f "$FM_TEST_SYNC_LOG.rc" ]; then exit "$(cat "$FM_TEST_SYNC_LOG.rc")"; fi
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/send" "$fakebin/sync"
   : > "$home/send.log"
@@ -282,14 +289,9 @@ test_a_plain_check_reports_without_settling() {
   pass "a check without reconcile authority reports a landed PR and changes nothing"
 }
 
-test_nothing_is_filed_for_settled_prs_other_lines_or_unregistered_mates() {
-  local home out
+test_nothing_is_filed_for_other_lines_or_unregistered_mates() {
+  local home
   home=$(make_home refusals)
-  printf 'MERGED\n' > "$home/forge/9"
-  relay_line "$home" "done: PR $URL9"
-  [ -z "$(landing_ids "$home")" ] || fail "an already merged PR was filed"
-  out=$(home_env "$home" "$LANDING" register ios "$URL9")
-  case "$out" in *"skipped"*"already merged"*) ;; *) fail "register did not skip a merged PR: $out" ;; esac
   relay_line "$home" "working: PR $URL7 is being validated"
   relay_line "$home" "done [key=merged-x]: merged x $URL7"
   relay_line "$home" "done: no pull request here"
@@ -301,7 +303,7 @@ test_nothing_is_filed_for_settled_prs_other_lines_or_unregistered_mates() {
     fail "a non-PR URL got a landing record"
   fi
   [ -z "$(landing_ids "$home")" ] || fail "a refused registration left a record"
-  pass "settled PRs, non-report lines, unregistered mates, and non-PR URLs file nothing"
+  pass "non-report lines, unregistered mates, and non-PR URLs file nothing"
 }
 
 test_a_second_mate_id_never_owns_a_pr_poll_and_a_landing_id_rearms() {
@@ -470,6 +472,130 @@ test_a_non_mate_home_reports_no_custody() {
   pass "an ordinary or locally routed home reports no custody"
 }
 
+test_latest_custody_wins_after_reverting_an_exception() {
+  local home mate id out
+  home=$(make_home custody-transitions)
+  mate=$(make_mate_home "$home" yes)
+  report_custody_through_the_relay "$home" "$mate"
+  make_mate_home "$home" no >/dev/null
+  report_custody_through_the_relay "$home" "$mate"
+  make_mate_home "$home" yes >/dev/null
+  report_custody_through_the_relay "$home" "$mate"
+  id=$(assert_one_landing "$home" "$URL7")
+  [ "$(grep -cF ' custody task=worker-1 ' "$mate/state/parent-replies.status")" -eq 3 ] \
+    || fail "a custody transition was suppressed"
+  grep -qx 'custody_blocked=AC2' "$home/state/$id.meta" || fail "latest custody lost the exception"
+  if out=$(merge_through_the_guards "$home" "$id" -- --squash); then
+    fail "repeated exception merged on standing authority: $out"
+  fi
+  pass "custody blocked, success, blocked leaves the latest exception enforced"
+}
+
+test_first_terminal_reports_settle_once() {
+  local home state url number out
+  for state in MERGED CLOSED; do
+    home=$(make_home "first-$state")
+    if [ "$state" = MERGED ]; then url=$URL9; number=9; else url=$URL8; number=8; fi
+    printf '%s\n' "$state" > "$home/forge/$number"
+    relay_line "$home" "done [key=first]: PR $url"
+    [ -z "$(landing_ids "$home")" ] || fail "first terminal report did not settle"
+    [ "$(wc -l < "$home/send.log" | tr -d ' ')" -eq 1 ] || fail "first terminal report did not notify once"
+    if [ "$state" = MERGED ]; then
+      [ "$(cat "$home/sync.log")" = alpha ] || fail "first merged report did not refresh"
+    else
+      [ ! -s "$home/sync.log" ] || fail "first closed report refreshed"
+    fi
+    relay_line "$home" "done [key=repeat]: PR $url"
+    relay_line "$home" "done [key=reply]: acknowledged settlement of PR $url"
+    out=$(home_env "$home" "$LANDING" register ios "$url")
+    case "$out" in *skipped*previously\ settled*) ;; *) fail "settled URL was registered again: $out" ;; esac
+    [ -z "$(landing_ids "$home")" ] || fail "replay left a record"
+    [ "$(wc -l < "$home/send.log" | tr -d ' ')" -eq 1 ] || fail "terminal replay notified again"
+    [ "$(wc -l < "$home/sync.log" | tr -d ' ')" -le 1 ] || fail "terminal replay refreshed again"
+  done
+  pass "first merged and closed reports settle once and terminal replies never loop"
+}
+
+test_non_resend_delivery_outcomes_retire_once() {
+  local home rc out
+  for rc in 4 5 6 7 8 255 1; do
+    home=$(make_home "delivery-$rc")
+    relay_line "$home" "done: PR $URL7"
+    printf 'MERGED\n' > "$home/forge/7"
+    printf '%s\n' "$rc" > "$home/send.fail.rc"
+    printf 'delivery diagnostic for exit %s\n' "$rc" > "$home/send.fail"
+    if [ "$rc" -eq 1 ]; then printf 'text delivery is unknown; do not resend\n' >> "$home/send.fail"; fi
+    out=$(home_env "$home" "$LANDING" sweep 2>&1) || fail "non-resend delivery was retried: $out"
+    case "$out" in *"delivery diagnostic for exit $rc"*) ;; *) fail "delivery diagnostic was hidden: $out" ;; esac
+    [ -z "$(landing_ids "$home")" ] || fail "non-resend delivery retained an automatic retry"
+    home_env "$home" "$LANDING" sweep >/dev/null
+    relay_line "$home" "done [key=repeat]: PR $URL7"
+    [ "$(wc -l < "$home/send.log" | tr -d ' ')" -eq 1 ] || fail "non-resend delivery was sent twice"
+  done
+  for rc in 3 9; do
+    home=$(make_home "delivery-reconcile-$rc")
+    relay_line "$home" "done: PR $URL7"
+    printf 'MERGED\n' > "$home/forge/7"
+    printf '%s\n' "$rc" > "$home/send.fail.rc"
+    if [ "$rc" -eq 3 ]; then
+      printf 'unconfirmed; retry only with the same delivery id\n' > "$home/send.fail"
+    else
+      printf 'remote-omp-binding-refused: no payload accepted; do not resend until binding reconciled\n' > "$home/send.fail"
+    fi
+    if home_env "$home" "$LANDING" sweep >/dev/null 2>&1; then fail "unresolved delivery lost its record"; fi
+    assert_one_landing "$home" "$URL7" >/dev/null
+    rm "$home/send.fail"
+    home_env "$home" "$LANDING" sweep >/dev/null
+    [ "$(sort -u "$home/send.log.ids" | wc -l | tr -d ' ')" -eq 1 ] || fail "retry changed delivery identity"
+    [ "$(wc -l < "$home/send.log.ids" | tr -d ' ')" -eq 2 ] || fail "identity-bound delivery was not retried"
+  done
+  pass "delivery distinctions preserve diagnostics and retry only with the same identity"
+}
+
+test_clone_sync_outcomes_are_reported() {
+  local home rc out
+  for rc in 0 1; do
+    home=$(make_home "sync-$rc")
+    relay_line "$home" "done: PR $URL7"
+    printf 'MERGED\n' > "$home/forge/7"
+    printf '%s\n' "$rc" > "$home/sync.log.rc"
+    printf 'alpha: skipped: dirty clone\n' > "$home/sync.log.result"
+    out=$(home_env "$home" "$LANDING" sweep) || fail "best effort sync prevented settlement: $out"
+    case "$out" in *"skipped: dirty clone"*) ;; *) fail "sync diagnostic was hidden: $out" ;; esac
+    case "$out" in *refreshed*) fail "skipped clone claimed refreshed: $out" ;; esac
+    if [ "$rc" -eq 1 ]; then
+      case "$out" in *"sync failed (exit 1)"*) ;; *) fail "failed sync claimed success: $out" ;; esac
+    fi
+    [ -z "$(landing_ids "$home")" ] || fail "best effort sync kept the record"
+  done
+  pass "failed and skipped clone sync outcomes remain visible"
+}
+
+test_forge_reads_are_bounded_without_timeout_binaries() {
+  local home pathbin cmd resolved out start
+  home=$(make_home perl-deadline)
+  pathbin="$home/bounded-bin"
+  mkdir "$pathbin"
+  for cmd in bash env dirname awk sed tail grep cut shasum sha256sum git date mktemp mv rm chmod stat uname tr wc cat head sleep mkdir perl cmp touch sort readlink basename id ln rmdir od ps cp; do
+    resolved=$(command -v "$cmd") || continue
+    ln -s "$resolved" "$pathbin/$cmd"
+  done
+  cat > "$home/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' >> "$FM_TEST_FORGE/reads"
+sleep 30
+echo MERGED
+SH
+  start=$SECONDS
+  out=$(home_env "$home" env PATH="$home/fakebin:$pathbin" FM_LANDING_FORGE_TIMEOUT=1 "$LANDING" register ios "$URL7") \
+    || fail "bounded unknown forge read could not register: $out"
+  [ "$((SECONDS - start))" -lt 10 ] || fail "forge fallback failed to bound reads"
+  [ -s "$home/forge/reads" ] || fail "bounded test did not reach the forge"
+  assert_one_landing "$home" "$URL7" >/dev/null
+  [ ! -s "$home/send.log" ] || fail "timed-out read claimed merged"
+  pass "Perl fallback bounds forge reads and preserves unknown PR tracking"
+}
+
 test_relayed_pr_ready_files_a_main_owned_landing_and_a_merge_settles_it
 test_custody_survives_the_workers_release_and_the_guards_hold_at_merge
 test_the_mates_pr_check_reports_custody_when_it_passes
@@ -478,5 +604,10 @@ test_main_merges_through_the_landing_record_and_settles_it
 test_a_pr_closed_without_merging_settles_without_a_refresh
 test_an_untold_mate_keeps_the_record_until_it_can_be_told
 test_a_plain_check_reports_without_settling
-test_nothing_is_filed_for_settled_prs_other_lines_or_unregistered_mates
+test_nothing_is_filed_for_other_lines_or_unregistered_mates
 test_a_second_mate_id_never_owns_a_pr_poll_and_a_landing_id_rearms
+test_latest_custody_wins_after_reverting_an_exception
+test_first_terminal_reports_settle_once
+test_non_resend_delivery_outcomes_retire_once
+test_clone_sync_outcomes_are_reported
+test_forge_reads_are_bounded_without_timeout_binaries

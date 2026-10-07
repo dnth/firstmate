@@ -14,9 +14,8 @@
 #       File (or find) the landing record for the PR and arm its merge poll.
 #       Idempotent. Prints `landing: <landing-id>`. Refuses an id that is not a
 #       registered remote second mate and any URL that is not a canonical PR.
-#       A PR the forge already shows merged or closed gets no record (prints
-#       `landing: skipped ...`), so a mate's reply to a settle notice cannot
-#       register it again.
+#       A first report of a merged or closed PR settles immediately.
+#       A durable per-URL settled marker makes subsequent reports no-ops.
 #   fm-landing.sh ingest <secondmate-id> <status-line>
 #       What the reply relay calls for every accepted line from a remote mate: a
 #       `done` line reporting `PR <url>` files the landing (register), and the
@@ -40,7 +39,9 @@
 #       Finish a landed or closed PR: on merge refresh the project's clone
 #       through bin/fm-fleet-sync.sh (best effort), tell the second mate through bin/fm-send.sh
 #       so it can close its own row, then retire the poll and the record. A mate
-#       that cannot be told keeps the record, so the next sweep retries.
+#       that cannot be told keeps the record for identity-bound delivery retry.
+#       Delivered or durable notices are never resent; diagnostics remain visible.
+#       Failed or skipped clone refreshes are reported in the settlement output.
 #
 # Record: state/<landing-id>.meta holding kind=landing, secondmate=<id>, the
 # canonical pr=<url>, and the custody the mate reported (pr_head=, nm_run_id=,
@@ -52,6 +53,7 @@
 # record, not a board item and not a worker: the poll, merge outcome, and
 # cleanup reuse bin/fm-pr-lib.sh and bin/fm-merge-outcome-lib.sh unchanged. Its
 # presence also keeps supervision armed, which the merge poll needs.
+# state/landing-settled-<digest> records the canonical PR URL after notification.
 # FM_LANDING_SEND_BIN and FM_LANDING_FLEET_SYNC_BIN replace the notifier and the
 # clone refresh; FM_LANDING_FORGE_TIMEOUT (default 20) bounds each forge read.
 set -eu
@@ -65,7 +67,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SEND_BIN="${FM_LANDING_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 FLEET_SYNC_BIN="${FM_LANDING_FLEET_SYNC_BIN:-$SCRIPT_DIR/fm-fleet-sync.sh}"
 FORGE_TIMEOUT="${FM_LANDING_FORGE_TIMEOUT:-20}"
-case "$FORGE_TIMEOUT" in ''|*[!0-9]*) FORGE_TIMEOUT=20 ;; esac
+case "$FORGE_TIMEOUT" in ''|0|*[!0-9]*) FORGE_TIMEOUT=20 ;; esac
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -85,8 +87,6 @@ usage() {
 }
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
-# <seconds> <command...>: bounded forge read; an unavailable timeout runs the
-# command as is, because every caller treats a failed read as "not settled".
 bounded() {
   local secs=$1
   shift
@@ -94,8 +94,10 @@ bounded() {
     timeout "$secs" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
     gtimeout "$secs" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$secs" "$@"
   else
-    "$@"
+    return 124
   fi
 }
 
@@ -115,7 +117,8 @@ meta_value() {  # <meta> <key>
   sed -n "s/^$2=//p" "$1" | tail -1
 }
 
-lock_path() { printf '%s/.landing-%s.lock\n' "$STATE" "$1"; }
+lock_path() { printf '%s/.landing-%s.lock\n' "$STATE" "$(url_digest "$1")"; }
+settled_path() { printf '%s/landing-settled-%s\n' "$STATE" "$(url_digest "$1")"; }
 
 arm_poll() {  # <landing-id> <canonical-url>; FM_PR_* already parsed from it
   local id=$1 url=$2
@@ -127,26 +130,30 @@ arm_poll() {  # <landing-id> <canonical-url>; FM_PR_* already parsed from it
 
 # File (or find) the landing record for <url> and arm its poll; with
 # LANDING_CUSTODY set (name=value lines) the record's custody keys are replaced
-# by it. Prints the landing id, or `skipped` when the forge already settled the PR.
+# by it. Prints the landing id, or `skipped` for a previously settled URL.
 register_core() {  # <secondmate-id> <url>
-  local sm=$1 raw=$2 id meta tmp lock remote outcome
+  local sm=$1 raw=$2 id meta tmp lock remote outcome marker
   fm_pr_task_id_valid "$sm" || die "invalid second mate id"
   fm_pr_url_parse "$raw" || die "not a canonical PR URL: $raw"
   remote=$(secondmate_registry_field "$DATA/secondmates.md" "$sm" remote 2>/dev/null || true)
   [ "$remote" = 1 ] || die "$sm is not a registered remote second mate"
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
   raw=$FM_PR_URL
-  # A PR the forge already shows merged or closed needs no record, and filing
-  # one would let a mate's reply to the settle notice register it again.
-  outcome=$(forge_outcome "$FM_PR_PROVIDER" "$raw" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER")
-  if [ "$outcome" != open ]; then
+  id=$(landing_id_for "$sm" "$raw")
+  meta="$STATE/$id.meta"
+  marker=$(settled_path "$raw")
+  lock=$(lock_path "$raw")
+  fm_lock_acquire_wait "$lock" || die "cannot lock landing record $id"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    if [ -L "$marker" ] || ! grep -qxF "$raw" "$marker"; then
+      fm_lock_release "$lock"
+      die "invalid settled marker for $raw"
+    fi
+    fm_lock_release "$lock"
     echo skipped
     return 0
   fi
-  id=$(landing_id_for "$sm" "$raw")
-  meta="$STATE/$id.meta"
-  lock=$(lock_path "$id")
-  fm_lock_acquire_wait "$lock" || die "cannot lock landing record $id"
+  outcome=$(forge_outcome "$FM_PR_PROVIDER" "$raw" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER")
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if ! { fm_pr_meta_kind_is "$meta" landing && grep -qxF "pr=$raw" "$meta"; }; then
       fm_lock_release "$lock"
@@ -173,10 +180,13 @@ register_core() {  # <secondmate-id> <url>
   fi
   # The record outlives a skipped arm (state without a poll is re-armed by the
   # next register or by a landing id's fm-pr-check), so arm even when it exists.
-  if ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+  if [ "$outcome" = open ] && ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
     arm_poll "$id" "$raw" || { fm_lock_release "$lock"; exit 1; }
   fi
   fm_lock_release "$lock"
+  if [ "$outcome" != open ]; then
+    "$SCRIPT_DIR/fm-landing.sh" settle "$id" "$outcome" >&2 || return 1
+  fi
   echo "$id"
 }
 
@@ -186,7 +196,7 @@ cmd_register() {
   LANDING_CUSTODY=
   id=$(register_core "$1" "$2") || exit 1
   if [ "$id" = skipped ]; then
-    printf 'landing: skipped %s - already merged or closed\n' "$2"
+    printf 'landing: skipped %s - previously settled\n' "$2"
   else
     printf 'landing: %s\n' "$id"
   fi
@@ -246,7 +256,7 @@ cmd_ingest() {
 # report the validated PR's custody upward once, so the main home keeps it after
 # the worker is released. A home that is not a remote second mate reports nothing.
 cmd_report() {
-  local id=${1:-} meta kind url head run mode out evidence blocked line
+  local id=${1:-} meta kind url head run mode out evidence blocked line latest lock
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   fm_pr_task_id_valid "$id" || die "invalid task id"
   fm_merge_outcome_home_id "$FM_HOME" >/dev/null 2>&1 || return 0
@@ -271,7 +281,16 @@ cmd_report() {
   fi
   line="working [key=pr-custody-$(url_digest "$FM_PR_URL")]: PR $FM_PR_URL custody task=$id head=${head:-none} run=${run:-none} mode=${mode:-unknown} evidence=$evidence blocked=$blocked"
   parse_custody_line "$line" || die "refusing to report custody for $id: the record is not well formed"
-  fm_merge_outcome_append_once "$STATE/parent-replies.status" "$line" || die "could not append the custody report"
+  lock="$STATE/.landing-custody.lock"
+  fm_lock_acquire_wait "$lock" || die "cannot lock the custody report"
+  trap 'fm_lock_release "$lock"' EXIT
+  [ ! -L "$STATE/parent-replies.status" ] || die "invalid custody report ledger"
+  latest=$(grep -F "PR $FM_PR_URL custody task=$id " "$STATE/parent-replies.status" 2>/dev/null | tail -1) || latest=
+  if [ "$latest" != "$line" ]; then
+    printf '%s\n' "$line" >> "$STATE/parent-replies.status" || die "could not append the custody report"
+  fi
+  fm_lock_release "$lock"
+  trap - EXIT
   printf 'custody: %s\n' "$id"
 }
 
@@ -324,7 +343,7 @@ clone_for_pr() {  # <host> <path>
 }
 
 cmd_settle() {
-  local id=${1:-} outcome=${2:-} meta url sm lock clone text note=
+  local id=${1:-} outcome=${2:-} meta url sm lock clone text marker tmp result send_rc sync_rc note=
   [ "$#" -eq 2 ] || { usage >&2; exit 2; }
   case "$outcome" in merged|closed) ;; *) die "outcome must be merged or closed" ;; esac
   fm_pr_task_id_valid "$id" || die "invalid landing id"
@@ -334,28 +353,56 @@ cmd_settle() {
   sm=$(meta_value "$meta" secondmate)
   fm_pr_url_parse "$url" || die "$id records no canonical PR"
   fm_pr_task_id_valid "$sm" || die "$id records no second mate"
-  lock=$(lock_path "$id")
+  marker=$(settled_path "$url")
+  lock=$(lock_path "$url")
   fm_lock_acquire_wait "$lock" || die "cannot lock landing record $id"
   trap 'fm_lock_release "$lock"' EXIT
-  if [ "$outcome" = merged ]; then
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ] && [ "$outcome" = merged ]; then
     if clone=$(clone_for_pr "$FM_PR_HOST" "$FM_PR_PATH"); then
-      "$FLEET_SYNC_BIN" "$clone" >/dev/null 2>&1 || true
-      note="clone $clone refreshed, "
+      sync_rc=0
+      result=$("$FLEET_SYNC_BIN" "$clone" 2>&1) || sync_rc=$?
+      if [ "$sync_rc" -eq 0 ]; then
+        note="clone $clone sync: ${result:-completed}, "
+      else
+        note="clone $clone sync failed (exit $sync_rc): ${result:-no diagnostic}, "
+      fi
     else
       note="no project clone matches, "
     fi
+  fi
+  if [ "$outcome" = merged ]; then
     text="Landing notice: $url was merged. Close any row you kept open for it and retire any worker still tied to it; the main home owns the merge record and needs no reply beyond your usual status line."
   else
     text="Landing notice: $url was closed without merging. Close or re-plan any row you kept open for it; the main home no longer tracks it."
   fi
-  FM_HOME="$FM_HOME" "$SEND_BIN" "$sm" "$text" >/dev/null 2>&1 \
-    || { printf 'DRIFT landing-notify-failed: %s - second mate %s could not be told; record kept for retry\n' "$id" "$sm"; exit 1; }
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ ! -L "$marker" ] && grep -qxF "$url" "$marker" || die "invalid settled marker for $url"
+  else
+    send_rc=0
+    result=$(FM_HOME="$FM_HOME" FM_SEND_RECONCILE_AUTH=1 "$SEND_BIN" "$sm" \
+      --reconcile-delivery "landing-$(url_digest "$url")" "$text" 2>&1) || send_rc=$?
+    [ -z "$result" ] || printf '%s\n' "$result" >&2
+    case "$send_rc" in
+      0|4|5|6|7|8|255) ;;
+      *)
+        if [ "$send_rc" -ne 1 ] || ! printf '%s\n' "$result" | grep -qiE 'do not resend|text was delivered|text delivery .* unknown'; then
+          printf 'DRIFT landing-notify-failed: %s - second mate %s delivery unresolved (exit %s); record kept for identity-bound retry\n' "$id" "$sm" "$send_rc"
+          exit 1
+        fi
+        ;;
+    esac
+    tmp=$(umask 077; mktemp "$STATE/.fm-landing-settled.XXXXXX") || die "cannot stage settled marker"
+    if ! { printf '%s\n' "$url" > "$tmp" && mv -f -- "$tmp" "$marker"; }; then
+      rm -f -- "$tmp"
+      die "cannot record settled URL"
+    fi
+  fi
   fm_pr_poll_cleanup_remove "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
     || { printf 'DRIFT landing-cleanup-refused: %s - PR poll artifacts could not be retired; record kept\n' "$id"; exit 1; }
   rm -f -- "$meta"
   fm_lock_release "$lock"
   trap - EXIT
-  printf 'DRIFT landing-%s: %s - %s %s; %ssecond mate %s told, record retired\n' "$outcome" "$id" "$url" "$outcome" "$note" "$sm"
+  printf 'DRIFT landing-%s: %s - %s %s; %ssecond mate %s notified or delivery retained; record retired\n' "$outcome" "$id" "$url" "$outcome" "$note" "$sm"
 }
 
 cmd_sweep() {
