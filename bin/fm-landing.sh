@@ -364,7 +364,9 @@ cmd_settle() {
     text="Landing notice: $url was closed without merging. Close or re-plan any row you kept open for it; the main home no longer tracks it."
   fi
   if [ -e "$marker" ] || [ -L "$marker" ]; then
-    [ ! -L "$marker" ] && grep -qxF "$url" "$marker" || die "invalid settled marker for $url"
+    if [ -L "$marker" ] || ! grep -qxF "$url" "$marker"; then
+      die "invalid settled marker for $url"
+    fi
   else
     send_rc=0
     result=$(FM_HOME="$FM_HOME" FM_SEND_RECONCILE_AUTH=1 "$SEND_BIN" "$sm" \
