@@ -8,7 +8,10 @@
 #     lists any accepted_blocked criterion is refused, naming each criterion id
 #     and its recorded captain exception. Evidence that cannot be read refuses
 #     too, because an accepted-blocked criterion cannot then be ruled out.
-#     Tasks whose metadata kind is not ship are not checked by this guard.
+#     A main-owned landing record (kind=landing) is judged by the custody its
+#     second mate reported with the PR-ready gate: missing or incomplete custody
+#     refuses, and any reported accepted-blocked criterion refuses.
+#     Tasks whose metadata kind is neither ship nor landing are not checked.
 #   - red checks: owned by bin/fm-pr-merge.sh, which adds its own reasons.
 #
 # Override: --captain-instruction "<words>" carries the captain's concrete
@@ -44,10 +47,29 @@ fm_merge_guard_add_reason() {
   fi
 }
 
+# A main-owned landing record (bin/fm-landing.sh) cannot read the second mate's
+# evidence, so it holds the custody the mate's own PR-ready gate reported: the
+# guard refuses unless that custody says the evidence was complete, and refuses
+# naming every accepted-blocked criterion it lists.
+fm_merge_guard_check_landing_custody() {  # <meta-file>
+  local meta=$1 evidence blocked
+  evidence=$(sed -n 's/^custody_evidence=//p' "$meta" 2>/dev/null | tail -1)
+  blocked=$(sed -n 's/^custody_blocked=//p' "$meta" 2>/dev/null | tail -1)
+  if [ "$evidence" != complete ]; then
+    fm_merge_guard_add_reason "the second mate reported no complete acceptance evidence for this PR, so an accepted-blocked criterion cannot be ruled out"
+  elif [ "$blocked" != none ]; then
+    fm_merge_guard_add_reason "acceptance criteria accepted as blocked: ${blocked:-unknown} (captain exceptions are recorded in the second mate's home)"
+  fi
+}
+
 # fm_merge_guard_check_accepted_blocked <task-id> <meta-file>
 fm_merge_guard_check_accepted_blocked() {
   local id=$1 meta=$2 kind out rc=0 blocked
   kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ "$kind" = landing ]; then
+    fm_merge_guard_check_landing_custody "$meta"
+    return 0
+  fi
   [ "$kind" = ship ] || return 0
   out=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$FM_MERGE_GUARD_DATA" \
     "$SCRIPT_DIR/fm-receipt-check.sh" "$id" 2>/dev/null) || rc=$?

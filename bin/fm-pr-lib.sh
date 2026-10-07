@@ -292,6 +292,12 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# 0 iff the task record carries exactly this kind= value (an absent record or
+# kind never matches).
+fm_pr_meta_kind_is() {  # <meta-file> <kind>
+  [ -f "$1" ] && grep -qx "kind=$2" "$1" 2>/dev/null
+}
+
 # Reads the canonical PR identity out of state/<id>.meta under the
 # order-independent contract stated in this file's header: a second pr= line
 # or a malformed pr_head= field is the only content-level refusal.
@@ -457,6 +463,10 @@ fm_pr_poll_prepare() {
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
   [ -f "$template" ] || return 1
+  # A second mate never owns a PR poll under its own id: its PRs are landed
+  # under a main-owned landing record (bin/fm-landing.sh), and a poll armed
+  # here would be orphaned the moment its restore rewrites the task record.
+  fm_pr_meta_kind_is "$state/$id.meta" secondmate && return 1
 
   [ ! -L "$state" ] || return 1
   mkdir -p "$state" || return 1
@@ -1018,4 +1028,52 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
+}
+
+# Per-task PR-poll cleanup shared by bin/fm-teardown.sh and bin/fm-landing.sh.
+# Validation refuses any artifact that is not an ordinary single-link file on
+# the state device, so a doctored sidecar is preserved instead of removed;
+# removal then finishes any pending merge-retirement receipt, drops the
+# merge-notification marker, and deletes the check, sidecar, registration,
+# retirement receipt, and trust binding.
+fm_pr_poll_cleanup_validate() {
+  local state_dir=$1 id=$2 state_device artifact has_artifact=0
+  fm_task_id_path_safe "$id" || return 0
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    has_artifact=1
+  done
+  [ "$has_artifact" -eq 1 ] || return 0
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+  state_device=$(fm_pr_file_device "$state_dir") || return 1
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ]; then
+      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+      return 1
+    fi
+  done
+  if [ -e "$state_dir/$id.pr-poll-retirement" ] \
+    || [ -L "$state_dir/$id.pr-poll-retirement" ]; then
+    fm_pr_poll_retirement_state_valid "$state_dir" "$id" || {
+      echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
+      return 1
+    }
+  fi
+}
+
+fm_pr_poll_cleanup_remove() {  # <state> <id> <fm-pr-poll.sh template>
+  local state_dir=$1 id=$2 template=$3
+  fm_pr_poll_cleanup_validate "$state_dir" "$id" || return 1
+  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$template" || return 1
+  fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.check-trust" || return 1
 }

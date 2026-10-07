@@ -38,6 +38,7 @@ Sleep is explicit, never an automatic idle action.
 A dormant route wakes before a requested delivery or remote launch; health polling, startup convergence, configuration propagation, and reply polling do not wake it.
 Wake-on-delivery follows the shared [agent restoration contract](remote-secondmates.md#compute-wake-and-agent-restoration).
 Sleep refuses pending routed replies, open decisions, undelivered handoffs, or active or unknown remote child work.
+A finished worker may be released at PR-ready because the primary tracks the PR to merge under a [landing record](remote-secondmates.md#landing-owner), so review time does not need a live worker.
 
 | Size | Compute rate per hour |
 | --- | ---: |

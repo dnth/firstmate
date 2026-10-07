@@ -207,7 +207,7 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-main-ci-watch.test.sh|fm-pr-check-handoff.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
-    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh|fm-ext-bridge.test.sh)
+    fm-landing.test.sh|fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh|fm-ext-bridge.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -1042,6 +1042,10 @@ families_for_changed_path() {
     bin/fm-env-lib.sh)
       printf '%s\n' pr-forge
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      ;;
+    bin/fm-landing.sh)
+      printf '%s\n' pr-forge
+      printf '%s\n' secondmate
       ;;
     bin/fm-pr-*|bin/fm-main-ci-*|bin/fm-merge-local.sh|bin/fm-local-default.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-ext-*|bin/fm-check*)

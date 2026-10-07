@@ -1338,7 +1338,9 @@ make_home_case() {
 }
 
 parent_reply_lines() {  # <file> <url>
-  grep -c -F "$2" "$1" 2>/dev/null || true
+  # Merged outcomes are `done` lines; a remote home's PR-ready check also reports
+  # a `working` custody line naming the same URL.
+  { grep -F "$2" "$1" 2>/dev/null || true; } | grep -c '^done ' || true
 }
 
 test_secondmate_merge_reports_upward_once() {
@@ -1354,8 +1356,8 @@ test_secondmate_merge_reports_upward_once() {
 
   assert_grep "done [key=merged-task-x1]: merged task-x1 $url" "$replies" \
     "secondmate-merge-reports: the landed PR was not reported upward"
-  [ "$(wc -l <"$replies")" -eq 1 ] \
-    || fail "secondmate-merge-reports: one merge produced more than one upward line"
+  [ "$(grep -c 'key=merged-task-x1' "$replies")" -eq 1 ] \
+    || fail "secondmate-merge-reports: one merge produced more than one upward merged line"
   assert_absent "$case_dir/state/.wake-queue" \
     "secondmate-merge-reports: a secondmate home also wrote a main-home record"
 
@@ -1400,8 +1402,11 @@ test_failed_merge_reports_nothing() {
   set -e
 
   expect_code 1 "$rc" "failed-merge-silent: a failed merge should propagate"
-  assert_absent "$case_dir/state/parent-replies.status" \
-    "failed-merge-silent: a merge that never landed was reported as landed"
+  # The PR-ready check that precedes the merge reports custody upward; only a
+  # merged outcome would claim a landing.
+  if grep -q 'key=merged-' "$case_dir/state/parent-replies.status" 2>/dev/null; then
+    fail "failed-merge-silent: a merge that never landed was reported as landed"
+  fi
   assert_absent "$case_dir/state/task-x1.pr-poll-merge-notified" \
     "failed-merge-silent: a merge that never landed was marked as reported"
   pass "a refused or failed merge reports no outcome"
@@ -1421,8 +1426,9 @@ test_unproved_merge_reports_nothing() {
   set -e
 
   expect_code 1 "$rc" "unproved-merge-silent: an unproved merge should refuse"
-  assert_absent "$case_dir/state/parent-replies.status" \
-    "unproved-merge-silent: an unproved merge was reported upward as landed"
+  if grep -q 'key=merged-' "$case_dir/state/parent-replies.status" 2>/dev/null; then
+    fail "unproved-merge-silent: an unproved merge was reported upward as landed"
+  fi
   assert_absent "$case_dir/state/task-x1.pr-poll-merge-notified" \
     "unproved-merge-silent: an unproved merge was marked as reported"
   assert_present "$case_dir/state/task-x1.check.sh" \
@@ -1446,8 +1452,9 @@ test_main_home_merge_leaves_a_durable_wake() {
     || fail "main-merge-wake: one merge produced more than one durable record"
   grep -F "$(printf '\tcheck\tmerged-task-x1-%s\t' "$url")" "$case_dir/state/.wake-queue" >/dev/null \
     || fail "main-merge-wake: the durable record is not a check-kind row keyed by the PR"
-  assert_absent "$case_dir/state/parent-replies.status" \
-    "main-merge-wake: a main home wrote a parent reply channel it does not have"
+  if grep -q 'key=merged-' "$case_dir/state/parent-replies.status" 2>/dev/null; then
+    fail "main-merge-wake: a main home wrote a parent reply channel it does not have"
+  fi
   assert_present "$case_dir/state/task-x1.pr-poll-merge-notified" \
     "main-merge-wake: the canonical notification marker was not committed"
   pass "a merge a main home performs itself leaves one durable check-kind wake naming the PR"

@@ -235,6 +235,24 @@ The source log is never truncated or consumed.
 A captured delta cannot be `handled` before it was ingested - the runner's `handled-gate` seam requires an ingest receipt, cursor coverage, or a recorded continuity break.
 A shortened or changed prefix stops the relay, writes a durable `state/remote-replies/<id>.continuity-broken` marker naming the sequence and reason, and keeps the route pinned until an operator rebases the cursor.
 
+### Landing owner
+
+A remote second mate sleeps between turns and its merge poll runs only while it is awake, so the primary owns the landing of every PR the mate reports.
+When the reply relay ingests an accepted `done` line that reports `PR <url>`, it passes the line to `bin/fm-landing.sh ingest`, which files a primary-owned landing record and arms the ordinary merge poll on it.
+A first report of a PR already merged or closed creates its landing record and settles immediately; a failed registration fails the handle so autohandle retries it.
+A durable settled marker per PR URL makes repeated reports and replies naming the PR no-ops.
+When `bin/fm-pr-check.sh` passes its PR-ready gates in a remote second mate's home, it also reports the validated PR's custody upward.
+The landing record keeps that custody, so it outlives the worker; the [landing script header](../bin/fm-landing.sh) owns the report format and record fields.
+The record is not a board item and not a worker; the second mate's own id never owns a poll, and `bin/fm-pr-check.sh` and the arming library refuse a second mate's id.
+The mate may therefore release a finished worker at PR-ready without losing tracking.
+Merge authority is unchanged: the primary merges through the landing id under the [ship-landing procedure](../.agents/skills/ship-landing/SKILL.md), with custody refusals and captain overrides owned by the [merge guard](../bin/fm-merge-guard-lib.sh).
+A merge, by the primary or on the forge, wakes the primary, and the merged-PR reconcile in `bin/fm-todo-project.sh` settles the record: it attempts to refresh the project clone through the guarded fleet sync, tells the mate through `bin/fm-send.sh` so it can close its own row, and retires the record.
+A PR closed without merging is settled by the same reconcile on GitHub, noticed at the next heartbeat rather than by the poll.
+Settlement reports failed or skipped clone refreshes.
+A genuinely undelivered notice, including a refusal before delivery because restoration or the endpoint is unconfirmed, keeps the record for retry through the same reconciliation delivery identity.
+Delivered notices, durably queued requests, and unknown completion after delivery preserve diagnostics and never trigger a fresh resend.
+`bin/fm-landing.sh --help` owns the command surface.
+
 An SSH exit status of 255 always means transport failure or unknown remote completion.
 The transport never retries automatically.
 Semantic callers preserve the route or pending request and require same-host reconciliation rather than resending an operation that may already have happened.

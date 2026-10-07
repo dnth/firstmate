@@ -49,6 +49,11 @@
 # autohandle retries it rather than acknowledging a half-ingested delta. Exact
 # lines are appended at most once to the parent's state/<id>.status.
 #
+# An accepted `done` line that reports `PR <url>`, and the mate's custody line,
+# also reach bin/fm-landing.sh, which files a main-owned landing record so the
+# merge stays tracked while the remote mate sleeps; a failed registration fails
+# the handle like a failed document fetch.
+#
 # `handled-gate` is the generic runner's acknowledgement gate: a remote-reply
 # generation may be marked handled only after its ingest receipt exists, the
 # cursor covers its range, or its continuity break is recorded - a never-ingested
@@ -84,7 +89,7 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,71p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -554,6 +559,16 @@ cmd_ingest() {
     fi
     index=$((index + 1))
   done < "$tmp/manifest"
+  # A mate's PR-ready report gets a main-owned landing record, and its custody
+  # report records what the merge guards need, so the merge stays tracked while the
+  # mate sleeps. A failure fails the handle, like a failed document fetch, so
+  # autohandle retries instead of acknowledging an untracked PR.
+  if [ -f "$tmp/accepted" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      "$SCRIPT_DIR/fm-landing.sh" ingest "$id" "$line" >/dev/null \
+        || { fm_lock_release "$lock"; die "could not record a landing for: $line"; }
+    done < "$tmp/accepted"
+  fi
   # Only accepted lines may resolve a pending parent request: a rejected line's
   # correlation token is never trusted.
   while IFS= read -r corr; do

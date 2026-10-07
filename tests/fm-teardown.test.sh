@@ -3820,3 +3820,92 @@ test_turnend_registry_cleanup_uses_persisted_owner() {
 }
 
 test_turnend_registry_cleanup_uses_persisted_owner
+
+# The PR-poll sidecar cleanup that teardown shares with bin/fm-landing.sh lives
+# in bin/fm-pr-lib.sh; an ordinary task must still lose exactly its own sidecars
+# and still refuse (preserving the task) when one of them is not an ordinary file.
+test_ordinary_teardown_still_retires_its_own_poll_and_refuses_an_unsafe_one() {
+  local case_dir rc poll_template=$ROOT/bin/fm-pr-poll.sh
+  case_dir=$(make_case poll-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  (
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_poll_prepare "$case_dir/state" task-x1 github https://github.com/example/repo/pull/7 github.com example/repo 7 "$poll_template" \
+      && fm_pr_poll_publish_prepared
+  ) || fail "poll-cleanup: could not arm the task's merge poll"
+  mv "$case_dir/state/task-x1.pr-poll" "$case_dir/pr-poll.real"
+  ln -s "$case_dir/pr-poll.real" "$case_dir/state/task-x1.pr-poll"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "poll-cleanup: teardown removed a task whose poll sidecar was a symlink"
+  grep -q 'REFUSED: unsafe task PR-check artifact' "$case_dir/stderr" \
+    || fail "poll-cleanup: the unsafe sidecar was not refused by name"
+  assert_present "$case_dir/state/task-x1.meta" "poll-cleanup: a refused teardown dropped the task record"
+  rm -f "$case_dir/state/task-x1.pr-poll"
+  mv "$case_dir/pr-poll.real" "$case_dir/state/task-x1.pr-poll"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "poll-cleanup: teardown should succeed once the sidecar is ordinary"
+  assert_absent "$case_dir/state/task-x1.check.sh" "poll-cleanup: the task's merge check survived teardown"
+  assert_absent "$case_dir/state/task-x1.pr-poll" "poll-cleanup: the task's poll sidecar survived teardown"
+  assert_absent "$case_dir/state/task-x1.pr-poll-registration" "poll-cleanup: the task's poll registration survived teardown"
+  assert_absent "$case_dir/state/task-x1.meta" "poll-cleanup: the task record survived teardown"
+  pass "AC4: ordinary teardown still retires its own PR poll and refuses an unsafe sidecar"
+}
+
+# A remote second mate may release a finished worker at PR-ready (its branch is
+# on the remote, its PR still open) because main owns landing: the mate's
+# teardown touches only its own home, and main's landing record keeps tracking
+# the PR until the forge merges it.
+test_second_mate_pr_ready_teardown_leaves_main_tracking_the_pr() {
+  local case_dir main fakebin rc url=https://github.com/example/repo/pull/7 id out
+  case_dir=$(make_case landing-owner)
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  main="$case_dir/main"
+  fakebin="$main/fakebin"
+  mkdir -p "$main/data" "$main/state" "$main/config" "$fakebin"
+  printf -- '- ios - iOS delivery (host: remote-mac; root: %s; home: %s/remote; scope: iOS work; projects: repo; added 2026-08-02)\n' \
+    "$ROOT" "$main" > "$main/data/secondmates.md"
+  printf '#!/usr/bin/env bash\ncat "%s/forge"\n' "$main" > "$fakebin/gh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/send"
+  chmod +x "$fakebin/gh" "$fakebin/send"
+  printf 'OPEN\n' > "$main/forge"
+  landing_run() {
+    FM_HOME="$main" FM_ROOT_OVERRIDE="$ROOT" FM_LANDING_SEND_BIN="$fakebin/send" \
+      FM_LANDING_FLEET_SYNC_BIN="$fakebin/send" PATH="$fakebin:$PATH" "$ROOT/bin/fm-landing.sh" "$@"
+  }
+  IFS= read -r id < <(landing_run register ios "$url" | sed -n 's/^landing: //p')
+  [ -n "$id" ] || fail "landing-owner: main did not file a landing record for the PR-ready report"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "landing-owner: the mate's teardown at PR-ready should succeed with the PR still open"
+  assert_absent "$case_dir/state/task-x1.meta" "landing-owner: the mate's worker record survived its teardown"
+  bash -c '. "$1/bin/fm-pr-lib.sh" && fm_pr_poll_artifacts_valid "$2" "$3" "$1/bin/fm-pr-poll.sh"' _ "$ROOT" "$main/state" "$id" \
+    || fail "landing-owner: main lost its merge poll when the mate released the worker"
+  [ -z "$(landing_run sweep)" ] || fail "landing-owner: an open PR was settled early"
+
+  printf 'MERGED\n' > "$main/forge"
+  out=$(landing_run sweep)
+  case "$out" in *"landing-merged: $id"*) ;; *) fail "landing-owner: main did not settle the merge it tracked: $out" ;; esac
+  assert_absent "$main/state/$id.meta" "landing-owner: the settled landing record survived"
+  pass "AC2: a mate tears down its worker at PR-ready and main still tracks the PR to merge"
+}
+
+test_ordinary_teardown_still_retires_its_own_poll_and_refuses_an_unsafe_one
+test_second_mate_pr_ready_teardown_leaves_main_tracking_the_pr
