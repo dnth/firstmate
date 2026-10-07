@@ -20,11 +20,16 @@ printf 'ios\n' > "$HOME_DIR/.fm-secondmate-home"
 CREW_STATES="$TMP_ROOT/crew-states"
 UNLANDED="$TMP_ROOT/unlanded"
 TEARDOWNS="$TMP_ROOT/teardowns"
+TRANSITION="$TMP_ROOT/transition"
 : > "$CREW_STATES"; : > "$UNLANDED"; : > "$TEARDOWNS"
 
 cat > "$BIN/fm-crew-state.sh" <<SH
 #!/usr/bin/env bash
 state=\$(sed -n "s/^\$1 //p" "$CREW_STATES" | head -1)
+if [ -f "$TRANSITION" ] && [ "\$1" = shiprace ]; then
+  printf 'shiprace done\n' > "$CREW_STATES"
+  rm -f "$TRANSITION"
+fi
 printf 'state: %s · source: fake · fixture\n' "\${state:-unknown}"
 SH
 cat > "$BIN/fm-teardown.sh" <<SH
@@ -54,14 +59,25 @@ add_child blind ship direct-PR unknown
 pass "children leaves finished ships of every mode out of the live count"
 
 : > "$TEARDOWNS"
-[ "$(ctl sleep-reconcile ios)" = reconciled=3 ] || fail "reconcile did not retire the three finished ships"
+if out=$(ctl sleep-reconcile ios 2>&1); then fail "remaining live work must refuse reconciliation"; fi
+assert_contains "$out" "worker blind remains" "remaining worker refusal must name its record"
 sort "$TEARDOWNS" | tr '\n' ' ' | grep -qx 'shipdp shiplo shipnm ' \
   || fail "reconcile touched the wrong tasks: $(tr '\n' ' ' < "$TEARDOWNS")"
 [ ! -e "$HOME_DIR/state/shipnm.meta" ] && [ -e "$HOME_DIR/state/live.meta" ] \
   && [ -e "$HOME_DIR/state/scout.meta" ] && [ -e "$HOME_DIR/state/blind.meta" ] \
   || fail "reconcile removed something other than the finished ships"
 [ "$(ctl children ios)" = children=3 ] || fail "live work must still count after reconcile"
-pass "reconcile retires finished no-mistakes, direct-PR, and local-only ships and keeps live work"
+pass "reconcile retires finished ships in every mode and refuses remaining live work"
+
+rm -f "$HOME_DIR/state/live.meta" "$HOME_DIR/state/scout.meta" "$HOME_DIR/state/blind.meta"
+[ "$(ctl sleep-reconcile ios)" = reconciled=0 ] || fail "an empty reconciled home must permit sleep"
+[ "$(ctl children ios)" = children=0 ] || fail "an empty home must have no live workers"
+add_child shipnm ship no-mistakes done
+add_child shipdp ship direct-PR done
+add_child shiplo ship local-only done
+[ "$(ctl sleep-reconcile ios)" = reconciled=3 ] || fail "finished landed ships must permit reconciliation"
+[ "$(ctl children ios)" = children=0 ] || fail "successful reconciliation left workers behind"
+pass "reconciliation succeeds for empty homes and finished landed ships in every mode"
 
 # Unlanded finished work: teardown refuses, so reconcile fails and keeps it.
 add_child shipun ship no-mistakes 'done'
@@ -71,3 +87,22 @@ if out=$(ctl sleep-reconcile ios 2>&1); then fail "reconcile succeeded past unla
 assert_contains "$out" "shipun could not be torn down safely" "the refusal must name the finished ship"
 [ -e "$HOME_DIR/state/shipun.meta" ] || fail "unlanded work was removed"
 pass "a finished ship with unlanded work refuses the reconcile and is kept"
+
+rm -f "$HOME_DIR/state/shipun.meta"
+for mode in no-mistakes direct-PR local-only; do
+  : > "$CREW_STATES"; : > "$TEARDOWNS"
+  add_child shiprace ship "$mode" working
+  printf 'shiprace\n' > "$UNLANDED"
+  touch "$TRANSITION"
+  if out=$(ctl sleep-reconcile ios 2>&1); then fail "a transitioning $mode ship permitted suspension"; fi
+  assert_contains "$out" "worker shiprace remains" "transition refusal must name the ship"
+  [ ! -s "$TEARDOWNS" ] || fail "the working observation must skip teardown"
+  [ "$(ctl children ios)" = children=0 ] || fail "the later children read must see the ship as finished"
+  [ -e "$HOME_DIR/state/shiprace.meta" ] || fail "transitioning unlanded work was removed"
+  if out=$(ctl sleep-reconcile ios 2>&1); then fail "the now-finished unlanded ship permitted suspension"; fi
+  assert_contains "$out" "shiprace could not be torn down safely" "ordinary teardown must reject unlanded work"
+  [ "$(cat "$TEARDOWNS")" = shiprace ] || fail "finished ship did not pass through ordinary teardown"
+  [ -e "$HOME_DIR/state/shiprace.meta" ] || fail "unlanded ship was removed after teardown refusal"
+  rm -f "$HOME_DIR/state/shiprace.meta"
+done
+pass "working-to-done unlanded ships refuse suspension despite a later zero live count"

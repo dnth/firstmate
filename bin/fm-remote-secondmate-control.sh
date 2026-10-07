@@ -569,6 +569,12 @@ cmd_sleep_reconcile() {
       || die "finished ship $child could not be torn down safely"
     reconciled=$((reconciled + 1))
   done
+  for meta in "$TARGET_HOME/state"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    child=${meta##*/}
+    child=${child%.meta}
+    die "worker $child remains after sleep reconciliation; refusing suspension"
+  done
   printf 'reconciled=%s\n' "$reconciled"
 }
 
