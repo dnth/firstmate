@@ -240,9 +240,12 @@ A shortened or changed prefix stops the relay, writes a durable `state/remote-re
 A remote second mate sleeps between turns and its merge poll runs only while it is awake, so the primary owns the landing of every PR the mate reports.
 When the reply relay ingests an accepted `done` line that reports `PR <url>`, it runs `bin/fm-landing.sh register`, which files a landing record in the primary's `state/` under a primary-owned id (`land-<second-mate>-<number>-<digest>`) and arms the ordinary merge poll on it.
 A PR the forge already shows merged or closed gets no record, and a failed registration fails the handle so autohandle retries it.
+When `bin/fm-pr-check.sh` passes its PR-ready gates in a remote second mate's home, it also reports the validated PR's custody upward as one `working [key=pr-custody-<digest>]` line: the PR head, No-Mistakes run, mode, whether the acceptance evidence was complete, and any accepted-blocked criterion ids.
+The landing record keeps that custody (`pr_head=`, `nm_run_id=`, `custody_*`), so it outlives the worker.
 The record is not a board item and not a worker; the second mate's own id never owns a poll, and `bin/fm-pr-check.sh` and the arming library refuse a second mate's id.
 The mate may therefore release a finished worker at PR-ready without losing tracking.
-Merge authority is unchanged: the captain's word still decides, and the primary runs `bin/fm-pr-merge.sh <landing-id> <pr-url>` with its ordinary guards, because the primary holds the only task record that survives the worker.
+Merge authority is unchanged: the captain's word still decides, and the primary runs `bin/fm-pr-merge.sh <landing-id> <pr-url>`, because the primary holds the only task record that survives the worker.
+The merge guards judge the landing record by its custody: missing or incomplete evidence, or any accepted-blocked criterion, refuses standing authority and only the captain's `--captain-instruction` merges it, exactly as for a local ship task.
 A merge, by the primary or on the forge, wakes the primary, and the merged-PR reconcile in `bin/fm-todo-project.sh` settles the record: it refreshes the project clone through the guarded fleet sync, tells the mate through `bin/fm-send.sh` so it can close its own row, and retires the record.
 A PR closed without merging is settled by the same reconcile on GitHub, noticed at the next heartbeat rather than by the poll.
 A mate that cannot be told keeps the record, so the next reconcile retries.

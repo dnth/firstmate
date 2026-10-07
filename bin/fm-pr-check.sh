@@ -28,7 +28,8 @@
 # that lock is fresh.
 # A second mate's id is refused: its PRs are tracked under a main-owned landing
 # record, and a landing id re-arms its poll through bin/fm-landing.sh instead of
-# the ship gates above.
+# the ship gates above. In a remote second mate's home a successful check also
+# reports the validated PR's custody upward (bin/fm-landing.sh report).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -229,4 +230,8 @@ fm_pr_metadata_identity_parse "$META" || { fm_pr_poll_revoke_final || true; exit
   || { fm_pr_poll_revoke_final || true; exit 1; }
 fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { fm_pr_poll_revoke_final || true; echo "error: published PR poll is invalid" >&2; exit 1; }
+# A remote second mate reports the validated PR's custody upward before its
+# worker can be released; the main home's landing record keeps it (bin/fm-landing.sh).
+"$SCRIPT_DIR/fm-landing.sh" report "$ID" >/dev/null \
+  || echo "warning: could not report PR custody for $ID to the main home" >&2
 printf 'armed: state/%s.check.sh\n' "$ID"

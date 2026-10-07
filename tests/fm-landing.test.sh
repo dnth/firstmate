@@ -14,6 +14,11 @@
 #   (e) a non-reconcile check only reports
 #   (f) PRs the forge already shows settled, non-PR lines, and unregistered
 #       mates file nothing
+#   (h) custody crosses the relay: the mate's own PR-ready gate reports it, main's
+#       landing record keeps it after the worker is released, and the merge
+#       through fm-pr-merge on the landing id keeps its guards - complete
+#       evidence merges, an accepted-blocked criterion or missing custody refuses
+#       standing authority, and the captain's instruction overrides with a record
 #   (g) fm-pr-check refuses a second mate's id and arms nothing; the arming
 #       library refuses it too; a landing id re-arms through fm-pr-check
 set -u
@@ -219,6 +224,7 @@ test_main_merges_through_the_landing_record_and_settles_it() {
   local home id out
   home=$(make_home main-merge)
   relay_line "$home" "done [key=pr-ready]: PR $URL7 checks green"
+  report_custody_through_the_relay "$home" "$(make_mate_home "$home" no)"
   id=$(assert_one_landing "$home" "$URL7")
   # The mate's worker is gone, so only main's record can carry the merge.
   out=$(home_env "$home" "$ROOT/bin/fm-pr-merge.sh" "$id" "$URL7" -- --squash 2>&1) \
@@ -332,7 +338,142 @@ test_a_second_mate_id_never_owns_a_pr_poll_and_a_landing_id_rearms() {
   pass "AC3: fm-pr-check refuses a second mate's id, nothing arms a poll under it, and a landing id re-arms"
 }
 
+
+HEAD40=0123456789abcdef0123456789abcdef01234567
+
+# A remote second mate's home holding one validated worker for URL7: the worker's
+# task record, brief, and evidence ledger, plus the seeded identity and remote
+# parent binding that make its PR-ready gate report upward.
+make_mate_home() {  # <home> <blocked: yes|no> -> echoes the mate home
+  local home=$1 mate="$1/mate" ledger
+  mkdir -p "$mate/state" "$mate/data/worker-1"
+  printf 'ios\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' > "$mate/.fm-secondmate-parent"
+  fm_write_meta "$mate/state/worker-1.meta" "kind=ship" "mode=no-mistakes" "yolo=0" \
+    "pr=$URL7" "pr_head=$HEAD40" "nm_run_id=run-1"
+  printf '# Task\nFixture.\n\n# Acceptance criteria\n- AC1: First.\n- AC2: Second.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' \
+    > "$mate/data/worker-1/brief.md"
+  ledger="$mate/data/worker-1/evidence.jsonl"
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"success","summary":"ok","result":"pass"}' > "$ledger"
+  if [ "$2" = yes ]; then
+    printf '%s\n' '{"criterion":"AC2","type":"test","outcome":"accepted-blocked","summary":"no env","result":"blocked","captain_exception":"2026-10-07 captain: ship without AC2"}' >> "$ledger"
+  else
+    printf '%s\n' '{"criterion":"AC2","type":"test","outcome":"success","summary":"ok","result":"pass"}' >> "$ledger"
+  fi
+  : > "$mate/data/worker-1/.evidence.lock"
+  printf '%s\n' "$mate"
+}
+
+# The mate's PR-ready gate reports custody; the line crosses the main relay.
+report_custody_through_the_relay() {  # <main-home> <mate-home>
+  local home=$1 mate=$2 line
+  FM_HOME="$mate" FM_ROOT_OVERRIDE="$ROOT" "$LANDING" report worker-1 >/dev/null \
+    || fail "the mate's PR-ready gate could not report custody"
+  line=$(grep -F ' custody task=worker-1 ' "$mate/state/parent-replies.status" | tail -1)
+  [ -n "$line" ] || fail "the mate reported no custody line"
+  relay_line "$home" "$line"
+}
+
+merge_through_the_guards() {  # <home> <id> [extra fm-pr-merge args]
+  local home=$1 id=$2
+  shift 2
+  : > "$home/forge/gh-axi.log"
+  home_env "$home" "$ROOT/bin/fm-pr-merge.sh" "$id" "$URL7" "$@" 2>&1
+}
+
+test_custody_survives_the_workers_release_and_the_guards_hold_at_merge() {
+  local home mate id out meta want
+  # Complete evidence, nothing accepted-blocked: the owner merges after release.
+  home=$(make_home custody-clean)
+  mate=$(make_mate_home "$home" no)
+  report_custody_through_the_relay "$home" "$mate"
+  rm -f "$mate/state/worker-1.meta"   # the mate releases its worker
+  id=$(assert_one_landing "$home" "$URL7")
+  meta="$home/state/$id.meta"
+  for want in "pr_head=$HEAD40" nm_run_id=run-1 custody_task=worker-1 custody_mode=no-mistakes \
+    custody_evidence=complete custody_blocked=none; do
+    grep -qx "$want" "$meta" || fail "the landing record lost the mate's custody ($want): $(cat "$meta")"
+  done
+  fm_pr_poll_artifacts_valid "$home/state" "$id" "$POLL" || fail "recording custody broke the landing poll"
+  out=$(merge_through_the_guards "$home" "$id" -- --squash) || fail "the owner could not merge after release: $out"
+  grep -qxF 'pr merge 7 --repo acme/alpha --squash' "$home/forge/gh-axi.log" || fail "the guarded merge never reached the forge"
+  # The report is idempotent, and a report that repeats changes nothing.
+  FM_HOME="$mate" FM_ROOT_OVERRIDE="$ROOT" "$LANDING" report worker-1 >/dev/null
+  [ "$(grep -cF ' custody task=worker-1 ' "$mate/state/parent-replies.status")" -eq 1 ] \
+    || fail "a repeated PR-ready report duplicated the custody line"
+
+  # An accepted-blocked criterion refuses standing authority and names it.
+  home=$(make_home custody-blocked)
+  mate=$(make_mate_home "$home" yes)
+  report_custody_through_the_relay "$home" "$mate"
+  rm -f "$mate/state/worker-1.meta"
+  id=$(assert_one_landing "$home" "$URL7")
+  grep -qx 'custody_blocked=AC2' "$home/state/$id.meta" || fail "the accepted-blocked criterion was not carried: $(cat "$home/state/$id.meta")"
+  if out=$(merge_through_the_guards "$home" "$id" -- --squash); then
+    fail "an accepted-blocked landing merged on standing authority"
+  fi
+  case "$out" in *"accepted as blocked: AC2"*"--captain-instruction"*) ;; *) fail "the refusal did not name the criterion and the override: $out" ;; esac
+  [ ! -s "$home/forge/gh-axi.log" ] || fail "a refused merge reached the forge"
+  # Only the captain's explicit word merges it, and the override is recorded.
+  out=$(merge_through_the_guards "$home" "$id" --captain-instruction "captain 2026-10-07: merge it despite AC2" -- --squash) \
+    || fail "the captain's instruction did not merge the accepted-blocked landing: $out"
+  grep -qxF 'pr merge 7 --repo acme/alpha --squash' "$home/forge/gh-axi.log" || fail "the overridden merge never reached the forge"
+  grep -q 'captain 2026-10-07: merge it despite AC2' "$home/data/$id/captain-merge-instructions.jsonl" \
+    || fail "the captain's override left no durable record"
+
+  # No custody at all (a bare PR-ready report) cannot rule an exception out.
+  home=$(make_home custody-missing)
+  relay_line "$home" "done [key=pr-ready]: PR $URL7 checks green"
+  id=$(assert_one_landing "$home" "$URL7")
+  if out=$(merge_through_the_guards "$home" "$id" -- --squash); then
+    fail "a landing with no custody merged on standing authority"
+  fi
+  case "$out" in *"no complete acceptance evidence"*) ;; *) fail "the missing-custody refusal was not explained: $out" ;; esac
+  [ ! -s "$home/forge/gh-axi.log" ] || fail "a refused merge reached the forge"
+
+  # A mate whose evidence is incomplete reports it, and that refuses too.
+  home=$(make_home custody-incomplete)
+  mate=$(make_mate_home "$home" no)
+  : > "$mate/data/worker-1/evidence.jsonl"
+  report_custody_through_the_relay "$home" "$mate"
+  id=$(assert_one_landing "$home" "$URL7")
+  grep -qx 'custody_evidence=incomplete' "$home/state/$id.meta" || fail "incomplete evidence was not carried"
+  if merge_through_the_guards "$home" "$id" -- --squash >/dev/null; then
+    fail "a landing with incomplete evidence merged on standing authority"
+  fi
+  pass "AC5: custody crosses the relay and survives the worker's release, and the owner's merge keeps every guard"
+}
+
+test_the_mates_pr_check_reports_custody_when_it_passes() {
+  local home mate out
+  home=$(make_home mate-pr-check)
+  mate=$(make_mate_home "$home" no)
+  # An unregistered direct-PR worker: its first PR-ready check runs the real gates.
+  fm_write_meta "$mate/state/worker-1.meta" "kind=ship" "mode=direct-PR" "yolo=0"
+  sed -i.bak 's/mode=no-mistakes/mode=direct-PR/' "$mate/data/worker-1/brief.md" && rm -f "$mate/data/worker-1/brief.md.bak"
+  mkdir -p "$home/root/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$home/root/bin/fm-guard.sh"
+  chmod +x "$home/root/bin/fm-guard.sh"
+  out=$(env -u FM_TASK_ID FM_HOME="$mate" FM_ROOT_OVERRIDE="$home/root" PATH="$home/fakebin:$BASE_PATH" "$PR_CHECK" worker-1 "$URL7" 2>&1) \
+    || fail "the mate's PR-ready check failed: $out"
+  grep -qxF "working [key=pr-custody-$(printf '%s' "$URL7" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-8)]: PR $URL7 custody task=worker-1 head=none run=none mode=direct-PR evidence=complete blocked=none" \
+    "$mate/state/parent-replies.status" || fail "the passing PR-ready check reported no custody: $(cat "$mate/state/parent-replies.status" 2>/dev/null)"
+  pass "a remote second mate's passing PR-ready check reports custody upward"
+}
+
+test_a_non_mate_home_reports_no_custody() {
+  local home out
+  home=$(make_home plain-home)
+  fm_write_meta "$home/state/task-a.meta" "kind=ship" "mode=direct-PR" "pr=$URL7"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$LANDING" report task-a)
+  [ -z "$out" ] && [ ! -e "$home/state/parent-replies.status" ] || fail "an ordinary home reported custody: $out"
+  pass "an ordinary or locally routed home reports no custody"
+}
+
 test_relayed_pr_ready_files_a_main_owned_landing_and_a_merge_settles_it
+test_custody_survives_the_workers_release_and_the_guards_hold_at_merge
+test_the_mates_pr_check_reports_custody_when_it_passes
+test_a_non_mate_home_reports_no_custody
 test_main_merges_through_the_landing_record_and_settles_it
 test_a_pr_closed_without_merging_settles_without_a_refresh
 test_an_untold_mate_keeps_the_record_until_it_can_be_told

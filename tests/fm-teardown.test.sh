@@ -3887,7 +3887,7 @@ test_second_mate_pr_ready_teardown_leaves_main_tracking_the_pr() {
     FM_HOME="$main" FM_ROOT_OVERRIDE="$ROOT" FM_LANDING_SEND_BIN="$fakebin/send" \
       FM_LANDING_FLEET_SYNC_BIN="$fakebin/send" PATH="$fakebin:$PATH" "$ROOT/bin/fm-landing.sh" "$@"
   }
-  id=$(landing_run register ios "$url" | sed -n 's/^landing: //p')
+  IFS= read -r id < <(landing_run register ios "$url" | sed -n 's/^landing: //p')
   [ -n "$id" ] || fail "landing-owner: main did not file a landing record for the PR-ready report"
 
   set +e
@@ -3896,10 +3896,8 @@ test_second_mate_pr_ready_teardown_leaves_main_tracking_the_pr() {
   set -e
   expect_code 0 "$rc" "landing-owner: the mate's teardown at PR-ready should succeed with the PR still open"
   assert_absent "$case_dir/state/task-x1.meta" "landing-owner: the mate's worker record survived its teardown"
-  (
-    . "$ROOT/bin/fm-pr-lib.sh"
-    fm_pr_poll_artifacts_valid "$main/state" "$id" "$ROOT/bin/fm-pr-poll.sh"
-  ) || fail "landing-owner: main lost its merge poll when the mate released the worker"
+  bash -c '. "$1/bin/fm-pr-lib.sh" && fm_pr_poll_artifacts_valid "$2" "$3" "$1/bin/fm-pr-poll.sh"' _ "$ROOT" "$main/state" "$id" \
+    || fail "landing-owner: main lost its merge poll when the mate released the worker"
   [ -z "$(landing_run sweep)" ] || fail "landing-owner: an open PR was settled early"
 
   printf 'MERGED\n' > "$main/forge"
