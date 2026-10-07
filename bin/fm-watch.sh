@@ -1725,7 +1725,7 @@ while :; do
 
   # Opt-in idle auto-sleep (config/idle-sleep). The tick reads only local
   # records and detaches any guarded sleep attempt, so it never blocks this
-  # cycle; it prints a reason only for a refusal it has not yet surfaced.
+  # cycle; it prints reasons for previously unreported refusals or malformed lines.
   idle_sleep_tick
 
   # A process-event result carries richer adapter-owned wake context than the

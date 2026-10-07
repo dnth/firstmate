@@ -40,6 +40,8 @@
 # A private parent-route state directory stores only the remote secondmate
 # agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
+# `children` counts live workers only; the comments at cmd_children and
+# cmd_sleep_reconcile own finished-ship classification and safe sleep cleanup.
 # Retirement closes only this secondmate's panes or workspace and never
 # stops fm-remote or removes a sibling secondmate's workspace or panes.
 #
@@ -553,6 +555,9 @@ cmd_children() {
 # Retire every finished ship, of any delivery mode, through ordinary teardown
 # and never forced: teardown refuses work that has not landed, and that refusal
 # fails this command so the sleep stops and the work is kept.
+# After cleanup, any remaining worker record refuses suspension, including a
+# worker that became finished after its first observation. A later zero live
+# count cannot substitute for successful reconciliation.
 cmd_sleep_reconcile() {
   local id=$1 meta child reconciled=0
   validate_id "$id"

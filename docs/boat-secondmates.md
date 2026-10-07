@@ -37,7 +37,7 @@ Fresh endpoints may change IP or port without changing identity.
 Sleep is explicit unless the placement opts in to idle auto-sleep, which runs this same guarded sleep after a quiet window; [Idle auto-sleep](configuration.md#idle-auto-sleep-configidle-sleep) owns that contract.
 A dormant route wakes before a requested delivery or remote launch; health polling, startup convergence, configuration propagation, and reply polling do not wake it.
 Wake-on-delivery follows the shared [agent restoration contract](remote-secondmates.md#compute-wake-and-agent-restoration).
-Sleep first retires every finished ship, whatever its delivery mode, through the ordinary landed-work teardown guard.
+The [remote control script](../bin/fm-remote-secondmate-control.sh) owns finished-worker reconciliation before sleep.
 It then refuses pending routed replies, open decisions, undelivered handoffs, live or unknown remote child work, and any remaining finished ship whose work has not landed.
 A finished worker may be released at PR-ready because the primary tracks the PR to merge under a [landing record](remote-secondmates.md#landing-owner), so review time does not need a live worker or leave a worker record blocking sleep.
 
@@ -83,6 +83,7 @@ A delayed service request checks the generation under the same lock before consu
 No PID journal, descendant snapshot, STOP/CONT handshake, or PID fallback selects processes to signal.
 This is process custody for adapter helpers, not containment against malicious local programs that can ask the user manager to launch unrelated services.
 The worker runtime's crash is not an implicit compute-sleep request; explicitly sleep the placement or rely on its finite provider TTL.
+Opt-in idle auto-sleep still requires the [documented eligibility checks](configuration.md#idle-auto-sleep-configidle-sleep), including authoritative idle.
 
 Release removes local bearer files, proves service retirement, then checks remote bearer shred before a sandbox can be deleted or reported stopped.
 Partial acquisition failures use that same release path.

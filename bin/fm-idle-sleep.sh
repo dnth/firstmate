@@ -6,31 +6,30 @@
 #   fm-idle-sleep.sh check <id>      read-only verdict for one placement
 #   fm-idle-sleep.sh run <id>        one guarded sleep attempt (tick detaches it)
 #
-# Opt-in lives in config/idle-sleep, one placement per line: `<id> [<minutes>]`.
-# A blank minutes field means FM_IDLE_SLEEP_DEFAULT_MINUTES (default 30); `#`
-# starts a comment. A home without that file does nothing, and a placement not
-# listed in it is never touched. docs/configuration.md owns the file's contract.
+# docs/configuration.md's Idle auto-sleep section owns config/idle-sleep's
+# opt-in format and eligibility contract.
 #
 # This is not a second watcher. bin/fm-watch.sh calls `tick` once per cycle;
 # tick is throttled to FM_IDLE_SLEEP_TICK_SECONDS (default 60) and reads only
-# this home's records, so a quiet fleet pays nothing. A placement is a candidate
-# only when its compute is awake, it has no undelivered backlog handoff, no
-# unresolved routed reply, no open decision, and nothing in this home's records
-# for it (status, endpoint meta, pending replies, handoff files, provider meta)
-# has changed for the whole window. A candidate gets one detached `run` per
+# this home's records. The activity boundary uses status, endpoint meta,
+# pending replies, handoff files, the surviving .remote-handoff-<id>.generation
+# record, and provider meta. A candidate gets one detached `run` per
 # FM_IDLE_SLEEP_ATTEMPT_SECONDS (default 300), or per window after a refusal.
 #
-# `run` adds the two remote reads tick cannot make: the second-mate agent must
-# read idle (busy or unreadable keeps it awake) and its home must supervise no
-# live worker. It then calls the provider's own guarded `sleep` - bin/fm-boat.sh
-# or bin/fm-runpod.sh - which re-checks every guard and reconciles finished
-# ships. Nothing here passes a force flag or deletes anything. A success appends
+# `run` adds the two remote reads tick cannot make: `observe` and `children`.
+# It then calls the provider's own guarded `sleep` - bin/fm-boat.sh or
+# bin/fm-runpod.sh - with FM_IDLE_SLEEP_RECHECK=1. That opt-in adds local `check`
+# under the delivery/reply locks and a final `observe` plus `check` after worker
+# reconciliation and reply quiescence. Exit 75 means eligibility changed and
+# defers without recording a refusal; explicit operator sleeps omit these checks.
+# Nothing here passes a force flag or destroys a placement. A success appends
 # one line to state/idle-sleep.log; delivery wakes the placement as usual.
 #
 # A refusal by the guarded sleep is recorded under state/idle-sleep/<id>.refused
 # and surfaced by tick as one `check:` wake naming the placement and the reason.
-# The same reason is not surfaced again, and new activity clears the record, so
-# a refusal that persists costs one report, not one per attempt.
+# A changed reason replaces the record and clears <id>.reported; newer activity
+# clears both. Malformed-line wake deduplication uses one .config-reported-<hash>
+# marker per normalized line under the same directory.
 #
 # Environment overrides (tests): FM_IDLE_SLEEP_UNIT_SECONDS (seconds per
 # configured minute, default 60), FM_IDLE_SLEEP_TICK_SECONDS,

@@ -75,14 +75,12 @@
 # 255, because unknown remote completion must be reconciled on the same host.
 # Sleep never retires the logical second mate: the route, the registry record,
 # the reply cursor, and the volume all survive it.
-# Before counting remote children, sleep tears down every finished ship task,
-# whatever its delivery mode, through fm-teardown's ordinary landed-work guards,
-# and the child count then covers live workers only. A finished ship that still
-# holds unlanded work refuses the sleep.
+# bin/fm-remote-secondmate-control.sh owns finished-ship reconciliation and the
+# live-only child count; reconciliation must succeed before suspension.
 #
 # Suspension is an explicit `sleep` unless the operator opts a second mate in to
-# idle auto-sleep (config/idle-sleep, owned by bin/fm-idle-sleep.sh), which runs
-# this same guarded `sleep` and never forces it.
+# idle auto-sleep (docs/configuration.md owns the config contract).
+# bin/fm-idle-sleep.sh owns the additional auto-sleep recheck mechanics.
 #
 # Environment overrides (tests and self-hosted API mirrors only):
 #   FM_RUNPOD_API_BASE      REST base URL, default https://rest.runpod.io/v1

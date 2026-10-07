@@ -234,8 +234,8 @@ Run `recover-stuck --yes` to acknowledge and clear that attempt before another o
 
 ## Suspending safely
 
-Before evaluating these guards, `sleep` reconciles handled correlated replies and sends each finished ship, whatever its delivery mode, through the ordinary landed-work teardown guard.
-That cleanup removes only work already proven safe to tear down; a finished ship with unlanded work refuses suspension, and the worker count that follows covers live workers only.
+Before evaluating these guards, `sleep` reconciles handled correlated replies and runs the [remote control script's finished-worker reconciliation](../bin/fm-remote-secondmate-control.sh).
+Unlanded work still blocks suspension even when the live-worker count is zero.
 
 `sleep` refuses, and leaves the pod running, while any of these is true:
 

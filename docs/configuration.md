@@ -41,6 +41,8 @@ A home with no `data/runpod/` records behaves exactly as it did before this prov
 
 `config/idle-sleep` is a local, gitignored, primary-home-only file that opts Boat and RunPod second-mate placements in to automatic sleep; it is not inherited into secondmate homes.
 Each non-comment line is `<secondmate-id> [<minutes>]`, and a blank minutes field means 30.
+IDs use letters, digits, dots, underscores, or dashes and cannot start with a dot; minutes must be a positive integer without leading zeros, and `#` starts a comment.
+If an ID has multiple valid entries, the first supplies its window.
 A home without the file, and a placement it does not name, behave exactly as before: sleep stays an explicit operator or firstmate action.
 A malformed line disables auto-sleep for its named placement, even if another line opts that placement in.
 Each distinct malformed line is reported via one wake, with deduplication retained across ticks and alternating malformed lines.
@@ -49,9 +51,8 @@ The primary watcher drives it from its existing cycle through `bin/fm-idle-sleep
 A placement qualifies only when its compute is awake and this home holds no undelivered backlog handoff, no unresolved routed reply, and no open decision for it, and none of its records has changed for the whole window.
 Before sleeping, the attempt also requires the second-mate agent to read authoritative idle and its home to supervise no live worker; busy, unknown, and fallback-idle observations keep the placement awake.
 It then runs the provider's own guarded `sleep` (`bin/fm-boat.sh` or `bin/fm-runpod.sh`), which re-checks every guard and retires finished ships through ordinary teardown, and the next delivery wakes the placement as usual.
-Auto-sleep eligibility is rechecked under the provider delivery and reply locks before stopping compute; fresh activity defers the attempt without a refusal notification.
-Nothing in this path forces, discards, or deletes: a guard refusal leaves the placement awake and is surfaced as one notification naming the placement and the reason, repeated only if the reason changes after new activity.
-Each auto-sleep appends one line to `state/idle-sleep.log`.
+Auto-sleep eligibility and authoritative remote idle are rechecked under the provider delivery and reply locks after worker reconciliation and immediately before stopping compute; fresh activity, a busy agent, or an unreadable observation defers the attempt without a refusal notification.
+Nothing in this path forces cleanup, discards unlanded work, or destroys the placement: a guard refusal leaves it awake, and an unchanged reason is surfaced once; a changed reason or new activity permits another notification.
 
 ## Pi Calm preference (config/calm)
 
