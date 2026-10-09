@@ -33,6 +33,9 @@ def event(kind, **fields):
 def main():
     if Path(sys.argv[0]).name == "curl":
         config = sys.stdin.read()
+        if os.environ.get("FAKE_BOAT_MODE") == "naming-failure":
+            event("naming_failed")
+            return 1
         box = re.search(r"/sandboxes/(bx_[A-Za-z0-9]+)", config).group(1)
         data = next(line[7:] for line in config.splitlines() if line.startswith("data = "))
         body = json.loads(json.loads(data))
@@ -81,7 +84,13 @@ def main():
         process.communicate(script)
         return process.returncode
     if command == "scp":
-        event("scp")
+        box = args[-2].split(":", 1)[0]
+        event("scp", box=box)
+        if mode == "slow-artifacts" and box in ("bx_2", "bx_3"):
+            event("artifact_wait", box=box)
+            end = time.monotonic() + 10
+            while not (root / "release-artifacts").exists() and time.monotonic() < end:
+                time.sleep(.02)
         return 0
     box = args[1]
     if command == "usage":

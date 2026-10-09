@@ -557,6 +557,90 @@ class Cases(unittest.TestCase):
         self.assertEqual(len(self.state()["boxes"]), 1)
         self.assert_cleanup()
 
+    def test_recovered_failures_still_halt_new_creation(self):
+        import shlex
+        body = spec(6)
+        for lane in body["lanes"][1:]:
+            path = f"/tmp/boat-lane-tests/{lane['id']}.json"
+            initial = dict(cases=[dict(id=lane["id"], status="fail", kind="infra",
+                                      failure_signature="Redis HTTP503")])
+            after = dict(cases=[dict(id=lane["id"], status="pass")])
+            emit = lambda data: "printf %s " + shlex.quote(json.dumps(data)) + " > " + path
+            lane["selections"] = [dict(command=emit(initial) + "; false # SELECT",
+                timeout_seconds=2, evidence_file=path, retry_reset=[step("true")],
+                retry_cases={lane["id"]: step(emit(after))})]
+        self.assertEqual(self.run_case(body, "--jobs", "1"), 5)
+        self.assertEqual(len(self.state()["boxes"]), 3)
+        rows = self.ledger()
+        halt = next(row for row in rows if row["event"] == "systemic_halt")
+        self.assertEqual(halt["lanes"], ["lane1", "lane2"])
+        reports = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        completed = [row for row in reports if row["attempt"] == "complete"]
+        self.assertEqual(len(completed), 3)
+        self.assertTrue(all(row["verdict"] == "pass" for row in completed))
+        initial = next(row for row in reports if row["lane"] == "lane2" and row["attempt"] == "initial")
+        self.assertLess(halt["time"], initial["time"])
+        self.assert_cleanup()
+
+    def test_matching_failures_halt_before_slow_artifact_downloads(self):
+        import shlex
+        body = spec(7)
+        self.env["FAKE_BOAT_MODE"] = "slow-artifacts"
+        body["artifacts"] = ["/tmp/results"]
+        for lane in body["lanes"][1:3]:
+            path = f"/tmp/boat-lane-tests/{lane['id']}.json"
+            payload = dict(cases=[dict(id=lane["id"], status="fail", kind="product",
+                                      failure_signature="shared failure")])
+            lane["selections"] = [dict(command="while ! test -f /tmp/boat-lane-tests/release-failures; do sleep .02; done; "
+                + "printf %s " + shlex.quote(json.dumps(payload)) + " > " + path + "; false # SELECT",
+                timeout_seconds=10, evidence_file=path)]
+        body["lanes"][3]["selections"] = [step("while ! test -f /tmp/boat-lane-tests/release-fast; do sleep .02; done # SELECT", 10)]
+        process = self.start(body, "--jobs", "3")
+        try:
+            self.wait_event(lambda state: all(any(row.get("phase") == "selection" and row.get("lane") == lane
+                for row in state["events"]) for lane in ("lane1", "lane2", "lane3")))
+            (self.home / "release-failures").touch()
+            self.wait_event(lambda state: len([row for row in state["events"] if row["event"] == "artifact_wait"]) == 2)
+            self.assertTrue(any(row["event"] == "systemic_halt" for row in self.ledger()))
+            (self.home / "release-fast").touch()
+            end = time.monotonic() + 10
+            report = self.home / "run/report.jsonl"
+            while time.monotonic() < end:
+                rows = [json.loads(line) for line in report.read_text().splitlines()]
+                if any(row["lane"] == "lane3" and row["attempt"] == "complete" for row in rows):
+                    break
+                time.sleep(.02)
+            else:
+                self.fail("concurrent successful lane never completed")
+            self.assertEqual(len(self.state()["boxes"]), 4)
+            self.assertIsNone(process.poll())
+        finally:
+            (self.home / "release-artifacts").touch()
+            (self.home / "release-fast").touch()
+            (self.home / "release-failures").touch()
+            process.communicate(timeout=20)
+        self.assertEqual(process.returncode, 5)
+        self.assertEqual(len(self.state()["boxes"]), 4)
+        self.assert_cleanup()
+
+    def test_naming_failure_keeps_identity_and_cleans_before_report(self):
+        self.env["FAKE_BOAT_MODE"] = "naming-failure"
+        self.assertEqual(self.run_case(spec(3)), 3)
+        self.assertEqual(len(self.state()["boxes"]), 1)
+        rows = self.ledger()
+        created = next(row for row in rows if row["event"] == "created")
+        deleted = next(row for row in rows if row["event"] == "deleted")
+        result = next(row for row in rows if row["event"] == "lane_result")
+        self.assertEqual(result["box"], created["box"])
+        report = json.loads((self.home / "run/report.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(report["box"], created["box"])
+        self.assertEqual(report["verdict"], "harness_failure")
+        self.assertAlmostEqual(report["spend_so_far_usd"], .001)
+        self.assertAlmostEqual(report["reserved_usd"], 0)
+        self.assertLess(deleted["time"], report["time"])
+        self.assertFalse(any(row["event"] == "ssh" for row in self.state()["events"]))
+        self.assert_cleanup()
+
     def test_help_owns_schema_and_exits(self):
         result = subprocess.run([sys.executable, str(ROOT / "bin/fm-boat-lanes.py"), "--help"],
                                 capture_output=True, text=True, check=True)

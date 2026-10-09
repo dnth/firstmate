@@ -25,10 +25,10 @@ Spec v1 is JSON: {"version":1,"size":"large","ttl_seconds":1800,
  Docker inventory must be empty before prepare. Preparation/guard/transport
  failures are harness_failure; selection nonzero is a failed selection, never a pass.
  Artifacts must exclude credentials; only explicitly declared paths are fetched.
- Optional failure_signature_files are remote JSON reports with a top-level
- failure_signature string. Each nonempty case signature is also matched
- independently of case IDs or other failures across distinct lanes to stop new
- creation. Otherwise phase+exit is the conservative failure signature.
+ Each nonempty case failure signature is registered when evidence is read,
+ independently of case IDs, other failures and later retry success. A signature
+ observed on two distinct lanes stops new creation before reports or downloads;
+ already created lanes finish and clean up. Phase+exit provides the fallback.
 
 Required selection evidence_file is a /tmp JSON object with cases:[{id,status,
  failure_signature,request_ids,kind,dependency_blocked}]. Status is pass/fail/etc;
@@ -67,7 +67,7 @@ Stack-up steps must declare role:"stack_up" and observe:STEP. The observer is a
  and input lines over 65536 bytes are discarded. Other output uses one bounded tail.
 
 Command-step stdout/stderr is drained and discarded. Consumers of provider JSON,
- Docker inventory, case evidence and signature files retain complete responses
+ Docker inventory and case evidence retain complete responses
  up to 1MiB per stream; larger responses fail closed rather than being truncated.
 
 report.jsonl appends a fsynced record immediately after each selection/retry and
@@ -316,7 +316,7 @@ def validate(spec):
             or not isinstance(v, str) or "\0" in v or k.startswith("FM_")
             for k, v in env.items()):
         raise Refusal("invalid spec environment")
-    for key in ("prepare", "finish", "artifacts", "failure_signature_files"):
+    for key in ("prepare", "finish", "artifacts"):
         if not isinstance(spec.get(key, []), list):
             raise Refusal(f"{key} must be a list")
     steps = [(step, True) for step in spec.get("prepare", [])]
@@ -362,7 +362,7 @@ def validate(spec):
                 and "command" not in step):
             continue
         raise Refusal("invalid command or upload step")
-    for key in ("artifacts", "failure_signature_files"):
+    for key in ("artifacts",):
         if any(not isinstance(path, str) or not path.startswith("/tmp/")
                or "\0" in path or ".." in Path(path).parts for path in spec.get(key, [])):
             raise Refusal(f"{key} must contain absolute /tmp paths")
@@ -448,8 +448,6 @@ class Runner:
                 raise
             finally:
                 self.executor.cleaning = cleaning
-            client.api("PATCH", box, {"name": name, "ttlSeconds": self.spec["ttl_seconds"]})
-            self.event("named", box=box, name=name)
             return box
 
     def remote(self, box, lane, command, seconds, *, cancel=None, ready=None, output=None):
@@ -548,15 +546,16 @@ class Runner:
         text = text.replace("FM_OBSERVER_READY", "")
         return "\n".join(text.splitlines()[-200:])[-32768:] + "\n"
 
-    def signature(self, box, lane, default):
-        for path in self.spec.get("failure_signature_files", []):
-            result = self.remote(box, lane, "cat -- " + shlex.quote(path), 10)
-            if result.returncode == 0:
-                rows = objects(result.stdout)
-                value = rows[-1].get("failure_signature") if rows else None
-                if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,120}", value):
-                    return value
-        return default
+    def register_signature(self, lane, signature):
+        with self.lock:
+            seen = self.signatures.setdefault(signature, set())
+            if lane in seen:
+                return
+            seen.add(lane)
+            self.event("failure_observed", lane=lane, signature=signature)
+            if len(seen) == 2:
+                self.systemic = True
+                self.event("systemic_halt", signature=signature, lanes=sorted(seen))
 
     def fetch(self, box, lane):
         target = self.directory / "artifacts" / lane
@@ -610,6 +609,8 @@ class Runner:
                                  request_ids=requests, retry_decision="not-needed" if status == "pass"
                                  else "never" if classification in ("known-harness-defect", "product")
                                  else "eligible"))
+                if status != "pass" and signature:
+                    self.register_signature(lane, "cases:" + rows[-1]["signature_hash"])
             return rows
         except (ValueError, KeyError, TypeError):
             raise Refusal("malformed case evidence") from None
@@ -782,6 +783,9 @@ class Runner:
         phase = "create"
         try:
             box = self.create(name)
+            owned_name = self.boxes[box]["name"]
+            client.api("PATCH", box, {"name": owned_name, "ttlSeconds": self.spec["ttl_seconds"]})
+            self.event("named", box=box, name=owned_name)
             phase = "clean_substrate"
             result = self.remote(box, name, "docker ps -aq", 30)
             if result.returncode or result.stdout.strip():
@@ -800,9 +804,6 @@ class Runner:
                 if code:
                     verdict = failure_verdict
                     signature = case_signature or [f"selection:exit:{code}"]
-                    external = self.signature(box, name, None)
-                    if external:
-                        signature.append(external)
                     break
         except Deadline:
             verdict, signature = "timeout", phase + ":timeout"
@@ -814,19 +815,16 @@ class Runner:
             # Do not print arbitrary exceptions containing remote output or secrets.
             verdict, signature = "harness_failure", phase + ":exception"
         finally:
+            for failure_signature in ([signature] if isinstance(signature, str) else signature or []):
+                self.register_signature(name, failure_signature)
             if box and not self.stop.is_set():
                 try:
                     self.fetch(box, name)
                 except Exception:
                     if verdict == "pass":
                         verdict, signature = "harness_failure", "artifacts:refused"
+                        self.register_signature(name, signature)
             with self.lock:
-                for failure_signature in ([signature] if isinstance(signature, str) else signature or []):
-                    seen = self.signatures.setdefault(failure_signature, set())
-                    seen.add(name)
-                    if len(seen) >= 2:
-                        self.systemic = True
-                        self.event("systemic_halt", signature=failure_signature, lanes=sorted(seen))
                 result = dict(lane=name, verdict=verdict, signature=signature, box=box)
                 self.results.append(result)
                 self.event("lane_result", **result)
