@@ -69,23 +69,15 @@ Shards 3 and 4 produced timing artifacts; shards 1 and 2 hit the 20-minute job c
 Existing hints for uncompleted scripts remain from [run 33904204200](https://github.com/dnth/firstmate/actions/runs/33904204200).
 The four grown tests use conservative operator-supplied estimates: remote lifecycle 700000 ms, OMP secondmate 600000 ms, Boat routing 200000 ms, and Herdr server detach 90000 ms.
 These estimates deliberately exceed this attempt's observed times for those scripts to budget for the reported slower runs.
-The resulting 147-script remainder estimates 5031333 ms (~83.9 min); even a balanced four-shard partition would exceed the cap, so six runners now share the work.
+At that refresh, the remainder estimated about 83.9 minutes; even a balanced four-shard partition would exceed the cap, so six runners now share the work.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 
-| Lane | Script count | Estimated duration |
-|---|---:|---:|
-| `portable-serial-1of6` | 19 | 838559 ms (~838.6 s) |
-| `portable-serial-2of6` | 22 | 838552 ms (~838.6 s) |
-| `portable-serial-3of6` | 24 | 838549 ms (~838.5 s) |
-| `portable-serial-4of6` | 27 | 838558 ms (~838.6 s) |
-| `portable-serial-5of6` | 28 | 838558 ms (~838.6 s) |
-| `portable-serial-6of6` | 27 | 838557 ms (~838.6 s) |
-| imbalance | | 10 ms |
+Current serial shard membership is derived by `bin/fm-test-run.sh`; its header owns the inspection commands, and its weight hints own the balancing inputs.
 
 The single longest estimate, `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` at 700000 ms, is the floor for any shard count.
 
-Refresh the hints by downloading the per-shard timing artifacts from a green CI run, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs, and updating the table above:
+Refresh the hints by downloading the per-shard timing artifacts from a green CI run and replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs:
 
 ```sh
 gh run download <run-id> -R dnth/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
