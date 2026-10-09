@@ -28,11 +28,16 @@ Spec v1 is JSON: {"version":1,"size":"large","ttl_seconds":1800,
  Each nonempty case failure signature is registered when evidence is read,
  independently of case IDs, other failures and later retry success. A signature
  observed on two distinct lanes stops new creation before reports or downloads;
- already created lanes finish and clean up. Phase+exit provides the fallback.
+ already created lanes finish and clean up. Missing or empty case signatures use
+ phase+exit at the same boundary, for initial and retry evidence, even if a later
+ retry passes. A failing case with exit zero uses exit 1 for fallback matching.
 
 Required selection evidence_file is a /tmp JSON object with cases:[{id,status,
  failure_signature,request_ids,kind,dependency_blocked}]. Status is pass/fail/etc;
- kind may be infra/product. Non-pass cases classify as known-harness-defect when
+ Only id and status are required. Optional failure_signature must be a string,
+ dependency_blocked a boolean, request_ids
+ a list of safe strings, and kind (when present) must be infra or product.
+ Malformed fields are harness evidence errors. Non-pass cases classify as known-harness-defect when
  dependency_blocked or matching a literal substring in spec known_harness_defects;
  then infra when kind=infra or matching infra_signatures (e.g. a known outage);
  then product when kind=product; otherwise uncertain. Passes classify as pass.
@@ -567,7 +572,7 @@ class Runner:
             if result.returncode:
                 raise Refusal("artifact fetch failed")
 
-    def evidence(self, box, lane, selection):
+    def evidence(self, box, lane, selection, phase, code):
         path = selection.get("evidence_file")
         result = self.remote(box, lane, "cat -- " + shlex.quote(path), 10)
         if result.returncode:
@@ -587,16 +592,21 @@ class Runner:
                         or not re.fullmatch(r"[A-Za-z_-]{1,32}", status)):
                     raise ValueError()
                 seen.add(identity)
-                signature = str(case.get("failure_signature", ""))
+                signature = case.get("failure_signature", "")
+                blocked = case.get("dependency_blocked", False)
+                kind = case.get("kind")
+                if (not isinstance(signature, str) or type(blocked) is not bool
+                        or ("kind" in case and (not isinstance(kind, str) or kind not in ("infra", "product")))):
+                    raise ValueError()
                 if status == "pass":
                     classification = "pass"
-                elif case.get("dependency_blocked") or status == "dependency-blocked" or any(
+                elif blocked or status == "dependency-blocked" or any(
                         x in signature for x in self.spec.get("known_harness_defects", [])):
                     classification = "known-harness-defect"
-                elif case.get("kind") == "infra" or any(
+                elif kind == "infra" or any(
                         x in signature for x in self.spec.get("infra_signatures", [])):
                     classification = "infra"
-                elif case.get("kind") == "product":
+                elif kind == "product":
                     classification = "product"
                 else:
                     classification = "uncertain"
@@ -609,8 +619,11 @@ class Runner:
                                  request_ids=requests, retry_decision="not-needed" if status == "pass"
                                  else "never" if classification in ("known-harness-defect", "product")
                                  else "eligible"))
-                if status != "pass" and signature:
-                    self.register_signature(lane, "cases:" + rows[-1]["signature_hash"])
+                if status != "pass":
+                    self.register_signature(lane, "cases:" + rows[-1]["signature_hash"] if signature
+                                            else f"{phase}:exit:{code or 1}")
+            if code and all(row["status"] == "pass" for row in rows):
+                self.register_signature(lane, f"{phase}:exit:{code}")
             return rows
         except (ValueError, KeyError, TypeError):
             raise Refusal("malformed case evidence") from None
@@ -674,7 +687,7 @@ class Runner:
     def selection(self, box, lane, selection, index):
         start = time.monotonic()
         code = self.step(box, lane["id"], selection, "selection")
-        cases = self.evidence(box, lane["id"], selection)
+        cases = self.evidence(box, lane["id"], selection, "selection", code)
         if code != 0 and all(case["status"] == "pass" for case in cases):
             raise Refusal("failed selection contradicts passing case evidence")
         targets = [case for case in cases if case["classification"] in ("uncertain", "infra")]
@@ -710,7 +723,7 @@ class Runner:
             if self.step(box, lane["id"], self.spec["guard"], "guard"):
                 raise Refusal("retry source/credential guard failed")
             retry_code = self.step(box, lane["id"], retry, "retry")
-            updated = self.evidence(box, lane["id"], selection)
+            updated = self.evidence(box, lane["id"], selection, "retry", retry_code)
             latest = {row["id"]: row for row in updated}
             if not target_ids.issubset(latest):
                 raise Refusal("retry evidence omitted targeted cases")
@@ -729,9 +742,7 @@ class Runner:
         kinds = {case["classification"] for case in failures}
         verdict = ("known_harness_defect" if kinds == {"known-harness-defect"}
                    else "product_failure" if "product" in kinds else "uncertain_failure")
-        signatures = {"cases:" + case["signature_hash"] for case in failures
-                      if case["signature_hash"] != hashlib.sha256(b"").hexdigest()}
-        return code, verdict, sorted(signatures)
+        return code, verdict
 
     def cleanup(self, box):
         with self.lock:
@@ -800,10 +811,11 @@ class Runner:
                 if self.step(box, name, self.spec["guard"], phase):
                     raise Refusal("source/credential guard failed")
                 phase = "selection"
-                code, failure_verdict, case_signature = self.selection(box, lane, selection, index)
+                code, failure_verdict = self.selection(box, lane, selection, index)
                 if code:
                     verdict = failure_verdict
-                    signature = case_signature or [f"selection:exit:{code}"]
+                    with self.lock:
+                        signature = sorted(value for value, seen in self.signatures.items() if name in seen)
                     break
         except Deadline:
             verdict, signature = "timeout", phase + ":timeout"
@@ -815,8 +827,8 @@ class Runner:
             # Do not print arbitrary exceptions containing remote output or secrets.
             verdict, signature = "harness_failure", phase + ":exception"
         finally:
-            for failure_signature in ([signature] if isinstance(signature, str) else signature or []):
-                self.register_signature(name, failure_signature)
+            if isinstance(signature, str):
+                self.register_signature(name, signature)
             if box and not self.stop.is_set():
                 try:
                     self.fetch(box, name)

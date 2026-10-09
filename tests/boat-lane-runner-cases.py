@@ -454,8 +454,10 @@ class Cases(unittest.TestCase):
                 body = spec()
                 path = "/tmp/boat-lane-tests/cases.json"
                 initial = dict(cases=[dict(id="A", status="fail"), dict(id="B", status="fail")])
-                after = dict(cases=[dict(id="A", status="fail", kind=classification,
+                after = dict(cases=[dict(id="A", status="fail",
                     dependency_blocked=classification == "known-harness-defect"), dict(id="B", status="fail")])
+                if classification == "product":
+                    after["cases"][0]["kind"] = "product"
                 emit = lambda data: "printf %s " + shlex.quote(json.dumps(data)) + " > " + path
                 body["lanes"][0]["selections"] = [dict(command=emit(initial) + "; false # SELECT",
                     timeout_seconds=2, evidence_file=path, retry_reset=[step("true")],
@@ -583,14 +585,24 @@ class Cases(unittest.TestCase):
         self.assert_cleanup()
 
     def test_matching_failures_halt_before_slow_artifact_downloads(self):
+        self.concurrent_failure_halt("slow-artifacts", "shared failure")
+
+    def test_fallback_halts_before_slow_artifact_downloads(self):
+        self.concurrent_failure_halt("slow-artifacts", "")
+
+    def test_fallback_halts_before_slow_report_usage_queries(self):
+        self.concurrent_failure_halt("slow-report", None)
+
+    def concurrent_failure_halt(self, mode, signature):
         import shlex
         body = spec(7)
-        self.env["FAKE_BOAT_MODE"] = "slow-artifacts"
+        self.env["FAKE_BOAT_MODE"] = mode
         body["artifacts"] = ["/tmp/results"]
         for lane in body["lanes"][1:3]:
             path = f"/tmp/boat-lane-tests/{lane['id']}.json"
-            payload = dict(cases=[dict(id=lane["id"], status="fail", kind="product",
-                                      failure_signature="shared failure")])
+            payload = dict(cases=[dict(id=lane["id"], status="fail", kind="product")])
+            if signature is not None:
+                payload["cases"][0]["failure_signature"] = signature
             lane["selections"] = [dict(command="while ! test -f /tmp/boat-lane-tests/release-failures; do sleep .02; done; "
                 + "printf %s " + shlex.quote(json.dumps(payload)) + " > " + path + "; false # SELECT",
                 timeout_seconds=10, evidence_file=path)]
@@ -600,7 +612,8 @@ class Cases(unittest.TestCase):
             self.wait_event(lambda state: all(any(row.get("phase") == "selection" and row.get("lane") == lane
                 for row in state["events"]) for lane in ("lane1", "lane2", "lane3")))
             (self.home / "release-failures").touch()
-            self.wait_event(lambda state: len([row for row in state["events"] if row["event"] == "artifact_wait"]) == 2)
+            waiting = "artifact_wait" if mode == "slow-artifacts" else "report_wait"
+            self.wait_event(lambda state: len([row for row in state["events"] if row["event"] == waiting]) == 2)
             self.assertTrue(any(row["event"] == "systemic_halt" for row in self.ledger()))
             (self.home / "release-fast").touch()
             end = time.monotonic() + 10
@@ -616,6 +629,7 @@ class Cases(unittest.TestCase):
             self.assertIsNone(process.poll())
         finally:
             (self.home / "release-artifacts").touch()
+            (self.home / "release-report").touch()
             (self.home / "release-fast").touch()
             (self.home / "release-failures").touch()
             process.communicate(timeout=20)
@@ -639,6 +653,134 @@ class Cases(unittest.TestCase):
         self.assertAlmostEqual(report["reserved_usd"], 0)
         self.assertLess(deleted["time"], report["time"])
         self.assertFalse(any(row["event"] == "ssh" for row in self.state()["events"]))
+        self.assert_cleanup()
+
+    def fallback_retry_run(self, signature, retry_failure=False, code=1):
+        import shlex
+        body = spec(6)
+        for lane in body["lanes"][1:]:
+            path = f"/tmp/boat-lane-tests/{lane['id']}.json"
+            initial_case = dict(id=lane["id"], status="fail", kind="infra")
+            after_case = dict(id=lane["id"], status="fail" if retry_failure else "pass", kind="infra")
+            if retry_failure:
+                initial_case["failure_signature"] = "unique-" + lane["id"]
+                if signature is not None:
+                    after_case["failure_signature"] = signature
+            elif signature is not None:
+                initial_case["failure_signature"] = signature
+            emit = lambda case: "printf %s " + shlex.quote(json.dumps(dict(cases=[case]))) + " > " + path
+            lane["selections"] = [dict(command=emit(initial_case) + f"; exit {code} # SELECT",
+                timeout_seconds=2, evidence_file=path, retry_reset=[step("true")],
+                retry_cases={lane["id"]: step(emit(after_case) + ("; exit 7" if retry_failure else ""))})]
+        self.assertEqual(self.run_case(body, "--jobs", "1"), 5)
+        self.assertEqual(len(self.state()["boxes"]), 3)
+        rows = self.ledger()
+        halt = next(row for row in rows if row["event"] == "systemic_halt")
+        self.assertEqual(halt["lanes"], ["lane1", "lane2"])
+        import hashlib
+        expected = ("cases:" + hashlib.sha256(signature.encode()).hexdigest()
+                    if retry_failure and signature else "retry:exit:7" if retry_failure else "selection:exit:1")
+        self.assertEqual(halt["signature"], expected)
+        reports = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        record = next(row for row in reports if row["lane"] == "lane2"
+                      and row["attempt"] == ("retry" if retry_failure else "initial"))
+        self.assertLess(halt["time"], record["time"])
+        if not retry_failure:
+            self.assertTrue(all(row["verdict"] == "pass" for row in reports if row["attempt"] == "complete"))
+        self.assert_cleanup()
+
+    def test_absent_signature_recovered_failure_still_halts(self):
+        self.fallback_retry_run(None)
+
+    def test_empty_signature_recovered_failure_still_halts(self):
+        self.fallback_retry_run("")
+
+    def test_zero_exit_failed_evidence_uses_failure_fallback(self):
+        self.fallback_retry_run(None, code=0)
+
+    def test_absent_retry_failure_signature_halts_before_report(self):
+        self.fallback_retry_run(None, retry_failure=True)
+
+    def test_explicit_retry_failure_signature_halts_before_report(self):
+        self.fallback_retry_run("shared retry error", retry_failure=True)
+
+    def test_empty_retry_failure_signature_halts_before_report(self):
+        self.fallback_retry_run("", retry_failure=True)
+
+    def test_distinct_retry_exit_codes_do_not_share_synthetic_final_signature(self):
+        import shlex
+        body = spec(4)
+        for index, lane in enumerate(body["lanes"][1:]):
+            path = f"/tmp/boat-lane-tests/{lane['id']}.json"
+            initial = dict(cases=[dict(id=lane["id"], status="fail", kind="infra",
+                                      failure_signature="unique-" + lane["id"])])
+            updated = dict(cases=[dict(id=lane["id"], status="fail", kind="infra")])
+            emit = lambda data: "printf %s " + shlex.quote(json.dumps(data)) + " > " + path
+            lane["selections"] = [dict(command=emit(initial) + "; false # SELECT", timeout_seconds=2,
+                evidence_file=path, retry_reset=[step("true")],
+                retry_cases={lane["id"]: step(emit(updated) + f"; exit {index+7}")})]
+        self.assertEqual(self.run_case(body, "--jobs", "1"), 4)
+        self.assertEqual(len(self.state()["boxes"]), 4)
+        self.assertFalse(any(row["event"] == "systemic_halt" for row in self.ledger()))
+        observed = {row["signature"] for row in self.ledger() if row["event"] == "failure_observed"}
+        self.assertTrue({"retry:exit:7", "retry:exit:8", "retry:exit:9"}.issubset(observed))
+        self.assertNotIn("selection:exit:1", observed)
+        self.assert_cleanup()
+
+    def test_malformed_optional_evidence_is_harness_failure(self):
+        import shlex
+        invalid = [("failure_signature", value) for value in (None, 42, False, [], {})]
+        invalid += [("dependency_blocked", value) for value in (None, "false", 0, [], {})]
+        invalid += [("kind", value) for value in (None, 42, False, [], {}, "uncertain", "")]
+        invalid += [("request_ids", value) for value in (None, "req", [42])]
+        for key, value in invalid:
+            with self.subTest(field=key, value=value):
+                if (self.home / "run").exists():
+                    import shutil
+                    shutil.rmtree(self.home / "run")
+                    (self.home / "state.json").unlink()
+                body = spec(3)
+                case = dict(id="product", status="fail", kind="product", dependency_blocked=False)
+                case[key] = value
+                path = "/tmp/boat-lane-tests/cases.json"
+                body["lanes"][0]["selections"] = [dict(command="printf %s "
+                    + shlex.quote(json.dumps(dict(cases=[case]))) + " > " + path + "; false # SELECT",
+                    timeout_seconds=2, evidence_file=path)]
+                self.assertEqual(self.run_case(body), 3)
+                self.assertEqual(len(self.state()["boxes"]), 1)
+                report = json.loads((self.home / "run/report.jsonl").read_text().splitlines()[-1])
+                self.assertEqual(report["verdict"], "harness_failure")
+                self.assertFalse(report["cases"])
+                self.assert_cleanup()
+
+    def test_false_dependency_flag_preserves_product_verdict(self):
+        import shlex
+        body = spec()
+        case = dict(id="product", status="fail", kind="product", dependency_blocked=False,
+                    failure_signature="", request_ids=[])
+        path = "/tmp/boat-lane-tests/cases.json"
+        body["lanes"][0]["selections"] = [dict(command="printf %s "
+            + shlex.quote(json.dumps(dict(cases=[case]))) + " > " + path + "; false # SELECT",
+            timeout_seconds=2, evidence_file=path)]
+        self.assertEqual(self.run_case(body), 4)
+        report = json.loads((self.home / "run/report.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(report["verdict"], "product_failure")
+        self.assertEqual(report["cases"][0]["classification"], "product")
+        self.assert_cleanup()
+
+    def test_malformed_retry_evidence_is_harness_failure(self):
+        import shlex
+        body = spec()
+        path = "/tmp/boat-lane-tests/cases.json"
+        initial = dict(cases=[dict(id="case", status="fail", kind="infra")])
+        updated = dict(cases=[dict(id="case", status="pass", failure_signature=None)])
+        emit = lambda data: "printf %s " + shlex.quote(json.dumps(data)) + " > " + path
+        body["lanes"][0]["selections"] = [dict(command=emit(initial) + "; false # SELECT",
+            timeout_seconds=2, evidence_file=path, retry_reset=[step("true")], retry_cases={"case": step(emit(updated))})]
+        self.assertEqual(self.run_case(body), 3)
+        report = json.loads((self.home / "run/report.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(report["verdict"], "harness_failure")
+        self.assertEqual(report["cases"][0]["retry_decision"], "exhausted")
         self.assert_cleanup()
 
     def test_help_owns_schema_and_exits(self):

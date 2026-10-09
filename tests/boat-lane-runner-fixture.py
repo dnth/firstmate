@@ -86,7 +86,8 @@ def main():
     if command == "scp":
         box = args[-2].split(":", 1)[0]
         event("scp", box=box)
-        if mode == "slow-artifacts" and box in ("bx_2", "bx_3"):
+        name = mutate(lambda state: state["boxes"].get(box, {}).get("name", ""))
+        if mode == "slow-artifacts" and name.endswith(("-lane1", "-lane2")):
             event("artifact_wait", box=box)
             end = time.monotonic() + 10
             while not (root / "release-artifacts").exists() and time.monotonic() < end:
@@ -95,6 +96,12 @@ def main():
     box = args[1]
     if command == "usage":
         event("usage", box=box)
+        name = mutate(lambda state: state["boxes"][box].get("name", ""))
+        if mode == "slow-report" and name.endswith(("-lane1", "-lane2")):
+            event("report_wait", box=box)
+            end = time.monotonic() + 10
+            while not (root / "release-report").exists() and time.monotonic() < end:
+                time.sleep(.02)
         if mode == "usage-failure":
             return 1
         usage = {"sandboxId": box, "seconds": 100,
