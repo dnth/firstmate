@@ -16,14 +16,27 @@ Spec v1 is JSON: {"version":1,"size":"large","ttl_seconds":1800,
  "lanes":[{"id":"pilot","selections":[STEP]}],"artifacts":["/tmp/results"],
  "finish":[STEP]}. STEP is {"command":"shell script","timeout_seconds":60}
  or, in prepare only, {"upload":"/absolute/local/file","destination":"/tmp/file",
- "timeout_seconds":60}. Commands execute remotely in bash with strict errors,
+ "timeout_seconds":60}. size accepts fm-boat.py's RATES keys; ttl_seconds is an
+ integer from 60 through 86400. Lane IDs are unique and match
+ [a-zA-Z0-9][a-zA-Z0-9_-]{0,31}; pilot names one of them. Each lane has a nonempty
+ selections list and an optional report-only profile (default "default").
+ prepare, finish, artifacts and env default to empty; known_harness_defects and
+ infra_signatures are optional top-level lists of nonempty literal substrings.
+ Every step needs a positive finite timeout_seconds. env maps shell variable
+ names to strings without NUL; FM_ names are reserved. Artifact and evidence
+ paths must be beneath /tmp without '..' components. Upload sources must exist.
+ Keep project recipes private under the operator home's config/boat-lanes/;
+ tests/boat-lane-runner-cases.py contains offline fake-provider spec examples.
+ Commands execute remotely in bash with strict errors,
  VIRTUAL_ENV unset, spec env plus FM_LANE, FM_RUN_TOKEN and FM_BOX_ID. Uploads use
  Boat scp. guard is mandatory and runs after prepare and before each selection;
  it must assert the project's source/module/cwd/credential agreement. Selections
  must include the real test invocation AND case evidence; exit zero and all
  cases passing are both required. All commands are trusted operator input, never echoed.
  Docker inventory must be empty before prepare. Preparation/guard/transport
- failures are harness_failure; selection nonzero is a failed selection, never a pass.
+ failures are harness_failure; a nonzero selection exit is a failure observation.
+ Passing evidence with a nonzero exit is a harness contradiction; a permitted
+ retry may recover failed cases but never erases the initial failure observation.
  Artifacts must exclude credentials; only explicitly declared paths are fetched.
  Each nonempty case failure signature is registered when evidence is read,
  independently of case IDs, other failures and later retry success. A signature
@@ -33,12 +46,16 @@ Spec v1 is JSON: {"version":1,"size":"large","ttl_seconds":1800,
  retry passes. A failing case with exit zero uses exit 1 for fallback matching.
 
 Required selection evidence_file is a /tmp JSON object with cases:[{id,status,
- failure_signature,request_ids,kind,dependency_blocked}]. Status is pass/fail/etc;
- Only id and status are required. Optional failure_signature must be a string,
- dependency_blocked a boolean, request_ids
- a list of safe strings, and kind (when present) must be infra or product.
+ failure_signature,request_ids,kind,dependency_blocked}]. cases must be nonempty.
+ Only id and status are required: IDs are unique within the evidence file and
+ match [A-Za-z0-9_.:-]{1,120}; status matches [A-Za-z_-]{1,32} and only exact
+ "pass" passes. Optional failure_signature defaults to "" and must be a string,
+ dependency_blocked defaults to false and must be a boolean, request_ids defaults
+ to [] and must contain strings matching [A-Za-z0-9_.:-]{1,160}, and kind
+ (when present) must be infra or product.
  Malformed fields are harness evidence errors. Non-pass cases classify as known-harness-defect when
- dependency_blocked or matching a literal substring in spec known_harness_defects;
+ dependency_blocked=true, status="dependency-blocked", or matching a literal
+ substring in spec known_harness_defects;
  then infra when kind=infra or matching infra_signatures (e.g. a known outage);
  then product when kind=product; otherwise uncertain. Passes classify as pass.
  Only infra/uncertain are eligible for one retry. Selection retry_reset:[STEP]
@@ -85,8 +102,10 @@ report.jsonl appends a fsynced record immediately after each selection/retry and
  every append and readable mid-run. Only structural evidence is recorded, never
  arbitrary request bodies, credentials, commands or remote stdout/stderr.
 
-The pilot completes its real selections before any other box is created. --jobs
- bounds subsequent concurrent lanes. Before every create, spent usage plus ALL
+The pilot completes its real selections and cleanup before any other box is
+ created. --pilot-only omits fan-out; --jobs (positive integer, default 2) bounds
+ subsequent concurrent lanes. cap-usd must be positive and finite; BOAT_ORG is
+ refused to keep creation in personal workstation scope. Before every create, spent usage plus ALL
  outstanding TTL reservations plus the new full-TTL reservation must fit cap-usd.
  Unknown usage retains the full reservation; unsuccessful cleanup is a run failure.
  A spend cap bounds projected compute only, using fm-boat.py's hourly rates; it is
@@ -98,7 +117,7 @@ The NEW run directory is mode 0700. ledger.jsonl is append-only, mode 0600, fsyn
  records box immediately; usage records the full provider object BEFORE delete;
  deleted records explicit info 404 proof. lane_result records verdict/signature;
  summary records spent_usd/reserved_usd/systemic_halt/results. Private artifact
- directories contain declared downloads only. A crash leaves IDs (and in-flight
+ directories contain declared downloads and observer diagnostics. A crash leaves IDs (and in-flight
  create names) in the ledger for manual account inspection/cleanup. No automatic
  recovery or ledger reuse is supported; never delete by an unverified name alone.
 
@@ -113,6 +132,8 @@ Each process has its own session. Stdin is delivered incrementally without
  Exit codes: 0 all selected lanes pass with deletion proofs; 2 invalid spec/input;
  3 harness failure/refusal (including budget); 4 selection failure; 5 systemic halt;
  6 cleanup incomplete; 124 lane timeout; 130 SIGINT; 143 SIGTERM.
+ When outcomes overlap, precedence is cleanup, signal, systemic halt, timeout,
+ harness failure, selection failure, then success.
 """
 
 import argparse

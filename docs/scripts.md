@@ -60,6 +60,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-runpod-lib.sh`       | Dependency-free RunPod placement predicate read by supervision, convergence, and delivery |
 | `fm-runpod-pod-boot.sh`  | Tracked container boot contract sent to every RunPod pod; see [`runpod-secondmates.md`](runpod-secondmates.md#the-pods-boot-contract) |
 | `fm-runpod-omp-auth.sh`   | Workstation OMP auth-broker, read-only facade, and per-pod SSH reverse-tunnel lifecycle |
+| [`fm-boat-lanes.py`](../bin/fm-boat-lanes.py) | Run disposable Boat QA lanes from a versioned operator spec |
 | `fm-omp-auth-broker-readonly-proxy.mjs` | Credential-read-only HTTP boundary between RunPod OMP clients and the canonical workstation broker |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-prepush-guard.sh`    | Per-working-copy pre-push guard installed by fm-spawn: refuses pushes to main/master/the default branch from spawned copies |
