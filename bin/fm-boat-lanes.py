@@ -39,15 +39,19 @@ Required selection evidence_file is a /tmp JSON object with cases:[{id,status,
  Only infra/uncertain are eligible for one retry. Selection retry_reset:[STEP]
  must rebuild a fresh stack; retry_cases:{case_id:STEP} provides case re-selection,
  else retry_selection:STEP must be the smallest containing selection, and is
- refused when it would also rerun known-defect/product cases. Never rerun
+ skipped when it would rerun an attempted case or a currently known-defect/product case. Never rerun
  all lane selections. Missing reset/selection records a skipped retry. Retry
  commands must write updated evidence_file; known defects/product are never
  retry targets. Infra transport/timeout failures without readable case evidence
  remain harness/timeout verdicts, not invented product cases.
 
 Stack-up steps must declare role:"stack_up" and observe:STEP. The observer is a
- streaming diagnostic command started and acknowledged BEFORE the main command;
- its timeout must exceed the main deadline by at least 5s. Put project-specific
+ streaming diagnostic command started and acknowledged BEFORE the main command.
+ After establishing its capture/watchers, the observer itself must flush the exact
+ line FM_OBSERVER_READY on stdout or stderr within 15 seconds. The wrapper never
+ emits readiness. The observer must remain running until runner cancellation;
+ any premature completion (including exit zero) fails the step and pilot.
+ Its timeout must exceed the main deadline by at least 5s. Put project-specific
  Compose service discovery/log-follow commands in the observer spec. Follow logs
  from container creation, since project startup may remove failed services before
  returning. On step completion, the observer's process tree is terminated and its
@@ -61,6 +65,10 @@ Stack-up steps must declare role:"stack_up" and observe:STEP. The observer is a
  output cannot bury an earlier startup error. At most 32 services are retained;
  excess services use the plain tail. Each tail is at most 32768 characters,
  and input lines over 65536 bytes are discarded. Other output uses one bounded tail.
+
+Command-step stdout/stderr is drained and discarded. Consumers of provider JSON,
+ Docker inventory, case evidence and signature files retain complete responses
+ up to 1MiB per stream; larger responses fail closed rather than being truncated.
 
 report.jsonl appends a fsynced record immediately after each selection/retry and
  lane finish: lane, box, profile, duration_seconds, cases (id/status/classification/
@@ -187,38 +195,10 @@ class Executor:
         try:
             process = subprocess.Popen([str(arg) for arg in args], stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       text=output is None, start_new_session=True, env=env)
+                                       start_new_session=True, env=env)
         except OSError as error:
             raise Refusal("command unavailable") from error
-        if output is not None:
-            return self.stream(process, args, input, timeout, cancel, ready, output)
-        end = time.monotonic() + timeout
-        first = True
-        while True:
-            try:
-                out, err = process.communicate(input=input if first else None,
-                                               timeout=min(.1, max(.001, end-time.monotonic())))
-                if ready is not None and "FM_OBSERVER_READY" in out:
-                    ready.set()
-                break
-            except subprocess.TimeoutExpired as error:
-                first = False
-                captured = error.stdout or b""
-                if isinstance(captured, bytes):
-                    captured = captured.decode(errors="replace")
-                if ready is not None and "FM_OBSERVER_READY" in captured:
-                    ready.set()
-                if (cancel is not None and cancel.is_set()) or (ready is not None and self.stop.is_set()):
-                    terminate(process)
-                    out, err = process.communicate(timeout=2)
-                    break
-                if self.stop.is_set() and not self.cleaning:
-                    terminate(process)
-                    raise Interrupted()
-                if time.monotonic() >= end:
-                    terminate(process)
-                    raise Deadline()
-        result = subprocess.CompletedProcess(args, process.returncode, out, err)
+        result = self.stream(process, args, input, timeout, cancel, ready, output)
         if check and result.returncode:
             raise Refusal(f"command refused operation (exit {result.returncode})")
         return result
@@ -228,6 +208,8 @@ class Executor:
         end = time.monotonic() + timeout
         buffers = {process.stdout: b"", process.stderr: b""}
         dropping = set()
+        captured = {pipe: bytearray() for pipe in buffers}
+        cancelled = False
         failure = None
         terminated = False
         with selectors.DefaultSelector() as selector:
@@ -237,12 +219,14 @@ class Executor:
                 process.stdin.write((input or "").encode())
                 process.stdin.close()
                 while selector.get_map() or process.poll() is None:
-                    if not terminated and ((cancel is not None and cancel.is_set()) or self.stop.is_set()
+                    if not terminated and ((cancel is not None and cancel.is_set()) or (self.stop.is_set() and not self.cleaning)
                             or time.monotonic() >= end):
-                        if self.stop.is_set():
+                        if self.stop.is_set() and not self.cleaning:
                             failure = Interrupted()
                         elif time.monotonic() >= end:
                             failure = Deadline()
+                        cancelled = (cancel is not None and cancel.is_set()
+                                     and process.poll() is None and failure is None)
                         terminate(process)
                         terminated = True
                         end = float("inf")
@@ -256,6 +240,11 @@ class Executor:
                             if buffers[pipe] and pipe not in dropping:
                                 lines.append(buffers[pipe].decode(errors="replace"))
                             continue
+                        if output is None:
+                            if len(captured[pipe]) + len(chunk) > 1048576:
+                                raise Refusal("command response exceeds capture limit")
+                            captured[pipe].extend(chunk)
+                            continue
                         pieces = chunk.split(b"\n")
                         for index, piece in enumerate(pieces):
                             if pipe not in dropping:
@@ -266,7 +255,7 @@ class Executor:
                             if index < len(pieces)-1:
                                 if pipe not in dropping:
                                     line = buffers[pipe].decode(errors="replace")
-                                    if "FM_OBSERVER_READY" in line:
+                                    if ready is not None and line == "FM_OBSERVER_READY":
                                         ready.set()
                                     lines.append(line)
                                 buffers[pipe] = b""
@@ -275,13 +264,17 @@ class Executor:
                         output(lines)
                 process.wait()
             finally:
-                if process.poll() is None:
+                if sys.exc_info()[0] is not None or process.poll() is None:
                     terminate(process)
                 for pipe in buffers:
                     pipe.close()
         if failure:
             raise failure
-        return subprocess.CompletedProcess(args, process.returncode, "", "")
+        result = subprocess.CompletedProcess(args, process.returncode,
+            captured[process.stdout].decode(errors="replace"),
+            captured[process.stderr].decode(errors="replace"))
+        result.cancelled = cancelled
+        return result
 
 
 def objects(output):
@@ -464,13 +457,11 @@ class Runner:
         prefix = "unset VIRTUAL_ENV\n" + "\n".join(
             "export " + key + "=" + shlex.quote(value) for key, value in env.items())
         script = "set -euo pipefail\n" + prefix + "\n"
-        if ready is not None:
-            script += "printf 'FM_OBSERVER_READY\\n'\n"
         script += "exec timeout --signal=TERM --kill-after=2 "
         script += shlex.quote(str(seconds)) + " bash -euo pipefail -c " + shlex.quote(command) + "\n"
         result = self.executor.run([client.BOAT, "ssh", box, "bash", "-s"],
                                    input=script, timeout=seconds + 10, check=False, cancel=cancel, ready=ready, output=output)
-        if result.returncode in (124, 137):
+        if result.returncode in (124, 137) and not result.cancelled:
             raise Deadline()
         return result
 
@@ -508,17 +499,23 @@ class Runner:
                 try:
                     observed["result"] = self.remote(box, lane, observer["command"],
                         observer["timeout_seconds"], cancel=cancel, ready=ready, output=persist)
+                    if not observed["result"].cancelled:
+                        raise Refusal("diagnostic observer ended before cancellation")
                 except Exception as error:
                     observed["error"] = error
             thread = threading.Thread(target=collect)
             thread.start()
             try:
-                if not ready.wait(15) or not thread.is_alive():
+                end = time.monotonic() + 15
+                while not ready.wait(.05):
+                    if self.stop.is_set():
+                        raise Interrupted()
+                    if not thread.is_alive() or time.monotonic() >= end:
+                        raise Refusal("diagnostic observer failed to start")
+                if not thread.is_alive():
                     raise Refusal("diagnostic observer failed to start")
                 plain = {key: value for key, value in step.items() if key != "observe"}
                 code = self.step(box, lane, plain, phase)
-                if "error" in observed:
-                    raise observed["error"]
                 return code
             finally:
                 cancel.set()
@@ -526,12 +523,17 @@ class Runner:
                 result = observed.get("result")
                 self.event("diagnostics", box=box, lane=lane, path=str(path.relative_to(self.directory)),
                            exit=result.returncode if result is not None else None)
+                if sys.exc_info()[0] is None:
+                    if "error" in observed:
+                        raise observed["error"]
+                    if thread.is_alive() or result is None:
+                        raise Refusal("diagnostic observer did not stop")
         seconds = step["timeout_seconds"]
         if "upload" in step:
             result = self.executor.run([client.BOAT, "scp", step["upload"],
-                                       box + ":" + step["destination"]], timeout=seconds, check=False)
+                                       box + ":" + step["destination"]], timeout=seconds, check=False, output=lambda lines: None)
         else:
-            result = self.remote(box, lane, step["command"], seconds)
+            result = self.remote(box, lane, step["command"], seconds, output=lambda lines: None)
         self.event("step", box=box, lane=lane, phase=phase, exit=result.returncode)
         return result.returncode
 
@@ -561,7 +563,7 @@ class Runner:
         target.mkdir(mode=0o700, parents=True, exist_ok=True)
         for index, path in enumerate(self.spec.get("artifacts", [])):
             result = self.executor.run([client.BOAT, "scp", "-r", box + ":" + path,
-                                       str(target / str(index))], timeout=60, check=False)
+                                       str(target / str(index))], timeout=60, check=False, output=lambda lines: None)
             self.event("artifact", box=box, lane=lane, path=path, exit=result.returncode)
             if result.returncode:
                 raise Refusal("artifact fetch failed")
@@ -674,8 +676,6 @@ class Runner:
         cases = self.evidence(box, lane["id"], selection)
         if code != 0 and all(case["status"] == "pass" for case in cases):
             raise Refusal("failed selection contradicts passing case evidence")
-        if code == 0 and any(case["status"] != "pass" for case in cases):
-            code = 1
         targets = [case for case in cases if case["classification"] in ("uncertain", "infra")]
         protected = any(case["classification"] in ("known-harness-defect", "product") for case in cases)
         retries = selection.get("retry_cases", {})
@@ -687,14 +687,17 @@ class Runner:
         self.report(lane, box, index, cases, time.monotonic()-start, "initial")
         attempted = set()
         for case in targets:
-            if case["id"] in attempted:
+            if case["id"] in attempted or case["classification"] not in ("uncertain", "infra"):
                 continue
             retry = retries.get(case["id"], selection.get("retry_selection"))
-            if protected and case["id"] not in retries:
-                continue
             if not reset or retry is None:
                 continue
-            target_ids = {case["id"]} if case["id"] in retries else {row["id"] for row in targets}
+            if case["id"] not in retries and (attempted or any(
+                    row["classification"] in ("known-harness-defect", "product") for row in cases)):
+                case["retry_decision"] = "skipped-overlap-or-protected-selection"
+                continue
+            target_ids = {case["id"]} if case["id"] in retries else {
+                row["id"] for row in cases if row["classification"] in ("uncertain", "infra")}
             attempted.update(target_ids)
             for row in cases:
                 if row["id"] in target_ids:
@@ -707,16 +710,19 @@ class Runner:
                 raise Refusal("retry source/credential guard failed")
             retry_code = self.step(box, lane["id"], retry, "retry")
             updated = self.evidence(box, lane["id"], selection)
-            latest = {row["id"]: row for row in updated if row["id"] in target_ids}
+            latest = {row["id"]: row for row in updated}
             if not target_ids.issubset(latest):
                 raise Refusal("retry evidence omitted targeted cases")
             for row in cases:
                 if row["id"] in latest:
-                    latest[row["id"]]["retry_decision"] = "exhausted"
-                    row.update(latest[row["id"]])
-                    if retry_code and row["status"] == "pass":
+                    decision = ("exhausted" if row["id"] in attempted else
+                                "not-needed" if latest[row["id"]]["status"] == "pass" else
+                                "never" if latest[row["id"]]["classification"] in ("known-harness-defect", "product")
+                                else row["retry_decision"])
+                    row.update(latest[row["id"]], retry_decision=decision)
+                    if row["id"] in target_ids and retry_code and row["status"] == "pass":
                         raise Refusal("retry command failed with passing evidence")
-            self.report(lane, box, index, list(latest.values()), time.monotonic()-start, "retry")
+            self.report(lane, box, index, [row for row in cases if row["id"] in target_ids], time.monotonic()-start, "retry")
         failures = [case for case in cases if case["status"] != "pass"]
         code = 1 if failures else 0
         kinds = {case["classification"] for case in failures}

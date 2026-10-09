@@ -16,6 +16,8 @@ ROOT = Path(sys.argv.pop(1)).resolve()
 
 def step(command="true", seconds=2):
     body = dict(command=command, timeout_seconds=seconds)
+    if "# OBSERVE" in command and "FM_OBSERVER_READY" not in command:
+        body["command"] = "printf 'FM_OBSERVER_READY\\n'; " + command
     if "# SELECT" in command:
         path = "/tmp/boat-lane-tests/$FM_LANE.json"
         body["evidence_file"] = "/tmp/boat-lane-tests/pilot.json"
@@ -58,11 +60,17 @@ class Cases(unittest.TestCase):
                 if selection.get("evidence_file") == "/tmp/boat-lane-tests/pilot.json":
                     selection["evidence_file"] = f"/tmp/boat-lane-tests/{lane['id']}.json"
         (self.home / "spec.json").write_text(json.dumps(body or spec()))
+        preexec = None
+        if self.env.get("FAKE_RUNNER_MEMORY_LIMIT"):
+            import resource
+            def preexec():
+                limit = int(self.env["FAKE_RUNNER_MEMORY_LIMIT"])
+                resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
         return subprocess.Popen([sys.executable, str(ROOT / "bin/fm-boat-lanes.py"),
                                  "--spec", str(self.home / "spec.json"),
                                  "--run-dir", str(self.home / "run"), "--cap-usd", ".5",
                                  *extra], env=self.env, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True)
+                                stderr=subprocess.PIPE, text=True, preexec_fn=preexec)
 
     def run_case(self, body=None, *extra):
         process = self.start(body, *extra)
@@ -429,10 +437,124 @@ class Cases(unittest.TestCase):
     def test_observer_deadline_preserves_captured_tail(self):
         body = spec()
         body["prepare"] = [dict(command="sleep .4; false", timeout_seconds=2, role="stack_up",
-            observe=step("printf 'redis early error\\n'; sleep .2; exit 124 # OBSERVE", 10))]
+            observe=step("printf 'FM_OBSERVER_READY\\nredis early error\\n'; sleep .2; exit 124 # OBSERVE", 10))]
         self.assertEqual(self.run_case(body), 124)
         row = next(row for row in self.ledger() if row["event"] == "diagnostics")
         self.assertIn("redis early error", (self.home / "run" / row["path"]).read_text())
+        self.assert_cleanup()
+
+    def test_overlapping_fallback_never_reruns_attempted_case(self):
+        import shlex
+        for classification in ("uncertain", "product", "known-harness-defect"):
+            with self.subTest(classification=classification):
+                if (self.home / "run").exists():
+                    import shutil
+                    shutil.rmtree(self.home / "run")
+                    (self.home / "state.json").unlink()
+                body = spec()
+                path = "/tmp/boat-lane-tests/cases.json"
+                initial = dict(cases=[dict(id="A", status="fail"), dict(id="B", status="fail")])
+                after = dict(cases=[dict(id="A", status="fail", kind=classification,
+                    dependency_blocked=classification == "known-harness-defect"), dict(id="B", status="fail")])
+                emit = lambda data: "printf %s " + shlex.quote(json.dumps(data)) + " > " + path
+                body["lanes"][0]["selections"] = [dict(command=emit(initial) + "; false # SELECT",
+                    timeout_seconds=2, evidence_file=path, retry_reset=[step("true")],
+                    retry_cases={"A": step(emit(after) + "; false # RETRY_A")},
+                    retry_selection=step("touch /tmp/boat-lane-tests/unsafe-fallback; false"))]
+                self.assertEqual(self.run_case(body), 4)
+                self.assertFalse((self.home / "unsafe-fallback").exists())
+                rows = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+                self.assertEqual(len([row for row in rows if row["attempt"] == "retry"]), 1)
+                cases = {row["id"]: row for row in rows[-1]["cases"]}
+                self.assertEqual(cases["A"]["retry_decision"], "exhausted")
+                self.assertEqual(cases["B"]["retry_decision"], "skipped-overlap-or-protected-selection")
+                self.assert_cleanup()
+
+    def test_retry_reclassification_protects_unattempted_case(self):
+        import shlex
+        body = spec()
+        path = "/tmp/boat-lane-tests/cases.json"
+        initial = dict(cases=[dict(id="A", status="fail"), dict(id="B", status="fail")])
+        after = dict(cases=[dict(id="A", status="pass"), dict(id="B", status="fail", kind="product")])
+        emit = lambda data: "printf %s " + shlex.quote(json.dumps(data)) + " > " + path
+        body["lanes"][0]["selections"] = [dict(command=emit(initial) + "; false # SELECT",
+            timeout_seconds=2, evidence_file=path, retry_reset=[step("true")],
+            retry_cases={"A": step(emit(after)), "B": step("touch /tmp/boat-lane-tests/unsafe-B; false")})]
+        self.assertEqual(self.run_case(body), 4)
+        self.assertFalse((self.home / "unsafe-B").exists())
+        rows = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        cases = {case["id"]: case for case in rows[-1]["cases"]}
+        self.assertEqual(cases["B"]["classification"], "product")
+        self.assertEqual(cases["B"]["retry_decision"], "never")
+        self.assert_cleanup()
+
+    def test_smallest_selection_retries_all_targets_once(self):
+        import shlex
+        body = spec()
+        path = "/tmp/boat-lane-tests/cases.json"
+        initial = dict(cases=[dict(id="A", status="fail"), dict(id="B", status="fail")])
+        after = dict(cases=[dict(id="A", status="pass"), dict(id="B", status="pass")])
+        emit = lambda data: "printf %s " + shlex.quote(json.dumps(data)) + " > " + path
+        body["lanes"][0]["selections"] = [dict(command=emit(initial) + "; false # SELECT",
+            timeout_seconds=2, evidence_file=path, retry_reset=[step("true")], retry_selection=step(emit(after)))]
+        self.assertEqual(self.run_case(body), 0)
+        rows = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        self.assertEqual(len([row for row in rows if row["attempt"] == "retry"]), 1)
+        self.assertTrue(all(case["retry_decision"] == "exhausted" for case in rows[-1]["cases"]))
+        self.assert_cleanup()
+
+    def test_observer_readiness_delays_main_start(self):
+        body = spec(3)
+        observer = step("sleep .3; touch /tmp/boat-lane-tests/ready; printf 'FM_OBSERVER_READY\\n'; sleep 30 # OBSERVE", 10)
+        body["prepare"] = [dict(command="test -f /tmp/boat-lane-tests/ready # UP", timeout_seconds=2,
+                                role="stack_up", observe=observer)]
+        self.assertEqual(self.run_case(body, "--jobs", "1"), 0)
+        self.assert_cleanup()
+
+    def test_observer_early_completion_fails_pilot(self):
+        for code in (0, 1):
+            with self.subTest(code=code):
+                if (self.home / "run").exists():
+                    import shutil
+                    shutil.rmtree(self.home / "run")
+                    (self.home / "state.json").unlink()
+                body = spec(3)
+                observer = step(f"printf 'FM_OBSERVER_READY\\n'; sleep .15; exit {code} # OBSERVE", 10)
+                body["prepare"] = [dict(command="sleep .4; true # UP", timeout_seconds=2,
+                                        role="stack_up", observe=observer)]
+                self.assertEqual(self.run_case(body), 3)
+                self.assertEqual(len(self.state()["boxes"]), 1)
+                self.assert_cleanup()
+
+    def test_observer_exit_without_readiness_never_starts_main(self):
+        body = spec(3)
+        body["prepare"] = [dict(command="touch /tmp/boat-lane-tests/unsafe-up", timeout_seconds=2,
+            role="stack_up", observe=step("printf 'watcher failed\\n'; exit 1", 10))]
+        self.assertEqual(self.run_case(body), 3)
+        self.assertFalse((self.home / "unsafe-up").exists())
+        self.assertEqual(len(self.state()["boxes"]), 1)
+        self.assert_cleanup()
+
+    def test_noisy_commands_complete_under_memory_bound(self):
+        import shlex
+        body = spec()
+        program = "import os; chunk=b'x'*65536; [(os.write(1,chunk),os.write(2,chunk)) for _ in range(2048)]"
+        noisy = "python3 -c " + shlex.quote(program)
+        self.env["FAKE_RUNNER_MEMORY_LIMIT"] = str(96 * 1024 * 1024)
+        body["prepare"] = [step(noisy, 10)]
+        body["guard"] = step(noisy + " # GUARD", 10)
+        body["lanes"][0]["selections"] = [step(noisy + " # SELECT", 10)]
+        body["finish"] = [step(noisy + " # FINISH", 10)]
+        self.assertEqual(self.run_case(body), 0)
+        self.assert_cleanup()
+
+    def test_oversized_case_evidence_fails_closed(self):
+        body = spec(3)
+        path = "/tmp/boat-lane-tests/pilot.json"
+        command = "python3 -c 'import json; print(json.dumps({\"cases\":[{\"id\":\"A\",\"status\":\"pass\",\"extra\":\"x\"*1100000}]}))' > " + path
+        body["lanes"][0]["selections"] = [dict(command=command + " # SELECT", timeout_seconds=2, evidence_file=path)]
+        self.assertEqual(self.run_case(body), 3)
+        self.assertEqual(len(self.state()["boxes"]), 1)
         self.assert_cleanup()
 
     def test_help_owns_schema_and_exits(self):
