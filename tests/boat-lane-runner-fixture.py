@@ -58,6 +58,26 @@ def main():
         return 0
     if command == "ssh":
         box = args[1]
+        if os.environ.get("FAKE_STALL_SSH_CALL"):
+            def invoked(state):
+                number = 1 + sum(row["event"] == "ssh_invoked" for row in state["events"])
+                state["events"].append(dict(event="ssh_invoked", box=box, number=number))
+                return number
+            number = mutate(invoked)
+            if number == int(os.environ["FAKE_STALL_SSH_CALL"]):
+                event("input_stall", box=box, pid=os.getpid())
+                if mode == "input-close":
+                    os.close(0)
+                    return 42
+                if mode == "input-eof":
+                    for fd in (0, 1, 2):
+                        os.close(fd)
+                child = subprocess.Popen([sys.executable, "-c",
+                    "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(120)"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                event("child", pid=child.pid, parent=os.getpid())
+                time.sleep(120)
+                return 0
         script = sys.stdin.read().replace("/tmp/boat-lane-tests/", str(root) + "/")
         lane = re.search(r"export FM_LANE=([^\n]+)", script).group(1)
         phase = ("observer" if "# OBSERVE" in script else "finish" if "# FINISH" in script

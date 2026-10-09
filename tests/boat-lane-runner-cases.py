@@ -295,7 +295,8 @@ class Cases(unittest.TestCase):
         self.assertEqual(cases["product"]["retry_decision"], "never")
         retries = [row for row in rows if row["attempt"] == "retry"]
         self.assertEqual(len(retries), 1)
-        self.assertEqual([case["id"] for case in retries[0]["cases"]], ["infra"])
+        self.assertEqual({case["id"] for case in retries[0]["cases"]}, {"infra", "product"})
+        self.assertEqual(next(case for case in retries[0]["cases"] if case["id"] == "product")["retry_decision"], "never")
         self.assertEqual(retries[0]["cases"][0]["retry_decision"], "exhausted")
         final = next(row for row in rows if row["attempt"] == "complete")
         self.assertEqual(final["verdict"], "product_failure")
@@ -781,6 +782,156 @@ class Cases(unittest.TestCase):
         report = json.loads((self.home / "run/report.jsonl").read_text().splitlines()[-1])
         self.assertEqual(report["verdict"], "harness_failure")
         self.assertEqual(report["cases"][0]["retry_decision"], "exhausted")
+        self.assert_cleanup()
+
+    def test_new_product_retry_case_blocks_pilot_fanout(self):
+        import shlex
+        for case_retry, code in ((False, 0), (False, 1), (True, 0), (True, 1)):
+            with self.subTest(case_retry=case_retry, code=code):
+                self.reset_run()
+                body = spec(3)
+                path = "/tmp/boat-lane-tests/cases.json"
+                initial = dict(cases=[dict(id="A", status="fail")])
+                after = dict(cases=[dict(id="A", status="pass"),
+                    dict(id="B", status="fail", kind="product", failure_signature="new product bug", request_ids=["req-B"])])
+                emit = lambda data: "printf %s " + shlex.quote(json.dumps(data)) + " > " + path
+                selection = dict(command=emit(initial) + "; false # SELECT", timeout_seconds=2,
+                    evidence_file=path, retry_reset=[step("true")])
+                retry = step(emit(after) + f"; exit {code}")
+                if case_retry:
+                    selection["retry_cases"] = {"A": retry, "B": step("touch /tmp/boat-lane-tests/unsafe-B")}
+                else:
+                    selection["retry_selection"] = retry
+                body["lanes"][0]["selections"] = [selection]
+                self.assertEqual(self.run_case(body), 4)
+                self.assertEqual(len(self.state()["boxes"]), 1)
+                self.assertFalse((self.home / "unsafe-B").exists())
+                rows = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+                retry_report = next(row for row in rows if row["attempt"] == "retry")
+                for report in (retry_report, rows[-1]):
+                    cases = {case["id"]: case for case in report["cases"]}
+                    self.assertEqual(set(cases), {"A", "B"})
+                    self.assertEqual(cases["A"]["retry_decision"], "exhausted")
+                    self.assertEqual(cases["B"]["classification"], "product")
+                    self.assertEqual(cases["B"]["retry_decision"], "never")
+                    self.assertEqual(cases["B"]["request_ids"], ["req-B"])
+                    self.assertEqual(report["overall_totals"], {"pass": 1, "fail": 1})
+                self.assertEqual(rows[-1]["verdict"], "product_failure")
+                observed = next(row for row in self.ledger() if row["event"] == "failure_observed" and row["signature"].startswith("cases:"))
+                self.assertLess(observed["time"], retry_report["time"])
+                self.assert_cleanup()
+
+    def test_new_uncertain_retry_case_is_reported_without_extra_retry(self):
+        import shlex
+        body = spec()
+        path = "/tmp/boat-lane-tests/cases.json"
+        emit = lambda data: "printf %s " + shlex.quote(json.dumps(data)) + " > " + path
+        initial = dict(cases=[dict(id="A", status="fail")])
+        after = dict(cases=[dict(id="A", status="pass"), dict(id="B", status="fail")])
+        body["lanes"][0]["selections"] = [dict(command=emit(initial) + "; false # SELECT", timeout_seconds=2,
+            evidence_file=path, retry_reset=[step("true")],
+            retry_cases={"A": step(emit(after)), "B": step("touch /tmp/boat-lane-tests/unsafe-new")})]
+        self.assertEqual(self.run_case(body), 4)
+        self.assertFalse((self.home / "unsafe-new").exists())
+        rows = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        self.assertEqual(len([row for row in rows if row["attempt"] == "retry"]), 1)
+        case = next(case for case in rows[-1]["cases"] if case["id"] == "B")
+        self.assertEqual(case["retry_decision"], "skipped-newly-observed-case")
+        self.assert_cleanup()
+
+    def reset_run(self):
+        if (self.home / "run").exists():
+            import shutil
+            shutil.rmtree(self.home / "run")
+            (self.home / "state.json").unlink()
+
+    def stalled_input_spec(self, observer=False, seconds=.1):
+        body = spec(3)
+        large = "true\n#" + "x" * 70000
+        self.env["FAKE_STALL_SSH_CALL"] = "2"
+        self.env["FAKE_BOAT_MODE"] = "input-stall"
+        if observer:
+            body["prepare"] = [dict(command="true", timeout_seconds=seconds, role="stack_up",
+                                    observe=step(large, seconds+5))]
+        else:
+            body["prepare"] = [step(large, seconds)]
+        return body
+
+    def assert_child_reaped(self):
+        for row in self.state()["events"]:
+            if row["event"] == "child":
+                path = Path(f"/proc/{row['pid']}/stat")
+                if path.exists():
+                    self.assertEqual(path.read_text().split()[2], "Z")
+                else:
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(row["pid"], 0)
+
+    def test_large_main_and_observer_inputs_complete_normally(self):
+        body = spec()
+        large = "true\n#" + "x" * 70000
+        observer = "printf 'FM_OBSERVER_READY\\n'; sleep 30\n# OBSERVE " + "x" * 70000
+        body["prepare"] = [dict(command=large, timeout_seconds=2, role="stack_up", observe=step(observer, 8))]
+        self.assertEqual(self.run_case(body), 0)
+        self.assert_cleanup()
+
+    def test_unread_large_main_input_times_out_and_cleans(self):
+        start = time.monotonic()
+        self.assertEqual(self.run_case(self.stalled_input_spec()), 124)
+        self.assertLess(time.monotonic()-start, 14)
+        self.assertFalse(any(row.get("phase") == "selection" for row in self.state()["events"]))
+        self.assert_child_reaped()
+        self.assert_cleanup()
+
+    def test_unread_large_observer_input_fails_readiness_and_cleans(self):
+        start = time.monotonic()
+        self.assertEqual(self.run_case(self.stalled_input_spec(observer=True)), 3)
+        self.assertLess(time.monotonic()-start, 19)
+        self.assertEqual(len([row for row in self.state()["events"] if row["event"] == "ssh_invoked"]), 2)
+        self.assert_child_reaped()
+        self.assert_cleanup()
+
+    def test_unread_large_inputs_remain_interruptible(self):
+        for observer in (False, True):
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                with self.subTest(observer=observer, signal=sig):
+                    self.reset_run()
+                    process = self.start(self.stalled_input_spec(observer=observer, seconds=120))
+                    try:
+                        self.wait_event(lambda state: any(row["event"] == "child" for row in state["events"]))
+                        start = time.monotonic()
+                        process.send_signal(sig)
+                        process.communicate(timeout=6)
+                        self.assertLess(time.monotonic()-start, 6)
+                        self.assertEqual(process.returncode, 128+sig)
+                        self.assert_child_reaped()
+                        self.assert_cleanup()
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.communicate(timeout=5)
+                            for row in self.state()["events"]:
+                                if row["event"] == "input_stall":
+                                    try:
+                                        os.killpg(row["pid"], signal.SIGKILL)
+                                    except ProcessLookupError:
+                                        pass
+
+    def test_closed_input_pipe_reports_exit_without_blocking(self):
+        body = self.stalled_input_spec()
+        self.env["FAKE_BOAT_MODE"] = "input-close"
+        start = time.monotonic()
+        self.assertEqual(self.run_case(body), 3)
+        self.assertLess(time.monotonic()-start, 5)
+        self.assert_cleanup()
+
+    def test_closed_pipes_with_live_process_still_honor_deadline(self):
+        body = self.stalled_input_spec()
+        self.env["FAKE_BOAT_MODE"] = "input-eof"
+        start = time.monotonic()
+        self.assertEqual(self.run_case(body), 124)
+        self.assertLess(time.monotonic()-start, 14)
+        self.assert_child_reaped()
         self.assert_cleanup()
 
     def test_help_owns_schema_and_exits(self):

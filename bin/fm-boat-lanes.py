@@ -47,7 +47,9 @@ Required selection evidence_file is a /tmp JSON object with cases:[{id,status,
  skipped when it would rerun an attempted case or a currently known-defect/product case. Never rerun
  all lane selections. Missing reset/selection records a skipped retry. Retry
  commands must write updated evidence_file; known defects/product are never
- retry targets. Infra transport/timeout failures without readable case evidence
+ retry targets. Newly reported retry cases remain in verdicts and reports; newly
+ observed infra/uncertain cases are recorded without adding retry targets.
+ Infra transport/timeout failures without readable case evidence
  remain harness/timeout verdicts, not invented product cases.
 
 Stack-up steps must declare role:"stack_up" and observe:STEP. The observer is a
@@ -100,7 +102,8 @@ The NEW run directory is mode 0700. ledger.jsonl is append-only, mode 0600, fsyn
  create names) in the ledger for manual account inspection/cleanup. No automatic
  recovery or ledger reuse is supported; never delete by an unverified name alone.
 
-Each process has its own session. Deadlines terminate its group AND remembered
+Each process has its own session. Stdin is delivered incrementally without
+ blocking output draining, deadline enforcement or cancellation. Deadlines terminate its group AND remembered
  descendants, then kill after a grace period even if the leader already exited.
  Remote scripts also have a provider-side timeout; timeout prevents the next
  selection. SIGINT/SIGTERM stop scheduling, reap commands, capture usage, delete
@@ -221,8 +224,12 @@ class Executor:
             for pipe in buffers:
                 selector.register(pipe, selectors.EVENT_READ)
             try:
-                process.stdin.write((input or "").encode())
-                process.stdin.close()
+                pending = memoryview((input or "").encode())
+                if pending:
+                    os.set_blocking(process.stdin.fileno(), False)
+                    selector.register(process.stdin, selectors.EVENT_WRITE)
+                else:
+                    process.stdin.close()
                 while selector.get_map() or process.poll() is None:
                     if not terminated and ((cancel is not None and cancel.is_set()) or (self.stop.is_set() and not self.cleaning)
                             or time.monotonic() >= end):
@@ -236,9 +243,24 @@ class Executor:
                         terminated = True
                         end = float("inf")
                         cancel = None
+                        if not process.stdin.closed:
+                            selector.unregister(process.stdin)
+                            process.stdin.close()
                     lines = []
                     for key, _ in selector.select(.1):
                         pipe = key.fileobj
+                        if pipe is process.stdin:
+                            try:
+                                written = os.write(pipe.fileno(), pending[:8192])
+                                pending = pending[written:]
+                            except BlockingIOError:
+                                continue
+                            except BrokenPipeError:
+                                pending = pending[len(pending):]
+                            if not pending:
+                                selector.unregister(pipe)
+                                pipe.close()
+                            continue
                         chunk = os.read(pipe.fileno(), 8192)
                         if not chunk:
                             selector.unregister(pipe)
@@ -271,6 +293,7 @@ class Executor:
             finally:
                 if sys.exc_info()[0] is not None or process.poll() is None:
                     terminate(process)
+                process.stdin.close()
                 for pipe in buffers:
                     pipe.close()
         if failure:
@@ -727,6 +750,14 @@ class Runner:
             latest = {row["id"]: row for row in updated}
             if not target_ids.issubset(latest):
                 raise Refusal("retry evidence omitted targeted cases")
+            if retry_code and all(row["status"] == "pass" for row in updated):
+                raise Refusal("retry command failed with passing evidence")
+            existing = {row["id"] for row in cases}
+            for row in updated:
+                if row["id"] not in existing:
+                    if row["classification"] in ("uncertain", "infra"):
+                        row["retry_decision"] = "skipped-newly-observed-case"
+                    cases.append(row)
             for row in cases:
                 if row["id"] in latest:
                     decision = ("exhausted" if row["id"] in attempted else
@@ -734,9 +765,7 @@ class Runner:
                                 "never" if latest[row["id"]]["classification"] in ("known-harness-defect", "product")
                                 else row["retry_decision"])
                     row.update(latest[row["id"]], retry_decision=decision)
-                    if row["id"] in target_ids and retry_code and row["status"] == "pass":
-                        raise Refusal("retry command failed with passing evidence")
-            self.report(lane, box, index, [row for row in cases if row["id"] in target_ids], time.monotonic()-start, "retry")
+            self.report(lane, box, index, [row for row in cases if row["id"] in latest], time.monotonic()-start, "retry")
         failures = [case for case in cases if case["status"] != "pass"]
         code = 1 if failures else 0
         kinds = {case["classification"] for case in failures}
