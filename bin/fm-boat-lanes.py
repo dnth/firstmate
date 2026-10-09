@@ -20,16 +20,17 @@ Spec v1 is JSON: {"version":1,"size":"large","ttl_seconds":1800,
  VIRTUAL_ENV unset, spec env plus FM_LANE, FM_RUN_TOKEN and FM_BOX_ID. Uploads use
  Boat scp. guard is mandatory and runs after prepare and before each selection;
  it must assert the project's source/module/cwd/credential agreement. Selections
- must include the real test invocation AND a strict result assertion (exit zero
- is the pass contract). All commands are trusted operator input, never echoed.
+ must include the real test invocation AND case evidence; exit zero and all
+ cases passing are both required. All commands are trusted operator input, never echoed.
  Docker inventory must be empty before prepare. Preparation/guard/transport
  failures are harness_failure; selection nonzero is a failed selection, never a pass.
  Artifacts must exclude credentials; only explicitly declared paths are fetched.
  Optional failure_signature_files are remote JSON reports with a top-level
- failure_signature string: identical signatures on two distinct lanes stop all
- new creation. Otherwise phase+exit is the conservative failure signature.
+ failure_signature string. Each nonempty case signature is also matched
+ independently of case IDs or other failures across distinct lanes to stop new
+ creation. Otherwise phase+exit is the conservative failure signature.
 
-Optional selection evidence_file is a /tmp JSON object with cases:[{id,status,
+Required selection evidence_file is a /tmp JSON object with cases:[{id,status,
  failure_signature,request_ids,kind,dependency_blocked}]. Status is pass/fail/etc;
  kind may be infra/product. Non-pass cases classify as known-harness-defect when
  dependency_blocked or matching a literal substring in spec known_harness_defects;
@@ -50,14 +51,16 @@ Stack-up steps must declare role:"stack_up" and observe:STEP. The observer is a
  Compose service discovery/log-follow commands in the observer spec. Follow logs
  from container creation, since project startup may remove failed services before
  returning. On step completion, the observer's process tree is terminated and its
- bounded, redacted tail is saved mode0600 under artifacts/<lane>/diagnostics before
+ bounded, redacted tail is persisted incrementally mode0600 under artifacts/<lane>/diagnostics before
  finish/delete. Observer commands must redact generated secrets at their source;
  the runner additionally removes credential assignments, bearer tokens and URI
  passwords. Sensitive env values are never echoed. This also applies to retry
  stack resets marked stack_up. No diagnostics command may operate another box.
  Observers may emit JSON lines {"service":"redis","line":"redacted log line"};
  these retain a separate last-200-line tail per service, so another service's
- output cannot bury an earlier startup error. Other output uses one bounded tail.
+ output cannot bury an earlier startup error. At most 32 services are retained;
+ excess services use the plain tail. Each tail is at most 32768 characters,
+ and input lines over 65536 bytes are discarded. Other output uses one bounded tail.
 
 report.jsonl appends a fsynced record immediately after each selection/retry and
  lane finish: lane, box, profile, duration_seconds, cases (id/status/classification/
@@ -105,6 +108,7 @@ import math
 import os
 from pathlib import Path
 import re
+import selectors
 import shlex
 import signal
 import subprocess
@@ -177,15 +181,17 @@ class Executor:
     def cleaning(self, value):
         self.context.cleaning = value
 
-    def run(self, args, *, input=None, timeout=30, check=True, env=None, cancel=None, ready=None):
+    def run(self, args, *, input=None, timeout=30, check=True, env=None, cancel=None, ready=None, output=None):
         if self.stop.is_set() and not self.cleaning:
             raise Interrupted()
         try:
             process = subprocess.Popen([str(arg) for arg in args], stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       text=True, start_new_session=True, env=env)
+                                       text=output is None, start_new_session=True, env=env)
         except OSError as error:
             raise Refusal("command unavailable") from error
+        if output is not None:
+            return self.stream(process, args, input, timeout, cancel, ready, output)
         end = time.monotonic() + timeout
         first = True
         while True:
@@ -216,6 +222,66 @@ class Executor:
         if check and result.returncode:
             raise Refusal(f"command refused operation (exit {result.returncode})")
         return result
+
+
+    def stream(self, process, args, input, timeout, cancel, ready, output):
+        end = time.monotonic() + timeout
+        buffers = {process.stdout: b"", process.stderr: b""}
+        dropping = set()
+        failure = None
+        terminated = False
+        with selectors.DefaultSelector() as selector:
+            for pipe in buffers:
+                selector.register(pipe, selectors.EVENT_READ)
+            try:
+                process.stdin.write((input or "").encode())
+                process.stdin.close()
+                while selector.get_map() or process.poll() is None:
+                    if not terminated and ((cancel is not None and cancel.is_set()) or self.stop.is_set()
+                            or time.monotonic() >= end):
+                        if self.stop.is_set():
+                            failure = Interrupted()
+                        elif time.monotonic() >= end:
+                            failure = Deadline()
+                        terminate(process)
+                        terminated = True
+                        end = float("inf")
+                        cancel = None
+                    lines = []
+                    for key, _ in selector.select(.1):
+                        pipe = key.fileobj
+                        chunk = os.read(pipe.fileno(), 8192)
+                        if not chunk:
+                            selector.unregister(pipe)
+                            if buffers[pipe] and pipe not in dropping:
+                                lines.append(buffers[pipe].decode(errors="replace"))
+                            continue
+                        pieces = chunk.split(b"\n")
+                        for index, piece in enumerate(pieces):
+                            if pipe not in dropping:
+                                buffers[pipe] += piece
+                                if len(buffers[pipe]) > 65536:
+                                    buffers[pipe] = b""
+                                    dropping.add(pipe)
+                            if index < len(pieces)-1:
+                                if pipe not in dropping:
+                                    line = buffers[pipe].decode(errors="replace")
+                                    if "FM_OBSERVER_READY" in line:
+                                        ready.set()
+                                    lines.append(line)
+                                buffers[pipe] = b""
+                                dropping.discard(pipe)
+                    if lines:
+                        output(lines)
+                process.wait()
+            finally:
+                if process.poll() is None:
+                    terminate(process)
+                for pipe in buffers:
+                    pipe.close()
+        if failure:
+            raise failure
+        return subprocess.CompletedProcess(args, process.returncode, "", "")
 
 
 def objects(output):
@@ -280,7 +346,7 @@ def validate(spec):
             if "retry_selection" in selection:
                 steps.append((selection["retry_selection"], False))
             path = selection.get("evidence_file")
-            if path is not None and (not isinstance(path, str) or not path.startswith("/tmp/")
+            if (not isinstance(path, str) or not path.startswith("/tmp/")
                     or ".." in Path(path).parts):
                 raise Refusal("evidence_file must be beneath /tmp")
     for step, upload_allowed in steps:
@@ -393,7 +459,7 @@ class Runner:
             self.event("named", box=box, name=name)
             return box
 
-    def remote(self, box, lane, command, seconds, *, cancel=None, ready=None):
+    def remote(self, box, lane, command, seconds, *, cancel=None, ready=None, output=None):
         env = dict(self.spec.get("env", {}), FM_LANE=lane, FM_RUN_TOKEN=self.token, FM_BOX_ID=box)
         prefix = "unset VIRTUAL_ENV\n" + "\n".join(
             "export " + key + "=" + shlex.quote(value) for key, value in env.items())
@@ -403,7 +469,7 @@ class Runner:
         script += "exec timeout --signal=TERM --kill-after=2 "
         script += shlex.quote(str(seconds)) + " bash -euo pipefail -c " + shlex.quote(command) + "\n"
         result = self.executor.run([client.BOAT, "ssh", box, "bash", "-s"],
-                                   input=script, timeout=seconds + 10, check=False, cancel=cancel, ready=ready)
+                                   input=script, timeout=seconds + 10, check=False, cancel=cancel, ready=ready, output=output)
         if result.returncode in (124, 137):
             raise Deadline()
         return result
@@ -413,36 +479,53 @@ class Runner:
         if observer is not None:
             cancel, ready = threading.Event(), threading.Event()
             observed = {}
+            target = self.directory / "artifacts" / lane / "diagnostics"
+            target.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path = target / f"{uuid.uuid4().hex}.log"
+            tails = {"": ""}
+            def persist(lines):
+                for line in lines:
+                    service, message = "", line
+                    try:
+                        row = json.loads(line)
+                        if (isinstance(row, dict) and isinstance(row.get("service"), str)
+                                and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", row["service"])
+                                and isinstance(row.get("line"), str)):
+                            service, message = row["service"], row["line"]
+                    except ValueError:
+                        pass
+                    if service not in tails and len(tails) >= 33:
+                        service = ""
+                    tails[service] = self.redact(tails.get(service, "") + self.redact(message))
+                fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, "w") as handle:
+                    handle.write("".join((f"[{service}]\n" if service else "") + tail
+                                         for service, tail in sorted(tails.items())))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            persist([])
             def collect():
                 try:
                     observed["result"] = self.remote(box, lane, observer["command"],
-                                                     observer["timeout_seconds"], cancel=cancel, ready=ready)
-                except Exception:
-                    observed["error"] = True
+                        observer["timeout_seconds"], cancel=cancel, ready=ready, output=persist)
+                except Exception as error:
+                    observed["error"] = error
             thread = threading.Thread(target=collect)
             thread.start()
             try:
                 if not ready.wait(15) or not thread.is_alive():
                     raise Refusal("diagnostic observer failed to start")
                 plain = {key: value for key, value in step.items() if key != "observe"}
-                return self.step(box, lane, plain, phase)
+                code = self.step(box, lane, plain, phase)
+                if "error" in observed:
+                    raise observed["error"]
+                return code
             finally:
                 cancel.set()
                 thread.join(timeout=20)
-                target = self.directory / "artifacts" / lane / "diagnostics"
-                target.mkdir(mode=0o700, parents=True, exist_ok=True)
                 result = observed.get("result")
-                text = (result.stdout + "\n" + result.stderr) if result is not None else "observer unavailable"
-                text = self.diagnostic_tail(text)
-                with self.lock:
-                    path = target / f"{self.sequence + 1}.log"
-                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                    with os.fdopen(fd, "w") as handle:
-                        handle.write(text)
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    self.event("diagnostics", box=box, lane=lane, path=str(path.relative_to(self.directory)),
-                               exit=result.returncode if result is not None else None)
+                self.event("diagnostics", box=box, lane=lane, path=str(path.relative_to(self.directory)),
+                           exit=result.returncode if result is not None else None)
         seconds = step["timeout_seconds"]
         if "upload" in step:
             result = self.executor.run([client.BOAT, "scp", step["upload"],
@@ -462,25 +545,6 @@ class Runner:
         text = re.sub(r"(\w+://[^\s/:]+:)[^\s/@]+(@)", r"\1[REDACTED]\2", text)
         text = text.replace("FM_OBSERVER_READY", "")
         return "\n".join(text.splitlines()[-200:])[-32768:] + "\n"
-
-    def diagnostic_tail(self, text):
-        services = {}
-        plain = []
-        for line in text.splitlines():
-            try:
-                row = json.loads(line)
-                service = row.get("service")
-                message = row.get("line")
-                if (not isinstance(service, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", service)
-                        or not isinstance(message, str)):
-                    raise ValueError()
-                services.setdefault(service, []).append(message)
-            except (ValueError, TypeError, AttributeError):
-                plain.append(line)
-        parts = [self.redact("\n".join(plain))]
-        for service in sorted(services)[:32]:
-            parts += [f"\n[{service}]\n", self.redact("\n".join(services[service][-200:]))]
-        return "".join(parts)
 
     def signature(self, box, lane, default):
         for path in self.spec.get("failure_signature_files", []):
@@ -504,8 +568,6 @@ class Runner:
 
     def evidence(self, box, lane, selection):
         path = selection.get("evidence_file")
-        if path is None:
-            return []
         result = self.remote(box, lane, "cat -- " + shlex.quote(path), 10)
         if result.returncode:
             raise Refusal("case evidence unavailable")
@@ -610,9 +672,9 @@ class Runner:
         start = time.monotonic()
         code = self.step(box, lane["id"], selection, "selection")
         cases = self.evidence(box, lane["id"], selection)
-        if cases and code != 0 and all(case["status"] == "pass" for case in cases):
+        if code != 0 and all(case["status"] == "pass" for case in cases):
             raise Refusal("failed selection contradicts passing case evidence")
-        if cases and code == 0 and any(case["status"] != "pass" for case in cases):
+        if code == 0 and any(case["status"] != "pass" for case in cases):
             code = 1
         targets = [case for case in cases if case["classification"] in ("uncertain", "infra")]
         protected = any(case["classification"] in ("known-harness-defect", "product") for case in cases)
@@ -634,6 +696,9 @@ class Runner:
                 continue
             target_ids = {case["id"]} if case["id"] in retries else {row["id"] for row in targets}
             attempted.update(target_ids)
+            for row in cases:
+                if row["id"] in target_ids:
+                    row["retry_decision"] = "exhausted"
             start = time.monotonic()
             for step in reset:
                 if self.step(box, lane["id"], step, "retry_reset"):
@@ -647,21 +712,19 @@ class Runner:
                 raise Refusal("retry evidence omitted targeted cases")
             for row in cases:
                 if row["id"] in latest:
-                    row.update(latest[row["id"]], retry_decision="exhausted")
+                    latest[row["id"]]["retry_decision"] = "exhausted"
+                    row.update(latest[row["id"]])
                     if retry_code and row["status"] == "pass":
                         raise Refusal("retry command failed with passing evidence")
             self.report(lane, box, index, list(latest.values()), time.monotonic()-start, "retry")
         failures = [case for case in cases if case["status"] != "pass"]
-        if cases:
-            code = 1 if failures else 0
+        code = 1 if failures else 0
         kinds = {case["classification"] for case in failures}
         verdict = ("known_harness_defect" if kinds == {"known-harness-defect"}
                    else "product_failure" if "product" in kinds else "uncertain_failure")
-        signature = None
-        if failures:
-            identity = sorted((case["id"], case["classification"], case["signature_hash"]) for case in failures)
-            signature = "cases:" + hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-        return code, verdict, signature
+        signatures = {"cases:" + case["signature_hash"] for case in failures
+                      if case["signature_hash"] != hashlib.sha256(b"").hexdigest()}
+        return code, verdict, sorted(signatures)
 
     def cleanup(self, box):
         with self.lock:
@@ -730,7 +793,10 @@ class Runner:
                 code, failure_verdict, case_signature = self.selection(box, lane, selection, index)
                 if code:
                     verdict = failure_verdict
-                    signature = self.signature(box, name, case_signature or f"selection:exit:{code}")
+                    signature = case_signature or [f"selection:exit:{code}"]
+                    external = self.signature(box, name, None)
+                    if external:
+                        signature.append(external)
                     break
         except Deadline:
             verdict, signature = "timeout", phase + ":timeout"
@@ -749,12 +815,12 @@ class Runner:
                     if verdict == "pass":
                         verdict, signature = "harness_failure", "artifacts:refused"
             with self.lock:
-                if signature:
-                    seen = self.signatures.setdefault(signature, set())
+                for failure_signature in ([signature] if isinstance(signature, str) else signature or []):
+                    seen = self.signatures.setdefault(failure_signature, set())
                     seen.add(name)
                     if len(seen) >= 2:
                         self.systemic = True
-                        self.event("systemic_halt", signature=signature, lanes=sorted(seen))
+                        self.event("systemic_halt", signature=failure_signature, lanes=sorted(seen))
                 result = dict(lane=name, verdict=verdict, signature=signature, box=box)
                 self.results.append(result)
                 self.event("lane_result", **result)

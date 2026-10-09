@@ -15,20 +15,27 @@ ROOT = Path(sys.argv.pop(1)).resolve()
 
 
 def step(command="true", seconds=2):
-    return dict(command=command, timeout_seconds=seconds)
+    body = dict(command=command, timeout_seconds=seconds)
+    if "# SELECT" in command:
+        path = "/tmp/boat-lane-tests/$FM_LANE.json"
+        body["evidence_file"] = "/tmp/boat-lane-tests/pilot.json"
+        body["command"] = ("if " + command + "\nthen status=pass; code=0; else status=fail; code=1; fi\n"
+                           + "printf '{\"cases\":[{\"id\":\"real\",\"status\":\"%s\"}]} ' \"$status\" > "
+                           + path + "\nexit $code")
+    return body
 
 
 def spec(lanes=1):
     return dict(version=1, size="large", ttl_seconds=600, pilot="pilot",
                 prepare=[step("true # SETUP")], guard=step("true # GUARD"),
                 lanes=[dict(id="pilot" if index == 0 else f"lane{index}",
-                            selections=[step("true # SELECT")]) for index in range(lanes)],
+                            selections=[dict(step("true # SELECT"), evidence_file=f"/tmp/boat-lane-tests/{'pilot' if index == 0 else f'lane{index}'}.json")]) for index in range(lanes)],
                 artifacts=[], finish=[])
 
 
 class Cases(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(dir=ROOT)
         self.home = Path(self.temp.name)
         fixture = ROOT / "tests/boat-lane-runner-fixture.py"
         for name in ("boat", "curl"):
@@ -46,6 +53,10 @@ class Cases(unittest.TestCase):
         self.temp.cleanup()
 
     def start(self, body=None, *extra):
+        for lane in (body or {}).get("lanes", []):
+            for selection in lane["selections"]:
+                if selection.get("evidence_file") == "/tmp/boat-lane-tests/pilot.json":
+                    selection["evidence_file"] = f"/tmp/boat-lane-tests/{lane['id']}.json"
         (self.home / "spec.json").write_text(json.dumps(body or spec()))
         return subprocess.Popen([sys.executable, str(ROOT / "bin/fm-boat-lanes.py"),
                                  "--spec", str(self.home / "spec.json"),
@@ -211,7 +222,7 @@ class Cases(unittest.TestCase):
 
     def test_case_retry_excludes_known_defect(self):
         body = spec()
-        path = str(self.home / "cases.json")
+        path = "/tmp/boat-lane-tests/cases.json"
         initial = dict(cases=[dict(id="known", status="fail", failure_signature="expected HTTP 429, got 200"),
                               dict(id="uncertain", status="fail", request_ids=["req-123"])])
         retried = dict(cases=[dict(id="uncertain", status="pass", request_ids=["req-456"])])
@@ -233,6 +244,9 @@ class Cases(unittest.TestCase):
         self.assertEqual(len(retries), 1)
         self.assertEqual([row["id"] for row in retries[0]["cases"]], ["uncertain"])
         self.assertEqual(retries[0]["overall_totals"], {"fail": 1, "pass": 1})
+        self.assertEqual(retries[0]["cases"][0]["retry_decision"], "exhausted")
+        final = next(row for row in reports if row["attempt"] == "complete")
+        self.assertEqual(next(case for case in final["cases"] if case["id"] == "uncertain")["retry_decision"], "exhausted")
         self.assert_cleanup()
 
     def test_streaming_report_valid_before_last_lane_finishes(self):
@@ -259,7 +273,7 @@ class Cases(unittest.TestCase):
     def test_infra_retried_once_product_never_retried(self):
         import shlex
         body = spec()
-        path = str(self.home / "cases.json")
+        path = "/tmp/boat-lane-tests/cases.json"
         payload = dict(cases=[dict(id="infra", status="fail", kind="infra", request_ids=["req-infra"]),
                               dict(id="product", status="fail", kind="product")])
         emit = "printf %s " + shlex.quote(json.dumps(payload)) + " > " + shlex.quote(path)
@@ -274,13 +288,16 @@ class Cases(unittest.TestCase):
         retries = [row for row in rows if row["attempt"] == "retry"]
         self.assertEqual(len(retries), 1)
         self.assertEqual([case["id"] for case in retries[0]["cases"]], ["infra"])
-        self.assertEqual(next(row for row in rows if row["attempt"] == "complete")["verdict"], "product_failure")
+        self.assertEqual(retries[0]["cases"][0]["retry_decision"], "exhausted")
+        final = next(row for row in rows if row["attempt"] == "complete")
+        self.assertEqual(final["verdict"], "product_failure")
+        self.assertEqual(next(case for case in final["cases"] if case["id"] == "infra")["retry_decision"], "exhausted")
         self.assert_cleanup()
 
     def test_failed_command_with_passing_evidence_blocks_fanout(self):
         import shlex
         body = spec(3)
-        path = str(self.home / "cases.json")
+        path = "/tmp/boat-lane-tests/cases.json"
         payload = dict(cases=[dict(id="real", status="pass")])
         body["lanes"][0]["selections"] = [dict(command="printf %s " + shlex.quote(json.dumps(payload))
             + " > " + shlex.quote(path) + "; false # SELECT", timeout_seconds=2, evidence_file=path)]
@@ -334,6 +351,88 @@ class Cases(unittest.TestCase):
         self.assertIn("redis config unreadable", content)
         self.assertIn("healthy noise 299", content)
         self.assertNotIn("healthy noise 0\n", content)
+        self.assert_cleanup()
+
+    def test_missing_evidence_refused_before_creation(self):
+        body = spec()
+        body["lanes"][0]["selections"][0].pop("evidence_file")
+        self.assertEqual(self.run_case(body), 2)
+        self.assertEqual(self.state()["boxes"], {})
+
+    def test_unavailable_evidence_is_harness_failure(self):
+        body = spec(3)
+        body["lanes"][0]["selections"][0]["command"] = "true # SELECT"
+        self.assertEqual(self.run_case(body), 3)
+        self.assertEqual(len(self.state()["boxes"]), 1)
+        self.assertEqual(next(row for row in self.ledger() if row["event"] == "lane_result")["verdict"], "harness_failure")
+        self.assert_cleanup()
+
+    def test_shared_case_signature_ignores_ids_and_extra_failures(self):
+        import shlex
+        body = spec(6)
+        for index, lane in enumerate(body["lanes"][1:]):
+            payload = dict(cases=[dict(id=f"journey-{index}", status="fail",
+                                      kind="infra", failure_signature="Redis HTTP503")])
+            if index == 1:
+                payload["cases"].append(dict(id="unrelated", status="fail", failure_signature="other"))
+            path = f"/tmp/boat-lane-tests/{lane['id']}.json"
+            lane["selections"] = [dict(command="printf %s " + shlex.quote(json.dumps(payload))
+                + " > " + path + "; false # SELECT", timeout_seconds=2, evidence_file=path)]
+        self.assertEqual(self.run_case(body, "--jobs", "1"), 5)
+        self.assertEqual(len(self.state()["boxes"]), 3)
+        halt = next(row for row in self.ledger() if row["event"] == "systemic_halt")
+        self.assertEqual(halt["lanes"], ["lane1", "lane2"])
+        self.assert_cleanup()
+
+    def test_diagnostics_persist_while_running_and_survive_signal(self):
+        import shlex
+        body = spec()
+        program = "import json,time; print(json.dumps({'service':'redis','line':'early error TOKEN=fakefixturetoken'}),flush=True); "
+        program += "[print(json.dumps({'service':'api','line':'noise '+str(i)}),flush=True) for i in range(10000)]; time.sleep(30)"
+        body["prepare"] = [dict(command="sleep 30 # UP", timeout_seconds=30, role="stack_up",
+                                observe=step("python3 -c " + shlex.quote(program) + " # OBSERVE", 40))]
+        process = self.start(body)
+        directory = self.home / "run/artifacts/pilot/diagnostics"
+        end = time.monotonic() + 10
+        while time.monotonic() < end:
+            paths = list(directory.glob("*.log"))
+            content = paths[0].read_text() if paths else ""
+            if "noise 9999" in content:
+                break
+            time.sleep(.02)
+        else:
+            process.kill()
+            process.communicate()
+            self.fail("diagnostics were not persisted during startup")
+        self.assertIsNone(process.poll())
+        self.assertIn("early error", content)
+        self.assertNotIn("fakefixturetoken", content)
+        self.assertLess(paths[0].stat().st_size, 66000)
+        process.send_signal(signal.SIGTERM)
+        process.communicate(timeout=15)
+        self.assertEqual(process.returncode, 143)
+        self.assertIn("early error", paths[0].read_text())
+        self.assert_cleanup()
+
+    def test_stack_timeout_preserves_stdout_and_stderr_tails(self):
+        body = spec()
+        body["prepare"] = [dict(command="sleep 30", timeout_seconds=.3, role="stack_up",
+            observe=step("printf 'stdout error\\n'; printf 'stderr TOKEN=fakefixturetoken\\n' >&2; sleep 30 # OBSERVE", 10))]
+        self.assertEqual(self.run_case(body), 124)
+        row = next(row for row in self.ledger() if row["event"] == "diagnostics")
+        content = (self.home / "run" / row["path"]).read_text()
+        self.assertIn("stdout error", content)
+        self.assertIn("stderr TOKEN=[REDACTED]", content)
+        self.assertNotIn("fakefixturetoken", content)
+        self.assert_cleanup()
+
+    def test_observer_deadline_preserves_captured_tail(self):
+        body = spec()
+        body["prepare"] = [dict(command="sleep .4; false", timeout_seconds=2, role="stack_up",
+            observe=step("printf 'redis early error\\n'; sleep .2; exit 124 # OBSERVE", 10))]
+        self.assertEqual(self.run_case(body), 124)
+        row = next(row for row in self.ledger() if row["event"] == "diagnostics")
+        self.assertIn("redis early error", (self.home / "run" / row["path"]).read_text())
         self.assert_cleanup()
 
     def test_help_owns_schema_and_exits(self):

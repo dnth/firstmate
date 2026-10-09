@@ -55,7 +55,7 @@ def main():
         return 0
     if command == "ssh":
         box = args[1]
-        script = sys.stdin.read()
+        script = sys.stdin.read().replace("/tmp/boat-lane-tests/", str(root) + "/")
         lane = re.search(r"export FM_LANE=([^\n]+)", script).group(1)
         phase = ("observer" if "# OBSERVE" in script else "finish" if "# FINISH" in script
                  else "clean" if "docker ps -aq" in script else "guard" if "# GUARD" in script
