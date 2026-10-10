@@ -678,7 +678,7 @@ JSON
 
   assert_contains "$out" '"accepted":true' "the completion wake was not accepted by the branch"
   assert_contains "$out" '"rejected":""' "the completion wake settlement rejected: $out"
-  assert_contains "$out" '"content":"task-a: task-a finished","triggerTurn":true' \
+  assert_contains "$out" '"content":"task-a: task-a finished","display":false,"triggerTurn":true' \
     "a routine verdict on an undelivered completion did not open a captain turn: $out"
   ! printf '%s' "$out" | grep -F 'Undelivered completions await relay' >/dev/null \
     || fail "the just-merged completion was redundantly re-sent by the redelivery pass: $out"
@@ -856,7 +856,7 @@ JSON
     if [ "$mode" = still-current ]; then
       printf '%s' "$out" | grep -c 'task-a waits on the route' | grep -qx '1' \
         || fail "still-current: the failed merge was not replayed once: $out"
-      printf '%s' "$out" | grep -F 'task-a: task-a waits on the route","triggerTurn":true' >/dev/null \
+      printf '%s' "$out" | grep -F 'task-a: task-a waits on the route","display":false,"triggerTurn":true' >/dev/null \
         || fail "still-current: the replayed merge lost its captain shape: $out"
       grep -F '"seq":1,"state":"accepted"' "$state/branch-merge-deliveries.jsonl" >/dev/null \
         || fail "still-current: the successful replay recorded no accepted receipt"
@@ -954,9 +954,9 @@ JSON
     node --experimental-strip-types "$fixture/driver.mjs" 2>&1) \
     || fail "delivered-completion driver failed: $out"
 
-  assert_contains "$out" '"content":"⛵ task-a: task-a remains complete","triggerTurn":false' \
+  assert_contains "$out" '"content":"⛵ task-a: task-a remains complete","display":true,"triggerTurn":false' \
     "a routine report on an already-delivered completion opened a main turn or lost its merge note: $out"
-  assert_contains "$out" '"content":"task-a: task-a has a new finding","triggerTurn":true' \
+  assert_contains "$out" '"content":"task-a: task-a has a new finding","display":false,"triggerTurn":true' \
     "a new captain finding did not open a main turn: $out"
   trigger_turns=$(printf '%s' "$out" | grep -o '"triggerTurn":true' | wc -l | tr -d ' ')
   [ "$trigger_turns" = "1" ] || fail "expected exactly one captain turn, got $trigger_turns: $out"
@@ -1131,7 +1131,7 @@ JSON
           "gap: the superseded merge did not record a suppressed receipt"
         ;;
       control)
-        assert_contains "$out" '"content":"task-a: task-a waits on the palette choice","triggerTurn":true' \
+        assert_contains "$out" '"content":"task-a: task-a waits on the palette choice","display":false,"triggerTurn":true' \
           "control: a still-current advisory was not delivered: $out"
         assert_grep '"seq":1,"state":"accepted"' "$state/branch-merge-deliveries.jsonl" \
           "control: a delivered merge did not record an accepted receipt"

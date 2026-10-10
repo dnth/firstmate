@@ -746,8 +746,8 @@ export default function (pi: ExtensionAPI) {
     // silently. Repeat-first ordering keeps the reconcile last, so no
     // awaited operation sits between it and the send; a resolution landing
     // inside the repeat check is still caught by the reconcile that follows.
-    // Captain verdicts, completions, and any change in identity or verdict
-    // still render.
+    // Captain verdicts and completions still force a follow-up turn; changed
+    // routine identities still render.
     let repeatSilenced = false;
     if (verdict === "routine" && completionIds.length === 0 && /^[0-9]+$/.test(seq)) {
       const prior = await runOutcomeScript(["repeat-prior", "--seq", seq]);
