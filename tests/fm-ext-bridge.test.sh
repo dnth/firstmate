@@ -2088,6 +2088,32 @@ test_36_unanswered_requests_survive_filtered_drains_until_answered() {
   pass "36 unanswered requests survive filtered and acknowledged drains until answered"
 }
 
+test_37_every_pending_request_is_listed_without_limit() {
+  local home slug out message i
+  local slugs=()
+  home="$TMP_ROOT/c37"
+  setup_home "$home"
+  for ((i = 1; i <= 22; i++)); do
+    printf -v message '370000000000000%03d' "$i"
+    slug=$(intake_ok "$home" "pending request $i" "$message")
+    slugs+=("$slug")
+  done
+  out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>"$home/drain.err" \
+    | grep -v -E '^[0-9]{10}\s')
+  assert_contains "$out" "EXT REQUESTS AWAITING ANSWER" "the drain must present the request section"
+  for slug in "${slugs[@]}"; do
+    printf '%s\n' "$out" | grep -Fx "ext-request $slug" >/dev/null \
+      || fail "every pending request must have a plain ext-request line: $slug"
+  done
+  drain_ack "$home" "$home/drain.err"
+  out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>/dev/null)
+  for slug in "${slugs[@]}"; do
+    printf '%s\n' "$out" | grep -Fx "ext-request $slug" >/dev/null \
+      || fail "every unanswered request must remain listed after acknowledgement: $slug"
+  done
+  pass "37 every pending request is listed without a limit"
+}
+
 test_1_allowlisted_intake_and_non_fm
 test_2_correlation_persists
 test_3_immediate_ack
@@ -2128,5 +2154,6 @@ test_33_home_without_optin_is_inert
 test_34_real_sender_passes_discord_edge_user_agent_rule
 test_35_each_request_presents_its_own_wake_row
 test_36_unanswered_requests_survive_filtered_drains_until_answered
+test_37_every_pending_request_is_listed_without_limit
 
 echo "all fm-ext-bridge tests passed"

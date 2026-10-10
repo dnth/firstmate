@@ -1444,13 +1444,13 @@ fm_ext_wake_key() {
   printf '%s:%s\n' "$1" "$2"
 }
 
-# fm_ext_pending_requests [home]: one line per unanswered request,
-# "<slug>\t<recorded_at>\t<authority>", oldest first. The inbox record is the
+# fm_ext_pending_requests [home]: one slug per unanswered request.
+# The inbox record is the
 # durable truth: ext-respond removes it once the request is answered, so a
 # request stays listed however its wake rows were presented or acknowledged.
 # Silent unless the bridge is active.
 fm_ext_pending_requests() {
-  local home=${1:-${FM_HOME:?}} inbox file base slug recorded authority
+  local home=${1:-${FM_HOME:?}} inbox file base slug
   fm_ext_active "$home" || return 0
   inbox=$(fm_ext_inbox_dir "$home")
   [ -d "$inbox" ] && [ ! -L "$inbox" ] || return 0
@@ -1460,12 +1460,8 @@ fm_ext_pending_requests() {
     slug=${base%.json}
     fm_ext_slug_valid "$slug" || continue
     fm_ext_private_artifact_file_valid "$inbox" "$base" 600 || continue
-    recorded=$(jq -r '.recorded_at // 0' "$file" 2>/dev/null) || recorded=0
-    authority=$(jq -r '.authority // "unknown"' "$file" 2>/dev/null) || authority=unknown
-    case "$recorded" in ''|*[!0-9]*) recorded=0 ;; esac
-    case "$authority" in ''|*[!a-z]*) authority=unknown ;; esac
-    printf '%s\t%s\t%s\n' "$slug" "$recorded" "$authority"
-  done | LC_ALL=C sort -t "$(printf '\t')" -k2,2n -k1,1
+    printf '%s\n' "$slug"
+  done
 }
 
 # --- task meta link (not x_request=) ----------------------------------------
