@@ -123,6 +123,11 @@
 #     Print "current" when the seq's advisory is still deliverable, or
 #     "suppressed" when current durable state provably supersedes it. Missing
 #     seqs and rows without a typed advisory are "current" (fail-open).
+#   fm-branch-outcome.sh repeat-prior --seq <seq>
+#     Print "repeat" when seq N is a routine outcome whose (task, verdict,
+#     statusIdent, statusEndpoint) matches the task's previously stored
+#     outcome - the caller then merges it silently instead of re-rendering.
+#     Anything else prints "current". Read-only under the store lock.
 #   fm-branch-outcome.sh merge-receipt --seq <seq> --state accepted|failed|suppressed
 #     Append one merge-delivery receipt to the merge ledger.
 #   fm-branch-outcome.sh merge-replay
@@ -143,7 +148,7 @@ CURSOR="$STATE/.branch-outcomes-cursor"
 LOCK="$STATE/.branch-outcomes.lock"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--advisory-kind <kind>] [--advisory-key <key>] [--advisory-gen <gen>] [--advisory-wake-seqs <n,n,..>] | unread | handoff-next --seq <seq> | list [--recent <n>] | startup-replay | completions --task <id> --status-ident <dev:inode> [--through <endpoint>] [--from <offset>] | undelivered | deliver --task <id> --status-ident <dev:inode> --endpoint <endpoint> | deliver --task <id> --status-ident <dev:inode> --through <endpoint> | reconcile --seq <seq> | merge-receipt --seq <seq> --state accepted|failed|suppressed | merge-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--advisory-kind <kind>] [--advisory-key <key>] [--advisory-gen <gen>] [--advisory-wake-seqs <n,n,..>] | unread | handoff-next --seq <seq> | list [--recent <n>] | startup-replay | completions --task <id> --status-ident <dev:inode> [--through <endpoint>] [--from <offset>] | undelivered | deliver --task <id> --status-ident <dev:inode> --endpoint <endpoint> | deliver --task <id> --status-ident <dev:inode> --through <endpoint> | reconcile --seq <seq> | repeat-prior --seq <seq> | merge-receipt --seq <seq> --state accepted|failed|suppressed | merge-replay" >&2
   exit 2
 }
 
@@ -324,6 +329,31 @@ _fm_outcome_row_superseded() { # <normalized-json-row>
   endpoint=$(printf '%s' "$row" | jq -r '.statusEndpoint // 0' 2>/dev/null) || endpoint=0
   ident=$(printf '%s' "$row" | jq -r '.statusIdent // "-"' 2>/dev/null) || ident=-
   fm_advisory_superseded "$STATE" "$task" "$kind" "$key" "$endpoint" "$ident"
+}
+
+# Identical-repeat check for one ordered pair of stored outcome rows (relay
+# fix rank 2): 0 when the newer row is a routine, completion-free repeat of
+# the older - same task, verdict, statusIdent, and statusEndpoint. Completion
+# obligations are NOT compared here; the caller only consults this when its
+# own completions scan is already empty, so an owed event always forces
+# delivery regardless of this verdict. Fail-closed shape inverted on purpose:
+# any unreadable field returns 1 (current, render), never silent.
+_fm_outcome_is_identical_repeat() { # <prev-normalized-row> <row-normalized-row>
+  local prev=$1 row=$2 ptask pverdict pident pendpoint rtask rverdict rident rendpoint
+  ptask=$(printf '%s' "$prev" | jq -r '.task // ""' 2>/dev/null) || return 1
+  rtask=$(printf '%s' "$row" | jq -r '.task // ""' 2>/dev/null) || return 1
+  [ -n "$ptask" ] && [ "$ptask" = "$rtask" ] || return 1
+  pverdict=$(printf '%s' "$prev" | jq -r '.verdict // ""' 2>/dev/null) || return 1
+  rverdict=$(printf '%s' "$row" | jq -r '.verdict // ""' 2>/dev/null) || return 1
+  [ "$rverdict" = routine ] && [ "$pverdict" = routine ] || return 1
+  pident=$(printf '%s' "$prev" | jq -r '.statusIdent // "-"' 2>/dev/null) || return 1
+  rident=$(printf '%s' "$row" | jq -r '.statusIdent // "-"' 2>/dev/null) || return 1
+  [ "$pident" != "-" ] && [ "$pident" = "$rident" ] || return 1
+  pendpoint=$(printf '%s' "$prev" | jq -r '.statusEndpoint // empty' 2>/dev/null) || return 1
+  rendpoint=$(printf '%s' "$row" | jq -r '.statusEndpoint // empty' 2>/dev/null) || return 1
+  case "$pendpoint" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pendpoint" = "$rendpoint" ] || return 1
+  return 0
 }
 
 # Print "<endpoint><TAB><line>" for every captain-facing obligation event in
@@ -843,6 +873,48 @@ $DELIVERED_KEYS" in
     fm_lock_release "$LOCK"
     if [ -n "$RROW" ] && _fm_outcome_row_superseded "$RROW"; then
       printf 'suppressed\n'
+    else
+      printf 'current\n'
+    fi
+    ;;
+  repeat-prior)
+    # Identical-repeat check (relay-noise fix): print "repeat" when seq N is a
+    # routine outcome with no completion obligation whose (task, statusIdent,
+    # statusEndpoint, verdict) matches the task's previously stored outcome -
+    # the caller then merges it silently instead of re-rendering. Anything
+    # else prints "current". Reads the append-only store under the same lock;
+    # never writes.
+    [ "${1:-}" = --seq ] && [ "$#" -eq 2 ] || usage
+    SEQ=$2
+    case "$SEQ" in ''|0|0*|*[!0-9]*) usage ;; esac
+    fm_lock_acquire_wait "$LOCK" || exit 1
+    RROW=
+    RTASK=
+    PROW=
+    NORM=
+    if [ -s "$STORE" ]; then
+      while IFS= read -r LINE || [ -n "$LINE" ]; do
+        NORM=$(normalize_record "$LINE" 2>/dev/null) || continue
+        if [ "$(record_seq "$NORM")" = "$SEQ" ]; then
+          RROW=$NORM
+          RTASK=$(printf '%s' "$NORM" | jq -r '.task // ""' 2>/dev/null) || RTASK=
+          break
+        fi
+      done < "$STORE"
+      if [ -n "$RTASK" ]; then
+        while IFS= read -r LINE || [ -n "$LINE" ]; do
+          NORM=$(normalize_record "$LINE" 2>/dev/null) || continue
+          [ "$(record_seq "$NORM")" != "$SEQ" ] || break
+          NTASK=$(printf '%s' "$NORM" | jq -r '.task // ""' 2>/dev/null) || NTASK=
+          [ "$NTASK" != "$RTASK" ] || PROW=$NORM
+        done < "$STORE"
+      fi
+    fi
+    fm_lock_release "$LOCK"
+    if [ -z "$RROW" ] || [ -z "$PROW" ]; then
+      printf 'current\n'
+    elif _fm_outcome_is_identical_repeat "$PROW" "$RROW"; then
+      printf 'repeat\n'
     else
       printf 'current\n'
     fi

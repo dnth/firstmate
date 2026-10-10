@@ -739,7 +739,22 @@ export default function (pi: ExtensionAPI) {
     // and the send below runs with no further awaited operation in between,
     // so no status transition can slip into the gap. An outcome carrying
     // completion obligations still forces delivery - the owed events are
-    // facts, not advisory prose.
+    // facts, not advisory prose. The identical-repeat check (relay-noise
+    // fix) runs BEFORE the reconcile: a routine outcome with no completion
+    // obligation whose (task, statusIdent, statusEndpoint, verdict) matches
+    // the task's previously stored outcome stays durable but merges
+    // silently. Repeat-first ordering keeps the reconcile last, so no
+    // awaited operation sits between it and the send; a resolution landing
+    // inside the repeat check is still caught by the reconcile that follows.
+    // Captain verdicts and completions still force a follow-up turn; changed
+    // routine identities still render.
+    let repeatSilenced = false;
+    if (verdict === "routine" && completionIds.length === 0 && /^[0-9]+$/.test(seq)) {
+      const prior = await runOutcomeScript(["repeat-prior", "--seq", seq]);
+      if (prior.ok && prior.stdout.startsWith("repeat")) {
+        repeatSilenced = true;
+      }
+    }
     let superseded = false;
     if (completionIds.length === 0 && /^[0-9]+$/.test(seq)) {
       const check = await runOutcomeScript(["reconcile", "--seq", seq]);
@@ -775,7 +790,7 @@ export default function (pi: ExtensionAPI) {
       const message = {
         customType: "fm-branch-merge",
         content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`,
-        display: !(task === "fleet" && silent),
+        display: !(task === "fleet" && silent) && !repeatSilenced,
       };
       try {
         if (mainStreaming) {
@@ -865,6 +880,17 @@ export default function (pi: ExtensionAPI) {
             .map((row) => `${task}|${statusIdent}|${row.split("\t", 1)[0]}`);
         }
       }
+      // Same identical-repeat rule as the live merge, evaluated BEFORE the
+      // freshness reconcile so the reconcile stays the last awaited
+      // operation before the send.
+      const captain = record.verdict === "captain" || completionIds.length > 0;
+      let replayRepeatSilenced = false;
+      if (!captain && completionIds.length === 0) {
+        const prior = await runOutcomeScript(["repeat-prior", "--seq", seq]);
+        if (prior.ok && prior.stdout.startsWith("repeat")) {
+          replayRepeatSilenced = true;
+        }
+      }
       // Same freshness rule as live merge: only a completion-free replay may
       // be retired on advisory staleness; an undelivered completion
       // obligation is an owed fact, not advisory prose.
@@ -875,14 +901,13 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
       }
-      const captain = record.verdict === "captain" || completionIds.length > 0;
       const content = captain ? `${task}: ${summary}` : `${MERGE_NOTE_BOAT} ${task}: ${summary}`;
       const message = captain
         ? { customType: "fm-branch-merge", content, display: false }
         : {
             customType: "fm-branch-merge",
             content,
-            display: !(task === "fleet" && record.silent === true),
+            display: !(task === "fleet" && record.silent === true) && !replayRepeatSilenced,
           };
       try {
         if (captain) {

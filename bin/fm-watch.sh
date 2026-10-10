@@ -835,6 +835,15 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        # Escalation boundary: a run that finished while its wedge timer was
+        # running is done, not wedged. Absorb on the authoritative run-step
+        # state instead of escalating an idle-by-definition pane.
+        if ! afk_present && crew_is_run_step_done "$task"; then
+          rm -f "$since_file" "$escalation_file"
+          clear_write_tracking "$(window_key "$win")"
+          triage_log "absorbed $label timer expiry (run-step done, awaiting merge/landing): $win"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
@@ -914,9 +923,10 @@ board_row_in_flight() {  # <task>
 #   - the board row must be in flight: a queued or done row owes no boundary
 #     report.
 # Under away mode the daemon owns triage, so the wake fires without the costly
-# provably-working read (the same convention the other stale paths keep);
-# always-on, a provably-working crew absorbs the probe because a running
-# pipeline legitimately sits silent.
+# crew-state reads (the same convention the other stale paths keep); always-on,
+# a provably-working crew absorbs the probe because a running pipeline
+# legitimately sits silent, and a run-step-done crew absorbs it because a
+# finished pipeline idles by definition while its row awaits merge/landing.
 idle_open_work_tick() {  # <window> <task>
   local win=$1 task=$2 key task_key probe statusf last anchor reason
   key=$(window_key "$win")
@@ -934,6 +944,15 @@ idle_open_work_tick() {  # <window> <task>
   { [ -n "$anchor" ] && [ -e "$anchor" ]; } || anchor="$STATE/$task.meta"
   [ "$(age_of "$anchor")" -ge "$IDLE_OPEN_WORK_SECS" ] || return 0
   board_row_in_flight "$task" || return 0
+  # A run-step-done crew already finished its pipeline (checks green awaiting
+  # merge, run completed); an idle pane is the expected shape, not wedge
+  # evidence. Absorb on the authoritative crew state, not the status log's
+  # last line, which a trailing resolved event can push off-terminal.
+  if ! afk_present && crew_is_run_step_done "$task"; then
+    touch "$probe"
+    triage_log "absorbed idle-with-open-work probe (run-step done, awaiting merge/landing): $win"
+    return 0
+  fi
   if ! afk_present && crew_is_provably_working "$task"; then
     touch "$probe"
     triage_log "absorbed idle-with-open-work probe (provably working): $win"
@@ -1113,6 +1132,17 @@ surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last declaration='' declared=1 throttled=1
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
+  # A run-step-done crew finished its pipeline while its board row still sits
+  # in flight; the log tail may read non-terminal (a trailing resolved event)
+  # even though there is nothing left to inspect. Absorb on the authoritative
+  # crew state instead of surfacing an inconclusive-state wake per hash.
+  if ! afk_present && crew_is_run_step_done "$task"; then
+    printf '%s' "$h" > "$STATE/.stale-$key"
+    rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+    clear_write_tracking "$key"
+    triage_log "absorbed non-terminal stale (run-step done, awaiting merge/landing): $win"
+    return 0
+  fi
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     declared=0
@@ -2053,6 +2083,11 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif ! afk_present && crew_is_run_step_done "$(window_to_task "$w" "$STATE")"; then
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf" "$ewf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (run-step done, completion already reported): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"

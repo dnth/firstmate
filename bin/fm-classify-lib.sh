@@ -1895,6 +1895,26 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# 0 when the crew's authoritative current state is run-step done: the
+# no-mistakes pipeline finished (checks green awaiting merge, run completed,
+# PR merged/closed) and no step is actively validating. A done crew is
+# terminally idle by definition, so an idle pane is the expected shape, not
+# wedge evidence. Callers use this to absorb completion-boundary and stale
+# re-fires for a finished-but-still-in-flight row without trusting the status
+# log's last line, which a trailing resolved event can push off-terminal.
+# Reads the same one authoritative fm-crew-state.sh line as crew_absorb_class;
+# unlike crew_is_provably_working (working-only) this matches done+run-step.
+crew_is_run_step_done() {  # <id>
+  local id=$1 line state src
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = "done" ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  case "$src" in run-step) return 0 ;; *) return 1 ;; esac
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git

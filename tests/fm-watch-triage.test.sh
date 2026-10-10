@@ -550,6 +550,28 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
+test_crew_is_run_step_done_classifier() {
+  local dir fakebin
+  dir=$(make_case run-step-done-class); fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  crew_is_run_step_done a || fail "run-step done not recognized"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · run completed'
+  crew_is_run_step_done a || fail "run completed not recognized"
+  FM_FAKE_CREW_STATE='state: done · source: status-log · done: shipped'
+  ! crew_is_run_step_done a || fail "status-log done treated as run-step done"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  ! crew_is_run_step_done a || fail "working run treated as run-step done"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  ! crew_is_run_step_done a || fail "parked run treated as run-step done"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+  ! crew_is_run_step_done a || fail "unknown crew treated as run-step done"
+  ! crew_is_run_step_done "" || fail "empty id treated as run-step done"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_is_run_step_done: only done+run-step matches"
+}
+
 # The wedge detector's third liveness input: writes inside the crew's own recorded
 # worktree. Every negative outcome must report "no evidence" so the caller keeps
 # its existing escalation schedule, and a supervisor-side git read (which touches
@@ -1020,6 +1042,55 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+}
+
+test_wedge_timer_expiry_absorbs_run_step_done() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case wedge-timer-done); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-timerdone"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/timerdone.meta"
+  printf 'working: still compiling\n' > "$state/timerdone.status"
+  sig=$(seen_sig "$state/timerdone.status"); printf '%s' "$sig" > "$state/.seen-timerdone_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Phase A: working run absorbs and arms the wedge timer (existing contract).
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; unset FM_FAKE_CREW_STATE
+    fail "watcher exited for a working stale (should absorb): $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "wedge timer not armed on working absorb"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || { unset FM_FAKE_CREW_STATE; fail "could not acknowledge the phase-A stop"; }
+  # Phase B: the run finishes on the same unchanged hash with the timer
+  # expired. The escalation boundary must absorb on run-step done, not wake.
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    stop_pid "$pid" 2>/dev/null; reap "$pid" 2>/dev/null; unset FM_FAKE_CREW_STATE
+    fail "watcher did not survive a poll cycle for an expired timer on run-step done: $(cat "$out")"
+  fi
+  reap "$pid"; unset FM_FAKE_CREW_STATE
+  [ ! -s "$out" ] || fail "an expired wedge timer on run-step done printed a wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an expired wedge timer on run-step done enqueued a wake"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the done absorb did not clear the wedge timer"
+  grep -F "run-step done" "$state/.watch-triage.log" >/dev/null \
+    || fail "the timer-expiry done absorb was not logged"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional watcher stop"
+  pass "an expired wedge timer on run-step done absorbs instead of escalating"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -3607,6 +3678,124 @@ test_idle_open_work_provably_working_is_absorbed() {
   pass "a provably-working crew absorbs the probe once, rate-limited to one read per bound"
 }
 
+test_idle_open_work_run_step_done_absorbs_repeat_probe() {
+  local dir state data fakebin out capture_file window statusf pid tickpid sig probe
+  dir=$(make_case idle-open-runstep-done); state="$dir/state"; fakebin="$dir/fakebin"; data="$dir/data"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-r1done"
+  printf 'ticking clock 0\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nmode=no-mistakes\n' "$window" > "$state/r1done.meta"
+  statusf="$state/r1done.status"
+  # R1 shape: crew-state already reports run-step done with the PR awaiting
+  # merge, while the status log carries a trailing resolved event after its
+  # done line. The probe must absorb on the authoritative run-step state
+  # instead of firing on the non-terminal log tail.
+  printf 'done: PR https://github.com/insourcedata/superfk-aceh/pull/872 checks green\nresolved [key=nm-01RUN-test]: answered: test exception approved\n' > "$statusf"
+  write_backlog "$data" r1done
+  set_mtime $(( $(date +%s) - 3600 )) "$statusf"
+  set_mtime $(( $(date +%s) - 3600 )) "$state/r1done.meta"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-r1done_status"
+  probe=$(idle_probe_marker "$state" "$window" r1done)
+
+  tick_pane "$capture_file" & tickpid=$!
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_IDLE_OPEN_WORK_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    stop_pid "$tickpid"; unset FM_FAKE_CREW_STATE
+    fail "watcher did not survive a poll cycle for a run-step-done pane: $(cat "$out")"
+  fi
+  stop_pid "$tickpid"; reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  [ ! -s "$out" ] || fail "a run-step-done pane printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a run-step-done pane enqueued a wake"
+  [ -e "$probe" ] || fail "the absorbing probe did not record its rate-limit marker"
+  grep -F "absorbed idle-with-open-work probe (run-step done" "$state/.watch-triage.log" >/dev/null \
+    || fail "the run-step-done absorb was not logged to the triage log"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional watcher stop"
+  pass "a run-step-done pane absorbs the repeat probe on authoritative crew state"
+}
+
+test_idle_open_work_run_step_done_new_decision_still_fires() {
+  local dir state data fakebin out capture_file window statusf pid tickpid sig probe start
+  dir=$(make_case idle-open-done-newdecision); state="$dir/state"; fakebin="$dir/fakebin"; data="$dir/data"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-r1new"
+  printf 'ticking clock 0\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nmode=no-mistakes\n' "$window" > "$state/r1new.meta"
+  statusf="$state/r1new.status"
+  # Seed only the done prefix as already-seen, then append the new keyed
+  # decision as a genuinely new event the signal scan must surface.
+  printf 'done: PR https://github.com/insourcedata/superfk-aceh/pull/872 checks green\n' > "$statusf"
+  write_backlog "$data" r1new
+  set_mtime $(( $(date +%s) - 3600 )) "$statusf"
+  set_mtime $(( $(date +%s) - 3600 )) "$state/r1new.meta"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-r1new_status"
+  start=$(seen_offset_through_wake_lib "$state" "$statusf")
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_status_seen_commit "$2" "$3" "$4" "$5"' _ "$ROOT" "$state" "$statusf" "$start" "$(status_ident "$statusf")" \
+    || fail "could not seed the done prefix as classified"
+  printf 'needs-decision [key=nm-01RUN-merge]: ask-user finding merge-1: approve merge strategy\n' >> "$statusf"
+  probe=$(idle_probe_marker "$state" "$window" r1new)
+
+  tick_pane "$capture_file" & tickpid=$!
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_IDLE_OPEN_WORK_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 100; then
+    stop_pid "$tickpid"; unset FM_FAKE_CREW_STATE
+    fail "a new needs-decision after run-step done did not wake firstmate: $(cat "$out")"
+  fi
+  stop_pid "$tickpid"; unset FM_FAKE_CREW_STATE
+  grep -F "signal:" "$out" >/dev/null \
+    || fail "the new-decision wake did not arrive as a signal wake: $(cat "$out")"
+  [ -s "$state/.wake-queue" ] || fail "a new needs-decision after run-step done enqueued no wake"
+  pass "a new needs-decision after run-step done still wakes firstmate"
+}
+
+test_idle_open_work_run_step_done_resumed_working_still_fires() {
+  local dir state data fakebin out capture_file window statusf pid tickpid sig probe
+  dir=$(make_case idle-open-done-resumed); state="$dir/state"; fakebin="$dir/fakebin"; data="$dir/data"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-r1resume"
+  printf 'ticking clock 0\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nmode=no-mistakes\n' "$window" > "$state/r1resume.meta"
+  statusf="$state/r1resume.status"
+  # The worker resumed after done: the pipeline is validating again, so the
+  # run-step-done absorb must not apply. A working tail past the bound with
+  # an unknown crew verdict still fires the probe (existing contract).
+  printf 'done: PR https://github.com/insourcedata/superfk-aceh/pull/872 checks green\nworking: addressing review feedback, re-validating\n' > "$statusf"
+  write_backlog "$data" r1resume
+  set_mtime $(( $(date +%s) - 3600 )) "$statusf"
+  set_mtime $(( $(date +%s) - 3600 )) "$state/r1resume.meta"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-r1resume_status"
+  probe=$(idle_probe_marker "$state" "$window" r1resume)
+
+  tick_pane "$capture_file" & tickpid=$!
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_IDLE_OPEN_WORK_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 100; then
+    stop_pid "$tickpid"; unset FM_FAKE_CREW_STATE
+    fail "resumed working tail past the bound did not fire the probe: $(cat "$out")"
+  fi
+  stop_pid "$tickpid"; unset FM_FAKE_CREW_STATE
+  grep -F "idle-with-open-work" "$out" >/dev/null \
+    || fail "the resumed-work escalation did not carry the idle-with-open-work reason: $(cat "$out")"
+  pass "resumed work after done still fires the probe"
+}
+
 test_stop_pid_ends_a_term_immune_child
 test_signal_reason_is_actionable_classifier
 test_done_artifact_requires_exact_markers
@@ -3619,6 +3808,7 @@ test_decision_fold_correlation_parser
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_is_run_step_done_classifier
 test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
@@ -3633,6 +3823,7 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_wedge_timer_expiry_absorbs_run_step_done
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
@@ -3680,6 +3871,9 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_idle_open_work_run_step_done_absorbs_repeat_probe
+test_idle_open_work_run_step_done_new_decision_still_fires
+test_idle_open_work_run_step_done_resumed_working_still_fires
 test_idle_open_work_ticking_pane_escalates
 test_idle_open_work_queued_row_is_not_probed
 test_idle_open_work_recent_status_is_not_probed

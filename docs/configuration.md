@@ -358,8 +358,7 @@ A genuinely no-op heartbeat is absorbed in bash and never reaches OMP, and every
 Away mode still declines every wake offer, and a broken branch still falls back to today's wake-to-main path.
 The branch's role stays bounded: it cannot merge a PR, land local work, or freshly spawn, and every existing captain gate remains unchanged.
 Homes on any other primary harness never load this feature and are entirely unaffected.
-A captain-facing (verdict `captain`) branch outcome opens exactly one follow-up turn on main - that turn is the captain-visible result, and OMP never separately renders the merge note itself.
-A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
+The [two-stage noise filter](omp-supervision-branch.md#two-stage-noise-filter) owns outcome rendering, silent routine repeats, and captain-facing follow-up delivery.
 
 ## OMP supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
 
@@ -997,8 +996,8 @@ FM_WATCH_RESURFACE_MAX_SECS=900   # seconds since the first unacknowledged downt
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats
-FM_IDLE_OPEN_WORK_SECS=600         # seconds after a turn-end marker or spawn record before an idle pane with an in-flight board row and no newer status line escalates as idle-with-open-work; invalid values use 600
+FM_STALE_ESCALATE_SECS=240         # stale-pane escalation bound in seconds; absorption and declared-wait exceptions: docs/architecture.md "Event-driven supervision"
+FM_IDLE_OPEN_WORK_SECS=600         # idle-open-work probe bound in seconds after a turn-end marker or spawn record; invalid values use 600; eligibility and absorption: docs/architecture.md "Event-driven supervision"
 FM_REMOTE_STALE_RECHECK_SECS=60    # seconds between inconclusive remote stale-owner probes during away-mode recovery; invalid values use 60
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age of a busy pane's live-generation state/<id>.turn-ended.<spawn_gen> marker, or its state/<id>.meta spawn record before any turn completes, before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait or verified captain-held transfer takes the FM_PAUSE_RESURFACE_SECS recheck below instead
 FM_PAUSE_RESURFACE_SECS=2700       # seconds between bounded rechecks of a declared external wait or verified captain-held transfer, including a live idle pane after its first inconclusive stale wake and a live busy pane past FM_BUSY_TURN_MAX_SECS; the away-mode daemon uses the same setting, ageing its window against the crew's own latest status line rather than pane busy state
