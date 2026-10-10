@@ -216,6 +216,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # (fm_busy_classify).
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
+# Compute-dormant pause tracking (bin/fm-compute-lib.sh): the watcher anchors a
+# deliberately dormant scale-to-zero route's bounded recheck on the provider
+# lifecycle record, not a status line, so the daemon must know that predicate to
+# keep the watcher's pause and re-surface markers while dormant.
+# shellcheck source=bin/fm-compute-lib.sh
+. "$FM_DAEMON_DIR/fm-compute-lib.sh"
 
 # Wedge-alarm channel resolution and delivery (wedge_alarm_notify and its
 # bounded notifier machinery), shared with the watcher's undelivered
@@ -278,6 +284,10 @@ AFK_FLAG_NAME=".afk"
 # $FM_HOME/state. Kept as a function so the pure
 # classifiers can take an explicit state arg without depending on globals.
 _state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
+# Resolve the effective data dir. FM_DATA_OVERRIDE wins (testing); otherwise
+# $FM_HOME/data. Mirrors the watcher's DATA root so the daemon reads the same
+# provider lifecycle records the watcher's dormant predicate anchors on.
+_data_root() { printf '%s' "${FM_DATA_OVERRIDE:-$FM_HOME/data}"; }
 
 # --- portable stat (same trap as fm-watch.sh: no `stat -f || stat -c`) -------
 if [ "$(uname)" = Darwin ]; then
@@ -649,6 +659,14 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   if daemon_pause_status_is_valid "$win" "$state" "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
+  elif daemon_compute_dormant "$task"; then
+    # A deliberately dormant scale-to-zero route anchors its bounded recheck on
+    # the provider lifecycle record, not a status line, so there is no paused:
+    # line to validate. Keep the watcher's pause and re-surface markers so the
+    # dormant recheck fires at most once per PAUSE_RESURFACE_SECS. Clearing
+    # happens only after the lifecycle leaves dormancy (below), so a later
+    # genuine stale is still handled as an ordinary stale.
+    stale_marker_remove "$win" "$state"
   elif status_is_paused_or_captain_held "$last" && ! status_is_paused "$last" \
     && { [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; }; then
     pause_markers_remove "$win" "$state"
@@ -656,6 +674,13 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
     clear_pause_tracking "$win" "$state"
   fi
+}
+
+# The watcher's dormant predicate, reused: true while the route's provider
+# lifecycle record is in a recognized no-host state, so away-mode
+# reconciliation and always-on triage share one definition of dormant.
+daemon_compute_dormant() {  # <task>
+  fm_compute_is_dormant "$(_data_root)" "$1" 2>/dev/null
 }
 
 daemon_pause_status_is_valid() {  # <window> <state> <last-status-line>
@@ -1591,6 +1616,13 @@ housekeeping() {  # <state>
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     if task_window_is_remote "$win" "$state"; then
+      if daemon_compute_dormant "$task"; then
+        # A dormant scale-to-zero route has no host to probe: the watcher's
+        # once-per-window recheck owns its visibility, so an aged wedge marker
+        # must never become a false wedge or inconclusive-probe escalation.
+        stale_marker_remove "$win" "$state"
+        continue
+      fi
       remote_stale_recheck "$win" "$state"
       adv_recheck_rc=$?
       IFS=$'\t' read -r adv_endpoint adv_ident <<EOF
@@ -2027,6 +2059,15 @@ handle_wake() {  # <reason> <state>
       if [ "$kind" = "stale" ]; then
         task=$(window_to_task "$arg" "$state")
         last=$(last_status_line "$state/$task.status")
+        if daemon_compute_dormant "$task"; then
+          # A dormant scale-to-zero recheck is a bounded pause-cadence event, not
+          # wedge aging: the watcher owns its once-per-window throttle, so the
+          # daemon records no .subsuper-stale marker that housekeeping would
+          # later escalate as a false wedge or inconclusive probe.
+          reconcile_pause_tracking "$arg" "$state" "$last"
+          log "self-handle (dormant): $reason -> $distilled"
+          return
+        fi
         # Clear wedge aging only for terminal (or legacy free-text) captain lines.
         # Nonterminal progress verbs keep possible-wedge markers even if free text
         # once looked captain-relevant or was written into a seen marker.
