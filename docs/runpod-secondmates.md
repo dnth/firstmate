@@ -209,6 +209,8 @@ Startup health polling, startup convergence, `bin/fm-config-push.sh`, and reply-
 None of them creates compute, and none of them reports the deliberate no-host state as a fault.
 An unrecognized lifecycle value is not dormant, so corrupt metadata surfaces as an ordinary route failure instead of repeatedly creating compute.
 The parent watcher also recognizes those lifecycle records directly and absorbs a dormant route on the long pause cadence without probing its absent beacon or escalating it as a possible wedge.
+Away mode honors the same dormant recheck cadence: the away-mode supervisor keeps the watcher's pause and re-surface markers while the lifecycle record stays dormant, so the dormant recheck fires at most once per pause re-surface window in away mode exactly as with away mode off.
+A dormant recheck is never wedge-aged: the supervisor records no stale persistence marker for it and probes no absent host, so it cannot escalate as a false wedge or an inconclusive remote-stale probe.
 
 ### Endpoint stalls and never-ready recovery
 

@@ -696,6 +696,97 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear() {
   [ ! -e "$state/.stale-$watcher_key" ] || fail "unpaused watcher handoff retained watcher stale tracking"
   pass "housekeeping clears an already-resumed watcher pause across both supervisors"
 }
+test_housekeeping_keeps_dormant_compute_pause_markers() {
+  local dir state data watcher_key win
+  dir=$(make_supercase dormant-pause-keep)
+  state="$dir/state"; data="$dir/data"
+  mkdir -p "$data/boat"
+  win="remote:boat-dormant"
+  printf 'window=%s\nkind=secondmate\nremote_host=boat-alias\nbackend=tmux\n' "$win" > "$state/boat-dormant.meta"
+  printf 'working: steady state, no pause declared\n' > "$state/boat-dormant.status"
+  printf 'lifecycle=suspended\n' > "$data/boat/boat-dormant.meta"
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  : > "$state/.paused-$watcher_key"
+  date +%s > "$state/.paused-resurfaced-$watcher_key"
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_HOME="$dir" housekeeping "$state"
+  [ -e "$state/.paused-$watcher_key" ] || fail "away-mode reconciliation cleared the dormant watcher pause flag"
+  [ -e "$state/.paused-resurfaced-$watcher_key" ] || fail "away-mode reconciliation cleared the dormant re-surface throttle"
+  pass "away-mode reconciliation keeps a dormant compute route's pause and re-surface markers"
+}
+
+test_housekeeping_clears_dormant_pause_markers_after_resume() {
+  local dir state data watcher_key win
+  dir=$(make_supercase dormant-pause-resume)
+  state="$dir/state"; data="$dir/data"
+  mkdir -p "$data/boat"
+  win="remote:boat-dormant"
+  printf 'window=%s\nkind=secondmate\nremote_host=boat-alias\nbackend=tmux\n' "$win" > "$state/boat-dormant.meta"
+  printf 'working: steady state, no pause declared\n' > "$state/boat-dormant.status"
+  printf 'lifecycle=ready\n' > "$data/boat/boat-dormant.meta"
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  : > "$state/.paused-$watcher_key"
+  date +%s > "$state/.paused-resurfaced-$watcher_key"
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_HOME="$dir" housekeeping "$state"
+  [ ! -e "$state/.paused-$watcher_key" ] || fail "resumed compute route kept its dormant pause flag"
+  [ ! -e "$state/.paused-resurfaced-$watcher_key" ] || fail "resumed compute route kept its dormant re-surface throttle"
+  pass "away-mode reconciliation clears dormant pause tracking once the lifecycle leaves dormancy"
+}
+
+test_reconcile_dormant_suppresses_repeat_within_window() {
+  local dir state data watcher_key win last rf_age
+  dir=$(make_supercase dormant-resurface-cadence)
+  state="$dir/state"; data="$dir/data"
+  mkdir -p "$data/boat"
+  win="remote:boat-dormant"
+  printf 'window=%s\nkind=secondmate\nremote_host=boat-alias\nbackend=tmux\n' "$win" > "$state/boat-dormant.meta"
+  printf 'working: steady state\n' > "$state/boat-dormant.status"
+  printf 'lifecycle=suspended\n' > "$data/boat/boat-dormant.meta"
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  : > "$state/.paused-$watcher_key"
+  date +%s > "$state/.paused-resurfaced-$watcher_key"
+  last=$(last_status_line "$state/boat-dormant.status")
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_HOME="$dir" \
+    reconcile_pause_tracking "$win" "$state" "$last"
+  [ -e "$state/.paused-resurfaced-$watcher_key" ] || fail "reconciliation dropped the dormant throttle, so the next watcher pass re-fires inside the window"
+  rf_age=$(( $(date +%s) - $(stat -c %Y "$state/.paused-resurfaced-$watcher_key" 2>/dev/null || echo 0) ))
+  [ "$rf_age" -lt "${FM_PAUSE_RESURFACE_SECS:-2700}" ] || fail "dormant throttle age ${rf_age}s is already past the window"
+  pass "dormant reconciliation holds the re-surface throttle inside one PAUSE_RESURFACE_SECS window"
+}
+test_handle_wake_dormant_records_no_wedge_aging() {
+  local dir state data win reason
+  dir=$(make_supercase dormant-wake-no-wedge)
+  state="$dir/state"; data="$dir/data"
+  mkdir -p "$data/boat"
+  win="remote:boat-dormant"
+  printf 'window=%s\nkind=secondmate\nremote_host=boat-alias\nbackend=tmux\nharness=codex\n' "$win" > "$state/boat-dormant.meta"
+  printf 'working: steady state\n' > "$state/boat-dormant.status"
+  printf 'lifecycle=suspended\n' > "$data/boat/boat-dormant.meta"
+  reason="stale: $win (compute lifecycle=suspended dormant 5000s, rechecked on a long cadence not a wedge; confirm scale-to-zero should continue)"
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_HOME="$dir" FM_DEFER_ESCALATION_FLUSH=1 \
+    handle_wake "$reason" "$state" >/dev/null 2>&1
+  [ ! -e "$state/.subsuper-stale-boat-dormant" ] || fail "a dormant recheck minted wedge aging that housekeeping would later escalate as a false wedge"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a dormant recheck escalated instead of self-handling on the pause cadence"
+  pass "a dormant compute recheck self-handles with no wedge aging and no escalation"
+}
+
+test_housekeeping_dormant_never_false_wedges() {
+  local dir state data win pane key
+  dir=$(make_supercase dormant-no-false-wedge)
+  state="$dir/state"; data="$dir/data"; pane="$dir/pane.txt"
+  mkdir -p "$data/boat"
+  win="remote:boat-dormant"
+  printf 'idle\n' > "$pane"
+  printf 'window=%s\nkind=secondmate\nremote_host=boat-alias\nbackend=tmux\nharness=codex\n' "$win" > "$state/boat-dormant.meta"
+  printf 'working: steady state\n' > "$state/boat-dormant.status"
+  printf 'lifecycle=suspended\n' > "$data/boat/boat-dormant.meta"
+  key=$(printf '%s' "boat-dormant" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-stale-$key"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_HOME="$dir" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=2700 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "an aged dormant marker escalated as a false wedge: $(cat "$state/.subsuper-escalations")"
+  pass "housekeeping never wedge-escalates a dormant compute route, however aged its marker"
+}
 
 test_housekeeping_seeds_pause_marker_from_status() {
   local dir state key win
@@ -3152,6 +3243,11 @@ test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
+test_housekeeping_keeps_dormant_compute_pause_markers
+test_housekeeping_clears_dormant_pause_markers_after_resume
+test_reconcile_dormant_suppresses_repeat_within_window
+test_handle_wake_dormant_records_no_wedge_aging
+test_housekeeping_dormant_never_false_wedges
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_capture_failure_escalates_stale
