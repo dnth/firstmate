@@ -1102,6 +1102,78 @@ JSON
   pass "the merge reconciles advisory freshness after the cursor handoff, so nothing slips through the old awaited gap"
 }
 
+# Relay-noise repeat check must not reopen the #188 gap: the repeat-prior
+# subprocess runs BEFORE the reconcile, so a resolution landing inside it
+# is still caught by the reconcile that follows. A wrapped
+# fm-branch-outcome.sh appends a keyed resolution inside repeat-prior - the
+# exact window a post-reconcile check would miss - and the stale routine
+# prose must die there instead of merging silently.
+test_branch_repeat_check_gap_still_reconciles() {
+  local fixture state bin_dir f out status
+  for mode in gap control; do
+    fixture="$TMP_ROOT/repeat-gap-$mode"
+    state="$fixture/state"
+    make_omp_branch_driver_fixture "$fixture"
+    bin_dir="$fixture/bin"
+    mkdir -p "$bin_dir" "$state"
+    for f in "$ROOT"/bin/*; do ln -s "$f" "$bin_dir/$(basename "$f")"; done
+    rm -f "$bin_dir/fm-branch-outcome.sh"
+    cat > "$bin_dir/fm-branch-outcome.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = repeat-prior ] && [ -n "${FM_GAP_APPEND:-}" ] && [ ! -e "${FM_GAP_FLAG:?}" ]; then
+  printf '%b' "$FM_GAP_APPEND" >> "$FM_GAP_TARGET"
+  : > "$FM_GAP_FLAG"
+fi
+exec "$FM_REAL_OUTCOME" "$@"
+SH
+    chmod +x "$bin_dir/fm-branch-outcome.sh"
+    ln -s "$ROOT/.agents" "$fixture/.agents"
+    git init -q -b main "$fixture"
+    : > "$fixture/AGENTS.md"
+    printf 'needs-decision [key=theme]: which palette\n' > "$state/task-a.status"
+    printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+    printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+    cat > "$fixture/steps.json" <<'JSON'
+{
+  "steps": [
+    { "wake": "signal: task-a",
+      "prompt": [{ "report": { "task": "task-a", "verdict": "routine", "summary": "task-a waits on the palette choice" } }] }
+  ]
+}
+JSON
+    gap_append=''
+    [ "$mode" = gap ] && gap_append='resolved [key=theme]: captain picked dark\n'
+    status=0
+    out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+      FM_HOME="$fixture" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+      FM_ROOT_OVERRIDE="$fixture" \
+      FM_REAL_OUTCOME="$ROOT/bin/fm-branch-outcome.sh" \
+      FM_GAP_APPEND="$gap_append" FM_GAP_TARGET="$state/task-a.status" FM_GAP_FLAG="$fixture/gap-done" \
+      EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+      DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+      SESSIONS_ROOT="$fixture/.omp" \
+      SCENARIO_PATH="$fixture/steps.json" \
+      node --experimental-strip-types "$fixture/driver.mjs" 2>&1) || status=$?
+    expect_code 0 "$status" "repeat-gap $mode driver run failed: $out"
+    case "$mode" in
+      gap)
+        assert_not_contains "$out" 'task-a waits on the palette choice' \
+          "gap: a resolution inside repeat-prior still delivered stale prose: $out"
+        assert_grep '"seq":1,"state":"suppressed"' "$state/branch-merge-deliveries.jsonl" \
+          "gap: the superseded merge did not record a suppressed receipt"
+        ;;
+      control)
+        assert_contains "$out" '"content":"⛵ task-a: task-a waits on the palette choice","display":true,"triggerTurn":false' \
+          "control: a still-current routine advisory was not delivered as a rendered note: $out"
+        assert_grep '"seq":1,"state":"accepted"' "$state/branch-merge-deliveries.jsonl" \
+          "control: a delivered merge did not record an accepted receipt"
+        ;;
+    esac
+  done
+  pass "a resolution inside repeat-prior is still caught by the reconcile that follows it"
+}
+
 # Issue #188: replaying a provably-failed merge used to skip the completion
 # bookkeeping the live merge performs - a routine verdict replayed without
 # the completion-forced captain shape, the replayed send registered no
@@ -1644,6 +1716,8 @@ test_mixed_grant_settle_rejects_an_unreported_completion
 test_branch_merge_suppresses_a_resolved_decision_advisory
 test_branch_merge_suppresses_a_stale_worker_advisory
 test_branch_failed_merge_replays_only_while_current
+test_branch_merge_reconciles_after_the_cursor_handoff
+test_branch_repeat_check_gap_still_reconciles
 test_consumed_completion_is_redelivered_once_per_generation
 test_delivered_completion_re_report_opens_no_main_turn
 test_identical_repeat_routine_outcome_merges_silently
