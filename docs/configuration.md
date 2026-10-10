@@ -766,6 +766,7 @@ Every other shape - a trailing or embedded empty component such as `<guild>:` or
 The recorded request and its destination context both carry the granted `authority`, which is what the `ext-respond` skill reads.
 
 Canonical `request_id` is `discord:<guild>:<channel>:<thread>:<message>` and keeps those colons in JSON bodies.
+For a slash command, `<message>` is the Discord interaction id and `<thread>` defaults to the channel; replies post to that same thread.
 Filenames use the SHA-256 hex digest of that canonical id (`slug`).
 `bin/fm-ext-intake.sh` publishes `state/ext-inbox/<slug>.json` (mode 0600), durable destination context at `state/ext-context/<slug>.json`, and a one-wake offer marker at `state/ext-context/<slug>.offered.json`.
 The same message id claims the existing offer and does not append a second wake.
@@ -815,9 +816,8 @@ This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id` as `ext_request=` / `ext_request_slug=` / `ext_request_ts=` / `ext_followups=`, never `x_request=`.
 
-The Hermes Gateway plugin lives in `contrib/hermes-gateway-firstmate-comms/` and must be installed into a dedicated gateway `HERMES_HOME`, not the crewmate TUI profile.
+For Hermes 0.20.0 and newer, install the gateway plugin into a dedicated gateway profile, never the crewmate TUI profile; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md) owns profile installation, compatibility verification, and destination resolution.
 Crewmate Hermes still launches as `hermes chat --tui`.
-That launch string is not the Discord gateway.
 The `ext-respond` skill owns drain, classification, lifecycle action, and local emit.
 
 ## Process-to-event sources (state/procevent)

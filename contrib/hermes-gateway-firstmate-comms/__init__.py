@@ -1,6 +1,6 @@
 """Hermes Gateway plugin for the sibling local Firstmate Communication Officer.
 
-Install this directory into a dedicated gateway HERMES_HOME plugins folder.
+See README.md for installation into a dedicated gateway profile.
 Do not enable it on a crewmate TUI profile. Crewmate Hermes still launches as
 ``hermes chat --tui`` and is a separate adapter.
 
@@ -12,19 +12,20 @@ outbox using ``bin/fm-ext-outbox.sh``.
 from __future__ import annotations
 
 try:
-    from .intake import handle_fm_command, maybe_intake_from_text
+    from .intake import handle_fm_command, maybe_intake_from_text, pre_gateway_dispatch_hook
     from .outbox_poster import start_outbox_watcher
 except ImportError:
-    from intake import handle_fm_command, maybe_intake_from_text
+    from intake import handle_fm_command, maybe_intake_from_text, pre_gateway_dispatch_hook
     from outbox_poster import start_outbox_watcher
 
 
 def register(ctx):
-    """Wire the /fm slash command and start the local outbox poster."""
+    """Wire /fm and its required dispatch hook, then start the outbox poster."""
     ctx.register_command(
         "fm",
         handler=handle_fm_command,
         description="Send this request to the local Firstmate Communication Officer",
         args_hint="request",
     )
+    ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch_hook)
     start_outbox_watcher()
