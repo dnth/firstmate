@@ -744,6 +744,70 @@ EOF
   return 0
 }
 
+# Local Communication Officer doorbell. The gateway's intake and outbox poster
+# append durable ext rows (keys ext-request:<slug>, ext-delivery-failed:<slug>)
+# from another process, which cannot wake this watcher, so without this a
+# request waited for some unrelated wake. Each new such row rings once from
+# here: the wake carries the rows' own payloads and appends nothing, because
+# the rows are already durable (the same contract as an ext poll that owns its
+# wake). The highest rung sequence persists in EXT_DOORBELL_MARKER, so a
+# restarted watcher never rings a row twice; the drain's inbox-derived section
+# keeps an unanswered request presented after its row is acknowledged.
+EXT_DOORBELL_MARKER="$STATE/.ext-doorbell-rung"
+
+ext_doorbell_rung() {
+  local rung=0
+  if [ -f "$EXT_DOORBELL_MARKER" ] && [ ! -L "$EXT_DOORBELL_MARKER" ]; then
+    rung=$(head -n 1 "$EXT_DOORBELL_MARKER" 2>/dev/null || true)
+    case "$rung" in ''|*[!0-9]*) rung=0 ;; esac
+  fi
+  printf '%s\n' "$rung"
+}
+
+# Prints "<seq>\t<payload>" for every pending main-owned ext row above the mark.
+ext_doorbell_rows() {
+  local rung
+  rung=$(ext_doorbell_rung)
+  fm_wake_actor_pending_rows main 2>/dev/null | awk -F '\t' -v rung="$rung" '
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 + 0 > rung + 0 \
+      && ($4 ~ /^ext-request:/ || $4 ~ /^ext-delivery-failed:/) { print $2 "\t" $5 }'
+}
+
+ext_doorbell_mark() {  # <rows>: record the highest sequence in <rows> as rung
+  local rows=$1 max tmp
+  max=$(printf '%s\n' "$rows" | awk -F '\t' '$1 + 0 > max { max = $1 + 0 } END { print max + 0 }')
+  [ "$max" -gt 0 ] || return 0
+  tmp=$(mktemp "$STATE/.ext-doorbell-rung.tmp.XXXXXX") || return 1
+  if ! printf '%s\n' "$max" > "$tmp" || ! mv -f -- "$tmp" "$EXT_DOORBELL_MARKER"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+ext_doorbell_tick() {
+  local rows reason count
+  fm_ext_bridge_opted_in "$FM_HOME" 2>/dev/null || return 0
+  rows=$(ext_doorbell_rows) || return 0
+  [ -n "$rows" ] || return 0
+  count=$(printf '%s\n' "$rows" | grep -c .)
+  reason="check: $(printf '%s\n' "$rows" | head -n 3 | awk -F '\t' '{ printf "%s%s", sep, $2; sep = "; " }')"
+  [ "$count" -le 3 ] || reason="$reason; +$((count - 3)) more (see EXT REQUESTS AWAITING ANSWER in the drain)"
+  ext_doorbell_mark "$rows" || triage_log "ext doorbell: could not record the rung sequence; a later cycle may ring again"
+  wake "$reason"
+}
+
+# Converge state/ext-watch.check.sh with config/ext-bridge every cycle, so a
+# bridge switched on or off mid-session needs no restart; fm-ext-lib.sh owns the
+# arm and remove rules. Logs only when the shim appears or disappears.
+ext_bridge_converge_tick() {
+  local shim before=0 after=0 verdict
+  shim=$(fm_ext_watch_shim_path "$FM_HOME") || return 0
+  { [ -e "$shim" ] || [ -L "$shim" ]; } && before=1
+  verdict=$(fm_ext_watch_shim_converge "$FM_HOME" "$FM_ROOT" 2>/dev/null) || return 0
+  { [ -e "$shim" ] || [ -L "$shim" ]; } && after=1
+  [ "$before" = "$after" ] || triage_log "ext bridge: inbox poll shim converged ($verdict)"
+}
+
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
 # (default 3): a pane that keeps re-wedging on the SAME stale hash - each
 # escalation gets absorbed again as "still validating" one poll later, since the
@@ -1738,6 +1802,11 @@ while :; do
   # marker or channel failure can never interrupt the watch loop.
   main_wake_undelivered_tick || true
 
+  # Local Communication Officer: converge the inbox poll shim with the opt-in,
+  # then ring once for any bridge row the gateway recorded since the last ring.
+  ext_bridge_converge_tick || true
+  ext_doorbell_tick
+
   # Process-to-event liveness repair. Remote-reply routes converge first:
   # ensure-armed registers any live route that lost its source (without SSH),
   # so a registration it creates is started by the reconcile right below in
@@ -1863,8 +1932,12 @@ while :; do
         if [ "$check_owns_wake" -eq 1 ]; then
           # fm-ext-poll.sh already made one record durable per claimed request,
           # and released the claim again for any record it could not append.
-          # Appending here as well would double every request.
+          # Appending here as well would double every request, and the rows it
+          # appended are rung by this wake, so the doorbell must not ring them.
           touch "$STATE/.last-check"
+          if ! { ext_rows=$(ext_doorbell_rows) && ext_doorbell_mark "$ext_rows"; }; then
+            triage_log "ext doorbell: could not record the poll's rows as rung"
+          fi
           wake "$reason"
           continue
         fi

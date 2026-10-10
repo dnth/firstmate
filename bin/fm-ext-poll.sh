@@ -58,7 +58,7 @@ for file in "$INBOX"/*.json; do
   # Make the wake durable here rather than leaving it to the watcher: the
   # watcher can exit between this claim and its own append, and a claimed
   # offer never surfaces again, so that window silently dropped the request.
-  if ! fm_wake_append check "$FM_EXT_WATCH_SHIM" "ext-request $slug"; then
+  if ! fm_wake_append check "$(fm_ext_wake_key ext-request "$slug")" "ext-request $slug"; then
     fm_ext_offer_registry_unclaim "$STATE" "$slug" || true
     continue
   fi

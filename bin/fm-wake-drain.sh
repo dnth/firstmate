@@ -33,6 +33,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# shellcheck source=bin/fm-ext-lib.sh
+. "$SCRIPT_DIR/fm-ext-lib.sh"
 
 # A process inside an fm-spawn task worker's launch environment (FM_TASK_ID,
 # set by bin/fm-spawn.sh for every non-secondmate kind) is never a firstmate
@@ -508,6 +510,40 @@ print_status_sections() {
   rm -f -- "$prepared"
 }
 
+# Print every unanswered local Communication Officer request, folded from the
+# durable inbox (fm_ext_pending_requests) rather than from queued rows. A row
+# can be dropped by a filtered read of this output and is then consumed by the
+# acknowledgement, which silently loses the request. The inbox record stays
+# until ext-respond answers the request, so this section re-presents it on
+# every drain until then. Main only (the primary answers the bridge), silent
+# when the bridge is off or nothing waits, and bounded.
+print_ext_requests_section() {
+  local pending slug recorded authority now minutes waited shown=0 omitted=0 cap=20
+  [ "$ACTOR" = main ] || return 0
+  pending=$(fm_ext_pending_requests "$FM_HOME" 2>/dev/null) || return 0
+  [ -n "$pending" ] || return 0
+  now=$(date +%s)
+  printf 'EXT REQUESTS AWAITING ANSWER (local Communication Officer; answer each with the ext-respond skill - listed on every drain until ext-respond removes its inbox record):\n'
+  while IFS=$'\t' read -r slug recorded authority; do
+    [ -n "$slug" ] || continue
+    if [ "$shown" -ge "$cap" ]; then
+      omitted=$((omitted + 1))
+      continue
+    fi
+    if [ "$recorded" -gt 0 ] && [ "$now" -ge "$recorded" ]; then
+      minutes=$(( (now - recorded) / 60 ))
+      waited=$(printf '%dh%02dm' $((minutes / 60)) $((minutes % 60)))
+    else
+      waited=unknown
+    fi
+    printf 'ext-request %s (%s authority, waiting %s)\n' "$slug" "$authority" "$waited"
+    shown=$((shown + 1))
+  done <<EOF
+$pending
+EOF
+  [ "$omitted" -eq 0 ] || printf 'EXT REQUESTS AWAITING ANSWER: %d more not shown; ext-respond processes every inbox record\n' "$omitted"
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   fm_lock_acquire_wait "$lock" || return 1
@@ -521,6 +557,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   fi
   if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
   fm_lock_release "$lock"
+  if [ "$rc" -eq 0 ]; then print_ext_requests_section || true; fi
   return "$rc"
 }
 

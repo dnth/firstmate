@@ -53,4 +53,4 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts (`docs/configuration.md` "X mode (.env)").
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.
 - `EXT: local bridge on ...` / `EXT: local bridge off ...` - bootstrap confirmed or removed the local Communication Officer poll shim (`docs/configuration.md` "Local Communication Officer bridge").
-  There is no cadence override; intake wakes immediately and the default slow-check interval covers restart recovery.
+  Every watcher cycle converges the same shim again, so a bridge switched on or off mid-session needs no bootstrap rerun; there is no cadence override.

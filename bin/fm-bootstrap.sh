@@ -1039,81 +1039,36 @@ EOF
 
 # Local Communication Officer bridge (opt-in): config/ext-bridge plus a
 # mode-0600 secret file. The presence file is the only activation authority;
-# FM_EXT_BRIDGE can disable a configured bridge but can never enable one. Writes one identity shim:
+# FM_EXT_BRIDGE can disable a configured bridge but can never enable one.
+# fm_ext_watch_shim_converge (bin/fm-ext-lib.sh) owns the one identity shim:
 #   state/ext-watch.check.sh - byte-static identity shim; the watcher validates
 #                            its bytes and invokes bin/fm-ext-poll.sh directly
-# There is no hosted relay, pairing token, or cadence override. Intake wakes
-# the primary immediately; the shim exists so restart recovery and the watcher
-# identity path match X mode.
+# This reports its verdict at session start; the watcher converges the same
+# shim every cycle, so a bridge switched on or off mid-session needs no restart.
+# There is no hosted relay, pairing token, or cadence override. Intake records a
+# durable per-request wake row that the watcher's doorbell rings for; the shim's
+# poll recovers offers intake did not claim, matching X mode's identity path.
 ext_bridge_setup() {
-  local shim shim_body shim_home secret
-
-  shim=$(fm_ext_watch_shim_path)
-
-  ext_bridge_remove_shim() {
-    x_mode_remove_artifact "$shim"
-  }
-
-  if ! fm_ext_bridge_opted_in "$FM_HOME"; then
-    if x_mode_artifact_present "$shim"; then
-      if ext_bridge_remove_shim; then
-        echo "EXT: local bridge off - removed inbox poll shim"
-      else
-        echo "EXT: local bridge off - failed to remove inbox poll shim"
-      fi
-    fi
-    return 0
-  fi
-
-  secret=$(fm_ext_secret_path "$FM_HOME")
-  if ! fm_ext_secret_valid "$secret"; then
-    if x_mode_artifact_present "$shim"; then
-      if ext_bridge_remove_shim; then
-        echo "EXT: local bridge off - secret file missing or not mode 0600; install it and rerun bootstrap"
-      else
-        echo "EXT: local bridge off - failed to remove inbox poll shim after a secret-file refusal"
-      fi
-    else
-      echo "EXT: local bridge off - secret file missing or not mode 0600"
-    fi
-    return 0
-  fi
-
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "MISSING: jq (install: $(install_cmd jq))"
-    if x_mode_artifact_present "$shim"; then
-      if ext_bridge_remove_shim; then
-        echo "EXT: local bridge off - missing jq; install it and rerun bootstrap"
-      else
-        echo "EXT: local bridge off - failed to remove inbox poll shim after missing jq"
-      fi
-    fi
-    return 0
-  fi
-
-  ext_arm_failed() {
-    if ext_bridge_remove_shim; then
-      echo "EXT: local bridge off - failed to arm inbox poll shim"
-    else
-      echo "EXT: local bridge off - failed to arm inbox poll shim; stale artifacts remain"
-    fi
-  }
-
-  mkdir -p "$STATE" 2>/dev/null || { ext_arm_failed; return 0; }
-
-  case "$FM_HOME" in
-    /*) shim_home=$FM_HOME ;;
-    *)
-      shim_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) \
-        || { ext_arm_failed; return 0; }
+  local verdict
+  verdict=$(fm_ext_watch_shim_converge "$FM_HOME" "$FM_ROOT")
+  case "$verdict" in
+    'off none') ;;
+    'off removed') echo "EXT: local bridge off - removed inbox poll shim" ;;
+    'off remove-failed') echo "EXT: local bridge off - failed to remove inbox poll shim" ;;
+    'secret none') echo "EXT: local bridge off - secret file missing or not mode 0600" ;;
+    'secret removed') echo "EXT: local bridge off - secret file missing or not mode 0600; install it and rerun bootstrap" ;;
+    'secret remove-failed') echo "EXT: local bridge off - failed to remove inbox poll shim after a secret-file refusal" ;;
+    jq\ *)
+      echo "MISSING: jq (install: $(install_cmd jq))"
+      case "$verdict" in
+        'jq removed') echo "EXT: local bridge off - missing jq; install it and rerun bootstrap" ;;
+        'jq remove-failed') echo "EXT: local bridge off - failed to remove inbox poll shim after missing jq" ;;
+      esac
       ;;
+    'on armed') echo "EXT: local bridge on - inbox poll armed via state/ext-watch.check.sh" ;;
+    'on arm-failed') echo "EXT: local bridge off - failed to arm inbox poll shim" ;;
+    *) echo "EXT: local bridge off - failed to arm inbox poll shim; stale artifacts remain" ;;
   esac
-  shim_body=$(fm_ext_poll_shim_content "$shim_home" "$FM_ROOT")
-  x_mode_write_if_changed "$shim" "$shim_body" 700 || { ext_arm_failed; return 0; }
-  fm_ext_poll_shim_valid "$shim" "$shim_home" "$FM_ROOT" \
-    || { ext_arm_failed; return 0; }
-
-  echo "EXT: local bridge on - inbox poll armed via state/ext-watch.check.sh"
 }
 
 crew_dispatch_validate() {

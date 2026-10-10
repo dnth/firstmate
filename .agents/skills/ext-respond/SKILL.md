@@ -2,7 +2,7 @@
 name: ext-respond
 description: >-
   Agent-only playbook for handling local Communication Officer Discord requests.
-  Use on an "ext-request <slug>" check wake to drain the local inbox, classify,
+  Use on an "ext-request <slug>" check wake or a drain's "EXT REQUESTS AWAITING ANSWER" section to drain the local inbox, classify,
   act through the normal lifecycle, emit ack/answer/follow-up/final into the
   local outbox, and link spawned work.
   Loaded only when the sibling local ext-bridge is enabled.
@@ -14,7 +14,7 @@ metadata:
 # ext-respond
 
 The local Communication Officer bridge lets a firstmate instance answer `/fm` requests that a dedicated Hermes Gateway plugin delivered into this home.
-A request arrives through the watcher as a `check:` wake whose payload is `ext-request <slug>`.
+A request arrives through the watcher as a `check:` wake whose payload is `ext-request <slug>`, and every main drain lists each still-unanswered request under `EXT REQUESTS AWAITING ANSWER` until its inbox record is removed, so treat that section as the same trigger.
 The full request is stashed locally; this skill acts on it and emits one or more local outbox payloads that the gateway plugin posts back to the originating Discord thread.
 
 This runs only when the local ext-bridge is on (`config/ext-bridge` plus a mode-0600 secret; see AGENTS.md "Local Communication Officer bridge").

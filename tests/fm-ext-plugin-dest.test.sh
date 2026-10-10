@@ -248,11 +248,99 @@ PY
   pass "6 required hook registration errors propagate and successful startup works"
 }
 
+# --- 7. /fm inside a thread is authorised by the thread's parent channel ----
+#
+# Allowlist rules name a channel. In a thread Hermes reports the thread as the
+# chat, so the plugin must authorise against the thread's parent channel and
+# still reply into the thread. A top-level channel also has a parent (its
+# category), which must never replace the channel.
+
+test_7_thread_uses_parent_channel_for_allowlist_and_replies_in_thread() {
+  local home out slug ctx target
+  home="$TMP_ROOT/c7"
+  setup_home "$home"
+  out=$(THREAD=777777777777777777 OTHER=888888888888888888 CATEGORY=999999999999999999 \
+    plugin_env "$home" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ.get("PYTHONPATH", ""))
+from types import SimpleNamespace
+import intake
+os.environ["FM_HOME"] = sys.argv[1]
+os.environ["FM_ROOT_OVERRIDE"] = sys.argv[2]
+G, C, A = os.environ["GUILD"], os.environ["CHANNEL"], os.environ["AUTHOR"]
+T, O, K = os.environ["THREAD"], os.environ["OTHER"], os.environ["CATEGORY"]
+
+def text_in_thread(thread, parent, msgid):
+    # Shape of the adapter's text-message source inside a thread.
+    source = SimpleNamespace(platform=SimpleNamespace(value="discord"),
+        chat_id=thread, chat_type="thread", user_id=A, user_name="captain",
+        thread_id=thread, parent_chat_id=parent, scope_id=G, guild_id=G,
+        message_id=msgid)
+    raw = SimpleNamespace(id=msgid, guild_id=G, channel_id=thread,
+                          author=SimpleNamespace(id=A))
+    return SimpleNamespace(text="/fm status please", source=source, raw_message=raw)
+
+def slash(chat, chat_type, channel_parent, msgid):
+    # Shape of _build_slash_event: no parent_chat_id; the interaction's channel
+    # carries parent_id (the parent channel for a thread, the category otherwise).
+    source = SimpleNamespace(platform=SimpleNamespace(value="discord"),
+        chat_id=chat, chat_type=chat_type, user_id=A, user_name="captain",
+        thread_id=chat if chat_type == "thread" else None, message_id=None)
+    raw = SimpleNamespace(id=msgid, guild_id=G, channel_id=chat,
+                          channel=SimpleNamespace(id=chat, parent_id=channel_parent),
+                          user=SimpleNamespace(id=A))
+    return SimpleNamespace(text="/fm status please", source=source, raw_message=raw)
+
+cases = [
+    ("text-thread", text_in_thread(T, C, "700000000000000001")),
+    ("slash-thread", slash(T, "thread", C, "700000000000000002")),
+    ("slash-top", slash(C, "group", K, "700000000000000003")),
+    ("stranger-text-thread", text_in_thread(T, O, "700000000000000004")),
+    ("stranger-slash-thread", slash(T, "thread", O, "700000000000000005")),
+    ("other-channel", slash(O, "group", K, "700000000000000006")),
+]
+for name, event in cases:
+    intake.pre_gateway_dispatch_hook(event)
+    print("%s=%s" % (name, intake.handle_fm_command("status please")))
+PY
+  )
+  for name in text-thread slash-thread slash-top; do
+    assert_contains "$out" "$name=Aye, captain" "/fm $name under the allowlisted channel must be accepted"
+  done
+  for name in stranger-text-thread stranger-slash-thread other-channel; do
+    assert_contains "$out" "$name=Firstmate refused this request: it is not on the local allowlist." \
+      "/fm $name outside the allowlisted channel must be refused"
+  done
+  for msg in 700000000000000001 700000000000000002; do
+    slug=$(printf '%s' "discord:${GUILD}:${CHANNEL}:777777777777777777:${msg}" | sha256sum | awk '{print $1}')
+    ctx="$home/state/ext-context/${slug}.json"
+    [ -f "$ctx" ] || fail "a thread request must be recorded against its parent channel and thread ($msg)"
+    target=$(jq -r '.channel_id + ":" + .thread_id' "$ctx")
+    [ "$target" = "$CHANNEL:777777777777777777" ] \
+      || fail "a thread request must keep the parent channel and reply into the thread, got $target"
+  done
+  # The answer firstmate emits is what the outbox poster posts: it must target
+  # the thread the captain asked in.
+  printf 'Aye, all shipshape.' > "$home/ans.txt"
+  PATH="$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-ext-emit.sh" \
+    --request-id "discord:${GUILD}:${CHANNEL}:777777777777777777:700000000000000001" \
+    --kind answer --generation 1 --text-file "$home/ans.txt" >/dev/null \
+    || fail "an answer to a thread request must be emitted"
+  slug=$(printf '%s' "discord:${GUILD}:${CHANNEL}:777777777777777777:700000000000000001" | sha256sum | awk '{print $1}')
+  target=$(jq -r '.thread_id' "$home/state/ext-outbox/${slug}.answer.1.json")
+  [ "$target" = 777777777777777777 ] || fail "the reply to a thread request must post into the thread, got $target"
+  slug=$(printf '%s' "discord:${GUILD}:${CHANNEL}:${CHANNEL}:700000000000000003" | sha256sum | awk '{print $1}')
+  [ -f "$home/state/ext-context/${slug}.json" ] \
+    || fail "a top-level channel request must keep its own channel, never its category"
+  pass "7 /fm in a thread is authorised by its parent channel and replies into the thread"
+}
+
 test_1_interleaved_identical_text_keeps_authority
 test_2_denied_author_gets_allowlist_refusal
 test_3_reply_target_is_originating_thread
 test_4_unresolvable_names_hermes_version
 test_5_rebind_clears_stale_destination
 test_6_hook_registration_errors_propagate
+test_7_thread_uses_parent_channel_for_allowlist_and_replies_in_thread
 
 echo "all fm-ext-plugin-dest tests passed"
