@@ -749,6 +749,19 @@ export default function (pi: ExtensionAPI) {
       await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "suppressed"]);
       return "suppressed";
     }
+    // Identical-repeat suppression (relay-noise fix): a routine outcome with
+    // no completion obligation whose (task, statusIdent, statusEndpoint,
+    // verdict) matches the task's previously stored outcome stays durable
+    // but merges silently, so a finished-but-in-flight row cannot render one
+    // note per stale wake. Captain verdicts, completions, and any change in
+    // identity or verdict still render.
+    let repeatSilenced = false;
+    if (verdict === "routine" && completionIds.length === 0 && /^[0-9]+$/.test(seq)) {
+      const prior = await runOutcomeScript(["repeat-prior", "--seq", seq]);
+      if (prior.ok && prior.stdout.startsWith("repeat")) {
+        repeatSilenced = true;
+      }
+    }
     // The completion-delivery contract: an outcome covering an undelivered
     // captain-facing event owes a main turn regardless of the model's verdict,
     // so completionIds forces the captain delivery shape. The turn is the
@@ -775,7 +788,7 @@ export default function (pi: ExtensionAPI) {
       const message = {
         customType: "fm-branch-merge",
         content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`,
-        display: !(task === "fleet" && silent),
+        display: !(task === "fleet" && silent) && !repeatSilenced,
       };
       try {
         if (mainStreaming) {
@@ -875,14 +888,24 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
       }
+      // Same identical-repeat rule as the live merge: a routine replay with
+      // no completion obligation that matches the previously stored outcome
+      // merges silently instead of re-rendering.
       const captain = record.verdict === "captain" || completionIds.length > 0;
+      let replayRepeatSilenced = false;
+      if (!captain && completionIds.length === 0) {
+        const prior = await runOutcomeScript(["repeat-prior", "--seq", seq]);
+        if (prior.ok && prior.stdout.startsWith("repeat")) {
+          replayRepeatSilenced = true;
+        }
+      }
       const content = captain ? `${task}: ${summary}` : `${MERGE_NOTE_BOAT} ${task}: ${summary}`;
       const message = captain
         ? { customType: "fm-branch-merge", content, display: false }
         : {
             customType: "fm-branch-merge",
             content,
-            display: !(task === "fleet" && record.silent === true),
+            display: !(task === "fleet" && record.silent === true) && !replayRepeatSilenced,
           };
       try {
         if (captain) {

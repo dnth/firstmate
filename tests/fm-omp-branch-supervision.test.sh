@@ -963,6 +963,62 @@ JSON
   pass "an already-delivered completion re-report stays routine while a new finding still opens a captain turn"
 }
 
+# Relay-noise fix rank 2: an identical repeat routine outcome (same task,
+# status ident, status endpoint, verdict, no completion obligation) stays
+# durable but merges silently; a changed summary on the same span still
+# renders, and a captain verdict still opens a turn.
+test_identical_repeat_routine_outcome_merges_silently() {
+  local fixture state out seq1 seq2 ident1 ident2 end1 end2
+  fixture="$TMP_ROOT/identical-repeat"
+  state="$fixture/state"
+  make_omp_branch_driver_fixture "$fixture"
+  mkdir -p "$state"
+  # A finished-but-in-flight row: done line delivered long ago, so the span
+  # the grant snapshots carries no undelivered completion obligation.
+  printf 'working: setup done\nresolved [key=nm-01RUN-test]: answered: test exception approved\n' > "$state/task-a.status"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf '1\t1\tstale\tdefault:wA:p1\tstale: default:wA:p1\n2\t2\tstale\tdefault:wA:p1\tstale: default:wA:p1 (idle-with-open-work)\n3\t3\tstale\tdefault:wA:p1\tstale: default:wA:p1 (idle-with-open-work)\n' > "$state/.wake-queue"
+  cat > "$fixture/steps.json" <<'JSON'
+{
+  "steps": [
+    { "wake": "stale: default:wA:p1", "report": { "task": "task-a", "verdict": "routine", "summary": "task-a remains complete with PR green" } },
+    { "wake": "stale: default:wA:p1 (idle-with-open-work)", "report": { "task": "task-a", "verdict": "routine", "summary": "task-a remains complete with PR green" } },
+    { "wake": "stale: default:wA:p1 (idle-with-open-work)", "report": { "task": "task-a", "verdict": "captain", "summary": "task-a has a new finding" } }
+  ]
+}
+JSON
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    SCENARIO_PATH="$fixture/steps.json" \
+    node --experimental-strip-types "$fixture/driver.mjs" 2>&1) \
+    || fail "identical-repeat driver failed: $out"
+
+  # All three outcomes stay durable with accepted merge receipts.
+  for s in 1 2 3; do
+    grep -F "\"seq\":$s,\"state\":\"accepted\"" "$state/branch-merge-deliveries.jsonl" >/dev/null \
+      || fail "seq $s lost its accepted merge receipt: $(cat "$state/branch-merge-deliveries.jsonl" 2>/dev/null)"
+  done
+  # The repeat check is identity on (task, verdict, statusIdent,
+  # statusEndpoint): seq 2 repeats seq 1, seq 3 is a captain verdict.
+  [ "$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" repeat-prior --seq 2)" = repeat ] \
+    || fail "seq 2 was not classed an identical repeat of seq 1"
+  [ "$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" repeat-prior --seq 3)" = current ] \
+    || fail "seq 3 (captain verdict) was classed a repeat"
+  seq1=$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" list --recent 3 | sed -n '1p')
+  seq2=$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" list --recent 3 | sed -n '2p')
+  ident1=$(printf '%s' "$seq1" | jq -r '.statusIdent'); end1=$(printf '%s' "$seq1" | jq -r '.statusEndpoint')
+  ident2=$(printf '%s' "$seq2" | jq -r '.statusIdent'); end2=$(printf '%s' "$seq2" | jq -r '.statusEndpoint')
+  [ "$ident1" = "$ident2" ] && [ "$end1" = "$end2" ] \
+    || fail "repeat pair spans differ ($ident1@$end1 vs $ident2@$end2): repeat-prior would be vacuous"
+  # The captain outcome still opens a main turn.
+  assert_contains "$out" '"content":"task-a: task-a has a new finding","triggerTurn":true' \
+    "a changed captain outcome did not open a main turn: $out"
+  pass "an identical repeat routine outcome stays durable with feed-through identity while captain outcomes still turn"
+}
+
 # Issue #188: the live merge used to reconcile advisory freshness and then
 # AWAIT the cursor handoff before sendMessage, so a resolution landing in
 # that gap still shipped the stale advisory. The merge now hands the cursor
@@ -1584,5 +1640,6 @@ test_branch_merge_suppresses_a_stale_worker_advisory
 test_branch_failed_merge_replays_only_while_current
 test_consumed_completion_is_redelivered_once_per_generation
 test_delivered_completion_re_report_opens_no_main_turn
+test_identical_repeat_routine_outcome_merges_silently
 test_decision_owned_wake_reaches_main_past_branch_and_episode
 test_decision_owned_wake_forces_turn_without_episode
