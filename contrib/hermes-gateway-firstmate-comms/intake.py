@@ -6,14 +6,25 @@ import os
 import re
 import subprocess
 import tempfile
+from contextvars import ContextVar
 from pathlib import Path
 
 # bin/fm-ext-intake.sh exits 3 when the allowlist refuses the request, which is
 # how a refusal is told apart from a broken bridge without parsing its message.
 INTAKE_REFUSED = 3
-
+# Hermes gateway version this plugin resolves destinations against.
+# Dispatch calls handler(user_args) with no event, so the destination arrives
+# via the plugin-owned task-local below; other releases fail loudly below.
+HERMES_VERSION = "0.20.5"
 _SNOWFLAKE = re.compile(r"^[0-9]+$")
 _FM_PREFIX = re.compile(r"^/fm(?:@\S+)?(?:\s+|$)")
+# Task-local destination for the inbound event currently dispatching.
+# Set on EVERY pre_gateway_dispatch event (None for non-/fm) and read by
+# handle_fm_command later in the same asyncio task. Task-locality is the
+# whole point: two concurrent /fm texts, even byte-identical ones from an
+# allowlisted and a denied author, never share a destination. No
+# process-global cache keyed by text is used here.
+_current_event_dest: ContextVar = ContextVar("FM_CURRENT_EVENT_DEST", default=None)
 
 
 def firstmate_root() -> Path:
@@ -60,7 +71,7 @@ def context_field(context: dict | None, *names: str) -> str:
 
 
 def destination_from_context(context: dict | None) -> dict[str, str]:
-    guild = context_field(context, "guild_id", "guild", "server_id")
+    guild = context_field(context, "guild_id", "guild", "server_id", "scope_id")
     channel = context_field(context, "channel_id", "chat_id")
     thread = context_field(context, "thread_id") or channel
     message = context_field(context, "message_id", "id")
@@ -74,6 +85,92 @@ def destination_from_context(context: dict | None) -> dict[str, str]:
         "author": author,
         "platform": platform,
     }
+
+
+def _snowflake(value: object) -> str:
+    text = str(value or "").strip()
+    return text if _SNOWFLAKE.fullmatch(text) else ""
+
+
+def _source_field(source: object, *names: str) -> str:
+    for name in names:
+        try:
+            value = getattr(source, name, None)
+        except Exception:
+            continue
+        text = _snowflake(value)
+        if text:
+            return text
+    return ""
+
+
+def destination_from_event(event: object) -> dict[str, str]:
+    """Build the intake destination from a Hermes MessageEvent.
+    Structural source: gateway/session.py SessionSource on event.source,
+    plus the Discord interaction behind event.raw_message. No rendered
+    output is parsed: every field is a native id attribute.
+    """
+    source = getattr(event, "source", None)
+    raw = getattr(event, "raw_message", None)
+    guild = _source_field(source, "scope_id", "guild_id")
+    channel = _source_field(source, "chat_id")
+    thread = _source_field(source, "thread_id") or channel
+    message = _source_field(source, "message_id") or _snowflake(getattr(event, "message_id", None))
+    author = _source_field(source, "user_id", "user_id_alt")
+    platform = ""
+    try:
+        platform_value = getattr(getattr(source, "platform", None), "value", None)
+        platform = str(platform_value or getattr(source, "platform", "") or "").strip()
+    except Exception:
+        platform = ""
+    if not guild and raw is not None:
+        guild = _snowflake(getattr(raw, "guild_id", None))
+        if not guild:
+            guild = _snowflake(getattr(getattr(raw, "guild", None), "id", None))
+    if not message and raw is not None:
+        message = _snowflake(getattr(raw, "id", None))
+    if not author and raw is not None:
+        user = getattr(raw, "user", None) or getattr(raw, "author", None)
+        author = _snowflake(getattr(user, "id", None))
+    if not channel and raw is not None:
+        channel = _snowflake(getattr(raw, "channel_id", None)) or _snowflake(getattr(getattr(raw, "channel", None), "id", None))
+        if not thread:
+            thread = channel
+    return {
+        "guild_id": guild,
+        "channel_id": channel,
+        "thread_id": thread or channel,
+        "message_id": message,
+        "author": author,
+        "platform": platform or "discord",
+    }
+
+
+def bind_event_destination(event: object = None) -> object:
+    """Bind this turn's destination task-locally. Called from the
+    pre_gateway_dispatch hook on EVERY event: /fm events bind their
+    MessageEvent destination, anything else binds None so a previous
+    turn's destination can never leak into this one. Returns the token
+    so tests can reset it; the gateway task rebinds per event anyway.
+    """
+    try:
+        text = getattr(event, "text", None) or ""
+        dest = destination_from_event(event) if is_fm_text(text) else None
+        if dest is not None and not destination_valid(dest):
+            dest = None
+    except Exception:
+        dest = None
+    return _current_event_dest.set(dest)
+
+
+def pre_gateway_dispatch_hook(event=None, **kwargs) -> dict | None:
+    """Hermes pre_gateway_dispatch hook: bind the /fm destination locally.
+    Fires once per inbound MessageEvent before auth and dispatch, in the
+    same asyncio task that later runs handle_fm_command. Returns None
+    always so normal dispatch continues untouched.
+    """
+    bind_event_destination(event)
+    return None
 
 
 def request_id_for(dest: dict[str, str]) -> str:
@@ -110,17 +207,44 @@ def maybe_intake_from_text(text: str, context: dict | None) -> str | None:
     return handle_fm_command(fm_request_text(text), context)
 
 
+def resolve_destination(raw_args: str, context: dict | None = None) -> dict[str, str]:
+    """Resolve the intake destination for one /fm dispatch.
+    An explicit caller context dict wins when one is passed. Otherwise the
+    destination is the task-local bound by pre_gateway_dispatch in this
+    same asyncio task - never a shared cache, so concurrent identical
+    texts cannot cross author or channel authority. Hermes binds its own
+    session vars after plugin dispatch, so they are not read here.
+    Anything unresolved stays empty and fails closed in destination_valid.
+    """
+    dest = destination_from_context(context)
+    if destination_valid(dest):
+        return dest
+    try:
+        bound = _current_event_dest.get()
+    except Exception:
+        bound = None
+    if isinstance(bound, dict) and destination_valid(bound):
+        return bound
+    return destination_from_context(None)
+
+
 def handle_fm_command(raw_args: str, context: dict | None = None) -> str:
     """Slash-command handler. Returns a fast ack without waiting for Firstmate work.
-
     The allowlist decision is not made here. bin/fm-ext-intake.sh owns the rule
     grammar and the authority it grants, and it is the gate that actually
     protects the home, so a second copy in this file could only ever drift away
     from it. This maps that one decision back to a Discord-facing sentence.
+    The Hermes 0.20.x plugin dispatch calls handler(user_args) with no
+    context, so the destination arrives via the task-local bound by the
+    pre_gateway_dispatch hook in the same task; an explicit context dict
+    still wins when a caller (or a newer Hermes) passes one.
     """
-    dest = destination_from_context(context)
+    dest = resolve_destination(raw_args, context)
     if not destination_valid(dest):
-        return "Firstmate refused this request: Discord destination is incomplete."
+        return (
+            "Firstmate refused this request: Discord destination is incomplete "
+            f"(Hermes {HERMES_VERSION}). Try again from the channel or thread."
+        )
     home = firstmate_home()
     request_text = fm_request_text(raw_args)
     if not request_text:

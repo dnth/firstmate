@@ -815,10 +815,13 @@ This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id` as `ext_request=` / `ext_request_slug=` / `ext_request_ts=` / `ext_followups=`, never `x_request=`.
 
-The Hermes Gateway plugin lives in `contrib/hermes-gateway-firstmate-comms/` and must be installed into a dedicated gateway `HERMES_HOME`, not the crewmate TUI profile.
+The Hermes Gateway plugin lives in `contrib/hermes-gateway-firstmate-comms/` and must be installed into a dedicated gateway profile home (for example `~/.hermes/profiles/fmcomms`, which gets its own `hermes-gateway-<name>.service`), not the crewmate TUI profile.
+Installing a gateway from an arbitrary `HERMES_HOME` path reuses and rewrites the default `hermes-gateway.service` on Hermes 0.20.5, so prefer the profile path.
+Supported Hermes gateway range is 0.20.0 and newer, verified against 0.20.5.
+Hermes 0.20.x dispatches plugin commands as `handler(user_args)` with no event, so the plugin's `pre_gateway_dispatch` hook binds each inbound `/fm` MessageEvent destination task-locally before dispatch and the handler consumes it in the same task; concurrent identical texts never share a destination.
+A slash-command request records canonical `request_id` `discord:<guild>:<channel>:<thread>:<message>`, where `<message>` is the Discord interaction id and `<thread>` defaults to the channel, and replies post to that same thread.
+When the destination cannot be resolved the plugin answers that the Discord destination is incomplete and names the Hermes version, never a silent drop.
 Crewmate Hermes still launches as `hermes chat --tui`.
-That launch string is not the Discord gateway.
-The `ext-respond` skill owns drain, classification, lifecycle action, and local emit.
 
 ## Process-to-event sources (state/procevent)
 
