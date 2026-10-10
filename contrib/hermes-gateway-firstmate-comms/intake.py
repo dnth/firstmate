@@ -132,6 +132,21 @@ def destination_from_event(event: object) -> dict[str, str]:
         channel = _snowflake(getattr(raw, "channel_id", None)) or _snowflake(getattr(getattr(raw, "channel", None), "id", None))
         if not thread:
             thread = channel
+    # In a thread Hermes reports the thread itself as the chat. Allowlist
+    # rules name channels, so authorise against the thread's parent channel
+    # and keep the thread as the reply target. Only a thread qualifies: a
+    # top-level channel's parent_id is its category, never a channel rule.
+    try:
+        chat_type = str(getattr(source, "chat_type", "") or "").strip()
+    except Exception:
+        chat_type = ""
+    if chat_type == "thread":
+        parent = _source_field(source, "parent_chat_id")
+        if not parent and raw is not None:
+            parent = _snowflake(getattr(getattr(raw, "channel", None), "parent_id", None))
+        if parent:
+            thread = thread or channel
+            channel = parent
     return {
         "guild_id": guild,
         "channel_id": channel,

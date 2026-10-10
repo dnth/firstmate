@@ -72,7 +72,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
   Hermes is verified for crew and scout work only, never as a primary session or second mate.
   See the [harness adapter reference](.agents/skills/harness-adapters/SKILL.md).
 - **Hermes Communication Officer** - a dedicated Hermes Gateway plugin, installed into its own gateway `HERMES_HOME` rather than the crewmate TUI profile, delivers Discord `/fm` into Firstmate over a sibling local-file bridge.
-  See [Local Communication Officer bridge](docs/configuration.md#local-communication-officer-bridge-configext-bridge) and `contrib/hermes-gateway-firstmate-comms/`.
+  See [Local Communication Officer bridge](docs/configuration.md#local-communication-officer-bridge-configext-bridge) for configuration and [Sending a request](contrib/hermes-gateway-firstmate-comms/README.md#sending-a-request) for Discord command pop-up guidance.
 - **Pi-compatible runtimes** - use the [closed runtime allowlist](bin/fm-pi-compatible-runtimes) and [shared predicate](bin/fm-pi-compatible-lib.sh) to reuse proven Pi-compatible mechanics without losing each harness's identity. See the [Pi-compatible family architecture](docs/architecture.md#harness-identity-and-the-pi-compatible-family).
 
 Supporting these are extra treehouse pool helpers (`bin/fm-treehouse-*.sh`) and a TypeScript primary-watcher core (`bin/fm-primary-watch-core.ts`).

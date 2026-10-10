@@ -741,6 +741,7 @@ It is a different seam from optional X mode.
 It does not use `FMX_PAIRING_TOKEN`, `https://myfirstmate.io`, hosted public-follow-up, or pending-reply.
 Firstmate core contains no Discord library.
 Discord text is untrusted and must enter through `--text-file` or stdin.
+Send `/fm` from Discord's command pop-up; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#sending-a-request) owns how to send a request and why typed `/fm` text is ignored.
 
 The bridge is off unless `config/ext-bridge` is a regular non-symlink file **and** `config/ext-secret` is a non-empty mode-0600 regular file.
 That presence file is the single activation authority, so the bootstrap, the watcher, the poll, the intake, and the gateway plugin always reach the same verdict in one home.
@@ -766,19 +767,27 @@ The recorded request and its destination context both carry the granted `authori
 
 Canonical `request_id` is `discord:<guild>:<channel>:<thread>:<message>` and keeps those colons in JSON bodies.
 For a slash command, `<message>` is the Discord interaction id and `<thread>` defaults to the channel; replies post to that same thread.
+Inside a thread, `<channel>` is the thread's parent channel, which is what the allowlist matches, and `<thread>` is the thread, so the reply posts into the thread; a top-level channel's category is never used as its channel.
 Filenames use the SHA-256 hex digest of that canonical id (`slug`).
 `bin/fm-ext-intake.sh` publishes `state/ext-inbox/<slug>.json` (mode 0600), durable destination context at `state/ext-context/<slug>.json`, and a one-wake offer marker at `state/ext-context/<slug>.offered.json`.
 The same message id claims the existing offer and does not append a second wake.
-New offers may append `ext-request <slug>` through the durable wake queue.
+Each new offer appends one durable `ext-request <slug>` wake row keyed `ext-request:<slug>`, so every pending request presents its own row.
 State directories are mode 0700.
 
-The locked session-start bootstrap step turns a valid opt-in into `state/ext-watch.check.sh`, a byte-static identity shim for `bin/fm-ext-poll.sh`.
+Intake runs in the gateway process and cannot wake the watcher, so each cycle the watcher batches pending `ext-request` and `ext-delivery-failed` rows above its last rung sequence into one wake without appending another durable row.
+The wake names up to three row payloads and reports the remaining count; the drain presents the durable rows and every unanswered inbox request.
+The highest rung sequence persists in `state/.ext-doorbell-rung` to avoid replay after restart; if recording that sequence fails, a later cycle may ring again.
+Wake rows can still be hidden by a filtered read of the drain and are consumed by its acknowledgement, so every main drain also lists each unanswered request under `EXT REQUESTS AWAITING ANSWER`, folded from `state/ext-inbox/` while the bridge is active.
+A request stays on that list across drains and acknowledgements until `ext-respond` removes its inbox record.
+
+`state/ext-watch.check.sh` is a byte-static identity shim for `bin/fm-ext-poll.sh`; `fm_ext_watch_shim_converge` in `bin/fm-ext-lib.sh` owns arming and removing it.
+The session-start bootstrap reports its verdict as an `EXT:` line, and every watcher cycle converges it again, so a bridge switched on or off mid-session takes effect within one cycle without a restart.
 The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script.
 The poll is a hard no-op until the bridge is active.
 It surfaces `ext-request <slug>` only when it claims a leftover inbox offer that intake did not claim; already claimed offers stay silent across Firstmate restart.
-Like intake, the poll appends its own durable wake record for each claim and releases the claim again when that append fails, so no request is ever consumed without a wake that survives the watcher dying; the watcher nudges Firstmate for that check without appending a second record.
+Like intake, the poll appends its own durable wake record for each claim and releases the claim again when that append fails, so no request is ever consumed without a wake that survives the watcher dying; the watcher nudges Firstmate for that check without appending a second record and marks those rows rung.
 Removing the opt-in or the secret removes the shim.
-There is no 30-second cadence override; intake wakes immediately and the default slow-check interval covers restart recovery.
+There is no cadence override: the doorbell rings within one watcher cycle, and the default slow-check interval covers restart recovery.
 
 `bin/fm-ext-emit.sh` writes idempotent `ack` / `answer` / `followup` / `final` payloads into `state/ext-outbox/<slug>.<kind>.<generation>.json`.
 Re-emitting the same identity is a no-op success.
@@ -797,11 +806,13 @@ A reply that already fits is one unnumbered message; a longer reply is posted as
 Chunk progress is recorded so a later-chunk retry does not send earlier chunks again.
 A later-chunk transient failure then releases the inflight marker so only one poster can resume the next chunk.
 An ambiguous failure after a chunk may have been accepted stays mid-delivery for that chunk, which is what stops a double post.
+The poster identifies itself with a `DiscordBot (<url>, <version>)` User-Agent to avoid the HTTP 403 `error code: 1010` refusal observed with Python's default agent.
+The [bridge regression test](../tests/fm-ext-bridge.test.sh) drives the real sender against a local stub of that edge rule by overriding the module attribute `DISCORD_API_BASE`; this is a test seam, not an operator setting.
 
 That mid-delivery state is bounded rather than permanent.
 Once a generation has recorded the same in-flight chunk without a fresh claim or progress heartbeat for longer than `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), the next `begin` reopens exactly that chunk for one more attempt and records the attempt in chunk progress.
 Each chunk attempt refreshes the progress artifact before sending, so a poster still making progress is never recovered out from under its sender regardless of the recovery window.
-After `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts, `begin` records a terminal failed marker, exits 5, and wakes Firstmate with `ext-delivery-failed <slug>`.
+After `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts, `begin` records a terminal failed marker, exits 5, and appends `ext-delivery-failed <slug>` keyed `ext-delivery-failed:<slug>` for the watcher to ring.
 So an ordinary network timeout costs at most a repeated chunk and, at worst, a surfaced failure - never a silently truncated reply that no shipped command can clear.
 
 `pending` lists only generations that are still genuinely pending.

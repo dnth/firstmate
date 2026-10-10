@@ -180,7 +180,7 @@ case "$cmd" in
         printf 'recovery-exhausted %s %s %s\n' "$SLUG" "$KIND" "$GENERATION"
         # The terminal failure is already durable; this wake is what makes it
         # visible to firstmate instead of leaving a silently undelivered reply.
-        if ! fm_wake_append check "$FM_EXT_WATCH_SHIM" "ext-delivery-failed $SLUG"; then
+        if ! fm_wake_append check "$(fm_ext_wake_key ext-delivery-failed "$SLUG")" "ext-delivery-failed $SLUG"; then
           printf 'fm-ext-outbox: recorded the terminal failure for %s but could not append its wake\n' \
             "$SLUG" >&2
         fi

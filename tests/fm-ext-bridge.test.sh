@@ -27,6 +27,7 @@ BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 HARNESS="$ROOT/bin/fm-harness.sh"
 PLUGIN="$ROOT/contrib/hermes-gateway-firstmate-comms"
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 GUILD=111111111111111111
 CHANNEL=222222222222222222
@@ -1952,6 +1953,167 @@ test_33_home_without_optin_is_inert() {
   pass "33 a home that never opts in gains no bridge state"
 }
 
+# --- 34. the real sender passes Discord's edge User-Agent rule --------------
+#
+# Every other outbox case injects its own sender, so nothing exercised the
+# request discord_send really builds. Discord's Cloudflare edge answers a
+# request whose User-Agent is not a DiscordBot agent with HTTP 403 and the
+# plain-text body "error code: 1010" before the API sees it; urllib's default
+# agent is refused that way. The stub below applies the same rule, and the real
+# sender is pointed at it through the module's API base.
+
+test_34_real_sender_passes_discord_edge_user_agent_rule() {
+  local home slug out
+  home="$TMP_ROOT/c34"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "real sender")
+  write_text "$home/ans.txt" "Aye, all shipshape."
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  out=$(home_env "$home" env DISCORD_BOT_TOKEN=test-bot-token PYTHONPATH="$PLUGIN" \
+    "$PYTHON_BIN" - "$home" <<'PY'
+import json, os, sys, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home = sys.argv[1]
+os.environ["FM_HOME"] = home
+if not hasattr(outbox_poster, "DISCORD_API_BASE"):
+    # Never let this case reach the real Discord API.
+    print("result=no-api-base")
+    sys.exit(0)
+seen = []
+class Edge(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        agent = self.headers.get("User-Agent", "")
+        seen.append((self.path, agent, self.headers.get("Authorization", ""), json.loads(body)))
+        if agent.startswith("DiscordBot ("):
+            code, ctype = 200, "application/json"
+            reply = json.dumps({"id": "34", "channel_id": "333333333333333333"}).encode()
+        else:
+            code, ctype, reply = 403, "text/plain; charset=UTF-8", b"error code: 1010\n"
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(reply)))
+        self.end_headers()
+        self.wfile.write(reply)
+    def log_message(self, *_args):
+        pass
+server = ThreadingHTTPServer(("127.0.0.1", 0), Edge)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+outbox_poster.DISCORD_API_BASE = "http://127.0.0.1:%d/api/v10" % server.server_address[1]
+result = outbox_poster.drain_outbox(home=Path(home))
+server.shutdown()
+print("result=" + ",".join(result))
+for path, agent, auth, body in seen:
+    print("path=" + path)
+    print("agent=" + agent)
+    print("auth=" + auth)
+    print("content=" + body.get("content", ""))
+PY
+  )
+  assert_contains "$out" "result=sent" "the real sender must pass the edge User-Agent rule (got: $out)"
+  assert_contains "$out" "path=/api/v10/channels/$THREAD/messages" "the real sender must post to the destination thread"
+  assert_contains "$out" "agent=DiscordBot (" "the real sender must identify as a DiscordBot agent"
+  assert_contains "$out" "auth=Bot test-bot-token" "the real sender must authenticate as the bot"
+  assert_contains "$out" "content=Aye, all shipshape." "the real sender must post the answer text"
+  assert_present "$home/state/ext-outbox/${slug}.answer.1.receipt.json" "a passed edge must write a receipt"
+  [ ! -e "$home/state/ext-outbox/${slug}.answer.1.failed.json" ] \
+    || fail "a passed edge must not record a terminal failure"
+  pass "34 the real sender passes Discord's edge User-Agent rule"
+}
+
+# --- 35. every request presents its own wake row ----------------------------
+#
+# The drain dedupes queued rows on kind+key. Bridge rows used to share the
+# check key ext-watch.check.sh, so several pending requests presented as one
+# line while the acknowledgement consumed them all.
+
+test_35_each_request_presents_its_own_wake_row() {
+  local home slug1 slug2 out rows
+  home="$TMP_ROOT/c35"
+  setup_home "$home"
+  slug1=$(intake_ok "$home" "first order" 350000000000000001)
+  slug2=$(intake_ok "$home" "second order" 350000000000000002)
+  out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>/dev/null)
+  rows=$(printf '%s\n' "$out" | grep -E '^[0-9]+	[0-9]+	check	' || true)
+  assert_contains "$rows" "ext-request $slug1" "the first pending request must present its own wake row"
+  assert_contains "$rows" "ext-request $slug2" "the second pending request must present its own wake row"
+  pass "35 every pending request presents its own wake row"
+}
+
+# --- 36. unanswered requests stay presented until answered ------------------
+#
+# A drain read through grep -v -E '^[0-9]{10}\s' deletes every raw row, and the
+# acknowledgement then consumes the unseen rows, so requests were lost. The
+# inbox record is the durable truth, so the drain lists every unanswered
+# request in a section a row filter cannot remove and an
+# acknowledgement cannot consume.
+
+drain_ack() {  # <home> <drain-stderr>
+  local home=$1 err=$2 sequence generation
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "drain printed no acknowledgement command"
+  home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation" >/dev/null 2>&1 || fail "acknowledgement must succeed"
+}
+
+test_36_unanswered_requests_survive_filtered_drains_until_answered() {
+  local home slug out
+  home="$TMP_ROOT/c36"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "what is waiting on me" 360000000000000001)
+  out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>"$home/drain.err" \
+    | grep -v -E '^[0-9]{10}\s')
+  assert_contains "$out" "EXT REQUESTS AWAITING ANSWER" "a row-filtered drain must still present the request section"
+  assert_contains "$out" "ext-request $slug" "a row-filtered drain must still name the pending request"
+  drain_ack "$home" "$home/drain.err"
+  out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>/dev/null)
+  assert_contains "$out" "ext-request $slug" "an acknowledged but unanswered request must still be presented"
+  mv "$home/config/ext-bridge" "$home/config/ext-bridge.off"
+  out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>/dev/null)
+  case "$out" in
+    *"EXT REQUESTS AWAITING ANSWER"*) fail "a bridge that is switched off must not present requests" ;;
+  esac
+  mv "$home/config/ext-bridge.off" "$home/config/ext-bridge"
+  # ext-respond removes the inbox record once the request is answered.
+  rm -f "$home/state/ext-inbox/$slug.json"
+  out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>/dev/null)
+  case "$out" in
+    *"EXT REQUESTS AWAITING ANSWER"*|*"ext-request $slug"*) fail "an answered request must leave the drain" ;;
+  esac
+  pass "36 unanswered requests survive filtered and acknowledged drains until answered"
+}
+
+test_37_every_pending_request_is_listed_without_limit() {
+  local home slug out message i
+  local slugs=()
+  home="$TMP_ROOT/c37"
+  setup_home "$home"
+  for ((i = 1; i <= 22; i++)); do
+    printf -v message '370000000000000%03d' "$i"
+    slug=$(intake_ok "$home" "pending request $i" "$message")
+    slugs+=("$slug")
+  done
+  out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>"$home/drain.err" \
+    | grep -v -E '^[0-9]{10}\s')
+  assert_contains "$out" "EXT REQUESTS AWAITING ANSWER" "the drain must present the request section"
+  for slug in "${slugs[@]}"; do
+    printf '%s\n' "$out" | grep -Fx "ext-request $slug" >/dev/null \
+      || fail "every pending request must have a plain ext-request line: $slug"
+  done
+  drain_ack "$home" "$home/drain.err"
+  out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>/dev/null)
+  for slug in "${slugs[@]}"; do
+    printf '%s\n' "$out" | grep -Fx "ext-request $slug" >/dev/null \
+      || fail "every unanswered request must remain listed after acknowledgement: $slug"
+  done
+  pass "37 every pending request is listed without a limit"
+}
+
 test_1_allowlisted_intake_and_non_fm
 test_2_correlation_persists
 test_3_immediate_ack
@@ -1989,5 +2151,9 @@ test_30_secret_gate_rejects_every_bad_shape
 test_31_optin_is_config_file_only
 test_32_poll_unclaims_when_wake_fails
 test_33_home_without_optin_is_inert
+test_34_real_sender_passes_discord_edge_user_agent_rule
+test_35_each_request_presents_its_own_wake_row
+test_36_unanswered_requests_survive_filtered_drains_until_answered
+test_37_every_pending_request_is_listed_without_limit
 
 echo "all fm-ext-bridge tests passed"

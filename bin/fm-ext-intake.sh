@@ -191,7 +191,7 @@ offer_rc=$?
 case "$offer_rc" in
   0)
     if [ "$WAKE" = 1 ]; then
-      if ! fm_wake_append check "$FM_EXT_WATCH_SHIM" "ext-request $SLUG"; then
+      if ! fm_wake_append check "$(fm_ext_wake_key ext-request "$SLUG")" "ext-request $SLUG"; then
         if ! fm_ext_offer_registry_unclaim "$STATE" "$SLUG"; then
           die "could not append the wake, and the offer marker could not be released" 1
         fi

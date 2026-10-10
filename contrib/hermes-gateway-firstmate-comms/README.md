@@ -37,6 +37,14 @@ A `<guild>` rule does **not** hand every member of that Discord server command a
 A rule with an empty component (`<guild>:`) or a fourth component is malformed and is ignored, so a typo cannot widen a grant.
 The allowlist decision lives in `bin/fm-ext-intake.sh`, which this plugin calls; the plugin keeps no copy of the rule grammar and reports the refusal that script returns.
 
+## Sending a request
+
+Send `/fm` from Discord's command pop-up: type `/fm`, pick this bot's `/fm` entry when the pop-up shows it, put the request in its box, and send.
+Typing `/fm hello` and pressing Enter before the pop-up appears sends ordinary chat text instead of the command, and the gateway ignores ordinary text that does not @mention the bot.
+For thread authorization and reply routing, see the [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).
+
+## How it works
+
 The plugin registers slash command `fm` and the `pre_gateway_dispatch` hook.
 Hermes 0.20.x dispatches plugin commands as `handler(user_args)` with no event, so the hook binds each inbound `/fm` MessageEvent destination task-locally before dispatch and the handler consumes it in the same task.
 Concurrent identical `/fm` texts never share a destination: the binding is task-local, never a shared cache.
@@ -45,7 +53,7 @@ It never calls `dispatch_tool("terminal", ...)`.
 The slash handler returns a fast ack without waiting for Firstmate to finish the work.
 When the destination cannot be resolved the handler answers that the Discord destination is incomplete and names the running Hermes version (`unknown` if the version cannot be imported), never a silent drop.
 The [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge) owns request identity and reply destination fields.
-Destination isolation, originating-thread routing, version diagnostics, and required hook registration are covered by [the destination regression test](../../tests/fm-ext-plugin-dest.test.sh).
+Destination isolation, originating-thread and parent-channel routing, version diagnostics, and required hook registration are covered by [the destination regression test](../../tests/fm-ext-plugin-dest.test.sh).
 
 An outbox watcher drains `state/ext-outbox/` through `bin/fm-ext-outbox.sh`.
 Unsent payloads retry after a gateway restart.
@@ -60,6 +68,7 @@ A generation left in-flight by an ambiguous send is reopened for another attempt
 Delivered payloads are retired as soon as they have a receipt, so poll cost does not grow with the number of replies already sent, and leftover records expire after `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 7 days).
 `FM_EXT_OUTBOX_POLL_SECS` (default 2) sets how often the watcher drains the outbox.
 Set `DISCORD_BOT_TOKEN` (or `HERMES_DISCORD_TOKEN`) for Discord REST delivery.
+The [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge) owns the poster's User-Agent requirement and real-sender regression coverage.
 Firstmate core has no Discord library.
 
 See [Local Communication Officer bridge](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).

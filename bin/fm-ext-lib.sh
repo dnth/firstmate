@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Shared helpers for the sibling local-bridge Communication Officer
-# (fm-ext-intake.sh, fm-ext-emit.sh, fm-ext-link.sh, fm-ext-poll.sh).
+# (fm-ext-intake.sh, fm-ext-emit.sh, fm-ext-link.sh, fm-ext-poll.sh, and the
+# bridge parts of fm-bootstrap.sh, fm-watch.sh, and fm-wake-drain.sh).
 #
 # This file is sourced, never executed. It copies the private-artifact
 # publication pattern used by X mode without sourcing bin/fm-x-lib.sh and
@@ -1333,6 +1334,134 @@ fm_ext_poll_shim_valid() {
   local file=$1 home=$2 root=$3
   fm_ext_single_link_file_mode_valid "$file" 700 || return 1
   cmp -s "$file" <(fm_ext_poll_shim_content "$home" "$root")
+}
+
+# fm_ext_shim_home <home>: the FM_HOME spelling baked into the shim - an
+# absolute path as given, a relative one resolved physically.
+fm_ext_shim_home() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) ;;
+  esac
+}
+
+# fm_ext_file_write_if_changed <dest> <content> <mode>: atomically replace a
+# single-link regular file with <content> plus a trailing newline unless it
+# already matches; refuses a symlink or hard-linked destination.
+fm_ext_file_write_if_changed() {
+  local dest=$1 content=$2 mode=$3 parent tmp device current
+  parent=${dest%/*}
+  [ "$parent" != "$dest" ] || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    device=$(stat -f %d "$parent" 2>/dev/null) || return 1
+  else
+    device=$(stat -c %d "$parent" 2>/dev/null) || return 1
+  fi
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    fm_ext_single_link_file_valid "$dest" "$device" || return 1
+    if [ "$(uname)" = Darwin ]; then
+      current=$(stat -f %Lp "$dest" 2>/dev/null) || return 1
+    else
+      current=$(stat -c %a "$dest" 2>/dev/null) || return 1
+    fi
+    if [ "$current" = "$mode" ] && cmp -s "$dest" <(printf '%s\n' "$content"); then
+      return 0
+    fi
+  fi
+  tmp=$(umask 077; mktemp "$parent/.fm-ext-shim.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s\n' "$content" > "$tmp" \
+    || ! chmod "$mode" "$tmp" \
+    || ! fm_ext_single_link_file_mode_valid "$tmp" "$mode" "$device" \
+    || ! mv -f -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  fm_ext_single_link_file_mode_valid "$dest" "$mode" "$device" \
+    && cmp -s "$dest" <(printf '%s\n' "$content")
+}
+
+fm_ext_file_remove_if_present() {
+  local file=$1 parent=${1%/*}
+  [ -e "$file" ] || [ -L "$file" ] || return 0
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  rm -f -- "$file" 2>/dev/null || return 1
+  ! { [ -e "$file" ] || [ -L "$file" ]; }
+}
+
+# fm_ext_watch_shim_converge <home> <root>: make state/ext-watch.check.sh agree
+# with this home's opt-in. The single owner of arming and removing the shim:
+# the session-start bootstrap reports its verdict, and every watcher cycle
+# calls it so a bridge switched on or off mid-session converges without a
+# restart. Prints "<state> <action>":
+#   state  off (not opted in), secret (secret missing or not 0600),
+#          jq (jq missing), on (active and armable)
+#   action none, removed, remove-failed, armed, arm-failed, arm-failed-stale
+fm_ext_watch_shim_converge() {
+  local home=$1 root=$2 verdict shim shim_home content
+  shim="$(fm_ext_state_dir "$home")/$FM_EXT_WATCH_SHIM"
+  if ! fm_ext_bridge_opted_in "$home"; then
+    verdict=off
+  elif ! fm_ext_secret_valid "$(fm_ext_secret_path "$home")"; then
+    verdict=secret
+  elif ! command -v jq >/dev/null 2>&1; then
+    verdict=jq
+  else
+    verdict=on
+  fi
+  if [ "$verdict" != on ]; then
+    if [ -e "$shim" ] || [ -L "$shim" ]; then
+      if fm_ext_file_remove_if_present "$shim"; then
+        printf '%s removed\n' "$verdict"
+      else
+        printf '%s remove-failed\n' "$verdict"
+      fi
+    else
+      printf '%s none\n' "$verdict"
+    fi
+    return 0
+  fi
+  if mkdir -p "${shim%/*}" 2>/dev/null \
+    && shim_home=$(fm_ext_shim_home "$home") \
+    && content=$(fm_ext_poll_shim_content "$shim_home" "$root") \
+    && fm_ext_file_write_if_changed "$shim" "$content" 700 \
+    && fm_ext_poll_shim_valid "$shim" "$shim_home" "$root"; then
+    printf 'on armed\n'
+  elif fm_ext_file_remove_if_present "$shim"; then
+    printf 'on arm-failed\n'
+  else
+    printf 'on arm-failed-stale\n'
+  fi
+}
+
+# --- wake keys and pending requests ------------------------------------------
+
+# fm_ext_wake_key <event> <slug>: the durable wake-row key for one bridge
+# event (ext-request or ext-delivery-failed). Keyed per request, because the
+# drain presents one row per kind+key and a shared key collapsed every pending
+# request into one presented line.
+fm_ext_wake_key() {
+  printf '%s:%s\n' "$1" "$2"
+}
+
+# fm_ext_pending_requests [home]: one slug per unanswered request.
+# The inbox record is the
+# durable truth: ext-respond removes it once the request is answered, so a
+# request stays listed however its wake rows were presented or acknowledged.
+# Silent unless the bridge is active.
+fm_ext_pending_requests() {
+  local home=${1:-${FM_HOME:?}} inbox file base slug
+  fm_ext_active "$home" || return 0
+  inbox=$(fm_ext_inbox_dir "$home")
+  [ -d "$inbox" ] && [ ! -L "$inbox" ] || return 0
+  for file in "$inbox"/*.json; do
+    [ -e "$file" ] || continue
+    base=${file##*/}
+    slug=${base%.json}
+    fm_ext_slug_valid "$slug" || continue
+    fm_ext_private_artifact_file_valid "$inbox" "$base" 600 || continue
+    printf '%s\n' "$slug"
+  done
 }
 
 # --- task meta link (not x_request=) ----------------------------------------

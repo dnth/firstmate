@@ -41,6 +41,13 @@ SendFn = Callable[[dict], dict]
 _WATCHER_STARTED = False
 _WATCHER_LOCK = threading.Lock()
 _TRANSIENT_HTTP = {429, 500, 502, 503, 504}
+# Discord REST base. Hermetic tests point the real sender at a local stub by
+# assigning this module attribute; nothing in production overrides it.
+DISCORD_API_BASE = "https://discord.com/api/v10"
+# Discord requires a "DiscordBot ($url, $version)" agent. Its Cloudflare edge
+# refuses urllib's default "Python-urllib/x.y" with HTTP 403 and the plain-text
+# body "error code: 1010" before the API, so every post failed without it.
+USER_AGENT = "DiscordBot (https://github.com/dnth/firstmate, 0.1.0)"
 
 
 class DiscordSendError(Exception):
@@ -375,12 +382,13 @@ def discord_send(payload: dict) -> dict:
     channel = payload["thread_id"] or payload["channel_id"]
     body = json.dumps({"content": payload["text"]}).encode("utf-8")
     request = urllib.request.Request(
-        f"https://discord.com/api/v10/channels/{channel}/messages",
+        f"{DISCORD_API_BASE}/channels/{channel}/messages",
         data=body,
         method="POST",
         headers={
             "Authorization": f"Bot {token}",
             "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
         },
     )
     try:
