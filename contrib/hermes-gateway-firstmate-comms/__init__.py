@@ -1,6 +1,6 @@
 """Hermes Gateway plugin for the sibling local Firstmate Communication Officer.
 
-Install this directory into a dedicated gateway HERMES_HOME plugins folder.
+See README.md for installation into a dedicated gateway profile.
 Do not enable it on a crewmate TUI profile. Crewmate Hermes still launches as
 ``hermes chat --tui`` and is a separate adapter.
 
@@ -20,7 +20,7 @@ except ImportError:
 
 
 def register(ctx):
-    """Wire the /fm slash command and start the local outbox poster."""
+    """Wire /fm and its required dispatch hook, then start the outbox poster."""
     ctx.register_command(
         "fm",
         handler=handle_fm_command,

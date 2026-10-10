@@ -205,7 +205,7 @@ def maybe_intake_from_text(text: str, context: dict | None) -> str | None:
 
 def resolve_destination(raw_args: str, context: dict | None = None) -> dict[str, str]:
     """Resolve the intake destination for one /fm dispatch.
-    An explicit caller context dict wins when one is passed. Otherwise the
+    A valid explicit caller context dict wins when one is passed. Otherwise the
     destination is the task-local bound by pre_gateway_dispatch in this
     same asyncio task - never a shared cache, so concurrent identical
     texts cannot cross author or channel authority. Hermes binds its own
@@ -233,7 +233,7 @@ def handle_fm_command(raw_args: str, context: dict | None = None) -> str:
     The Hermes 0.20.x plugin dispatch calls handler(user_args) with no
     context, so the destination arrives via the task-local bound by the
     pre_gateway_dispatch hook in the same task; an explicit context dict
-    still wins when a caller (or a newer Hermes) passes one.
+    still wins when a caller (or a newer Hermes) passes a valid one.
     """
     dest = resolve_destination(raw_args, context)
     if not destination_valid(dest):

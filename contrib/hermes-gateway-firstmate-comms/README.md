@@ -1,4 +1,5 @@
 # Hermes Gateway plugin: Firstmate Communication Officer
+
 Install this directory into a **dedicated Hermes Gateway profile**, never the crewmate TUI profile.
 Supported Hermes gateway range is 0.20.0 and newer, verified against 0.20.5.
 
@@ -7,6 +8,7 @@ Firstmate still launches crewmates with `hermes chat --tui`.
 That command is not this Discord gateway.
 
 ## Dedicated gateway profile
+
 Use a profile home, for example `~/.hermes/profiles/fmcomms`, which gets its own `hermes-gateway-fmcomms.service`.
 Installing a gateway from an arbitrary `HERMES_HOME` path reuses and rewrites the default `hermes-gateway.service` on Hermes 0.20.5, so prefer the profile path.
 Copy or symlink this plugin into the profile's `plugins/firstmate-comms/` directory.
@@ -41,8 +43,9 @@ Concurrent identical `/fm` texts never share a destination: the binding is task-
 It writes Discord text to a temp file and execs `bin/fm-ext-intake.sh --text-file`.
 It never calls `dispatch_tool("terminal", ...)`.
 The slash handler returns a fast ack without waiting for Firstmate to finish the work.
-When the destination cannot be resolved the handler answers that the Discord destination is incomplete and names the Hermes version, never a silent drop.
-A slash-command request records canonical `request_id` `discord:<guild>:<channel>:<thread>:<message>`, where `<message>` is the Discord interaction id and `<thread>` defaults to the channel; replies post to that same thread.
+When the destination cannot be resolved the handler answers that the Discord destination is incomplete and names the running Hermes version (`unknown` if the version cannot be imported), never a silent drop.
+The [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge) owns request identity and reply destination fields.
+Destination isolation, originating-thread routing, version diagnostics, and required hook registration are covered by [the destination regression test](../../tests/fm-ext-plugin-dest.test.sh).
 
 An outbox watcher drains `state/ext-outbox/` through `bin/fm-ext-outbox.sh`.
 Unsent payloads retry after a gateway restart.

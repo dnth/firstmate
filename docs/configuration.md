@@ -766,6 +766,7 @@ Every other shape - a trailing or embedded empty component such as `<guild>:` or
 The recorded request and its destination context both carry the granted `authority`, which is what the `ext-respond` skill reads.
 
 Canonical `request_id` is `discord:<guild>:<channel>:<thread>:<message>` and keeps those colons in JSON bodies.
+For a slash command, `<message>` is the Discord interaction id and `<thread>` defaults to the channel; replies post to that same thread.
 Filenames use the SHA-256 hex digest of that canonical id (`slug`).
 `bin/fm-ext-intake.sh` publishes `state/ext-inbox/<slug>.json` (mode 0600), durable destination context at `state/ext-context/<slug>.json`, and a one-wake offer marker at `state/ext-context/<slug>.offered.json`.
 The same message id claims the existing offer and does not append a second wake.
@@ -815,13 +816,9 @@ This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id` as `ext_request=` / `ext_request_slug=` / `ext_request_ts=` / `ext_followups=`, never `x_request=`.
 
-The Hermes Gateway plugin lives in `contrib/hermes-gateway-firstmate-comms/` and must be installed into a dedicated gateway profile home (for example `~/.hermes/profiles/fmcomms`, which gets its own `hermes-gateway-<name>.service`), not the crewmate TUI profile.
-Installing a gateway from an arbitrary `HERMES_HOME` path reuses and rewrites the default `hermes-gateway.service` on Hermes 0.20.5, so prefer the profile path.
-Supported Hermes gateway range is 0.20.0 and newer, verified against 0.20.5.
-Hermes 0.20.x dispatches plugin commands as `handler(user_args)` with no event, so the plugin's `pre_gateway_dispatch` hook binds each inbound `/fm` MessageEvent destination task-locally before dispatch and the handler consumes it in the same task; concurrent identical texts never share a destination.
-A slash-command request records canonical `request_id` `discord:<guild>:<channel>:<thread>:<message>`, where `<message>` is the Discord interaction id and `<thread>` defaults to the channel, and replies post to that same thread.
-When the destination cannot be resolved the plugin answers that the Discord destination is incomplete and names the Hermes version, never a silent drop.
+For Hermes 0.20.0 and newer, install the gateway plugin into a dedicated gateway profile, never the crewmate TUI profile; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md) owns profile installation, compatibility verification, and destination resolution.
 Crewmate Hermes still launches as `hermes chat --tui`.
+The `ext-respond` skill owns drain, classification, lifecycle action, and local emit.
 
 ## Process-to-event sources (state/procevent)
 
