@@ -12,10 +12,6 @@ from pathlib import Path
 # bin/fm-ext-intake.sh exits 3 when the allowlist refuses the request, which is
 # how a refusal is told apart from a broken bridge without parsing its message.
 INTAKE_REFUSED = 3
-# Hermes gateway version this plugin resolves destinations against.
-# Dispatch calls handler(user_args) with no event, so the destination arrives
-# via the plugin-owned task-local below; other releases fail loudly below.
-HERMES_VERSION = "0.20.5"
 _SNOWFLAKE = re.compile(r"^[0-9]+$")
 _FM_PREFIX = re.compile(r"^/fm(?:@\S+)?(?:\s+|$)")
 # Task-local destination for the inbound event currently dispatching.
@@ -241,9 +237,13 @@ def handle_fm_command(raw_args: str, context: dict | None = None) -> str:
     """
     dest = resolve_destination(raw_args, context)
     if not destination_valid(dest):
+        try:
+            from hermes_cli import __version__ as hermes_version
+        except ImportError:
+            hermes_version = "unknown"
         return (
             "Firstmate refused this request: Discord destination is incomplete "
-            f"(Hermes {HERMES_VERSION}). Try again from the channel or thread."
+            f"(Hermes {hermes_version}). Try again from the channel or thread."
         )
     home = firstmate_home()
     request_text = fm_request_text(raw_args)

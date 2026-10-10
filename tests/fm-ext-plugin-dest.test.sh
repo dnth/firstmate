@@ -157,13 +157,26 @@ test_4_unresolvable_names_hermes_version() {
   out=$(plugin_env x <<'PY'
 import os, sys
 sys.path.insert(0, os.environ.get("PYTHONPATH", ""))
+from types import ModuleType
+from unittest.mock import patch
 import intake
 intake.bind_event_destination(None)
-print(intake.handle_fm_command("no destination anywhere"))
+for version in ("0.20.0", "0.20.9"):
+    hermes = ModuleType("hermes_cli")
+    hermes.__version__ = version
+    with patch.dict(sys.modules, {"hermes_cli": hermes}):
+        reply = intake.handle_fm_command("no destination anywhere")
+        assert f"(Hermes {version})" in reply, reply
+        print(reply)
+with patch.dict(sys.modules, {"hermes_cli": None}):
+    reply = intake.handle_fm_command("no destination anywhere")
+    assert "(Hermes unknown)" in reply, reply
+    print(reply)
 PY
-  )
+  ) || fail "Hermes version diagnostic failed"
   assert_contains "$out" "destination is incomplete" "an unresolvable destination must say so"
-  assert_contains "$out" "Hermes 0.20.5" "the refusal must name the Hermes version"
+  assert_contains "$out" "Hermes 0.20.0" "the refusal must name the running Hermes version"
+  assert_contains "$out" "Hermes 0.20.9" "the refusal must reflect a different Hermes version"
   pass "4 unresolvable destination fails loudly with the Hermes version"
 }
 
@@ -199,10 +212,47 @@ PY
   pass "5 every event rebinds so no stale destination leaks"
 }
 
+test_6_hook_registration_errors_propagate() {
+  local out
+  out=$(plugin_env x <<'PY'
+import importlib.util, sys
+from pathlib import Path
+from unittest.mock import Mock, patch
+spec = importlib.util.spec_from_file_location("fm_plugin", Path(sys.argv[3]) / "__init__.py")
+plugin = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(plugin)
+with patch.object(plugin, "start_outbox_watcher") as watcher:
+    ctx = Mock()
+    error = RuntimeError("hook registration failed")
+    ctx.register_hook.side_effect = error
+    try:
+        plugin.register(ctx)
+    except RuntimeError as exc:
+        assert exc is error
+    else:
+        raise AssertionError("hook registration failure was hidden")
+    ctx.register_command.assert_called_once_with(
+        "fm", handler=plugin.handle_fm_command,
+        description="Send this request to the local Firstmate Communication Officer",
+        args_hint="request")
+    watcher.assert_not_called()
+    ctx = Mock()
+    plugin.register(ctx)
+    ctx.register_command.assert_called_once()
+    ctx.register_hook.assert_called_once_with("pre_gateway_dispatch", plugin.pre_gateway_dispatch_hook)
+    watcher.assert_called_once_with()
+print("registration errors propagate; successful registration starts watcher")
+PY
+  ) || fail "plugin registration behavior failed"
+  assert_contains "$out" "registration errors propagate" "hook errors must remain visible"
+  pass "6 required hook registration errors propagate and successful startup works"
+}
+
 test_1_interleaved_identical_text_keeps_authority
 test_2_denied_author_gets_allowlist_refusal
 test_3_reply_target_is_originating_thread
 test_4_unresolvable_names_hermes_version
 test_5_rebind_clears_stale_destination
+test_6_hook_registration_errors_propagate
 
 echo "all fm-ext-plugin-dest tests passed"

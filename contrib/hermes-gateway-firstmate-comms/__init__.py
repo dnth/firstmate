@@ -27,12 +27,5 @@ def register(ctx):
         description="Send this request to the local Firstmate Communication Officer",
         args_hint="request",
     )
-    # Hermes 0.20.x dispatches plugin commands as handler(user_args) with no
-    # event, so this hook binds the /fm MessageEvent destination task-locally
-    # before dispatch for handle_fm_command to consume. Unknown hook names
-    # only warn, so older Hermes releases keep the command working.
-    try:
-        ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch_hook)
-    except Exception:
-        pass
+    ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch_hook)
     start_outbox_watcher()
