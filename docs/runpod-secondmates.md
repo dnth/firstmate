@@ -211,6 +211,8 @@ An unrecognized lifecycle value is not dormant, so corrupt metadata surfaces as 
 The parent watcher also recognizes those lifecycle records directly and absorbs a dormant route on the long pause cadence without probing its absent beacon or escalating it as a possible wedge.
 Away mode honors the same dormant recheck cadence: the away-mode supervisor keeps the watcher's pause and re-surface markers while the lifecycle record stays dormant, so the dormant recheck fires at most once per pause re-surface window in away mode exactly as with away mode off.
 A dormant recheck is never wedge-aged: the supervisor records no stale persistence marker for it and probes no absent host, so it cannot escalate as a false wedge or an inconclusive remote-stale probe.
+The supervisor reuses the watcher's `fm_compute_is_dormant` predicate for both RunPod and Boat routes without synthesizing a `paused:` status event.
+Once the lifecycle leaves dormancy, ordinary stale and pause handling resumes without retaining dormant suppression.
 
 ### Endpoint stalls and never-ready recovery
 

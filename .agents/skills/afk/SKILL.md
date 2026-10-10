@@ -162,7 +162,7 @@ Classify each wake this way:
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS`, housekeeping sends one awaiting-external recheck and resets the pause window; [`docs/configuration.md`](../../../docs/configuration.md) owns the shared default and override.
 - A `stale` `captain-held` recovery status is pause-like only after a local backend liveness probe proves the endpoint dead or missing.
   Live or ambiguous local endpoints remain stale and visible.
-  Every stale remote endpoint is rechecked through its owner rather than trusting local absence.
+  Outside the [dormant compute exception](../../../docs/runpod-secondmates.md#waking-is-automatic-where-it-matters), every stale remote endpoint is rechecked through its owner rather than trusting local absence.
   A confirmed dead or missing remote endpoint suppresses only a still-`captain-held` status; a non-held stale worker remains visible or escalates.
   A declared `paused:` wait follows its existing long-cadence pause path, while other live, ambiguous, changed, or inconclusive recovery remains visible or escalates.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
