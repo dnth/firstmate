@@ -748,7 +748,7 @@ test_reconcile_dormant_suppresses_repeat_within_window() {
   FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_HOME="$dir" \
     reconcile_pause_tracking "$win" "$state" "$last"
   [ -e "$state/.paused-resurfaced-$watcher_key" ] || fail "reconciliation dropped the dormant throttle, so the next watcher pass re-fires inside the window"
-  rf_age=$(( $(date +%s) - $(stat -c %Y "$state/.paused-resurfaced-$watcher_key" 2>/dev/null || echo 0) ))
+  rf_age=$(_file_age "$state/.paused-resurfaced-$watcher_key")
   [ "$rf_age" -lt "${FM_PAUSE_RESURFACE_SECS:-2700}" ] || fail "dormant throttle age ${rf_age}s is already past the window"
   pass "dormant reconciliation holds the re-surface throttle inside one PAUSE_RESURFACE_SECS window"
 }
