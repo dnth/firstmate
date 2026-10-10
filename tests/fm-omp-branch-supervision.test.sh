@@ -967,6 +967,42 @@ JSON
 # status ident, status endpoint, verdict, no completion obligation) stays
 # durable but merges silently; a changed summary on the same span still
 # renders, and a captain verdict still opens a turn.
+test_repeat_prior_uses_latest_same_task_outcome() {
+  local home seq task verdict expected out snapshot
+  home="$TMP_ROOT/repeat-prior-store"
+  mkdir -p "$home/state"
+  printf 'working: task-a continues\n' > "$home/state/task-a.status"
+  printf 'working: task-b continues\n' > "$home/state/task-b.status"
+  while read -r task verdict expected; do
+    seq=$(FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" append \
+      --task "$task" --verdict "$verdict" --summary "$task $verdict") || fail "repeat fixture append failed"
+    out=$(FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" repeat-prior --seq "$seq") \
+      || fail "repeat-prior failed for seq $seq"
+    [ "$out" = "$expected" ] || fail "seq $seq: expected $expected, got $out"
+  done <<'ROWS'
+task-a routine current
+task-b routine current
+task-a routine repeat
+task-a captain current
+task-b routine repeat
+task-a routine current
+task-b routine repeat
+task-a routine repeat
+ROWS
+  printf 'working: new progress\n' >> "$home/state/task-a.status"
+  seq=$(FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'new endpoint') || fail "changed endpoint append failed"
+  [ "$(FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" repeat-prior --seq "$seq")" = current ] \
+    || fail "a changed same-task endpoint was silenced"
+  snapshot=$(cat "$home/state/branch-outcomes.jsonl")
+  [ "$(FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" repeat-prior --seq 3)" = repeat ] \
+    || fail "later same-task records changed an earlier repeat verdict"
+  [ "$(FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" repeat-prior --seq 999)" = current ] \
+    || fail "a missing sequence was silenced"
+  [ "$(cat "$home/state/branch-outcomes.jsonl")" = "$snapshot" ] || fail "repeat-prior changed the store"
+  pass "repeat-prior compares the latest preceding outcome of the same task"
+}
+
 test_identical_repeat_routine_outcome_merges_silently() {
   local fixture state out seq1 seq2 ident1 ident2 end1 end2
   fixture="$TMP_ROOT/identical-repeat"
@@ -977,11 +1013,14 @@ test_identical_repeat_routine_outcome_merges_silently() {
   # the grant snapshots carries no undelivered completion obligation.
   printf 'working: setup done\nresolved [key=nm-01RUN-test]: answered: test exception approved\n' > "$state/task-a.status"
   printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
-  printf '1\t1\tstale\tdefault:wA:p1\tstale: default:wA:p1\n2\t2\tstale\tdefault:wA:p1\tstale: default:wA:p1 (idle-with-open-work)\n3\t3\tstale\tdefault:wA:p1\tstale: default:wA:p1 (idle-with-open-work)\n' > "$state/.wake-queue"
+  printf 'working: task-b continues\n' > "$state/task-b.status"
+  printf 'project=project-a\nwindow=default:wB:p1\n' > "$state/task-b.meta"
+  printf '1\t1\tstale\tdefault:wA:p1\tstale: default:wA:p1\n2\t2\tstale\tdefault:wB:p1\tstale: default:wB:p1\n3\t3\tstale\tdefault:wA:p1\tstale: default:wA:p1 (idle-with-open-work)\n4\t4\tstale\tdefault:wA:p1\tstale: default:wA:p1 (idle-with-open-work)\n' > "$state/.wake-queue"
   cat > "$fixture/steps.json" <<'JSON'
 {
   "steps": [
     { "wake": "stale: default:wA:p1", "report": { "task": "task-a", "verdict": "routine", "summary": "task-a remains complete with PR green" } },
+    { "wake": "stale: default:wB:p1", "report": { "task": "task-b", "verdict": "routine", "summary": "task-b continues" } },
     { "wake": "stale: default:wA:p1 (idle-with-open-work)", "report": { "task": "task-a", "verdict": "routine", "summary": "task-a remains complete with PR green" } },
     { "wake": "stale: default:wA:p1 (idle-with-open-work)", "report": { "task": "task-a", "verdict": "captain", "summary": "task-a has a new finding" } }
   ]
@@ -996,19 +1035,19 @@ JSON
     node --experimental-strip-types "$fixture/driver.mjs" 2>&1) \
     || fail "identical-repeat driver failed: $out"
 
-  # All three outcomes stay durable with accepted merge receipts.
-  for s in 1 2 3; do
+  # All four outcomes stay durable with accepted merge receipts.
+  for s in 1 2 3 4; do
     grep -F "\"seq\":$s,\"state\":\"accepted\"" "$state/branch-merge-deliveries.jsonl" >/dev/null \
       || fail "seq $s lost its accepted merge receipt: $(cat "$state/branch-merge-deliveries.jsonl" 2>/dev/null)"
   done
   # The repeat check is identity on (task, verdict, statusIdent,
-  # statusEndpoint): seq 2 repeats seq 1, seq 3 is a captain verdict.
-  [ "$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" repeat-prior --seq 2)" = repeat ] \
-    || fail "seq 2 was not classed an identical repeat of seq 1"
-  [ "$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" repeat-prior --seq 3)" = current ] \
-    || fail "seq 3 (captain verdict) was classed a repeat"
-  seq1=$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" list --recent 3 | sed -n '1p')
-  seq2=$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" list --recent 3 | sed -n '2p')
+  # statusEndpoint): seq 3 repeats seq 1, seq 4 is a captain verdict.
+  [ "$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" repeat-prior --seq 3)" = repeat ] \
+    || fail "seq 3 was not classed an identical repeat of seq 1"
+  [ "$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" repeat-prior --seq 4)" = current ] \
+    || fail "seq 4 (captain verdict) was classed a repeat"
+  seq1=$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" list --recent 4 | sed -n '1p')
+  seq2=$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" list --recent 4 | sed -n '3p')
   ident1=$(printf '%s' "$seq1" | jq -r '.statusIdent'); end1=$(printf '%s' "$seq1" | jq -r '.statusEndpoint')
   ident2=$(printf '%s' "$seq2" | jq -r '.statusIdent'); end2=$(printf '%s' "$seq2" | jq -r '.statusEndpoint')
   [ "$ident1" = "$ident2" ] && [ "$end1" = "$end2" ] \
@@ -1720,6 +1759,7 @@ test_branch_merge_reconciles_after_the_cursor_handoff
 test_branch_repeat_check_gap_still_reconciles
 test_consumed_completion_is_redelivered_once_per_generation
 test_delivered_completion_re_report_opens_no_main_turn
+test_repeat_prior_uses_latest_same_task_outcome
 test_identical_repeat_routine_outcome_merges_silently
 test_decision_owned_wake_reaches_main_past_branch_and_episode
 test_decision_owned_wake_forces_turn_without_episode

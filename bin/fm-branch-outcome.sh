@@ -898,18 +898,18 @@ $DELIVERED_KEYS" in
         if [ "$(record_seq "$NORM")" = "$SEQ" ]; then
           RROW=$NORM
           RTASK=$(printf '%s' "$NORM" | jq -r '.task // ""' 2>/dev/null) || RTASK=
-        elif [ -n "$RROW" ]; then
           break
-        else
-          NTASK=$(printf '%s' "$NORM" | jq -r '.task // ""' 2>/dev/null) || NTASK=
-          # Track the latest row; the helper re-checks task equality, so a
-          # neighbour task can never silence this row - it only decides which
-          # candidate the helper compares.
-          case "$NTASK" in '') ;; *) PROW=$NORM ;; esac
         fi
       done < "$STORE"
+      if [ -n "$RTASK" ]; then
+        while IFS= read -r LINE || [ -n "$LINE" ]; do
+          NORM=$(normalize_record "$LINE" 2>/dev/null) || continue
+          [ "$(record_seq "$NORM")" != "$SEQ" ] || break
+          NTASK=$(printf '%s' "$NORM" | jq -r '.task // ""' 2>/dev/null) || NTASK=
+          [ "$NTASK" != "$RTASK" ] || PROW=$NORM
+        done < "$STORE"
+      fi
     fi
-    [ -n "$RTASK" ] || PROW=
     fm_lock_release "$LOCK"
     if [ -z "$RROW" ] || [ -z "$PROW" ]; then
       printf 'current\n'
