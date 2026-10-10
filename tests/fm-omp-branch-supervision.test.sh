@@ -588,7 +588,7 @@ const pi = {
       failOnce.splice(index, 1);
       throw new Error("send refused");
     }
-    sends.push({ content: message.content, triggerTurn: opts?.triggerTurn === true, step: stepIndex });
+    sends.push({ content: message.content, display: message.display !== false, triggerTurn: opts?.triggerTurn === true, step: stepIndex });
   },
   registerCommand() {},
   registerTool() {},
@@ -1013,10 +1013,16 @@ JSON
   ident2=$(printf '%s' "$seq2" | jq -r '.statusIdent'); end2=$(printf '%s' "$seq2" | jq -r '.statusEndpoint')
   [ "$ident1" = "$ident2" ] && [ "$end1" = "$end2" ] \
     || fail "repeat pair spans differ ($ident1@$end1 vs $ident2@$end2): repeat-prior would be vacuous"
-  # The captain outcome still opens a main turn.
-  assert_contains "$out" '"content":"task-a: task-a has a new finding","triggerTurn":true' \
+  # The first routine note renders; the identical repeat merges silently.
+  assert_contains "$out" '"content":"⛵ task-a: task-a remains complete with PR green","display":true' \
+    "the first routine note did not render: $out"
+  assert_contains "$out" '"content":"⛵ task-a: task-a remains complete with PR green","display":false' \
+    "the identical repeat routine outcome rendered instead of merging silently: $out"
+  # The captain outcome still opens a main turn (display:false is the captain
+  # shape; key order in the serialized send is content, display, triggerTurn).
+  assert_contains "$out" '"content":"task-a: task-a has a new finding","display":false,"triggerTurn":true' \
     "a changed captain outcome did not open a main turn: $out"
-  pass "an identical repeat routine outcome stays durable with feed-through identity while captain outcomes still turn"
+  pass "an identical repeat routine outcome merges silently while captain outcomes still turn"
 }
 
 # Issue #188: the live merge used to reconcile advisory freshness and then

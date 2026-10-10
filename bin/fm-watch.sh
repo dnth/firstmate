@@ -835,6 +835,15 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        # Escalation boundary: a run that finished while its wedge timer was
+        # running is done, not wedged. Absorb on the authoritative run-step
+        # state instead of escalating an idle-by-definition pane.
+        if ! afk_present && crew_is_run_step_done "$task"; then
+          rm -f "$since_file" "$escalation_file"
+          clear_write_tracking "$(window_key "$win")"
+          triage_log "absorbed $label timer expiry (run-step done, awaiting merge/landing): $win"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0

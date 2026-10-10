@@ -1044,6 +1044,55 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
 }
 
+test_wedge_timer_expiry_absorbs_run_step_done() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case wedge-timer-done); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-timerdone"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/timerdone.meta"
+  printf 'working: still compiling\n' > "$state/timerdone.status"
+  sig=$(seen_sig "$state/timerdone.status"); printf '%s' "$sig" > "$state/.seen-timerdone_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Phase A: working run absorbs and arms the wedge timer (existing contract).
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; unset FM_FAKE_CREW_STATE
+    fail "watcher exited for a working stale (should absorb): $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "wedge timer not armed on working absorb"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || { unset FM_FAKE_CREW_STATE; fail "could not acknowledge the phase-A stop"; }
+  # Phase B: the run finishes on the same unchanged hash with the timer
+  # expired. The escalation boundary must absorb on run-step done, not wake.
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    stop_pid "$pid" 2>/dev/null; reap "$pid" 2>/dev/null; unset FM_FAKE_CREW_STATE
+    fail "watcher did not survive a poll cycle for an expired timer on run-step done: $(cat "$out")"
+  fi
+  reap "$pid"; unset FM_FAKE_CREW_STATE
+  [ ! -s "$out" ] || fail "an expired wedge timer on run-step done printed a wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an expired wedge timer on run-step done enqueued a wake"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the done absorb did not clear the wedge timer"
+  grep -F "run-step done" "$state/.watch-triage.log" >/dev/null \
+    || fail "the timer-expiry done absorb was not logged"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional watcher stop"
+  pass "an expired wedge timer on run-step done absorbs instead of escalating"
+}
+
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -3774,6 +3823,7 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_wedge_timer_expiry_absorbs_run_step_done
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
