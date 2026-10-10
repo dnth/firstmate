@@ -41,7 +41,7 @@ The allowlist decision lives in `bin/fm-ext-intake.sh`, which this plugin calls;
 
 Send `/fm` from Discord's command pop-up: type `/fm`, pick this bot's `/fm` entry when the pop-up shows it, put the request in its box, and send.
 Typing `/fm hello` and pressing Enter before the pop-up appears sends ordinary chat text instead of the command, and the gateway ignores ordinary text that does not @mention the bot.
-`/fm` works in an allowlisted channel and in any thread under it: inside a thread the allowlist matches the thread's parent channel and the reply posts into the thread.
+For thread authorization and reply routing, see the [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).
 
 ## How it works
 
@@ -68,7 +68,7 @@ A generation left in-flight by an ambiguous send is reopened for another attempt
 Delivered payloads are retired as soon as they have a receipt, so poll cost does not grow with the number of replies already sent, and leftover records expire after `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 7 days).
 `FM_EXT_OUTBOX_POLL_SECS` (default 2) sets how often the watcher drains the outbox.
 Set `DISCORD_BOT_TOKEN` (or `HERMES_DISCORD_TOKEN`) for Discord REST delivery.
-The poster sends a `DiscordBot (<url>, <version>)` User-Agent, because Discord's edge refuses Python's default agent with HTTP 403 `error code: 1010`; [the bridge regression test](../../tests/fm-ext-bridge.test.sh) drives the real sender against a stub of that rule.
+The [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge) owns the poster's User-Agent requirement and real-sender regression coverage.
 Firstmate core has no Discord library.
 
 See [Local Communication Officer bridge](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).

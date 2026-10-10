@@ -377,11 +377,10 @@ A user enables it with `config/ext-bridge` plus a mode-0600 secret file and a fa
 That opt-in is authorization for firstmate to answer allowlisted Discord `/fm` requests, and standing authorization to act autonomously on normal reversible work only for a request whose allowlist rule names guild, channel, and author.
 A request admitted by a broader guild-only or channel-only rule is answered, but anything that changes a project waits for the captain's confirmation, so adding a whole server to the allowlist never hands its members command authority.
 Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation at every authority level.
-A valid opt-in arms `state/ext-watch.check.sh`, and an opt-out removes it, as described in the [local Communication Officer configuration reference](configuration.md#local-communication-officer-bridge-configext-bridge); the session-start bootstrap reports that verdict, and every watcher cycle converges it again so a mid-session switch needs no restart.
+The [local Communication Officer configuration reference](configuration.md#local-communication-officer-bridge-configext-bridge) owns activation, shim convergence, durable wake keys, and pending-request presentation.
 
 The gateway plugin calls `bin/fm-ext-intake.sh --text-file`, never `dispatch_tool("terminal", ...)`, and never interpolates Discord text into a shell command.
-Intake stores `state/ext-inbox/<slug>.json`, claims a one-wake offer marker, and appends a durable per-request wake row; because intake runs in the gateway process, the watcher rings that row once, and every main drain lists each unanswered inbox record until it is answered, so a request survives a filtered or acknowledged drain.
-The canonical `request_id` keeps colons while filenames use the SHA-256 slug.
+Intake owns durable request publication; the watcher owns notification, and the drain presents pending requests from the inbox independently of wake acknowledgement.
 The `ext-respond` skill drains that inbox, classifies each request, and emits `ack` / `answer` / `followup` / `final` payloads through `bin/fm-ext-emit.sh`.
 Spawned work is linked with `bin/fm-ext-link.sh` using `ext_request=`, not `x_request=`.
 The gateway outbox poster delivers those payloads to the Discord destination stored in context and writes receipts; posting-marker retry versus mid-delivery refuse is owned by the [local Communication Officer configuration reference](configuration.md#local-communication-officer-bridge-configext-bridge).

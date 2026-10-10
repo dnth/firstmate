@@ -14,7 +14,7 @@ metadata:
 # ext-respond
 
 The local Communication Officer bridge lets a firstmate instance answer `/fm` requests that a dedicated Hermes Gateway plugin delivered into this home.
-A request arrives through the watcher as a `check:` wake whose payload is `ext-request <slug>`, and every main drain lists each still-unanswered request under `EXT REQUESTS AWAITING ANSWER` until its inbox record is removed, so treat that section as the same trigger.
+Load this skill for an `ext-request <slug>` check wake or the drain's `EXT REQUESTS AWAITING ANSWER` section.
 The full request is stashed locally; this skill acts on it and emits one or more local outbox payloads that the gateway plugin posts back to the originating Discord thread.
 
 This runs only when the local ext-bridge is on (`config/ext-bridge` plus a mode-0600 secret; see AGENTS.md "Local Communication Officer bridge").

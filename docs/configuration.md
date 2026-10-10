@@ -774,8 +774,9 @@ The same message id claims the existing offer and does not append a second wake.
 Each new offer appends one durable `ext-request <slug>` wake row keyed `ext-request:<slug>`, so every pending request presents its own row.
 State directories are mode 0700.
 
-Intake runs in the gateway process and cannot wake the watcher, so the watcher rings for it: every cycle it wakes Firstmate once with the payload of each `ext-request` or `ext-delivery-failed` row it has not rung yet, appending nothing because those rows are already durable.
-The highest rung sequence persists in `state/.ext-doorbell-rung`, so a restarted watcher never rings a row twice.
+Intake runs in the gateway process and cannot wake the watcher, so each cycle the watcher batches pending `ext-request` and `ext-delivery-failed` rows above its last rung sequence into one wake without appending another durable row.
+The wake names up to three row payloads and reports the remaining count; the drain presents the durable rows and every unanswered inbox request.
+The highest rung sequence persists in `state/.ext-doorbell-rung` to avoid replay after restart; if recording that sequence fails, a later cycle may ring again.
 Wake rows can still be hidden by a filtered read of the drain and are consumed by its acknowledgement, so every main drain also lists each unanswered request under `EXT REQUESTS AWAITING ANSWER`, folded from `state/ext-inbox/` while the bridge is active.
 A request stays on that list across drains and acknowledgements until `ext-respond` removes its inbox record.
 
@@ -805,12 +806,13 @@ A reply that already fits is one unnumbered message; a longer reply is posted as
 Chunk progress is recorded so a later-chunk retry does not send earlier chunks again.
 A later-chunk transient failure then releases the inflight marker so only one poster can resume the next chunk.
 An ambiguous failure after a chunk may have been accepted stays mid-delivery for that chunk, which is what stops a double post.
-The poster identifies itself with a `DiscordBot (<url>, <version>)` User-Agent, as Discord requires; Discord's edge refuses any other agent, including Python's default, with HTTP 403 and the plain-text body `error code: 1010` before the API sees the request.
+The poster identifies itself with a `DiscordBot (<url>, <version>)` User-Agent to avoid the HTTP 403 `error code: 1010` refusal observed with Python's default agent.
+The [bridge regression test](../tests/fm-ext-bridge.test.sh) drives the real sender against a local stub of that edge rule by overriding the module attribute `DISCORD_API_BASE`; this is a test seam, not an operator setting.
 
 That mid-delivery state is bounded rather than permanent.
 Once a generation has recorded the same in-flight chunk without a fresh claim or progress heartbeat for longer than `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), the next `begin` reopens exactly that chunk for one more attempt and records the attempt in chunk progress.
 Each chunk attempt refreshes the progress artifact before sending, so a poster still making progress is never recovered out from under its sender regardless of the recovery window.
-After `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts, `begin` records a terminal failed marker, exits 5, and wakes Firstmate with `ext-delivery-failed <slug>`.
+After `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts, `begin` records a terminal failed marker, exits 5, and appends `ext-delivery-failed <slug>` keyed `ext-delivery-failed:<slug>` for the watcher to ring.
 So an ordinary network timeout costs at most a repeated chunk and, at worst, a surfaced failure - never a silently truncated reply that no shipped command can clear.
 
 `pending` lists only generations that are still genuinely pending.

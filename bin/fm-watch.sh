@@ -750,8 +750,9 @@ EOF
 # request waited for some unrelated wake. Each new such row rings once from
 # here: the wake carries the rows' own payloads and appends nothing, because
 # the rows are already durable (the same contract as an ext poll that owns its
-# wake). The highest rung sequence persists in EXT_DOORBELL_MARKER, so a
-# restarted watcher never rings a row twice; the drain's inbox-derived section
+# wake). Persisting the highest rung sequence in EXT_DOORBELL_MARKER prevents
+# routine replay after restart; a failed marker write allows another ring.
+# The drain's inbox-derived section
 # keeps an unanswered request presented after its row is acknowledged.
 EXT_DOORBELL_MARKER="$STATE/.ext-doorbell-rung"
 
