@@ -198,20 +198,33 @@ case "${1:-} ${2:-}" in
   "pane run")
     [ ! -f "$SEND_FAIL" ] || exit 1
     pane=${3:-}; launch=${4:-}
-    # Honor the spawn prove-execution probe: a ready pane runs it.
+    # Honor the spawn prove-execution probe: a ready pane runs it, leaves no
+    # agent trace, and never publishes acknowledgement for it.
     case "$launch" in
       touch\ */.fm-launch-probe.*)
         marker=${launch#touch }
         marker=${marker#\'}
         marker=${marker%\'}
         : > "$marker"
+        jq_state --arg p "$pane" '.typed[$p] = true' | save
+        ;;
+      *)
+        resolved=$launch
+        case "$resolved" in
+          "/bin/bash "*)
+            _staged=${resolved#/bin/bash }
+            _staged=${_staged#\'}
+            _staged=${_staged%\'}
+            [ ! -f "$_staged" ] || resolved=$(cat "$_staged")
+            ;;
+        esac
+        jq_state --arg p "$pane" --arg text "$resolved" \
+          '.typed[$p] = true | .launch[$p] = $text | .working[$p] = true' | save
+        printf '%s\n' "pane run $pane $resolved" >> "$LOG"
+        launch=$resolved
+        publish_omp_ack "$pane" "$launch"
         ;;
     esac
-    [ ! -f "$SEND_FAIL" ] || exit 1
-    pane=${3:-}; launch=${4:-}
-    jq_state --arg p "$pane" --arg text "$launch" \
-      '.typed[$p] = true | .launch[$p] = $text | .working[$p] = true' | save
-    publish_omp_ack "$pane" "$launch"
     ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
