@@ -696,6 +696,34 @@ Path(home, "config", "ext-bridge").rename(Path(home, "config", "ext-bridge.off")
 assert hook(ev.message("840000000000000002", "status again")) == "skip"
 assert "840000000000000002" not in ev.inbox(home)
 assert ev.reaction_path(C, "840000000000000002", outbox_poster.REACT_FAILED) in edge.wait(2)
+from unittest.mock import patch
+
+bridge = Path(home, "config", "ext-bridge")
+bridge_off = bridge.with_name("ext-bridge.off")
+failures = (
+    ("intake._poster", ImportError("poster unavailable")),
+    ("intake._poster", RuntimeError("poster load failed")),
+    ("intake.threading.Thread", RuntimeError("thread construction failed")),
+    ("intake.threading.Thread.start", RuntimeError("cannot allocate thread")),
+)
+sequence = 10
+for accepted in (True, False):
+    if accepted:
+        bridge_off.rename(bridge)
+    else:
+        bridge.rename(bridge_off)
+    for target, error in failures:
+        for thread in (None, "777777777777777777"):
+            sequence += 1
+            message_id = str(840000000000000000 + sequence)
+            with patch(target, side_effect=error) as failed:
+                assert hook(ev.message(message_id, "status", thread=thread)) == "skip", (target, accepted)
+                assert failed.call_count == 1, (target, failed.call_count)
+            records = ev.inbox(home)
+            assert (message_id in records) == accepted, (target, accepted, records)
+            if accepted:
+                assert ev.wake_rows(home, records[message_id]["slug"]) == 1
+assert len(edge.seen) == 2, edge.seen
 print("best-effort-ok")
 PY
   ) || fail "reaction failure case failed: $out"

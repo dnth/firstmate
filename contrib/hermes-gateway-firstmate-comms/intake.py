@@ -259,25 +259,29 @@ def replied_to(event: object) -> tuple[str, str]:
     return message_id, str(text)
 
 
-def react_in_background(dest: dict[str, str], emoji: str) -> threading.Thread:
+def react_in_background(dest: dict[str, str], reaction: str) -> threading.Thread | None:
     """React on the request's own message without blocking the gateway loop.
     A reaction is best effort: any failure is dropped, never retried, and
     never changes what happened to the request itself.
     """
-    payload = {
-        "origin": "message",
-        "thread_id": dest["thread_id"],
-        "channel_id": dest["channel_id"],
-        "message_id": dest["message_id"],
-    }
-    thread = threading.Thread(
-        target=_poster().react_to_request,
-        args=(payload, emoji),
-        name="fm-ext-react",
-        daemon=True,
-    )
-    thread.start()
-    return thread
+    try:
+        poster = _poster()
+        payload = {
+            "origin": "message",
+            "thread_id": dest["thread_id"],
+            "channel_id": dest["channel_id"],
+            "message_id": dest["message_id"],
+        }
+        thread = threading.Thread(
+            target=poster.react_to_request,
+            args=(payload, getattr(poster, reaction)),
+            name="fm-ext-react",
+            daemon=True,
+        )
+        thread.start()
+        return thread
+    except Exception:
+        return None
 
 
 def route_message_event(event: object) -> dict | None:
@@ -315,11 +319,11 @@ def route_message_event(event: object) -> dict | None:
     except Exception:
         code = -1
     if code == 0:
-        react_in_background(dest, _poster().REACT_SEEN)
+        react_in_background(dest, "REACT_SEEN")
         return dict(_SKIP)
     if code == INTAKE_REFUSED:
         return dict(_SKIP) if in_channel else None
-    react_in_background(dest, _poster().REACT_FAILED)
+    react_in_background(dest, "REACT_FAILED")
     return dict(_SKIP)
 
 
