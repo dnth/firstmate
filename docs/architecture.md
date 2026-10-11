@@ -384,7 +384,7 @@ The gateway plugin calls `bin/fm-ext-intake.sh --text-file`, never `dispatch_too
 Intake owns durable request publication; the watcher owns notification, and the drain presents pending requests from the inbox independently of wake acknowledgement.
 The `ext-respond` skill drains that inbox, classifies each request, and emits `ack` / `answer` / `followup` / `final` payloads through `bin/fm-ext-emit.sh`.
 Spawned work is linked with `bin/fm-ext-link.sh` using `ext_request=`, not `x_request=`.
-The gateway outbox poster delivers those payloads to the Discord destination stored in context and writes receipts; posting-marker retry versus mid-delivery refuse is owned by the [local Communication Officer configuration reference](configuration.md#local-communication-officer-bridge-configext-bridge).
+The gateway outbox poster delivers those payloads and writes receipts; the [topic-thread contract](configuration.md#topic-threads-one-thread-per-request) owns reply routing, and the [local Communication Officer configuration reference](configuration.md#local-communication-officer-bridge-configext-bridge) owns posting-marker retry versus mid-delivery refuse.
 Crewmate Hermes remains a separate TUI profile (`hermes chat --tui`) and is still refused as a second mate.
 This bridge remains layered on the existing check mechanism without changing X-mode or crewmate Hermes behavior.
 

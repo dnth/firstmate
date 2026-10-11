@@ -25,9 +25,8 @@
 # --origin records how the request arrived: "slash" (the default) for a /fm
 # command interaction, "message" for an ordinary Discord message, which is the
 # only kind the gateway can add reactions to. The destination context also
-# carries the fixed-label Discord thread name from bin/fm-ext-topic.sh
-# (empty for a request that already arrived inside a thread, which keeps its
-# thread).
+# carries a topic field with the fixed-label Discord thread name when
+# bin/fm-ext-topic.sh returns one; otherwise the field is omitted.
 # --reply-to-message-id marks a request that answers one of Firstmate's own
 # posted Discord messages: the
 # inbox record then carries reply_to {message_id, request_id, text}, with that

@@ -827,6 +827,7 @@ Each poll drops `state/ext-context/` destination and offer records past that win
 It drops the leftover markers of already retired outbox generations.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
+Request-wide thread records remain while any payload, progress, receipt, or failed JSON record for the request remains, then become eligible for pruning based on their own age.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id`; its header owns the recorded metadata fields.
@@ -887,9 +888,10 @@ Names use one fixed public label from the closed list owned by [`bin/fm-ext-topi
 Matching chooses a label without copying request words; stored names and API names are checked against the same closed list and source time.
 A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
 Slash commands are unchanged: `/fm` replies post to their originating thread (the channel itself for a top-level interaction) and never attempt thread creation.
-A thread-creation failure (missing permission, archived parent) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
+A thread-creation failure (such as missing permission) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
 Once any chunk has posted, retries keep that generation's original destination even if another generation subsequently creates the topic thread.
-Thread names and posts never carry task ids, branch names, paths, hostnames, secrets, or captain-private material, and a thread never widens who the allowlist admits.
+Creating a topic thread never widens who the allowlist admits.
+The [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) owns the unchanged public-safety rules for reply text.
 The intake records the name in the durable destination context (`bin/fm-ext-topic.sh` owns the fixed labels); the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record so every generation shares the same thread.
 The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, and unchanged-allowlist coverage.
 

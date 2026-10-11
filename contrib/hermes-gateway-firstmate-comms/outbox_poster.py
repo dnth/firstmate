@@ -502,9 +502,8 @@ def discord_create_thread(payload: dict, name: str) -> dict:
     """Start a public thread on the request's own message over Discord REST.
 
     Thread creation needs the channel that owns the message and that message's
-    id. The payload's thread field already holds the thread for an in-thread
-    request, so reaching here with one set would post the thread in the wrong
-    place; that caller error is permanent, never retried as a channel post.
+    id. An in-thread request has a thread field distinct from its parent
+    channel and must keep that destination rather than create a nested thread.
     """
     name = public_topic_name(payload, name)
     if not name:
