@@ -772,6 +772,7 @@ For a slash command, `<message>` is the Discord interaction id and `<thread>` de
 Inside a thread, `<channel>` is the thread's parent channel, which is what the allowlist matches, and `<thread>` is the thread, so the reply posts into the thread; a top-level channel's category is never used as its channel.
 Filenames use the SHA-256 hex digest of that canonical id (`slug`).
 `bin/fm-ext-intake.sh` publishes `state/ext-inbox/<slug>.json` (mode 0600), durable destination context at `state/ext-context/<slug>.json`, and a one-wake offer marker at `state/ext-context/<slug>.offered.json`.
+For requests carrying files, see [Discord attachments](#discord-attachments).
 The same message id claims the existing offer and does not append a second wake.
 Each new offer appends one durable `ext-request <slug>` wake row keyed `ext-request:<slug>`, so every pending request presents its own row.
 State directories are mode 0700.
@@ -822,7 +823,9 @@ A payload whose generation has reached a receipt or a terminal failed marker is 
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
 Local bridge records expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
-Each poll drops `state/ext-context/` destination and offer records past that window, keeping an offer marker whose request is still sitting unhandled in the inbox, and drops the leftover markers of already retired outbox generations.
+Each poll drops `state/ext-context/` destination and offer records past that window, keeping an offer marker whose request is still sitting unhandled in the inbox.
+It drops the leftover markers of already retired outbox generations.
+It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
@@ -846,6 +849,17 @@ For Hermes 0.20.0 and newer, install the gateway plugin into a dedicated gateway
 Crewmate Hermes still launches as `hermes chat --tui`.
 The `ext-respond` skill owns drain, classification, lifecycle action, and local emit.
 
+### Discord attachments
+
+Ordinary message requests can carry files, including a message with no text; slash commands use their existing text path.
+Intake copies eligible cached files into a private per-request folder under `state/ext-attachments/` and records kept and skipped attachments in the inbox.
+The [intake header](../bin/fm-ext-intake.sh) owns the manifest, record fields, permissions, caps, and skip rules; [the staging helper](../bin/fm-ext-lib.sh) owns skip reasons and supported cache roots.
+Cache admission uses the gateway process's `HERMES_HOME`; without a resolvable home, every attachment path is skipped as uncached.
+Published inbox records and their copied files survive later intake failures, so recovery does not depend on the gateway cache still containing the files.
+Text-only requests retain their existing record shape without attachment fields.
+The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#how-it-works) owns raw-message text selection and its compatibility fallback.
+The [`ext-respond` safety rules](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) own treating attachment bytes as untrusted data and keeping file contents, names, and paths out of Discord replies.
+
 ### Dedicated channel and reply continuation (config/ext-channel)
 
 `config/ext-channel` names one Discord channel by id, on its own line; comments and blank lines are ignored.
@@ -860,7 +874,7 @@ Firstmate's own posts are the Discord message ids the outbox poster recorded in 
 The request records `reply_to` with the replied-to `message_id`, the `request_id` that post answered when known, and that message's `text` cut to its first 1000 characters (a trailing `…` marks a cut), so a short answer such as "yes" can be read against what it answers.
 In the dedicated channel a reply to anyone else's message is still a request, just without `reply_to`.
 
-Only a new, human-written text message or reply qualifies: bot and webhook posts (Firstmate's own included), edits, and system messages never become requests, and neither path widens who the allowlist admits.
+Only a new, human-written message or reply qualifies, including an attachment-only message: bot and webhook posts (Firstmate's own included), edits, and system messages never become requests, and neither path widens who the allowlist admits.
 A message the plugin turns into a request, or ignores in the dedicated channel, is withheld from the gateway's general agent so it is not answered twice; every other message keeps its normal path.
 Every recorded request carries `origin`: `slash` for `/fm`, `message` for the two message paths.
 The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#dedicated-firstmate-channel) owns the Discord and gateway-profile setup that lets plain channel messages reach the plugin.

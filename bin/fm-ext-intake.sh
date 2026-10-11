@@ -10,6 +10,7 @@
 #     [--origin slash|message]
 #     [--reply-to-message-id <id> [--reply-to-request-id <request_id>]
 #      [--reply-to-text-file <path>]]
+#     [--attachment-manifest <path>]
 #
 # Opt-in is config/ext-bridge plus a mode-0600 home secret. FM_EXT_BRIDGE can
 # only turn a configured bridge off, never on. The presented --secret-file must
@@ -29,6 +30,19 @@
 # message's text cut to its first 1000 characters (a trailing ellipsis marks a
 # cut), so Firstmate can tell what a short answer such as "yes" refers to.
 # Neither field changes admission or authority.
+#
+# --attachment-manifest points at a JSON array of {path, media_type, name}
+# entries for the gateway's locally cached Discord attachments. Admitted files
+# are copied into state/ext-attachments/<slug>/ (mode 0700 dir, 0600 files)
+# and listed in the inbox record as attachments [{name, path, media_type,
+# bytes}]; the rest are listed as skipped_attachments [{name, reason}] and
+# never fetched or followed. The per-file byte cap is FM_EXT_ATTACHMENT_MAX_BYTES
+# (default 33554432) and the per-request count cap is FM_EXT_ATTACHMENT_MAX_COUNT
+# (default 10). Only regular files are copied: symlinks, remote URLs, and
+# path-like names are skipped, and an unknown media type is kept as
+# application/octet-stream. The manifest never changes admission or authority:
+# a non-allowlisted author copies nothing, and an attachment-only message
+# (empty text) is still recorded when a manifest entry is present.
 #
 # Idempotent: the same message id claims the existing offer and does not
 # append a second wake. If the wake cannot be appended, the offer marker is
@@ -58,6 +72,7 @@ usage: fm-ext-intake.sh --request-id discord:<guild>:<channel>:<thread>:<message
          [--origin slash|message]
          [--reply-to-message-id <id> [--reply-to-request-id <request_id>]
           [--reply-to-text-file <path>]]
+         [--attachment-manifest <path>]
 EOF
 }
 
@@ -82,6 +97,7 @@ ORIGIN=slash
 REPLY_MESSAGE_ID=
 REPLY_REQUEST_ID=
 REPLY_TEXT_FILE=
+ATTACHMENT_MANIFEST=
 # Longest replied-to text kept in a request's reply_to context, in characters.
 REPLY_TEXT_MAX=1000
 
@@ -107,6 +123,7 @@ while [ "$#" -gt 0 ]; do
     --reply-to-message-id) shift; REPLY_MESSAGE_ID=${1:-} ;;
     --reply-to-request-id) shift; REPLY_REQUEST_ID=${1:-} ;;
     --reply-to-text-file) shift; REPLY_TEXT_FILE=${1:-} ;;
+    --attachment-manifest) shift; ATTACHMENT_MANIFEST=${1:-} ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -164,7 +181,13 @@ else
   [ -f "$TEXT_FILE" ] && [ ! -L "$TEXT_FILE" ] || die "text file not found: $TEXT_FILE"
   TEXT=$(cat -- "$TEXT_FILE")
 fi
-[ -n "$TEXT" ] || die "text is empty"
+MANIFEST_PRESENT=0
+if [ -n "$ATTACHMENT_MANIFEST" ]; then
+  [ -f "$ATTACHMENT_MANIFEST" ] && [ ! -L "$ATTACHMENT_MANIFEST" ] \
+    || die "attachment manifest not found: $ATTACHMENT_MANIFEST"
+  MANIFEST_PRESENT=1
+fi
+[ -n "$TEXT" ] || [ "$MANIFEST_PRESENT" = 1 ] || die "text is empty"
 
 REPLY_TEXT=
 if [ -n "$REPLY_TEXT_FILE" ]; then
@@ -178,6 +201,9 @@ NOW=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
 case "$NOW" in
   ''|*[!0-9]*) die "could not read the current time" 1 ;;
 esac
+
+ATTACH_KEPT_JSON='[]'
+ATTACH_SKIPPED_JSON='[]'
 
 INBOX_JSON=$(jq -cn \
   --argjson schema_version "$FM_EXT_SCHEMA_VERSION" \
@@ -233,19 +259,47 @@ CONTEXT_JSON=$(jq -cn \
 
 INBOX_DIR=$(fm_ext_inbox_dir)
 CONTEXT_DIR=$(fm_ext_context_dir)
+ATTACH_DIR=
 
 if fm_ext_private_artifact_file_valid "$CONTEXT_DIR" "$SLUG.offered.json" 600; then
   printf '%s\n' "$SLUG"
   exit 0
 fi
 
-printf '%s\n' "$INBOX_JSON" \
-  | fm_ext_private_artifact_publish_stdin "$INBOX_DIR" "$SLUG.json" 600 \
-  || die "could not write inbox" 1
+if ! fm_ext_private_artifact_file_valid "$INBOX_DIR" "$SLUG.json" 600; then
+  if [ "$MANIFEST_PRESENT" = 1 ]; then
+    if ! ATTACH_DIR=$(fm_ext_private_request_dir_prepare "$STATE" "$FM_EXT_ATTACHMENTS_DIRNAME" "$SLUG"); then
+      die "could not prepare the attachment folder" 1
+    fi
+    if ! ATTACH_OUT=$(fm_ext_attachments_stage "$ATTACH_DIR" "$ATTACHMENT_MANIFEST"); then
+      rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
+      die "could not read the attachment manifest" 1
+    fi
+    ATTACH_KEPT_JSON=$(printf '%s\n' "$ATTACH_OUT" | jq -c '[.kept[] | {name, path: (.staged | split("/") | last), media_type, bytes}]') \
+      || ATTACH_KEPT_JSON='[]'
+    ATTACH_SKIPPED_JSON=$(printf '%s\n' "$ATTACH_OUT" | jq -c '.skipped') || ATTACH_SKIPPED_JSON='[]'
+    INBOX_JSON=$(printf '%s\n' "$INBOX_JSON" | jq -c --argjson kept "$ATTACH_KEPT_JSON" --argjson skipped "$ATTACH_SKIPPED_JSON" --arg dir "$ATTACH_DIR" '
+      .attachments = [$kept[] | {name, path: ($dir + "/" + .path), media_type, bytes}]
+      | .skipped_attachments = $skipped
+    ') || {
+      rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
+      die "could not record the attachments" 1
+    }
+  fi
+
+  printf '%s\n' "$INBOX_JSON" \
+    | fm_ext_private_artifact_publish_stdin "$INBOX_DIR" "$SLUG.json" 600 \
+    || {
+      [ -z "$ATTACH_DIR" ] || rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
+      die "could not write inbox" 1
+    }
+fi
 
 printf '%s\n' "$CONTEXT_JSON" \
   | fm_ext_private_artifact_publish_stdin "$CONTEXT_DIR" "$SLUG.json" 600 \
-  || die "could not write destination context" 1
+  || {
+    die "could not write destination context" 1
+  }
 
 fm_ext_offer_registry_claim "$STATE" "$SLUG" "$REQUEST_ID"
 offer_rc=$?
@@ -261,7 +315,9 @@ case "$offer_rc" in
     fi
     ;;
   1) ;;
-  *) die "could not claim the offer marker" 1 ;;
+  *) {
+    die "could not claim the offer marker" 1
+  } ;;
 esac
 
 printf '%s\n' "$SLUG"

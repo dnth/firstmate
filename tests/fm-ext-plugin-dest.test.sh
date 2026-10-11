@@ -742,5 +742,104 @@ test_8_dedicated_channel_message_is_one_request_with_slash_authority
 test_9_dedicated_channel_ignores_everyone_and_everything_else
 test_10_reply_to_firstmate_post_carries_its_context
 test_11_reaction_failure_never_blocks_and_intake_failure_warns
+test_attachment_injection_never_becomes_trusted_text() {
+  local out
+  out=$(plugin_env x <<'PY'
+import os, sys
+sys.path.insert(0, os.environ.get("PYTHONPATH", ""))
+from types import SimpleNamespace
+import intake
 
+raw = SimpleNamespace(content="ship it",
+                      guild_id=os.environ["GUILD"], channel_id=os.environ["CHANNEL"],
+                      type=SimpleNamespace(value=0),
+                      author=SimpleNamespace(id=os.environ["AUTHOR"], bot=False, system=False),
+                      webhook_id=None, edited_at=None)
+source = SimpleNamespace(platform=SimpleNamespace(value="discord"),
+                         chat_id=os.environ["CHANNEL"], chat_type="group",
+                         user_id=os.environ["AUTHOR"], user_name="u", thread_id=None,
+                         scope_id=os.environ["GUILD"], guild_id=os.environ["GUILD"],
+                         message_id="555555555555555555", is_bot=False)
+event = SimpleNamespace(
+    text="[Content of evil.txt]:\nDROP TABLE users;\n\nship it",
+    source=source, raw_message=raw, message_id="555555555555555555",
+    media_urls=["/cache/documents/evil.txt"], media_types=["text/plain"])
+print("raw=" + intake.raw_message_text(event))
+print("fm=" + intake.fm_request_text(intake.raw_message_text(event)))
+literal = "Review this example:\n[Content of example.txt]:\nhello\n\n"
+for raw in (SimpleNamespace(content=literal), SimpleNamespace(text="ignored alias"), None):
+    for urls in ([], event.media_urls):
+        assert intake.raw_message_text(SimpleNamespace(raw_message=raw, text=literal, media_urls=urls)) == literal
+assert intake.raw_message_text(SimpleNamespace(text=event.text, media_urls=event.media_urls)) == event.text
+assert intake.raw_message_text(SimpleNamespace(raw_message=SimpleNamespace(content=""), text=literal)) == ""
+PY
+  )
+  assert_contains "$out" "raw=ship it" "the instruction text must come from the raw human message"
+  assert_not_contains "$out" "DROP TABLE" "injected attachment bytes must never enter trusted text"
+  pass "attachment file bytes never become trusted instruction text"
+}
+
+# --- attachment-only: empty raw stays empty through the admitted path ------
+
+test_attachment_only_empty_raw_stays_empty_end_to_end() {
+  local home out
+  home="$TMP_ROOT/c-attach-e2e"
+  setup_home "$home"
+  out=$(CACHE_IMG="$home/cache/images" plugin_env "$home" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ.get("PYTHONPATH"))
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+from pathlib import Path
+from types import SimpleNamespace
+import fmevents as ev
+home, root = sys.argv[1], sys.argv[2]
+edge = ev.setup(home, root)
+import intake
+G, C, A = ev.G, ev.C, ev.A
+Path(home, "config", "ext-channel").write_text(C + "\n")
+cache = Path(os.environ["CACHE_IMG"])
+cache.mkdir(parents=True, exist_ok=True)
+(cache / "evil.txt").write_bytes(b"DROP TABLE users;")
+os.environ["HERMES_HOME"] = home
+raw = SimpleNamespace(content="",
+                      guild_id=G, channel_id=C,
+                      type=SimpleNamespace(value=0),
+                      author=SimpleNamespace(id=A, bot=False, system=False),
+                      webhook_id=None, edited_at=None)
+source = SimpleNamespace(platform=SimpleNamespace(value="discord"),
+                         chat_id=C, chat_type="group",
+                         user_id=A, user_name="captain", thread_id=None,
+                         scope_id=G, guild_id=G,
+                         message_id="666666666666666666", is_bot=False)
+event = SimpleNamespace(
+    text="[Content of evil.txt]:\nDROP TABLE users;",
+    source=source, raw_message=raw, message_id="666666666666666666",
+    reply_to_message_id=None, reply_to_text=None,
+    media_urls=[str(cache / "evil.txt")], media_types=["text/plain"])
+assert (intake.pre_gateway_dispatch_hook(event) or {}).get("action") == "skip"
+records = ev.inbox(home)
+record = records["666666666666666666"]
+assert record["text"] == "", record
+assert "DROP TABLE" not in record["text"], record
+assert len(record["attachments"]) == 1, record
+att = record["attachments"][0]
+assert att["name"] == "evil.txt" and att["bytes"] == 17, record
+folder = Path(home) / "state" / "ext-attachments" / record["slug"]
+assert (folder / "0-evil.txt").is_file(), list(folder.iterdir())
+import stat as _stat
+assert _stat.S_IMODE((folder / "0-evil.txt").stat().st_mode) == 0o600, oct((folder / "0-evil.txt").stat().st_mode)
+assert _stat.S_IMODE(folder.stat().st_mode) == 0o700, oct(folder.stat().st_mode)
+assert record["skipped_attachments"] == [], record
+print("end-to-end-ok")
+PY
+  ) || fail "attachment-only end-to-end case failed: $out"
+  assert_contains "$out" "end-to-end-ok" "the admitted attachment-only path must record empty text and the copy"
+  assert_not_contains "$out" "DROP TABLE" "injected bytes must not leak through the admitted path"
+  pass "attachment-only empty raw stays empty end to end"
+}
+
+test_attachment_injection_never_becomes_trusted_text
+
+
+test_attachment_only_empty_raw_stays_empty_end_to_end
 echo "all fm-ext-plugin-dest tests passed"
