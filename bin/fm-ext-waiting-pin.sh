@@ -202,14 +202,27 @@ cmd_content() {
 # a one-shot outbox payload the gateway poster drains into an edit-in-place.
 cmd_refresh() {
   local force=0 guild channel now body text hash state_path old_hash old_guild old_channel last_at min_secs age
-  local records reference outbox file pending same=0
+  local records reference outbox file pending same=0 publication_slug publication_release target
   case "${1:-}" in ''|--force) [ "${1:-}" != "--force" ] || force=1 ;; *) fail "invalid arguments '$*'" ;; esac
   fm_ext_active "$FM_HOME" >/dev/null 2>&1 || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
   fm_ext_waiting_pin_target "$FM_HOME" >/dev/null || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
-  guild=$(fm_ext_waiting_pin_target "$FM_HOME" | cut -d' ' -f1)
-  channel=$(fm_ext_waiting_pin_target "$FM_HOME" | cut -d' ' -f2)
-  now=$(waiting_pin_now) || defer "the current time could not be read"
   command -v jq >/dev/null 2>&1 || defer "jq is required"
+  outbox=$(fm_ext_outbox_dir "$FM_HOME")
+  publication_slug=$(printf '%064d' 1)
+  FM_EXT_INFLIGHT_OWNER_PID=$$ fm_run_timed 30 bash -c '
+    . "$1/fm-ext-lib.sh"
+    while :; do
+      fm_ext_outbox_inflight_claim "$2" "$3" waiting-pin 1
+      claim_status=$?
+      [ "$claim_status" -eq 1 ] || exit "$claim_status"
+      sleep 0.1
+    done
+  ' _ "$SCRIPT_DIR" "$outbox" "$publication_slug" || defer "the publication claim could not be acquired"
+  printf -v publication_release 'fm_ext_outbox_inflight_release %q %q waiting-pin 1 >/dev/null 2>&1' "$outbox" "$publication_slug"
+  trap "$publication_release" EXIT
+  target=$(fm_ext_waiting_pin_target "$FM_HOME") || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
+  read -r guild channel <<< "$target"
+  now=$(waiting_pin_now) || defer "the current time could not be read"
   body=$(waiting_pin_body) || defer "the board could not be read"
   text=$(waiting_pin_render "$now" "$body") || defer "the board could not be read"
   hash=$(printf '%s' "$body" | sha256sum 2>/dev/null | awk '{print $1}' \
@@ -219,7 +232,6 @@ cmd_refresh() {
   if [ -f "$state_path" ]; then
     records=$(jq -c '. + {pending:false}' "$state_path") || defer "the delivery record could not be read"
   fi
-  outbox=$(fm_ext_outbox_dir "$FM_HOME")
   for file in "$outbox"/waiting-pin.*.json; do
     [ -e "$file" ] || continue
     fm_ext_private_artifact_file_valid "$outbox" "${file##*/}" 600 || defer "the pending snapshot is unsafe"

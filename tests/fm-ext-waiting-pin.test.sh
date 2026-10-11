@@ -401,7 +401,7 @@ SH
   for mode in list show hang; do
     out=$(home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FAIL_MODE="$mode" "$REFRESH" refresh 2>&1) || fail "backend failure must remain best effort"
     assert_contains "$out" deferred "failed or wedged reads must defer"
-    [ ! -d "$home/state/ext-outbox" ] || fail "failed reads must not queue false all-clear snapshots"
+    [ -z "$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' 2>/dev/null)" ] || fail "failed reads must not queue false all-clear snapshots"
   done
   pass "10 failed and wedged board reads defer publication"
 }
@@ -505,7 +505,7 @@ test_12_landing_and_dated_calls() {
   printf 'pr=https://github.com/o/r/pull/45\n' > "$home/state/missing-task.meta"
   out=$(home_env "$home" "$REFRESH" refresh 2>&1) || fail "a failed real task lookup must defer"
   assert_contains "$out" deferred "missing task rows must still fail the refresh"
-  [ ! -d "$home/state/ext-outbox" ] || fail "task lookup failures must not publish"
+  [ -z "$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' 2>/dev/null)" ] || fail "task lookup failures must not publish"
   pass "12 landing PRs and due calls render while future calls stay deferred"
 }
 
@@ -707,6 +707,84 @@ PYTEST
   pass "16 competing pin posters share the existing exclusive claim across snapshots"
 }
 
+test_17_refresh_capture_and_publication_are_serialized() {
+  local home fake
+  home="$TMP_ROOT/c17"
+  setup_home "$home"
+  hold_call "$home" choice "Approve the now answered call" waiting
+  fake="$home/fakebin"
+  mkdir "$fake"
+  cat > "$fake/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = list ]; then
+  if [ "$REFRESH_ACTOR" = first ]; then
+    listing=$("$REAL_TASKS_AXI" "$@") || exit "$?"
+    touch "$RACE_HOME/first-captured"
+    while [ ! -f "$RACE_HOME/first-release" ]; do sleep 0.05; done
+    printf '%s\n' "$listing"
+    exit 0
+  fi
+  touch "$RACE_HOME/second-read"
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  cat > "$fake/jq" <<'SH'
+#!/usr/bin/env bash
+[ "$REFRESH_ACTOR" != second ] || touch "$RACE_HOME/second-attempt"
+exec "$REAL_JQ" "$@"
+SH
+  chmod 700 "$fake/tasks-axi" "$fake/jq"
+  home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token REAL_TASKS_AXI="$TASKS_AXI_BIN" REAL_JQ="$(command -v jq)" RACE_HOME="$home" PATH="$fake:$BASE_PATH" \
+    "$PYTHON_BIN" - "$home" "$REFRESH" <<'PYTEST'
+import json, os, subprocess, sys, time
+from pathlib import Path
+import outbox_poster as poster
+home, refresh = Path(sys.argv[1]), sys.argv[2]
+def wait_for(name):
+    until = time.monotonic() + 20
+    while not (home / name).exists():
+        assert time.monotonic() < until, f"timed out waiting for {name}"
+        time.sleep(.05)
+def launch(actor):
+    return subprocess.Popen([refresh, "refresh", "--force"], env=dict(os.environ, REFRESH_ACTOR=actor), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+first = launch("first")
+second = None
+try:
+    wait_for("first-captured")
+    subprocess.run([os.environ["REAL_TASKS_AXI"], "done", "choice"], cwd=home / "data", check=True, capture_output=True)
+    second = launch("second")
+    wait_for("second-attempt")
+    assert not (home / "second-read").exists(), "a competing refresh read the board before obtaining the publication claim"
+    (home / "first-release").touch()
+    for process in (first, second):
+        stdout, stderr = process.communicate(timeout=20)
+        assert process.returncode == 0 and "refreshed" in stdout, (stdout, stderr)
+    assert (home / "second-read").exists()
+finally:
+    (home / "first-release").touch()
+    for process in (first, second):
+        if process is not None and process.poll() is None:
+            process.kill(); process.wait()
+paths = sorted(home.joinpath("state/ext-outbox").glob("waiting-pin.*.json"))
+assert len(paths) == 2
+records = [json.loads(path.read_text()) for path in paths]
+assert "Approve the now answered call" in records[0]["text"]
+assert "Nothing waiting - all clear." in records[1]["text"]
+assert int(records[0]["snapshot_id"]) < int(records[1]["snapshot_id"])
+contents = []
+def edge(action, path, token, body):
+    if action in ("post", "edit"):
+        contents.append(body["content"])
+    return {"id": "message", "pinned": True}
+poster.waiting_pin_http = edge
+assert poster.drain_outbox(home=home) == ["posted-pinned", "edited"]
+assert "Nothing waiting - all clear." in contents[-1]
+assert not list(home.joinpath("state/ext-outbox").glob("*.inflight"))
+PYTEST
+  [ "$?" = 0 ] || fail "overlapping refreshes must preserve capture and publication order"
+  pass "17 overlapping refreshes capture and publish in the same order"
+}
+
 test_1_content_lists_calls_and_prs_without_leaks
 test_2_refresh_creates_then_edits_in_place
 test_3_deleted_message_recreated_once
@@ -728,5 +806,7 @@ test_14_existing_task_captain_holds
 
 test_15_pin_targets_and_reply_separation
 test_16_competing_pin_posters_share_one_claim
+
+test_17_refresh_capture_and_publication_are_serialized
 
 echo "all fm-ext-waiting-pin tests passed"
