@@ -1,4 +1,10 @@
-"""Fail-closed /fm intake for the local Firstmate Communication Officer."""
+"""Fail-closed Discord intake for the local Firstmate Communication Officer.
+
+Three Discord paths reach Firstmate, all through bin/fm-ext-intake.sh and
+its one allowlist: the /fm slash command, every ordinary message in the
+optional dedicated channel named by config/ext-channel, and a Discord reply
+to one of Firstmate's own posted messages anywhere the gateway listens.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -14,6 +21,13 @@ from pathlib import Path
 INTAKE_REFUSED = 3
 _SNOWFLAKE = re.compile(r"^[0-9]+$")
 _FM_PREFIX = re.compile(r"^/fm(?:@\S+)?(?:\s+|$)")
+# discord.MessageType values for a new text message and a reply. Every other
+# type (joins, pins, boosts, thread starters, ...) is a system message.
+_MESSAGE_DEFAULT = 0
+_MESSAGE_REPLY = 19
+# Returned from pre_gateway_dispatch for a message this plugin owns, so the
+# gateway's general agent never also answers it.
+_SKIP = {"action": "skip", "reason": "firstmate-comms request"}
 # Task-local destination for the inbound event currently dispatching.
 # Set on EVERY pre_gateway_dispatch event (None for non-/fm) and read by
 # handle_fm_command later in the same asyncio task. Task-locality is the
@@ -51,6 +65,26 @@ def allowlist_path(home: Path | None = None) -> Path:
     if override:
         return Path(override)
     return home / "config" / "ext-allowlist"
+
+
+def dedicated_channel(home: Path | None = None) -> str:
+    """The dedicated Firstmate channel id from config/ext-channel, or "".
+    The file names exactly one Discord channel id on its own line; comments
+    and blank lines are ignored. Absent, symlinked, unreadable, empty, or
+    ambiguous (more than one id) leaves the channel path off. It is read per
+    message, so a change needs no gateway restart.
+    """
+    path = (home or firstmate_home()) / "config" / "ext-channel"
+    try:
+        if path.is_symlink() or not path.is_file():
+            return ""
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    ids = [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+    if len(ids) != 1:
+        return ""
+    return _snowflake(ids[0])
 
 
 def context_field(context: dict | None, *names: str) -> str:
@@ -174,14 +208,133 @@ def bind_event_destination(event: object = None) -> object:
     return _current_event_dest.set(dest)
 
 
+def _poster():
+    # Imported on use: outbox_poster imports this module at load time.
+    try:
+        from . import outbox_poster
+    except ImportError:  # loaded from sys.path in hermetic tests
+        import outbox_poster
+    return outbox_poster
+
+
+def _message_type(raw: object) -> int | None:
+    kind = getattr(raw, "type", None)
+    value = getattr(kind, "value", kind)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def ordinary_message(event: object) -> bool:
+    """True only for a new, human-written Discord text message or reply.
+    A slash-command interaction, a bot or webhook post (Firstmate's own
+    included), an edited message, and a system message are never ordinary,
+    so none of them can become a request through the message paths.
+    """
+    raw = getattr(event, "raw_message", None)
+    if _message_type(raw) not in (_MESSAGE_DEFAULT, _MESSAGE_REPLY):
+        return False
+    author = getattr(raw, "author", None)
+    if author is None or getattr(author, "bot", False) or getattr(author, "system", False):
+        return False
+    if getattr(raw, "webhook_id", None) or getattr(raw, "edited_at", None) is not None:
+        return False
+    return not getattr(getattr(event, "source", None), "is_bot", False)
+
+
+def replied_to(event: object) -> tuple[str, str]:
+    """(id, text) of the message a Discord reply answers, or ("", "").
+    Discord delivers the referenced message with the reply, so its text needs
+    no extra fetch; text is empty when that message has since been deleted.
+    """
+    raw = getattr(event, "raw_message", None)
+    if _message_type(raw) != _MESSAGE_REPLY:
+        return "", ""
+    reference = getattr(raw, "reference", None)
+    message_id = _snowflake(getattr(reference, "message_id", None)) or _snowflake(
+        getattr(event, "reply_to_message_id", None)
+    )
+    if not message_id:
+        return "", ""
+    resolved = getattr(reference, "resolved", None)
+    text = getattr(resolved, "content", None) or getattr(event, "reply_to_text", None) or ""
+    return message_id, str(text)
+
+
+def react_in_background(dest: dict[str, str], emoji: str) -> threading.Thread:
+    """React on the request's own message without blocking the gateway loop.
+    A reaction is best effort: any failure is dropped, never retried, and
+    never changes what happened to the request itself.
+    """
+    payload = {
+        "origin": "message",
+        "thread_id": dest["thread_id"],
+        "channel_id": dest["channel_id"],
+        "message_id": dest["message_id"],
+    }
+    thread = threading.Thread(
+        target=_poster().react_to_request,
+        args=(payload, emoji),
+        name="fm-ext-react",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def route_message_event(event: object) -> dict | None:
+    """Turn an ordinary Discord message into a Firstmate request when it is
+    one: any message in the dedicated channel (or a thread under it), or a
+    reply to one of Firstmate's own posted messages anywhere. Both go through
+    bin/fm-ext-intake.sh exactly like /fm, so its allowlist alone decides
+    admission and authority. Returns the gateway skip action for a message
+    this plugin owns, so the general agent never also answers it, and None
+    to leave every other message on its normal path.
+
+    An accepted request gets the seen reaction. A refused author's message is
+    dropped silently in the dedicated channel and keeps its normal path
+    elsewhere. Any other intake failure gets the warning reaction, never a
+    silent drop.
+    """
+    if not ordinary_message(event):
+        return None
+    dest = destination_from_event(event)
+    if not destination_valid(dest):
+        return None
+    home = firstmate_home()
+    channel = dedicated_channel(home)
+    in_channel = bool(channel) and dest["channel_id"] == channel
+    reply_id, reply_text = replied_to(event)
+    post = _poster().firstmate_post_for(reply_id, home) if reply_id else None
+    if not in_channel and post is None:
+        return None
+    reply_to = None
+    if post is not None:
+        reply_to = {"message_id": reply_id, "request_id": post["request_id"], "text": reply_text}
+    text = fm_request_text(getattr(event, "text", None) or "")
+    try:
+        code = _run_intake(home, dest, text, origin="message", reply_to=reply_to)
+    except Exception:
+        code = -1
+    if code == 0:
+        react_in_background(dest, _poster().REACT_SEEN)
+        return dict(_SKIP)
+    if code == INTAKE_REFUSED:
+        return dict(_SKIP) if in_channel else None
+    react_in_background(dest, _poster().REACT_FAILED)
+    return dict(_SKIP)
+
+
 def pre_gateway_dispatch_hook(event=None, **kwargs) -> dict | None:
-    """Hermes pre_gateway_dispatch hook: bind the /fm destination locally.
+    """Hermes pre_gateway_dispatch hook.
     Fires once per inbound MessageEvent before auth and dispatch, in the
-    same asyncio task that later runs handle_fm_command. Returns None
-    always so normal dispatch continues untouched.
+    same asyncio task that later runs handle_fm_command. It binds the /fm
+    destination task-locally, then routes an ordinary message through
+    route_message_event. Anything unexpected leaves normal dispatch alone.
     """
     bind_event_destination(event)
-    return None
+    try:
+        return route_message_event(event)
+    except Exception:
+        return None
 
 
 def request_id_for(dest: dict[str, str]) -> str:
@@ -241,6 +394,8 @@ def resolve_destination(raw_args: str, context: dict | None = None) -> dict[str,
 
 def handle_fm_command(raw_args: str, context: dict | None = None) -> str:
     """Slash-command handler. Returns a fast ack without waiting for Firstmate work.
+    A slash command is a Discord interaction, not a message, so it cannot take
+    the delivery reactions; this short text is its only acknowledgement.
     The allowlist decision is not made here. bin/fm-ext-intake.sh owns the rule
     grammar and the authority it grants, and it is the gate that actually
     protects the home, so a second copy in this file could only ever drift away
@@ -272,10 +427,22 @@ def handle_fm_command(raw_args: str, context: dict | None = None) -> str:
         return "Firstmate refused this request: it is not on the local allowlist."
     if code != 0:
         return "Firstmate could not record that request locally. Try again from this thread."
-    return "Aye, captain - Firstmate has the order and is on it."
+    return "Aye, captain - Firstmate has it."
 
 
-def _run_intake(home: Path, dest: dict[str, str], text: str) -> int:
+def _write_temp(text: str) -> str:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+        handle.write(text)
+        return handle.name
+
+
+def _run_intake(
+    home: Path,
+    dest: dict[str, str],
+    text: str,
+    origin: str = "slash",
+    reply_to: dict[str, str] | None = None,
+) -> int:
     intake = firstmate_root() / "bin" / "fm-ext-intake.sh"
     secret = secret_path(home)
     env = os.environ.copy()
@@ -285,35 +452,36 @@ def _run_intake(home: Path, dest: dict[str, str], text: str) -> int:
     # activation authority, so installing this plugin cannot switch the intake
     # half of a home on while its bootstrap and watcher still believe the
     # bridge is off.
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
-        handle.write(text)
-        text_path = handle.name
+    temp_paths = [_write_temp(text)]
+    args = [
+        str(intake),
+        "--request-id",
+        request_id_for(dest),
+        "--guild-id",
+        dest["guild_id"],
+        "--channel-id",
+        dest["channel_id"],
+        "--thread-id",
+        dest["thread_id"],
+        "--message-id",
+        dest["message_id"],
+        "--author",
+        dest["author"],
+        "--secret-file",
+        str(secret),
+        "--text-file",
+        temp_paths[0],
+        "--origin",
+        origin,
+    ]
     try:
-        result = subprocess.run(
-            [
-                str(intake),
-                "--request-id",
-                request_id_for(dest),
-                "--guild-id",
-                dest["guild_id"],
-                "--channel-id",
-                dest["channel_id"],
-                "--thread-id",
-                dest["thread_id"],
-                "--message-id",
-                dest["message_id"],
-                "--author",
-                dest["author"],
-                "--secret-file",
-                str(secret),
-                "--text-file",
-                text_path,
-            ],
-            check=False,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
+        if reply_to:
+            temp_paths.append(_write_temp(reply_to.get("text") or ""))
+            args += ["--reply-to-message-id", reply_to["message_id"], "--reply-to-text-file", temp_paths[1]]
+            if reply_to.get("request_id"):
+                args += ["--reply-to-request-id", reply_to["request_id"]]
+        result = subprocess.run(args, check=False, env=env, capture_output=True, text=True)
         return result.returncode
     finally:
-        os.unlink(text_path)
+        for path in temp_paths:
+            os.unlink(path)

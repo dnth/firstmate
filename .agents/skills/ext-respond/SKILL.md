@@ -13,7 +13,7 @@ metadata:
 
 # ext-respond
 
-The local Communication Officer bridge lets a firstmate instance answer `/fm` requests that a dedicated Hermes Gateway plugin delivered into this home.
+The local Communication Officer bridge lets a firstmate instance answer Discord requests that a dedicated Hermes Gateway plugin delivered into this home: `/fm`, a message in the dedicated channel, or a reply to one of Firstmate's own posts.
 Load this skill for an `ext-request <slug>` check wake or the drain's `EXT REQUESTS AWAITING ANSWER` section.
 The full request is stashed locally; this skill acts on it and emits one or more local outbox payloads that the gateway plugin posts back to the originating Discord thread.
 
@@ -42,13 +42,15 @@ A missing or unrecognized `authority` value is treated as `confirm`.
 
 - **Work that completes now** - emit **one** `answer` reporting the outcome.
 - **Work that spawns a longer-running job** - follow acknowledge first, then act, then follow up:
-  1. Emit an immediate `ack` through `bin/fm-ext-emit.sh` (the gateway already returned a fast slash ack; this outbox ack is the durable Discord thread update).
+  1. Emit an immediate `ack` through `bin/fm-ext-emit.sh` (the gateway already acknowledged receipt with a short `/fm` text or a 👀 reaction; this outbox ack is the durable Discord thread update).
   2. Dispatch the work through the normal lifecycle right away.
   3. Link the spawned task **before** clearing the inbox: `bin/fm-ext-link.sh <task-id> <request_id>`.
      This records `ext_request=`, not `x_request=`.
   4. On genuine milestones emit `followup` with a new `--generation`.
      The terminal outcome uses `--kind final`.
      Duplicate generation is a no-op.
+
+A request whose `origin` is `message` shows ✅ on the captain's message only once its `answer` or `final` posts, so finish every request that needs a reply with one of those kinds.
 
 Every drained request sorts into one of three cases:
 
@@ -76,6 +78,8 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
 1. **Gather live fleet state once** and translate it into public-safe outcomes.
 2. **Drain every pending request.** For each `state/ext-inbox/<slug>.json`:
    a. Read `request_id`, `text`, `author`, and destination ids.
+      When `reply_to` is present, the author replied to one of Firstmate's own posts: read `reply_to.text` (the first 1000 characters of that post) to resolve what a short answer such as "yes" refers to, and use `reply_to.request_id`, the earlier request that post answered, to find any task linked to it.
+      The reply carries its own `authority`; the earlier request's authority never transfers to it.
       Ignore unknown extra fields.
    b. Classify as actionable, question, or pure acknowledgment.
    c. Act on an actionable request through the normal lifecycle.

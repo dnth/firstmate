@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Behavior tests for the gateway plugin's Discord destination resolution.
+# Behavior tests for the gateway plugin's Discord destination resolution and
+# its message paths: the dedicated channel, replies to Firstmate's own posts,
+# and the seen/warning reactions on the captain's message.
 #
-# Hermetic: no Discord network, no token, no gateway process. Python drives
-# contrib/hermes-gateway-firstmate-comms/intake.py with synthetic MessageEvent
-# shapes mirroring the installed Hermes 0.20.5 Discord adapter
-# (_build_slash_event plus the interaction's guild/message ids) and asserts
-# the task-local pre_gateway_dispatch -> handle_fm_command contract.
+# Hermetic: no Discord network, no real token, no gateway process. Python
+# drives contrib/hermes-gateway-firstmate-comms/intake.py with synthetic
+# MessageEvent shapes mirroring the installed Hermes 0.20.5 Discord adapter
+# (_build_slash_event plus the interaction's guild/message ids, and the text
+# message event built by _handle_message) and asserts the task-local
+# pre_gateway_dispatch -> handle_fm_command contract. Reactions go to a local
+# stand-in for Discord's REST edge.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -37,8 +41,124 @@ setup_home() {
 
 plugin_env() {
   GUILD="$GUILD" CHANNEL="$CHANNEL" AUTHOR="$AUTHOR" DENIED="$DENIED" \
+  FM_EVENTS_DIR="$TMP_ROOT/fixtures" \
   PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$1" "$ROOT" "$PLUGIN"
 }
+
+# Shared synthetic events and a recording REST edge for the message-path cases.
+mkdir -p "$TMP_ROOT/fixtures"
+cat > "$TMP_ROOT/fixtures/fmevents.py" <<'PY'
+"""Synthetic Hermes 0.20.5 Discord events and a local REST edge."""
+import json
+import os
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
+
+G, C, A = os.environ["GUILD"], os.environ["CHANNEL"], os.environ["AUTHOR"]
+DEFAULT, REPLY, MEMBER_JOIN = 0, 19, 7
+
+
+def message(msgid, text, author=A, channel=C, thread=None, kind=DEFAULT,
+            bot=False, edited=False, webhook=None, reply_to=None, reply_text=None):
+    """A guild text message as _handle_message builds it; raw is the Message."""
+    chat = thread or channel
+    source = SimpleNamespace(
+        platform=SimpleNamespace(value="discord"), chat_id=chat,
+        chat_type="thread" if thread else "group", user_id=author,
+        user_name="u", thread_id=thread,
+        parent_chat_id=channel if thread else None, scope_id=G, guild_id=G,
+        message_id=msgid, is_bot=bot)
+    reference = None
+    if reply_to:
+        resolved = None
+        if reply_text is not None:
+            resolved = SimpleNamespace(id=int(reply_to), content=reply_text)
+        reference = SimpleNamespace(message_id=int(reply_to), resolved=resolved)
+    raw = SimpleNamespace(
+        id=int(msgid), guild_id=int(G), channel_id=int(chat),
+        type=SimpleNamespace(value=kind),
+        author=SimpleNamespace(id=int(author), bot=bot, system=False),
+        webhook_id=webhook,
+        edited_at="2026-10-11T00:00:00+00:00" if edited else None,
+        reference=reference)
+    return SimpleNamespace(text=text, source=source, raw_message=raw,
+                           message_id=msgid, reply_to_message_id=reply_to,
+                           reply_to_text=reply_text)
+
+
+def slash(msgid, text, author=A, channel=C):
+    """A /fm invocation as _build_slash_event builds it; raw is the Interaction."""
+    source = SimpleNamespace(
+        platform=SimpleNamespace(value="discord"), chat_id=channel,
+        chat_type="group", user_id=author, user_name="u", thread_id=None,
+        scope_id=G, guild_id=G, message_id=None)
+    raw = SimpleNamespace(id=int(msgid), guild_id=int(G), channel_id=int(channel),
+                          type=SimpleNamespace(value=2),
+                          user=SimpleNamespace(id=int(author)))
+    return SimpleNamespace(text=text, source=source, raw_message=raw, message_id=None)
+
+
+def inbox(home):
+    """Recorded requests keyed by Discord message id."""
+    folder = Path(home) / "state" / "ext-inbox"
+    records = [json.loads(p.read_text()) for p in folder.glob("*.json")] if folder.is_dir() else []
+    return {record["message_id"]: record for record in records}
+
+
+def wake_rows(home, slug):
+    queue = Path(home) / "state" / ".wake-queue"
+    if not queue.is_file():
+        return 0
+    return sum(1 for line in queue.read_text().splitlines() if line.endswith("ext-request " + slug))
+
+
+class Edge:
+    """Local stand-in for Discord's REST edge; records each reaction PUT."""
+
+    def __init__(self, status=204):
+        self.seen = []
+        edge = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_PUT(self):
+                edge.seen.append((self.path, self.headers.get("User-Agent", "")))
+                self.send_response(status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = "http://127.0.0.1:%d/api/v10" % self.server.server_address[1]
+
+    def wait(self, count, timeout=10.0):
+        """Wait until count reactions arrived; return the recorded paths."""
+        deadline = time.monotonic() + timeout
+        while len(self.seen) < count and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return [path for path, _agent in self.seen]
+
+
+def setup(home, root, status=204):
+    """Point the plugin at this home and its reactions at a fresh edge."""
+    import outbox_poster
+    os.environ["FM_HOME"] = home
+    os.environ["FM_ROOT_OVERRIDE"] = root
+    os.environ["DISCORD_BOT_TOKEN"] = "test-bot-token"
+    edge = Edge(status)
+    outbox_poster.DISCORD_API_BASE = edge.base
+    return edge
+
+
+def reaction_path(channel, message, emoji):
+    from urllib.parse import quote
+    return "/api/v10/channels/%s/messages/%s/reactions/%s/@me" % (channel, message, quote(emoji, safe=""))
+PY
 
 # --- 1. task-local bind: identical text from two authors never crosses ------
 
@@ -335,6 +455,254 @@ PY
   pass "7 /fm in a thread is authorised by its parent channel and replies into the thread"
 }
 
+# --- 8. the dedicated channel turns a plain message into one request --------
+#
+# config/ext-channel names one channel. Every ordinary message an allowlisted
+# author sends there, or in a thread under it, becomes a request through the
+# same intake as /fm, so it carries the same authority, and the general agent
+# never also answers it. The request's message gets the seen reaction.
+
+test_8_dedicated_channel_message_is_one_request_with_slash_authority() {
+  local home out
+  home="$TMP_ROOT/c8"
+  setup_home "$home"
+  out=$(THREAD=777777777777777777 plugin_env "$home" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["PYTHONPATH"])
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+from pathlib import Path
+import fmevents as ev
+home, root = sys.argv[1], sys.argv[2]
+edge = ev.setup(home, root)
+import intake, outbox_poster
+G, C, A, T = ev.G, ev.C, ev.A, os.environ["THREAD"]
+SEEN = outbox_poster.REACT_SEEN
+
+def hook(event):
+    return (intake.pre_gateway_dispatch_hook(event) or {}).get("action")
+
+# Off until configured: a plain message keeps its normal path.
+assert hook(ev.message("810000000000000001", "ship the docs fix")) is None
+assert ev.inbox(home) == {}, "an unconfigured channel must record nothing"
+
+Path(home, "config", "ext-channel").write_text("# Firstmate's channel\n%s\n" % C)
+event = ev.message("810000000000000002", "ship the docs fix")
+assert hook(event) == "skip", "a channel request must not also reach the general agent"
+assert hook(event) == "skip", "a redelivered message stays Firstmate's"
+records = ev.inbox(home)
+assert list(records) == ["810000000000000002"], records
+record = records["810000000000000002"]
+assert record["text"] == "ship the docs fix", record
+assert record["origin"] == "message", record
+assert (record["channel_id"], record["thread_id"], record["author"]) == (C, C, A), record
+assert ev.wake_rows(home, record["slug"]) == 1, "one message must raise exactly one wake"
+seen = edge.wait(2)
+assert set(seen) == {ev.reaction_path(C, "810000000000000002", SEEN)}, seen
+assert all(agent.startswith("DiscordBot (") for _path, agent in edge.seen), edge.seen
+
+# The same authority as /fm from the same author and channel.
+assert intake.pre_gateway_dispatch_hook(ev.slash("810000000000000003", "/fm ship it")) is None
+print("slash=" + intake.handle_fm_command("ship it"))
+records = ev.inbox(home)
+assert records["810000000000000003"]["authority"] == record["authority"] == "standing", records
+
+# A broader channel rule grants confirm on both paths alike.
+Path(home, "config", "ext-allowlist").write_text("%s:%s\n" % (G, C))
+assert hook(ev.message("810000000000000004", "what is waiting on me")) == "skip"
+intake.pre_gateway_dispatch_hook(ev.slash("810000000000000005", "/fm what is waiting on me"))
+intake.handle_fm_command("what is waiting on me")
+records = ev.inbox(home)
+assert records["810000000000000004"]["authority"] == "confirm", records
+assert records["810000000000000005"]["authority"] == "confirm", records
+
+# Typed /fm text and a thread under the channel are requests too.
+assert hook(ev.message("810000000000000006", "/fm check the build")) == "skip"
+assert hook(ev.message("810000000000000007", "and the notes", thread=T)) == "skip"
+records = ev.inbox(home)
+assert records["810000000000000006"]["text"] == "check the build", records
+thread_record = records["810000000000000007"]
+assert (thread_record["channel_id"], thread_record["thread_id"]) == (C, T), thread_record
+assert ev.reaction_path(T, "810000000000000007", SEEN) in edge.wait(5), edge.seen
+print("dedicated-channel-ok")
+PY
+  ) || fail "dedicated-channel request case failed: $out"
+  assert_contains "$out" "slash=Aye, captain" "the /fm comparison request must be accepted"
+  assert_contains "$out" "dedicated-channel-ok" "the dedicated channel must record one request per message"
+  pass "8 a dedicated-channel message is one request with the same authority as /fm"
+}
+
+# --- 9. nothing else in or outside the channel becomes a request ------------
+
+test_9_dedicated_channel_ignores_everyone_and_everything_else() {
+  local home out
+  home="$TMP_ROOT/c9"
+  setup_home "$home"
+  out=$(OTHER=888888888888888888 plugin_env "$home" <<'PY'
+import os, sys, time
+sys.path.insert(0, os.environ["PYTHONPATH"])
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+from pathlib import Path
+import fmevents as ev
+home, root = sys.argv[1], sys.argv[2]
+edge = ev.setup(home, root)
+import intake
+G, C, A, D, O = ev.G, ev.C, ev.A, os.environ["DENIED"], os.environ["OTHER"]
+channel_file = Path(home, "config", "ext-channel")
+channel_file.write_text(C + "\n")
+
+def hook(event):
+    return (intake.pre_gateway_dispatch_hook(event) or {}).get("action")
+
+# Someone the allowlist does not admit is ignored outright in the channel.
+assert hook(ev.message("820000000000000001", "let me in", author=D)) == "skip"
+
+# A guild-wide rule would admit anything below, so only the path decides.
+Path(home, "config", "ext-allowlist").write_text("%s:%s:%s\n%s\n" % (G, C, A, G))
+cases = {
+    "bot": ev.message("820000000000000002", "beep", bot=True),
+    "webhook": ev.message("820000000000000003", "hook post", webhook=999),
+    "edited": ev.message("820000000000000004", "edited order", edited=True),
+    "system": ev.message("820000000000000005", "joined", kind=ev.MEMBER_JOIN),
+    "other-channel": ev.message("820000000000000006", "elsewhere", channel=O),
+    "slash-interaction": ev.slash("820000000000000007", "/fm from the pop-up"),
+}
+for name, event in cases.items():
+    assert hook(event) is None, name
+
+# A malformed, ambiguous, or symlinked setting leaves the channel off.
+for content in ("", "general\n", "%s\n%s\n" % (C, O)):
+    channel_file.write_text(content)
+    assert hook(ev.message("820000000000000008", "still off")) is None, content
+real = Path(home, "real-channel")
+real.write_text(C + "\n")
+channel_file.unlink()
+channel_file.symlink_to(real)
+assert hook(ev.message("820000000000000009", "still off")) is None, "symlink"
+
+assert ev.inbox(home) == {}, ev.inbox(home)
+time.sleep(0.3)
+assert edge.seen == [], edge.seen
+print("ignored-ok")
+PY
+  ) || fail "dedicated-channel negative case failed: $out"
+  assert_contains "$out" "ignored-ok" "only allowlisted human messages in the channel may become requests"
+  pass "9 the dedicated channel ignores other authors, bots, edits, system messages, and other channels"
+}
+
+# --- 10. a reply to a Firstmate post continues that conversation ------------
+#
+# A Discord reply to one of Firstmate's own posted messages becomes a request
+# anywhere the gateway listens, carrying the replied-to id, Firstmate's
+# original request id, and that message's text cut to 1000 characters.
+
+test_10_reply_to_firstmate_post_carries_its_context() {
+  local home out
+  home="$TMP_ROOT/c10"
+  setup_home "$home"
+  out=$(THREAD=777777777777777777 plugin_env "$home" <<'PY'
+import os, subprocess, sys
+sys.path.insert(0, os.environ["PYTHONPATH"])
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+from pathlib import Path
+import fmevents as ev
+home, root = sys.argv[1], sys.argv[2]
+edge = ev.setup(home, root)
+import intake, outbox_poster
+G, C, A, D, T = ev.G, ev.C, ev.A, os.environ["DENIED"], os.environ["THREAD"]
+
+def hook(event):
+    return (intake.pre_gateway_dispatch_hook(event) or {}).get("action")
+
+# Firstmate answers a /fm request; the poster keeps the Discord id it posted.
+intake.pre_gateway_dispatch_hook(ev.slash("830000000000000001", "/fm docs status"))
+assert intake.handle_fm_command("docs status").startswith("Aye, captain")
+rid = "discord:%s:%s:%s:830000000000000001" % (G, C, C)
+Path(home, "ans.txt").write_text("Docs fix is ready. Shall I merge it?")
+subprocess.run([os.path.join(root, "bin", "fm-ext-emit.sh"), "--request-id", rid,
+                "--kind", "answer", "--generation", "1",
+                "--text-file", os.path.join(home, "ans.txt")], check=True, capture_output=True)
+POSTED = "830000000000000900"
+sent = outbox_poster.drain_outbox(
+    send=lambda _payload: {"ok": True, "discord_message_id": POSTED}, home=Path(home))
+assert sent == ["sent"], sent
+
+quoted = "Docs fix is ready. Shall I merge it? " + "\u00e9" * 2000
+assert hook(ev.message("830000000000000002", "yes", kind=ev.REPLY,
+                       reply_to=POSTED, reply_text=quoted)) == "skip"
+record = ev.inbox(home)["830000000000000002"]
+context = record["reply_to"]
+assert (record["text"], record["origin"]) == ("yes", "message"), record
+assert (context["message_id"], context["request_id"]) == (POSTED, rid), context
+assert context["text"] == quoted[:1000] + "\u2026", len(context["text"])
+
+# The same continuation works from a thread under the channel.
+assert hook(ev.message("830000000000000003", "go ahead", thread=T, kind=ev.REPLY,
+                       reply_to=POSTED, reply_text="Shall I merge it?")) == "skip"
+threaded = ev.inbox(home)["830000000000000003"]
+assert (threaded["channel_id"], threaded["thread_id"]) == (C, T), threaded
+assert threaded["reply_to"]["request_id"] == rid, threaded
+
+# A reply to anyone else's message, or from an author the allowlist refuses,
+# keeps its normal path and records nothing.
+assert hook(ev.message("830000000000000004", "agreed", kind=ev.REPLY,
+                       reply_to="830000000000000999", reply_text="someone else")) is None
+assert hook(ev.message("830000000000000005", "yes", author=D, kind=ev.REPLY,
+                       reply_to=POSTED, reply_text="Shall I merge it?")) is None
+assert set(ev.inbox(home)) == {"830000000000000001", "830000000000000002",
+                               "830000000000000003"}, sorted(ev.inbox(home))
+
+# Inside the dedicated channel any reply is a request; only a reply to
+# Firstmate carries reply context.
+Path(home, "config", "ext-channel").write_text(C + "\n")
+assert hook(ev.message("830000000000000006", "noted", kind=ev.REPLY,
+                       reply_to="830000000000000999", reply_text="someone else")) == "skip"
+assert "reply_to" not in ev.inbox(home)["830000000000000006"]
+assert ev.reaction_path(C, "830000000000000002", outbox_poster.REACT_SEEN) in edge.wait(3)
+print("reply-ok")
+PY
+  ) || fail "reply continuation case failed: $out"
+  assert_contains "$out" "reply-ok" "a reply to Firstmate must carry its context and nothing else may"
+  pass "10 a reply to a Firstmate post becomes a request carrying the replied-to id and bounded text"
+}
+
+# --- 11. reactions are best effort; an unrecorded request warns -------------
+
+test_11_reaction_failure_never_blocks_and_intake_failure_warns() {
+  local home out
+  home="$TMP_ROOT/c11"
+  setup_home "$home"
+  out=$(plugin_env "$home" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["PYTHONPATH"])
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+from pathlib import Path
+import fmevents as ev
+home, root = sys.argv[1], sys.argv[2]
+edge = ev.setup(home, root, status=500)
+import intake, outbox_poster
+C = ev.C
+Path(home, "config", "ext-channel").write_text(C + "\n")
+
+def hook(event):
+    return (intake.pre_gateway_dispatch_hook(event) or {}).get("action")
+
+# Discord refusing the reaction changes nothing about the request.
+assert hook(ev.message("840000000000000001", "status please")) == "skip"
+assert "840000000000000001" in ev.inbox(home)
+assert edge.wait(1) == [ev.reaction_path(C, "840000000000000001", outbox_poster.REACT_SEEN)]
+
+# A request the bridge cannot record is flagged on the message, not dropped.
+Path(home, "config", "ext-bridge").rename(Path(home, "config", "ext-bridge.off"))
+assert hook(ev.message("840000000000000002", "status again")) == "skip"
+assert "840000000000000002" not in ev.inbox(home)
+assert ev.reaction_path(C, "840000000000000002", outbox_poster.REACT_FAILED) in edge.wait(2)
+print("best-effort-ok")
+PY
+  ) || fail "reaction failure case failed: $out"
+  assert_contains "$out" "best-effort-ok" "a reaction failure must not affect the request"
+  pass "11 reaction failures never block a request and an unrecorded request gets the warning reaction"
+}
+
 test_1_interleaved_identical_text_keeps_authority
 test_2_denied_author_gets_allowlist_refusal
 test_3_reply_target_is_originating_thread
@@ -342,5 +710,9 @@ test_4_unresolvable_names_hermes_version
 test_5_rebind_clears_stale_destination
 test_6_hook_registration_errors_propagate
 test_7_thread_uses_parent_channel_for_allowlist_and_replies_in_thread
+test_8_dedicated_channel_message_is_one_request_with_slash_authority
+test_9_dedicated_channel_ignores_everyone_and_everything_else
+test_10_reply_to_firstmate_post_carries_its_context
+test_11_reaction_failure_never_blocks_and_intake_failure_warns
 
 echo "all fm-ext-plugin-dest tests passed"

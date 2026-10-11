@@ -7,6 +7,9 @@
 #     --author <id> --secret-file <path>
 #     (--text-file <path> | --text-file -)
 #     [--platform discord] [--source hermes-gateway] [--no-wake]
+#     [--origin slash|message]
+#     [--reply-to-message-id <id> [--reply-to-request-id <request_id>]
+#      [--reply-to-text-file <path>]]
 #
 # Opt-in is config/ext-bridge plus a mode-0600 home secret. FM_EXT_BRIDGE can
 # only turn a configured bridge off, never on. The presented --secret-file must
@@ -17,6 +20,15 @@
 # "standing" only from a <guild>:<channel>:<author> rule, and "confirm" from a
 # broader guild-only or channel-only rule, whose requests need the captain's
 # confirmation before any project-changing action.
+#
+# --origin records how the request arrived: "slash" (the default) for a /fm
+# command interaction, "message" for an ordinary Discord message, which is the
+# only kind the gateway can add reactions to. --reply-to-message-id marks a
+# request that answers one of Firstmate's own posted Discord messages: the
+# inbox record then carries reply_to {message_id, request_id, text}, with that
+# message's text cut to its first 1000 characters (a trailing ellipsis marks a
+# cut), so Firstmate can tell what a short answer such as "yes" refers to.
+# Neither field changes admission or authority.
 #
 # Idempotent: the same message id claims the existing offer and does not
 # append a second wake. If the wake cannot be appended, the offer marker is
@@ -43,6 +55,9 @@ usage: fm-ext-intake.sh --request-id discord:<guild>:<channel>:<thread>:<message
          --author <id> --secret-file <path>
          (--text-file <path> | --text-file -)
          [--platform discord] [--source hermes-gateway] [--no-wake]
+         [--origin slash|message]
+         [--reply-to-message-id <id> [--reply-to-request-id <request_id>]
+          [--reply-to-text-file <path>]]
 EOF
 }
 
@@ -63,6 +78,12 @@ TEXT_FILE=
 PLATFORM=discord
 SOURCE=hermes-gateway
 WAKE=1
+ORIGIN=slash
+REPLY_MESSAGE_ID=
+REPLY_REQUEST_ID=
+REPLY_TEXT_FILE=
+# Longest replied-to text kept in a request's reply_to context, in characters.
+REPLY_TEXT_MAX=1000
 
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
@@ -82,6 +103,10 @@ while [ "$#" -gt 0 ]; do
     --platform) shift; PLATFORM=${1:-} ;;
     --source) shift; SOURCE=${1:-} ;;
     --no-wake) WAKE=0 ;;
+    --origin) shift; ORIGIN=${1:-} ;;
+    --reply-to-message-id) shift; REPLY_MESSAGE_ID=${1:-} ;;
+    --reply-to-request-id) shift; REPLY_REQUEST_ID=${1:-} ;;
+    --reply-to-text-file) shift; REPLY_TEXT_FILE=${1:-} ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -103,6 +128,21 @@ fm_ext_request_id_valid "$REQUEST_ID" || die "unsafe request_id: $REQUEST_ID"
 EXPECTED_RID="discord:${GUILD_ID}:${CHANNEL_ID}:${THREAD_ID}:${MESSAGE_ID}"
 [ "$REQUEST_ID" = "$EXPECTED_RID" ] \
   || die "request_id does not match guild/channel/thread/message fields"
+
+case "$ORIGIN" in
+  slash|message) ;;
+  *) die "origin must be slash or message, got '$ORIGIN'" ;;
+esac
+if [ -n "$REPLY_MESSAGE_ID" ]; then
+  case "$REPLY_MESSAGE_ID" in
+    *[!0-9]*) die "reply-to message id must be a Discord id, got '$REPLY_MESSAGE_ID'" ;;
+  esac
+  if [ -n "$REPLY_REQUEST_ID" ]; then
+    fm_ext_request_id_valid "$REPLY_REQUEST_ID" || die "unsafe reply-to request_id: $REPLY_REQUEST_ID"
+  fi
+elif [ -n "$REPLY_REQUEST_ID$REPLY_TEXT_FILE" ]; then
+  die "--reply-to-request-id and --reply-to-text-file need --reply-to-message-id"
+fi
 
 fm_ext_active "$FM_HOME" || die "local ext-bridge is not active (need config/ext-bridge plus a mode-0600 secret)" 1
 HOME_SECRET=$(fm_ext_secret_path "$FM_HOME")
@@ -126,6 +166,13 @@ else
 fi
 [ -n "$TEXT" ] || die "text is empty"
 
+REPLY_TEXT=
+if [ -n "$REPLY_TEXT_FILE" ]; then
+  [ -f "$REPLY_TEXT_FILE" ] && [ ! -L "$REPLY_TEXT_FILE" ] \
+    || die "reply-to text file not found: $REPLY_TEXT_FILE"
+  REPLY_TEXT=$(cat -- "$REPLY_TEXT_FILE")
+fi
+
 SLUG=$(fm_ext_request_slug "$REQUEST_ID") || die "could not derive request slug" 1
 NOW=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
 case "$NOW" in
@@ -144,12 +191,25 @@ INBOX_JSON=$(jq -cn \
   --arg message_id "$MESSAGE_ID" \
   --arg author "$AUTHOR" \
   --arg authority "$AUTHORITY" \
+  --arg origin "$ORIGIN" \
   --arg text "$TEXT" \
+  --arg reply_message_id "$REPLY_MESSAGE_ID" \
+  --arg reply_request_id "$REPLY_REQUEST_ID" \
+  --arg reply_text "$REPLY_TEXT" \
+  --argjson reply_max "$REPLY_TEXT_MAX" \
   --argjson recorded_at "$NOW" \
   '{schema_version:$schema_version, request_id:$request_id, slug:$slug,
     platform:$platform, source:$source, guild_id:$guild_id,
     channel_id:$channel_id, thread_id:$thread_id, message_id:$message_id,
-    author:$author, authority:$authority, text:$text, recorded_at:$recorded_at}') \
+    author:$author, authority:$authority, origin:$origin, text:$text,
+    recorded_at:$recorded_at}
+   + if $reply_message_id == "" then {} else
+       {reply_to: ({message_id:$reply_message_id,
+         text: (if ($reply_text | length) > $reply_max
+                then ($reply_text | .[0:$reply_max]) + "…"
+                else $reply_text end)}
+         + if $reply_request_id == "" then {} else {request_id:$reply_request_id} end)}
+     end') \
   || die "could not build the inbox record" 1
 
 CONTEXT_JSON=$(jq -cn \
@@ -163,11 +223,12 @@ CONTEXT_JSON=$(jq -cn \
   --arg message_id "$MESSAGE_ID" \
   --arg author "$AUTHOR" \
   --arg authority "$AUTHORITY" \
+  --arg origin "$ORIGIN" \
   --argjson recorded_at "$NOW" \
   '{request_id:$request_id, slug:$slug, platform:$platform, source:$source,
     guild_id:$guild_id, channel_id:$channel_id, thread_id:$thread_id,
     message_id:$message_id, author:$author, authority:$authority,
-    recorded_at:$recorded_at}') \
+    origin:$origin, recorded_at:$recorded_at}') \
   || die "could not build the destination context" 1
 
 INBOX_DIR=$(fm_ext_inbox_dir)

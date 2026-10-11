@@ -66,7 +66,7 @@ write_text() {
 }
 
 intake_ok() {
-  local home=$1 text=$2 message=${3:-$MESSAGE} out rc textfile
+  local home=$1 text=$2 message=${3:-$MESSAGE} origin=${4:-slash} out rc textfile
   textfile="$home/text.txt"
   write_text "$textfile" "$text"
   out=$(home_env "$home" "$INTAKE" \
@@ -74,7 +74,7 @@ intake_ok() {
     --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$THREAD" \
     --message-id "$message" --author "$AUTHOR" \
     --secret-file "$home/config/ext-secret" \
-    --text-file "$textfile")
+    --text-file "$textfile" --origin "$origin")
   rc=$?
   expect_code 0 "$rc" "intake exit"
   printf '%s\n' "$out"
@@ -2114,6 +2114,256 @@ test_37_every_pending_request_is_listed_without_limit() {
   pass "37 every pending request is listed without a limit"
 }
 
+# --- 38. delivery reactions follow the reply outcome -------------------------
+#
+# A request that arrived as an ordinary Discord message gets a check mark once
+# its answer or final reply has posted and a warning when a reply fails for
+# good. An ack is not the answer, and a slash command is an interaction with no
+# message to react to.
+
+test_38_delivery_reactions_follow_the_reply_outcome() {
+  local home out rid2 rid3 n
+  home="$TMP_ROOT/c38"
+  setup_home "$home"
+  rid2="discord:${GUILD}:${CHANNEL}:${THREAD}:380000000000000002"
+  rid3="discord:${GUILD}:${CHANNEL}:${THREAD}:380000000000000003"
+  intake_ok "$home" "status please" "$MESSAGE" message >/dev/null
+  intake_ok "$home" "slash status" 380000000000000002 >/dev/null
+  intake_ok "$home" "doomed status" 380000000000000003 message >/dev/null
+  write_text "$home/ack.txt" "On it."
+  write_text "$home/ans.txt" "All shipshape."
+  home_env "$home" "$EMIT" --request-id "$RID" --kind ack --generation 1 \
+    --text-file "$home/ack.txt" >/dev/null
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  home_env "$home" "$EMIT" --request-id "$rid2" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  home_env "$home" "$EMIT" --request-id "$rid3" --kind final --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
+import io, os, sys, urllib.error
+from email.message import EmailMessage
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home = sys.argv[1]
+os.environ["FM_HOME"] = home
+names = {outbox_poster.REACT_SEEN: "seen", outbox_poster.REACT_DONE: "done",
+         outbox_poster.REACT_FAILED: "failed"}
+def send(payload):
+    if payload["message_id"] == "380000000000000003":
+        raise urllib.error.HTTPError("https://discord.test/messages", 403, "forbidden",
+                                     EmailMessage(), io.BytesIO(b""))
+    return {"ok": True, "discord_message_id": "38" + payload["kind"]}
+def react(channel, message, emoji):
+    print("react=%s/%s/%s" % (channel, message, names.get(emoji, emoji)))
+results = outbox_poster.drain_outbox(send=send, home=Path(home), react=react)
+print("results=" + ",".join(sorted(results)))
+PY
+  )
+  assert_contains "$out" "react=$THREAD/$MESSAGE/done" "a posted answer must mark the captain's message done"
+  assert_contains "$out" "react=$THREAD/380000000000000003/failed" \
+    "a terminal post failure must mark the captain's message with a warning"
+  n=$(printf '%s\n' "$out" | grep -c '^react=')
+  [ "$n" = 2 ] || fail "only the posted answer and the terminal failure may react, got $n: $out"
+  assert_contains "$out" "results=sent,sent,sent,terminal-failed" "every reply must still reach its outcome"
+  pass "38 delivery reactions follow the reply outcome"
+}
+
+# --- 39. a failed reaction never blocks or repeats a reply -------------------
+
+test_39_reaction_failure_never_blocks_or_repeats_a_reply() {
+  local home slug sent out n
+  home="$TMP_ROOT/c39"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "status please" "$MESSAGE" message)
+  write_text "$home/ans.txt" "All shipshape."
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  sent="$home/sent.log"
+  : > "$sent"
+  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(payload):
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": "39"}
+def react(*_args):
+    raise RuntimeError("discord refused the reaction")
+print("first=" + ",".join(outbox_poster.drain_outbox(send=send, home=Path(home), react=react)))
+print("second=" + ",".join(outbox_poster.drain_outbox(send=send, home=Path(home), react=react)))
+PY
+  )
+  assert_contains "$out" "first=sent" "a failed reaction must not fail the reply"
+  [ "$(printf '%s\n' "$out" | sed -n 's/^second=//p')" = "" ] \
+    || fail "a failed reaction must not leave the reply pending: $out"
+  n=$(wc -l < "$sent" | tr -d ' ')
+  [ "$n" = 1 ] || fail "a failed reaction must not repeat the reply, posted $n times"
+  assert_present "$home/state/ext-outbox/${slug}.answer.1.receipt.json" "the reply must still be receipted"
+  pass "39 a failed reaction never blocks or repeats a reply"
+}
+
+# --- 40. a reply stuck past its recovery budget warns ------------------------
+
+test_40_recovery_exhausted_reply_warns() {
+  local home out
+  home="$TMP_ROOT/c40"
+  setup_home "$home"
+  intake_ok "$home" "never resolves" "$MESSAGE" message >/dev/null
+  write_text "$home/ans.txt" "permanently ambiguous"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
+import os, sys, time, urllib.error
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home = sys.argv[1]
+os.environ["FM_HOME"] = home
+reactions = []
+def send(_payload):
+    raise urllib.error.URLError("timed out")
+def react(_channel, _message, emoji):
+    reactions.append("failed" if emoji == outbox_poster.REACT_FAILED else emoji)
+print("first=" + ",".join(outbox_poster.drain_outbox(send=send, home=Path(home), react=react)))
+print("after-first=" + ",".join(reactions))
+os.environ["FM_EXT_NOW_OVERRIDE"] = str(int(time.time()) + 4000)
+os.environ["FM_EXT_MIDDELIVERY_RECOVERY_MAX"] = "0"
+print("second=" + ",".join(outbox_poster.drain_outbox(send=send, home=Path(home), react=react)))
+print("reactions=" + ",".join(reactions))
+PY
+  )
+  assert_contains "$out" "first=mid-delivery" "an ambiguous send must stay mid-delivery"
+  assert_contains "$out" "after-first=" "an ambiguous send is not yet a failure"
+  [ "$(printf '%s\n' "$out" | sed -n 's/^after-first=//p')" = "" ] \
+    || fail "an ambiguous send must not warn before its recovery budget is spent: $out"
+  assert_contains "$out" "second=recovery-exhausted" "a spent recovery budget must fail the reply"
+  assert_contains "$out" "reactions=failed" "a reply failed after recovery must warn exactly once"
+  pass "40 a reply stuck past its recovery budget warns on the captain's message"
+}
+
+# --- 41. the real reaction goes through Discord's REST edge -----------------
+
+test_41_real_reaction_uses_discord_rest_edge() {
+  local home out
+  home="$TMP_ROOT/c41"
+  setup_home "$home"
+  intake_ok "$home" "real reaction" "$MESSAGE" message >/dev/null
+  write_text "$home/ans.txt" "All shipshape."
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  out=$(home_env "$home" env DISCORD_BOT_TOKEN=test-bot-token PYTHONPATH="$PLUGIN" \
+    "$PYTHON_BIN" - "$home" <<'PY'
+import json, os, sys, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home = sys.argv[1]
+os.environ["FM_HOME"] = home
+seen = []
+class Edge(BaseHTTPRequestHandler):
+    def _answer(self, ok_code, ok_body):
+        agent = self.headers.get("User-Agent", "")
+        seen.append((self.command, self.path, agent, self.headers.get("Authorization", "")))
+        if agent.startswith("DiscordBot ("):
+            code, body = ok_code, ok_body
+        else:
+            code, body = 403, b"error code: 1010\n"
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self._answer(200, json.dumps({"id": "41", "channel_id": "333333333333333333"}).encode())
+    def do_PUT(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self._answer(204, b"")
+    def log_message(self, *_args):
+        pass
+server = ThreadingHTTPServer(("127.0.0.1", 0), Edge)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+outbox_poster.DISCORD_API_BASE = "http://127.0.0.1:%d/api/v10" % server.server_address[1]
+print("result=" + ",".join(outbox_poster.drain_outbox(home=Path(home))))
+server.shutdown()
+for command, path, agent, auth in seen:
+    print("%s %s agent=%s auth=%s" % (command, path, agent, auth))
+PY
+  )
+  assert_contains "$out" "result=sent" "the real sender must post the answer (got: $out)"
+  assert_contains "$out" "PUT /api/v10/channels/$THREAD/messages/$MESSAGE/reactions/%E2%9C%85/@me agent=DiscordBot (" \
+    "the real reaction must PUT the check mark on the captain's message as a DiscordBot agent"
+  assert_contains "$out" "auth=Bot test-bot-token" "the real reaction must authenticate as the bot"
+  pass "41 the real reaction goes through Discord's REST edge"
+}
+
+# --- 42. intake records origin and a bounded reply context ------------------
+
+intake_reply() {  # <home> <message> <reply-text-file> [extra intake args...]
+  local home=$1 message=$2 reply_file=$3
+  shift 3
+  home_env "$home" "$INTAKE" \
+    --request-id "discord:${GUILD}:${CHANNEL}:${THREAD}:${message}" \
+    --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$THREAD" \
+    --message-id "$message" --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" \
+    --text-file "$home/text.txt" --origin message \
+    --reply-to-message-id 420000000000000900 --reply-to-request-id "$RID" \
+    --reply-to-text-file "$reply_file" "$@"
+}
+
+test_42_intake_records_origin_and_bounded_reply_context() {
+  local home rc slug inbox i
+  home="$TMP_ROOT/c42"
+  setup_home "$home"
+  write_text "$home/text.txt" "yes"
+  home_env "$home" "$INTAKE" --request-id "$RID" --guild-id "$GUILD" \
+    --channel-id "$CHANNEL" --thread-id "$THREAD" --message-id "$MESSAGE" \
+    --author "$AUTHOR" --secret-file "$home/config/ext-secret" \
+    --text-file "$home/text.txt" --origin bogus >/dev/null 2>&1; rc=$?
+  expect_code 2 "$rc" "an unknown origin must be refused"
+  home_env "$home" "$INTAKE" --request-id "$RID" --guild-id "$GUILD" \
+    --channel-id "$CHANNEL" --thread-id "$THREAD" --message-id "$MESSAGE" \
+    --author "$AUTHOR" --secret-file "$home/config/ext-secret" \
+    --text-file "$home/text.txt" --reply-to-text-file "$home/text.txt" >/dev/null 2>&1; rc=$?
+  expect_code 2 "$rc" "reply text without a replied-to message must be refused"
+  [ ! -d "$home/state/ext-inbox" ] || [ -z "$(ls -A "$home/state/ext-inbox")" ] \
+    || fail "a refused intake must record nothing"
+
+  : > "$home/q1000.txt"
+  for ((i = 0; i < 1000; i++)); do printf '\303\251' >> "$home/q1000.txt"; done
+  cp "$home/q1000.txt" "$home/q1001.txt"
+  printf 'Z' >> "$home/q1001.txt"
+  slug=$(intake_reply "$home" 420000000000000001 "$home/q1000.txt") || fail "a reply request must be recorded"
+  inbox="$home/state/ext-inbox/$slug.json"
+  [ "$(jq -r '.origin' "$inbox")" = message ] || fail "a message request must record its origin"
+  [ "$(jq -r '.reply_to.message_id + " " + .reply_to.request_id' "$inbox")" = "420000000000000900 $RID" ] \
+    || fail "the reply context must name the replied-to message and its request"
+  [ "$(jq -r '.reply_to.text | length' "$inbox")" = 1000 ] \
+    || fail "a 1000-character replied-to text must be kept whole"
+  [ "$(jq -r '.reply_to.text | endswith("\u2026")' "$inbox")" = false ] \
+    || fail "a kept-whole text must not be marked as cut"
+  slug=$(intake_reply "$home" 420000000000000002 "$home/q1001.txt") || fail "a long reply request must be recorded"
+  inbox="$home/state/ext-inbox/$slug.json"
+  [ "$(jq -r '.reply_to.text | length' "$inbox")" = 1001 ] \
+    || fail "a longer replied-to text must be cut to 1000 characters plus the cut mark"
+  [ "$(jq -r '.reply_to.text | endswith("\u00e9\u2026")' "$inbox")" = true ] \
+    || fail "the cut must keep the first 1000 characters and mark the cut"
+
+  slug=$(intake_ok "$home" "plain slash request" 420000000000000003)
+  [ "$(jq -r '.origin + " " + (has("reply_to") | tostring)' "$home/state/ext-inbox/$slug.json")" = "slash false" ] \
+    || fail "a slash request must record its origin and no reply context"
+  [ "$(jq -r '.origin' "$home/state/ext-context/$slug.json")" = slash ] \
+    || fail "the destination context must carry the origin for the poster"
+  pass "42 intake records origin and a bounded reply context"
+}
+
 test_1_allowlisted_intake_and_non_fm
 test_2_correlation_persists
 test_3_immediate_ack
@@ -2155,5 +2405,10 @@ test_34_real_sender_passes_discord_edge_user_agent_rule
 test_35_each_request_presents_its_own_wake_row
 test_36_unanswered_requests_survive_filtered_drains_until_answered
 test_37_every_pending_request_is_listed_without_limit
+test_38_delivery_reactions_follow_the_reply_outcome
+test_39_reaction_failure_never_blocks_or_repeats_a_reply
+test_40_recovery_exhausted_reply_warns
+test_41_real_reaction_uses_discord_rest_edge
+test_42_intake_records_origin_and_bounded_reply_context
 
 echo "all fm-ext-bridge tests passed"

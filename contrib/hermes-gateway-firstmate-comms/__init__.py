@@ -5,8 +5,9 @@ Do not enable it on a crewmate TUI profile. Crewmate Hermes still launches as
 ``hermes chat --tui`` and is a separate adapter.
 
 This plugin never calls ``ctx.dispatch_tool("terminal", ...)``.
-It execs ``bin/fm-ext-intake.sh`` with ``--text-file`` and watches the local
-outbox using ``bin/fm-ext-outbox.sh``.
+It execs ``bin/fm-ext-intake.sh`` with ``--text-file`` for /fm, for messages in
+the optional dedicated channel, and for replies to Firstmate's own posts, and
+watches the local outbox using ``bin/fm-ext-outbox.sh``.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ except ImportError:
 
 
 def register(ctx):
-    """Wire /fm and its required dispatch hook, then start the outbox poster."""
+    """Wire /fm and its required dispatch hook, then start the outbox poster.
+    The hook also routes dedicated-channel messages and replies to Firstmate.
+    """
     ctx.register_command(
         "fm",
         handler=handle_fm_command,

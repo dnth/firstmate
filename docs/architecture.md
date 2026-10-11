@@ -372,14 +372,15 @@ The [X mode configuration reference](configuration.md#promised-public-replies-st
 
 ## Optional local Communication Officer bridge
 
-The sibling local bridge is opt-in presence for a dedicated Hermes Gateway `/fm` plugin talking to this home over local files, not a hosted relay.
+The sibling local bridge is opt-in presence for a dedicated Hermes Gateway plugin talking to this home over local files, not a hosted relay.
 A user enables it with `config/ext-bridge` plus a mode-0600 secret file and a fail-closed allowlist; the presence file is the only activation authority, so no caller's environment can switch on a home that never opted in.
-That opt-in is authorization for firstmate to answer allowlisted Discord `/fm` requests, and standing authorization to act autonomously on normal reversible work only for a request whose allowlist rule names guild, channel, and author.
+That opt-in is authorization for firstmate to answer allowlisted Discord requests, and standing authorization to act autonomously on normal reversible work only for a request whose allowlist rule names guild, channel, and author.
 A request admitted by a broader guild-only or channel-only rule is answered, but anything that changes a project waits for the captain's confirmation, so adding a whole server to the allowlist never hands its members command authority.
 Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation at every authority level.
 The [local Communication Officer configuration reference](configuration.md#local-communication-officer-bridge-configext-bridge) owns activation, shim convergence, durable wake keys, and pending-request presentation.
 
 The gateway plugin calls `bin/fm-ext-intake.sh --text-file`, never `dispatch_tool("terminal", ...)`, and never interpolates Discord text into a shell command.
+`/fm`, a message in the optional dedicated channel, and a reply to one of Firstmate's own posts all enter through that one intake, so its allowlist alone decides admission and authority on every path; the plugin only decides which Discord messages are meant for Firstmate.
 Intake owns durable request publication; the watcher owns notification, and the drain presents pending requests from the inbox independently of wake acknowledgement.
 The `ext-respond` skill drains that inbox, classifies each request, and emits `ack` / `answer` / `followup` / `final` payloads through `bin/fm-ext-emit.sh`.
 Spawned work is linked with `bin/fm-ext-link.sh` using `ext_request=`, not `x_request=`.

@@ -10,7 +10,9 @@
 # same identity is a no-op success. A posting marker without a receipt is
 # refused (mid-delivery), matching public-follow-up delivery-posting behavior.
 # Destination fields come from the durable per-request context, so a delayed
-# follow-up still works after the inbox file is gone.
+# follow-up still works after the inbox file is gone. The payload also carries
+# the request's origin (slash or message, slash when the context predates it),
+# which tells the gateway poster whether it can react to the original message.
 #
 # Discord text is untrusted: pass it with --text-file or stdin.
 set -u
@@ -111,8 +113,13 @@ THREAD=$(jq -r '.thread_id // empty' "$CTX")
 MESSAGE=$(jq -r '.message_id // empty' "$CTX")
 PLATFORM=$(jq -r '.platform // "discord"' "$CTX")
 SOURCE=$(jq -r '.source // "hermes-gateway"' "$CTX")
+ORIGIN=$(jq -r '.origin // "slash"' "$CTX")
 [ "$PLATFORM" = discord ] || die "context platform must be discord"
 [ "$SOURCE" = hermes-gateway ] || die "context source must be hermes-gateway"
+case "$ORIGIN" in
+  slash|message) ;;
+  *) die "context origin must be slash or message" ;;
+esac
 [ -n "$GUILD" ] && [ -n "$CHANNEL" ] && [ -n "$THREAD" ] && [ -n "$MESSAGE" ] \
   || die "destination context is incomplete"
 
@@ -133,12 +140,14 @@ OUTBOX_JSON=$(jq -cn \
   --arg channel_id "$CHANNEL" \
   --arg thread_id "$THREAD" \
   --arg message_id "$MESSAGE" \
+  --arg origin "$ORIGIN" \
   --arg text "$TEXT" \
   --argjson recorded_at "$NOW" \
   '{schema_version:$schema_version, request_id:$request_id, slug:$slug,
     kind:$kind, generation:$generation, platform:$platform, source:$source,
     guild_id:$guild_id, channel_id:$channel_id, thread_id:$thread_id,
-    message_id:$message_id, text:$text, recorded_at:$recorded_at}') \
+    message_id:$message_id, origin:$origin, text:$text,
+    recorded_at:$recorded_at}') \
   || die "could not build the outbox payload" 1
 
 printf '%s\n' "$OUTBOX_JSON" \
