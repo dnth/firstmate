@@ -468,6 +468,20 @@ case "${1:-}" in
     [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
     exit 0
     ;;
+  send-keys)
+    # Honor the spawn prove-execution probe: a ready pane runs it.
+    for _arg in "$@"; do
+      case "$_arg" in
+        touch\ */.fm-launch-probe.*)
+          _marker=${_arg#touch }
+          _marker=${_marker#\'}
+          _marker=${_marker%\'}
+          : > "$_marker"
+          ;;
+      esac
+    done
+    exit 0
+    ;;
   has-session) exit 0 ;;
 esac
 exit 0

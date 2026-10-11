@@ -24,8 +24,32 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys|kill-window)
+  has-session|new-session|new-window|kill-window)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    exit 0
+    ;;
+  send-keys)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    # Honor the spawn prove-execution probe: a ready pane runs it. A staged
+    # /bin/bash launch invocation is appended resolved as its own line, so
+    # assertions read the launch the pane executes without changing the
+    # ordinary single-line command record above.
+    for _arg in "$@"; do
+      case "$_arg" in
+        touch\ */.fm-launch-probe.*)
+          _marker=${_arg#touch }
+          _marker=${_marker#\'}
+          _marker=${_marker%\'}
+          : > "$_marker"
+          ;;
+        "/bin/bash "*)
+          _staged=${_arg#/bin/bash }
+          _staged=${_staged#\'}
+          _staged=${_staged%\'}
+          [ ! -f "$_staged" ] || cat "$_staged" >> "$FM_FAKE_TMUX_LOG"
+          ;;
+      esac
+    done
     exit 0
     ;;
   list-windows)
@@ -54,6 +78,7 @@ EOF
   display-message)
     case "$*" in
       *'#{cursor_y}'*) printf '0\n' ;;
+      *'#{pane_pid}'*) printf '%s\n' "$$" ;;
       *) printf 'firstmate\n' ;;
     esac
     exit 0
