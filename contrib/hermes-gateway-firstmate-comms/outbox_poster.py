@@ -507,6 +507,122 @@ def firstmate_post_for(message_id: str, home: Path | None = None) -> dict | None
     return None
 
 
+WAITING_PIN_STATE = "ext-waiting-pin.json"
+WAITING_PIN_MISSING_PERMISSIONS = {403, 50013, 50001}
+
+
+def waiting_pin_state_path(home: Path) -> Path:
+    return state_dir(home) / WAITING_PIN_STATE
+
+
+def waiting_pin_http(action: str, path: str, token: str, body: dict | None = None) -> dict:
+    import urllib.request
+
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(
+        f"{DISCORD_API_BASE}{path}",
+        data=data,
+        method="GET" if body is None else ("PATCH" if action == "edit" else "POST"),
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read().decode("utf-8") or "{}"
+    except urllib.error.HTTPError as err:
+        raise DiscordSendError(classify_http_code(err.code), f"discord HTTP {err.code}", err.code) from err
+    except urllib.error.URLError as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    except (TimeoutError, OSError) as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as err:
+        raise DiscordSendError("ambiguous", "discord HTTP 200 with invalid JSON") from err
+
+
+def waiting_pin_load(home: Path) -> dict | None:
+    path = waiting_pin_state_path(home)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def waiting_pin_store(home: Path, record: dict) -> None:
+    path = waiting_pin_state_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(record), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def waiting_pin_deliver(payload: dict, home: Path) -> str:
+    """Post once, pin once, then edit the pinned message in place."""
+    token = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("HERMES_DISCORD_TOKEN")
+    if not token:
+        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
+    channel = str(payload.get("channel_id") or "")
+    text = str(payload.get("text") or "")
+    if not channel or not text:
+        raise DiscordSendError("permanent", "waiting-pin payload missing channel or text")
+    stored = waiting_pin_load(home)
+    message_id = str((stored or {}).get("message_id") or "")
+    if message_id and str((stored or {}).get("channel_id") or "") == channel:
+        try:
+            waiting_pin_http("edit", f"/channels/{channel}/messages/{message_id}", token, {"content": text})
+        except DiscordSendError as err:
+            if err.http_code != 404:
+                raise
+            message_id = ""
+        else:
+            record = dict(stored or {})
+            record.update(
+                {
+                    "message_id": message_id,
+                    "channel_id": channel,
+                    "content_hash": str(payload.get("content_hash") or ""),
+                    "refreshed_at": int(payload.get("recorded_at") or 0),
+                }
+            )
+            waiting_pin_store(home, record)
+            return "edited"
+    if not message_id:
+        created = waiting_pin_http("post", f"/channels/{channel}/messages", token, {"content": text})
+        message_id = str(created.get("id") or "")
+        if not message_id:
+            raise DiscordSendError("ambiguous", "discord post returned no message id")
+        try:
+            waiting_pin_http("post", f"/channels/{channel}/pins/{message_id}", token, {})
+        except DiscordSendError as err:
+            if err.http_code in WAITING_PIN_MISSING_PERMISSIONS:
+                record = {
+                    "message_id": message_id,
+                    "channel_id": channel,
+                    "pinned": False,
+                    "pin_error": f"missing Manage Messages (discord HTTP {err.http_code})",
+                    "content_hash": str(payload.get("content_hash") or ""),
+                    "refreshed_at": int(payload.get("recorded_at") or 0),
+                }
+                waiting_pin_store(home, record)
+                return "posted-unpinned"
+            raise
+        record = {
+            "message_id": message_id,
+            "channel_id": channel,
+            "pinned": True,
+            "content_hash": str(payload.get("content_hash") or ""),
+            "refreshed_at": int(payload.get("recorded_at") or 0),
+        }
+        waiting_pin_store(home, record)
+        return "posted-pinned"
+    return "edited"
+
+
 def deliver_one(
     path: Path,
     send: SendFn | None = None,
@@ -522,6 +638,8 @@ def deliver_one(
         # than an error that would abort the whole drain pass.
         return "retired"
     home = home or firstmate_home()
+    if isinstance(payload.get("kind"), str) and payload["kind"] == "waiting-pin":
+        return waiting_pin_deliver(payload, home)
     status = begin_delivery(payload, home=home)
     if status == "recovery-exhausted":
         react_to_request(payload, REACT_FAILED, react)

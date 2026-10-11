@@ -896,8 +896,17 @@ run_check() {
   [ "${#hold_listings[@]}" -eq 0 ] || check_holds "${hold_listings[@]}"
   return 0
 }
+# Refresh the pinned Discord "Waiting on you" message after a board read.
+# Best effort only: a failed refresh never blocks projection or drift work.
+# Off until both the bridge and config/ext-waiting-pin are configured.
+refresh_waiting_pin() {
+  [ -x "$SCRIPT_DIR/fm-ext-waiting-pin.sh" ] || return 0
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-ext-waiting-pin.sh" refresh >/dev/null 2>&1 || true
+  return 0
+}
 
 case "$MODE" in
-  emit) run_emit ;;
-  check) run_check ;;
+  emit) run_emit; refresh_waiting_pin ;;
+  check) run_check; refresh_waiting_pin ;;
 esac

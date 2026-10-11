@@ -1066,6 +1066,11 @@ backlog_done_args() {
 # printed instruction for a later turn (bin/fm-backlog-transition-lib.sh owns the
 # invariant). This prints what already happened, so the follow-up wording stays
 # only where a human still owes the edit.
+# Keep the pinned waiting message current after the board closed.
+# Best effort: a failed refresh never blocks teardown.
+if [ -x "$FM_ROOT/bin/fm-ext-waiting-pin.sh" ]; then
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-ext-waiting-pin.sh" refresh >/dev/null 2>&1 || true
+fi
 backlog_refresh_reminder() {
   local backlog_display root backend=markdown
   [ "$KIND" = secondmate ] && return 0
