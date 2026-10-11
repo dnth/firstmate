@@ -498,6 +498,8 @@ cmd_ingest() {
       && [ "$(sed -n 's/^offset=//p' "$marker" | head -1)" = "$CURSOR_OFFSET" ] \
       && [ "$(sed -n 's/^prefix_sha256=//p' "$marker" | head -1)" = "$CURSOR_HASH" ]; then
       fm_lock_release "$lock"
+      trap - EXIT
+      rm -rf -- "$tmp"
       printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
       return 3
     fi
@@ -508,6 +510,8 @@ cmd_ingest() {
       printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fi
     fm_lock_release "$lock"
+    trap - EXIT
+    rm -rf -- "$tmp"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
     return 3
   fi

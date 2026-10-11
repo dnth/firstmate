@@ -733,6 +733,17 @@ RESULT_BREAK="$PARENT/state/procevent-inbox/$SID.12.result"
 [ "$(remote_env "$ADAPTER" classify "$RESULT_BREAK")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 wait_handled 12
+assert_absent "$PARENT/state/.remote-reply-ingest-ios.lock" \
+  "continuity handling retained the ingest lock"
+assert_absent "$PARENT/state/.remote-reply-lifecycle-ios.lock" \
+  "continuity handling retained the lifecycle lock"
+break_rc=0
+out=$(remote_env "$ADAPTER" handle ios 12 "$RESULT_BREAK" 2>&1) || break_rc=$?
+[ "$break_rc" -eq 3 ] || fail "replayed continuity handling returned $break_rc instead of 3: $out"
+assert_absent "$PARENT/state/.remote-reply-ingest-ios.lock" \
+  "replayed continuity handling retained the ingest lock"
+assert_absent "$PARENT/state/.remote-reply-lifecycle-ios.lock" \
+  "replayed continuity handling retained the lifecycle lock"
 assert_grep 'blocked [key=remote-reply-continuity-ios]: remote reply continuity broke for ios at sequence 12 (truncated)' \
   "$PARENT/state/ios.status" "continuity break did not escalate with its sequence"
 assert_present "$PARENT/state/remote-replies/ios.continuity-broken" \
