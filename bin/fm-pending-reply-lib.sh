@@ -178,10 +178,28 @@ fm_pending_reply_summarize() {  # <text>
   printf '%s' "$cleaned"
 }
 
+# Read one key of a record into <var> without starting a process, so a sweep
+# over every record stays cheap; the last occurrence of the key wins. A missing
+# record or key reads as empty.
+fm_pending_reply_read() {  # <record-path> <key> <var>
+  local __fm_pr_rec=$1 __fm_pr_key=$2 __fm_pr_line __fm_pr_value=
+  if [ -f "$__fm_pr_rec" ]; then
+    {
+      while IFS= read -r __fm_pr_line || [ -n "$__fm_pr_line" ]; do
+        case "$__fm_pr_line" in
+          "$__fm_pr_key="*) __fm_pr_value=${__fm_pr_line#"$__fm_pr_key="} ;;
+        esac
+      done < "$__fm_pr_rec"
+    } 2>/dev/null
+  fi
+  printf -v "$3" '%s' "$__fm_pr_value"
+}
+
 fm_pending_reply_get() {  # <record-path> <key>
-  local rec=$1 key=$2
-  [ -f "$rec" ] || return 0
-  grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  local value
+  [ -f "$1" ] || return 0
+  fm_pending_reply_read "$1" "$2" value
+  [ -z "$value" ] || printf '%s\n' "$value"
 }
 
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
@@ -447,6 +465,9 @@ fm_pending_reply_line_resolves() {  # <line> <corr_id>
 }
 
 # Scan a status file for a correlated resolve. Prints the matching line or empty.
+# Only a line carrying corr=<corr_id> can resolve, so one case-insensitive
+# fixed-string pass selects the candidates and the exact per-line check runs on
+# those alone; a long status history costs one grep, not a parse per line.
 fm_pending_reply_find_resolve_line() {  # <status-file> <corr_id>
   local status_file=$1 corr=$2 line
   [ -f "$status_file" ] || return 0
@@ -456,7 +477,7 @@ fm_pending_reply_find_resolve_line() {  # <status-file> <corr_id>
       printf '%s' "$line"
       return 0
     fi
-  done < "$status_file"
+  done < <(LC_ALL=C grep -aiF -e "corr=$corr" -- "$status_file" 2>/dev/null)
   return 0
 }
 
@@ -500,14 +521,33 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
 fm_pending_reply_close_decision() {  # <status-file> <corr_id> <task-id> <request-summary>
   local status_file=$1 corr=$2 task_id=$3 summary=$4 open line key note decision_key
   local keyed_open=0 legacy_open=0 legacy_missed legacy_delivery_unknown
-  local legacy_recovery_failed legacy_recovery_unknown
+  local legacy_recovery_failed legacy_recovery_unknown legacy_scope=0
   [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 0
   decision_key="pending-reply-$corr"
   legacy_missed="pending-reply-missed: task=$task_id pending-reply-id=$corr request=$summary"
   legacy_delivery_unknown="pending-reply-delivery-unknown: task=$task_id pending-reply-id=$corr request=$summary"
   legacy_recovery_failed="pending-reply-recovery-delivery-failed: task=$task_id pending-reply-id=$corr request=$summary"
   legacy_recovery_unknown="pending-reply-recovery-delivery-unknown: task=$task_id pending-reply-id=$corr request=$summary"
-  open=$(status_open_decisions "$status_file")
+  # Fold only what can move this record's decisions, so the cost tracks the
+  # record rather than the whole status history. A stated key always appears as
+  # its literal [key=<key>] token, so the keyed decision folds from those lines
+  # alone. The legacy blocker shares the keyless default decision with every
+  # other keyless line, so it needs the whole-log fold - but only when a
+  # keyless line with an exact legacy note for this record exists at all.
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$(_fm_decision_key "$line" 2>/dev/null)" = default ] || continue
+    case "$(status_line_note "$line")" in
+      "$legacy_missed"|"$legacy_delivery_unknown"|"$legacy_recovery_failed"|"$legacy_recovery_unknown")
+        legacy_scope=1
+        break
+        ;;
+    esac
+  done < <(LC_ALL=C grep -aF -e "pending-reply-id=$corr" -- "$status_file" 2>/dev/null)
+  if [ "$legacy_scope" -eq 1 ]; then
+    open=$(status_open_decisions "$status_file")
+  else
+    open=$(LC_ALL=C grep -aF -e "[key=$decision_key]" -- "$status_file" 2>/dev/null | status_open_decisions -)
+  fi
   [ -n "$open" ] || return 0
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -586,17 +626,25 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   return 0
 }
 
+# Resolve every still-open record of one task, and return 0 only when none
+# remains unresolved. A record reaches `resolved` only through
+# fm_pending_reply_try_resolve, which closes its decisions in that same step,
+# so the sweep skips settled records instead of rescanning the status log for
+# each of them; its cost tracks the open records, not the task's history.
 fm_pending_reply_reconcile_task() {  # <state-dir> <task_id> [status-file-override]
-  local state=$1 task_id=$2 status_override=${3-} dir rec corr phase unresolved=0
+  local state=$1 task_id=$2 status_override=${3-} dir rec rec_task corr phase unresolved=0
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
-    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
-    corr=$(fm_pending_reply_get "$rec" corr_id)
-    [ -n "$corr" ] || corr=$(basename "$rec")
+    fm_pending_reply_read "$rec" task_id rec_task
+    [ "$rec_task" = "$task_id" ] || continue
+    fm_pending_reply_read "$rec" phase phase
+    [ "$phase" != resolved ] || continue
+    fm_pending_reply_read "$rec" corr_id corr
+    [ -n "$corr" ] || corr=${rec##*/}
     fm_pending_reply_try_resolve "$state" "$corr" "$status_override" >/dev/null 2>&1 || true
-    phase=$(fm_pending_reply_get "$rec" phase)
+    fm_pending_reply_read "$rec" phase phase
     [ "$phase" = resolved ] || unresolved=1
   done
   [ "$unresolved" -eq 0 ]
@@ -1116,14 +1164,16 @@ fm_pending_reply_tick() {  # <state-dir>
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
-    case "$(basename "$rec")" in
+    case "${rec##*/}" in
       .*) continue ;;
     esac
-    corr=$(fm_pending_reply_get "$rec" corr_id)
-    [ -n "$corr" ] || corr=$(basename "$rec")
-    task_id=$(fm_pending_reply_get "$rec" task_id)
-    phase=$(fm_pending_reply_get "$rec" phase)
+    # Settled records are the bulk of a long-lived home; skip them before any
+    # other work so the per-tick cost tracks the open records.
+    fm_pending_reply_read "$rec" phase phase
     [ "$phase" != resolved ] || continue
+    fm_pending_reply_read "$rec" corr_id corr
+    [ -n "$corr" ] || corr=${rec##*/}
+    fm_pending_reply_read "$rec" task_id task_id
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -1218,9 +1268,9 @@ fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
   [ -d "$dir" ] || return 1
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
-    tid=$(fm_pending_reply_get "$rec" task_id)
+    fm_pending_reply_read "$rec" task_id tid
     [ "$tid" = "$task_id" ] || continue
-    phase=$(fm_pending_reply_get "$rec" phase)
+    fm_pending_reply_read "$rec" phase phase
     [ "$phase" != resolved ] || continue
     return 0
   done

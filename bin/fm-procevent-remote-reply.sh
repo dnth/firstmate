@@ -609,7 +609,9 @@ cmd_handle_locked() {
     # whose whole range the committed cursor already passed (the to_offset ==
     # cursor same-hash case stays inside cmd_ingest's cursor_already path), or
     # a continuity break recorded for a cursor state an operator already
-    # rebased away from, which must not re-escalate.
+    # rebased away from, which must not re-escalate. Ingest runs in its own
+    # subshell because it installs its own EXIT cleanup trap, which would
+    # otherwise replace the caller's lifecycle-lock release.
     read_cursor "$id"
     to=$(result_field "$result" to_offset) || die "result end offset is ambiguous"
     case "$to" in ''|*[!0-9]*) die "result carries a nonnumeric size or offset" ;; esac
@@ -619,12 +621,12 @@ cmd_handle_locked() {
       bfrom=$(result_field "$result" from_offset) || die "result start offset is ambiguous"
       bfrom_hash=$(result_field "$result" from_prefix_sha256) || die "result start hash is ambiguous"
       if [ "$bfrom" = "$CURSOR_OFFSET" ] && [ "$bfrom_hash" = "$CURSOR_HASH" ]; then
-        cmd_ingest "$id" "$result" "$seq" || rc=$?
+        (cmd_ingest "$id" "$result" "$seq") || rc=$?
       else
         printf 'superseded: %s seq=%s offset=%s\n' "$id" "$seq" "$CURSOR_OFFSET"
       fi
     else
-      cmd_ingest "$id" "$result" "$seq" || rc=$?
+      (cmd_ingest "$id" "$result" "$seq") || rc=$?
     fi
   fi
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
