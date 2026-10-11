@@ -32,10 +32,16 @@ AUTHOR=555555555555555555
 DENIED=666666666666666666
 RID="discord:${GUILD}:${CHANNEL}:${CHANNEL}:${MESSAGE}"
 
+expected_topic() {
+  local minute=$(( ($1 >> 22) / 60000 + 1420070400000 / 60000 + 480 ))
+  printf 'Firstmate request %02d:%02d' "$((minute / 60 % 24))" "$((minute % 60))"
+}
+
 setup_home() {
   local home=$1
   mkdir -p "$home/config"
   : > "$home/config/ext-bridge"
+  printf '%s\n' "$CHANNEL" > "$home/config/ext-channel"
   printf 'test-secret\n' > "$home/config/ext-secret"
   chmod 600 "$home/config/ext-secret"
   printf '%s\n' "$GUILD:$CHANNEL:$AUTHOR" > "$home/config/ext-allowlist"
@@ -119,7 +125,7 @@ test_1_top_level_replies_share_one_thread() {
   home="$TMP_ROOT/c1"
   setup_home "$home"
   slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
-  [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "fm ship login fix" ] \
+  [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "$(expected_topic "$MESSAGE")" ] \
     || fail "the destination context must carry the public-safe topic name"
   write_text "$home/ack.txt" "On it."
   write_text "$home/ans.txt" "All shipshape."
@@ -134,7 +140,7 @@ test_1_top_level_replies_share_one_thread() {
   home_env "$home" "$EMIT" --request-id "$RID" --kind final --generation 1 \
     --text-file "$home/fin.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
-  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/fm ship login fix" \
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/$(expected_topic "$MESSAGE")" \
     "the first reply must create one thread on the request message"
   creates=$(printf '%s\n' "$out" | grep -c '^thread-create=')
   [ "$creates" = 1 ] || fail "one request must create exactly one thread, got $creates"
@@ -214,7 +220,7 @@ test_3_thread_failure_falls_back_without_loss() {
   home_env "$home" "$EMIT" --request-id "$RID" --kind final --generation 1 \
     --text-file "$home/fin.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
-  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/fm ship docs fix" \
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/$(expected_topic "$MESSAGE")" \
     "a later generation must retry the thread create"
   assert_contains "$out" "posted-to=777777777777777777 Done for real." \
     "the retried reply must post into the new thread"
@@ -235,22 +241,17 @@ test_4_topic_names_bounded_and_threads_admit_nobody() {
   setup_home "$home"
   slug=$(intake_as "$home" "Fix login BUG #42: see /home/u/secret TOKEN=abc host-1.2.3.4!!!   " "$MESSAGE" "$CHANNEL" message)
   topic=$(jq -r '.topic' "$home/state/ext-context/$slug.json")
-  [ "$topic" = "fm fix login bug" ] \
-    || fail "only vocabulary words may survive, got $topic"
-  for leak in home secret TOKEN abc 42 /home/u 1.2.3.4; do
-    case "$topic" in
-      *"$leak"*) fail "the topic must not carry request values, got $topic" ;;
-    esac
-  done
-  slug=$(intake_as "$home" "Please approve the release plan soon" 555555555555555556 "$CHANNEL" message)
+  [ "$topic" = "$(expected_topic "$MESSAGE")" ] \
+    || fail "only a fixed label and source time may appear, got $topic"
+  slug=$(intake_as "$home" "please approve release plan" 555555555555555556 "$CHANNEL" message)
   topic=$(jq -r '.topic' "$home/state/ext-context/$slug.json")
-  [ "$topic" = "fm please approve release plan" ] \
-    || fail "safe words in order, got $topic"
+  [ "$topic" = "$(expected_topic 555555555555555556)" ] \
+    || fail "a private phrase must yield exactly the fixed fallback and source time, got $topic"
   slug=$(intake_as "$home" "$(printf 'w%.0s' $(seq 1 200))" 555555555555555557 "$CHANNEL" message)
-  [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "fm request" ] \
-    || fail "a request with no safe word must fall back"
+  [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "$(expected_topic 555555555555555557)" ] \
+    || fail "a request with no label match must fall back"
   slug=$(intake_as "$home" "!!! ???" 555555555555555558 "$CHANNEL" message)
-  [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "fm request" ] \
+  [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "$(expected_topic 555555555555555558)" ] \
     || fail "punctuation alone must fall back"
   out=$(GUILD="$GUILD" CHANNEL="$CHANNEL" THREAD="$THREAD" AUTHOR="$DENIED" \
     PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$ROOT" <<'PY'
@@ -293,7 +294,7 @@ test_5_thread_record_expires_with_retention() {
   home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
     --text-file "$home/ans.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
-  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/fm ship login fix" \
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/$(expected_topic "$MESSAGE")" \
     "the reply must create the thread first"
   [ -f "$home/state/ext-outbox/$slug.thread.json" ] \
     || fail "the thread id must be recorded request-wide"
@@ -328,15 +329,15 @@ test_6_sensitive_tokens_never_name_threads() {
     home="$TMP_ROOT/c6-$message"
     setup_home "$home"
     slug=$(intake_as "$home" "$text" "$message" "$CHANNEL" message)
-    [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "fm request" ] \
+    [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "$(expected_topic "$message")" ] \
       || fail "sensitive tokens must yield the neutral topic"
     write_text "$home/ans.txt" "Noted."
     home_env "$home" "$EMIT" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${message}" \
       --kind answer --generation 1 --text-file "$home/ans.txt" >/dev/null
     out=$(deliver "$home")
-    assert_contains "$out" "thread-create=$CHANNEL/$message/fm request" \
+    assert_contains "$out" "thread-create=$CHANNEL/$message/$(expected_topic "$message")" \
       "sensitive request tokens must not reach the creator"
-    home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$text" <<'PY'
+    home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$text" "$(expected_topic "$message")" <<'PY'
 import io, json, os, sys
 from pathlib import Path
 from unittest.mock import patch
@@ -346,15 +347,15 @@ context_path = home / "state/ext-context" / (slug + ".json")
 payload = json.loads(context_path.read_text())
 payload["topic"] = "fm " + text
 context_path.write_text(json.dumps(payload))
-assert poster.thread_name_for(payload, home) == "fm request"
+assert poster.thread_name_for(payload, home) == sys.argv[4]
 os.environ["DISCORD_BOT_TOKEN"] = "fixture"
 def respond(request, **kwargs):
-    assert json.loads(request.data)["name"] == "fm request"
+    assert json.loads(request.data)["name"] == sys.argv[4]
     return io.BytesIO(b'{"id":"777777777777777777"}')
 with patch.object(poster.urllib.request, "urlopen", respond):
     assert poster.discord_create_thread(payload, text)["thread_id"] == "777777777777777777"
 PY
-    [ "$?" = 0 ] || fail "poster and API must enforce whole-word safety"
+    [ "$?" = 0 ] || fail "poster and API must enforce fixed-label safety"
   done
   pass "6 sensitive tokens never name threads"
 }
@@ -439,6 +440,123 @@ test_8_pending_skips_thread_records() {
   pass "8 pending skips thread records without invoking jq"
 }
 
+test_9_concurrent_generations_reuse_existing_thread() {
+  local home slug
+  home="$TMP_ROOT/c9"
+  setup_home "$home"
+  slug=$(intake_as "$home" "ship login fix" "$MESSAGE" "$CHANNEL" message)
+  write_text "$home/ans.txt" "Noted."
+  for generation in 1 2; do
+    home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation "$generation" \
+      --text-file "$home/ans.txt" >/dev/null
+  done
+  home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import io, json, os, sys, threading, urllib.error
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+os.environ["DISCORD_BOT_TOKEN"] = "fixture"
+barrier = threading.Barrier(2)
+lock = threading.Lock()
+created = False
+posted = []
+def respond(request, **kwargs):
+    global created
+    barrier.wait(timeout=30)
+    with lock:
+        if created:
+            raise urllib.error.HTTPError(request.full_url, 400, "already exists", {},
+                io.BytesIO(b'{"code":160004,"message":"A thread has already been created for this message"}'))
+        created = True
+    message = request.full_url.split("/messages/")[1].split("/")[0]
+    return io.BytesIO(json.dumps({"id": message}).encode())
+def send(payload):
+    with lock:
+        posted.append(payload["thread_id"])
+    return {"discord_message_id": "900000000000000001"}
+paths = [home / "state/ext-outbox" / (slug + f".answer.{generation}.json") for generation in (1, 2)]
+payload = json.loads(paths[0].read_text())
+with patch.object(poster.urllib.request, "urlopen", respond):
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda path: poster.deliver_one(path, send=send, home=home), paths))
+assert results == ["sent", "sent"]
+assert posted == [payload["message_id"], payload["message_id"]]
+assert poster.load_request_thread(payload, home) == payload["message_id"]
+def existing(request, **kwargs):
+    raise urllib.error.HTTPError(request.full_url, 400, "already exists", {},
+        io.BytesIO(b'{"code":160004,"message":"already exists"}'))
+with patch.object(poster.urllib.request, "urlopen", existing):
+    try:
+        poster.discord_create_thread(payload, "private phrase")
+    except poster.DiscordSendError as err:
+        assert err.api_error == {"code": 160004, "message": "already exists"}
+    else:
+        raise AssertionError("the API error details must survive")
+    poster.request_progress_path(payload, home).unlink()
+    with patch.object(poster, "save_request_thread", side_effect=OSError("unwritable")):
+        assert poster.ensure_topic_thread(payload, {"posted_count": 0}, home) == payload["message_id"]
+PY
+  [ "$?" = 0 ] || fail "concurrent generations must share the source message thread"
+  pass "9 concurrent generations reuse the existing thread"
+}
+
+test_10_outside_channel_keeps_its_route() {
+  local home slug out dedicated=$CHANNEL CHANNEL=888888888888888888
+  home="$TMP_ROOT/c10"
+  setup_home "$home"
+  printf '%s\n' "$dedicated" > "$home/config/ext-channel"
+  slug=$(intake_as "$home" "aceh question" "$MESSAGE" "$CHANNEL" message)
+  [ "$(jq -r 'has("topic")' "$home/state/ext-context/$slug.json")" = false ] \
+    || fail "outside-channel requests must record no topic"
+  write_text "$home/ans.txt" "Noted."
+  home_env "$home" "$EMIT" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${MESSAGE}" \
+    --kind answer --generation 1 --text-file "$home/ans.txt" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "posted-to=$CHANNEL Noted." "outside-channel replies stay in place"
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
+    || fail "outside-channel replies must not create threads"
+  home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import json, sys
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+payload = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
+def forbidden(*args):
+    raise AssertionError("outside-channel creation")
+assert poster.ensure_topic_thread(payload, {"posted_count": 0}, home, forbidden) == ""
+with patch.object(poster.urllib.request, "urlopen", forbidden):
+    try:
+        poster.discord_create_thread(payload, "Aceh")
+    except poster.DiscordSendError as err:
+        assert err.outcome == "permanent"
+    else:
+        raise AssertionError("outside-channel API creation must be refused")
+PY
+  [ "$?" = 0 ] || fail "all outside-channel creation paths must be excluded"
+  pass "10 outside-channel replies keep their route"
+}
+
+test_11_fixed_labels_and_message_time() {
+  local home out clock
+  home="$TMP_ROOT/c11"
+  setup_home "$home"
+  clock=$(expected_topic "$MESSAGE")
+  clock=${clock#Firstmate request }
+  for label in Aceh InfoConnect Firstmate Question; do
+    out=$(printf '%s' "$label private release plan" | home_env "$home" "$ROOT/bin/fm-ext-topic.sh" \
+      --text-file - --origin message --thread-id "$CHANNEL" --channel-id "$CHANNEL" --message-id "$MESSAGE")
+    [ "$out" = "$label $clock" ] || fail "matching must select exactly a fixed label and message time"
+  done
+  rm "$home/config/ext-channel"
+  out=$(printf 'Aceh' | home_env "$home" "$ROOT/bin/fm-ext-topic.sh" \
+    --text-file - --origin message --thread-id "$CHANNEL" --channel-id "$CHANNEL" --message-id "$MESSAGE")
+  [ -z "$out" ] || fail "an unconfigured dedicated channel must create no topic"
+  pass "11 fixed labels use the source message MYT time"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -448,5 +566,9 @@ test_5_thread_record_expires_with_retention
 test_6_sensitive_tokens_never_name_threads
 test_7_resumed_chunks_keep_their_destination
 test_8_pending_skips_thread_records
+
+test_9_concurrent_generations_reuse_existing_thread
+test_10_outside_channel_keeps_its_route
+test_11_fixed_labels_and_message_time
 
 echo "all fm-ext-topic-threads tests passed"

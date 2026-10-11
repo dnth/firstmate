@@ -25,7 +25,7 @@
 # --origin records how the request arrived: "slash" (the default) for a /fm
 # command interaction, "message" for an ordinary Discord message, which is the
 # only kind the gateway can add reactions to. The destination context also
-# carries the safe-vocabulary Discord thread name from bin/fm-ext-topic.sh
+# carries the fixed-label Discord thread name from bin/fm-ext-topic.sh
 # (empty for a request that already arrived inside a thread, which keeps its
 # thread).
 # --reply-to-message-id marks a request that answers one of Firstmate's own
@@ -193,7 +193,7 @@ if [ -n "$ATTACHMENT_MANIFEST" ]; then
 fi
 [ -n "$TEXT" ] || [ "$MANIFEST_PRESENT" = 1 ] || die "text is empty"
 
-TOPIC=$(printf '%s' "$TEXT" | "$SCRIPT_DIR/fm-ext-topic.sh" --text-file - --origin "$ORIGIN" --thread-id "$THREAD_ID" --channel-id "$CHANNEL_ID") \
+TOPIC=$(printf '%s' "$TEXT" | "$SCRIPT_DIR/fm-ext-topic.sh" --text-file - --origin "$ORIGIN" --thread-id "$THREAD_ID" --channel-id "$CHANNEL_ID" --message-id "$MESSAGE_ID") \
   || die "could not derive the topic thread name" 1
 
 REPLY_TEXT=

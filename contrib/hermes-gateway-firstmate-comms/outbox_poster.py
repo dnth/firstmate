@@ -52,9 +52,9 @@ from pathlib import Path
 from typing import Callable
 
 try:
-    from .intake import firstmate_home, firstmate_root
+    from .intake import dedicated_channel, firstmate_home, firstmate_root
 except ImportError:  # loaded from sys.path in hermetic tests
-    from intake import firstmate_home, firstmate_root
+    from intake import dedicated_channel, firstmate_home, firstmate_root
 
 SendFn = Callable[[dict], dict]
 ReactFn = Callable[[str, str, str], None]
@@ -79,10 +79,11 @@ _SNOWFLAKE = re.compile(r"^[0-9]+$")
 class DiscordSendError(Exception):
     """Classified Discord send outcome for outbox delivery."""
 
-    def __init__(self, outcome: str, message: str = "", http_code: int | None = None):
+    def __init__(self, outcome: str, message: str = "", http_code: int | None = None, api_error: dict | None = None):
         super().__init__(message or outcome)
         self.outcome = outcome
         self.http_code = http_code
+        self.api_error = api_error or {}
 
 
 def classify_http_code(code: int) -> str:
@@ -464,13 +465,15 @@ def save_request_thread(payload: dict, thread_id: str, home: Path) -> None:
     os.chmod(path, 0o600)
 
 
-def public_topic_name(payload: dict, name: str) -> str:
+def public_topic_name(payload: dict, name: str, home: Path | None = None) -> str:
     result = subprocess.run(
         [str(firstmate_root() / "bin" / "fm-ext-topic.sh"),
          "--text-file", "-", "--origin", str(payload.get("origin") or "slash"),
          "--thread-id", str(payload.get("thread_id") or ""),
-         "--channel-id", str(payload.get("channel_id") or "")],
-        input=name.removeprefix("fm "), capture_output=True, text=True, check=False,
+         "--channel-id", str(payload.get("channel_id") or ""),
+         "--message-id", str(payload.get("message_id") or ""), "--validate-name"],
+        input=name, capture_output=True, text=True, check=False,
+        env=_env_for(home or firstmate_home()),
     )
     return result.stdout.strip() if result.returncode == 0 else ""
 
@@ -495,7 +498,7 @@ def thread_name_for(payload: dict, home: Path) -> str:
     if not isinstance(context, dict):
         return ""
     name = context.get("topic") or ""
-    return public_topic_name(payload, name) if isinstance(name, str) and name else ""
+    return public_topic_name(payload, name, home) if isinstance(name, str) and name else ""
 
 
 def discord_create_thread(payload: dict, name: str) -> dict:
@@ -534,10 +537,13 @@ def discord_create_thread(payload: dict, name: str) -> dict:
             raw = response.read().decode("utf-8") or "{}"
     except urllib.error.HTTPError as err:
         outcome = classify_http_code(err.code)
-        # Discord answers a thread create on an archived or locked parent with
-        # 400, and a missing permission with 403: both are permanent, and the
-        # caller falls back to posting in place rather than retrying.
-        raise DiscordSendError(outcome, f"discord HTTP {err.code}", err.code) from err
+        try:
+            details = json.loads(err.read().decode("utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            details = {}
+        if not isinstance(details, dict):
+            details = {}
+        raise DiscordSendError(outcome, f"discord HTTP {err.code}", err.code, details) from err
     except urllib.error.URLError as err:
         raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
     except (TimeoutError, OSError) as err:
@@ -566,19 +572,26 @@ def ensure_topic_thread(
     failure never blocks or loses the reply. Records a created thread id in
     progress so later generations reuse it; the caller persists progress.
     """
-    if payload.get("origin") != "message":
+    if (payload.get("origin") != "message"
+            or str(payload.get("thread_id") or "") != str(payload.get("channel_id") or "")):
         return ""
     if int(progress.get("posted_count") or 0) > 0:
         return str(progress.get("topic_thread_id", load_request_thread(payload, home)) or "")
     recorded = load_request_thread(payload, home)
     if recorded:
         return recorded
+    if str(payload.get("channel_id") or "") != dedicated_channel(home):
+        return ""
     name = thread_name_for(payload, home)
     if not name:
         return ""
     creator = create_thread or discord_create_thread
     try:
         receipt = creator(payload, name)
+    except DiscordSendError as err:
+        if err.api_error.get("code") != 160004:
+            return ""
+        receipt = {"thread_id": str(payload.get("message_id") or "")}
     except Exception:
         return ""
     thread_id = str((receipt or {}).get("thread_id") or "")
@@ -587,9 +600,6 @@ def ensure_topic_thread(
     try:
         save_request_thread(payload, thread_id, home)
     except Exception:
-        # The thread exists on Discord but this poster could not record it:
-        # still post into it this once rather than losing the reply, and let
-        # the next generation create (and record) its own.
         return thread_id
     return thread_id
 

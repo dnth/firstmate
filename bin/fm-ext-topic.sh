@@ -3,24 +3,21 @@
 #
 # Usage:
 #   fm-ext-topic.sh --text-file <path> --origin slash|message
-#     --thread-id <id> --channel-id <id>
+#     --thread-id <id> --channel-id <id> --message-id <id> [--validate-name]
 #
-# Reads the request text on the given file and prints one thread name plus a
-# trailing newline. A request that already arrived inside a thread prints
-# nothing and exits 0 with no output: it keeps its existing thread, so there
-# is nothing to name.
-#
-# The derivation is allowlist-only, never a redaction. Only tokens from the
-# explicit SAFE_WORDS vocabulary below survive, in request order, up to four.
-# Everything else - secrets, ids, paths, hostnames, numbers, unfamiliar words -
-# is dropped, and a request with no safe word falls back to "fm request".
-# Only whole whitespace-delimited vocabulary words are admitted.
+# Prints one fixed public label: Aceh, InfoConnect, Firstmate, Question, or
+# Firstmate request, followed by the source message's MYT time as HH:MM.
+# Matching selects a label but never copies request words into the name.
+# Only top-level message requests in config/ext-channel receive a name.
+# Slash requests, existing threads, and other channels print nothing.
+# --message-id supplies the Discord snowflake containing the message timestamp.
+# --validate-name checks a stored name against the same closed list and time;
+# an invalid name becomes the fixed fallback with the message time.
 # Admission and authority stay owned by bin/fm-ext-intake.sh.
-# The name stays far under Discord's 100-character thread-name limit.
 set -u
 
 usage() {
-  echo "usage: fm-ext-topic.sh --text-file <path> --origin slash|message --thread-id <id> --channel-id <id>" >&2
+  echo "usage: fm-ext-topic.sh --text-file <path> --origin slash|message --thread-id <id> --channel-id <id> --message-id <id> [--validate-name]" >&2
 }
 
 help() {
@@ -29,17 +26,12 @@ help() {
 
 die() { printf 'fm-ext-topic: %s\n' "$1" >&2; exit "${2:-2}"; }
 
-# Conservative safe topic vocabulary: generic workflow words only, all
-# lowercase ASCII, 2-12 characters. No stopwords, no secret-adjacent words
-# (secret, token, password, key), no filesystem words (home, path, file is a
-# verb here and stays), no network words (host, server, ip), no proper nouns.
-# A word outside this list is dropped even when it looks innocent.
-SAFE_WORDS='add agenda answer approve ask audit backlog bug build channel check chore clean close confirm daily debug demo deploy design doc docs draft explain feature find fix fleet help hotfix inbox investigate issue list login logout look meeting merge message note notes open plan please proposal quick read refactor release remind reply report request retro review run schedule search ship show spec standup start status stop summarize summary sync task test thread track triage update urgent verify watch write'
-
 TEXT_FILE=
 ORIGIN=
 THREAD_ID=
 CHANNEL_ID=
+MESSAGE_ID=
+VALIDATE=0
 
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
@@ -52,6 +44,8 @@ while [ "$#" -gt 0 ]; do
     --origin) shift; ORIGIN=${1:-} ;;
     --thread-id) shift; THREAD_ID=${1:-} ;;
     --channel-id) shift; CHANNEL_ID=${1:-} ;;
+    --message-id) shift; MESSAGE_ID=${1:-} ;;
+    --validate-name) VALIDATE=1 ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -62,6 +56,9 @@ done
 [ -n "$ORIGIN" ] || { usage; exit 2; }
 [ -n "$THREAD_ID" ] || { usage; exit 2; }
 [ -n "$CHANNEL_ID" ] || { usage; exit 2; }
+case "$MESSAGE_ID" in
+  ''|*[!0-9]*) die "message id must be a Discord id" ;;
+esac
 
 case "$ORIGIN" in
   slash|message) ;;
@@ -81,32 +78,27 @@ else
   TEXT=$(cat -- "$TEXT_FILE")
 fi
 
-WORDS=$(printf '%s' "$TEXT" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -s '[:space:]' '\n') \
-  || die "could not tokenize the text" 1
-
-KEPT=
-COUNT=0
-while IFS= read -r word; do
-  [ "$COUNT" -lt 4 ] || break
-  case "$word" in
-    *[!a-z]*) continue ;;
-  esac
-  case ${#word} in
-    2|3|4|5|6|7|8|9|10|11|12) ;;
-    *) continue ;;
-  esac
-  case " $SAFE_WORDS " in
-    *" $word "*) ;;
-    *) continue ;;
-  esac
-  case " $KEPT " in
-    *" $word "*) continue ;;
-  esac
-  KEPT="$KEPT${KEPT:+ }$word"
-  COUNT=$((COUNT + 1))
-done <<EOF
-$WORDS
-EOF
-
-[ -n "$KEPT" ] || { printf 'fm request\n'; exit 0; }
-printf 'fm %s\n' "$KEPT"
+FM_ROOT=${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+FM_HOME=${FM_HOME:-$FM_ROOT}
+python3 - "$FM_ROOT" "$FM_HOME" "$CHANNEL_ID" "$MESSAGE_ID" "$VALIDATE" 3<<< "$TEXT" <<'PY'
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "contrib/hermes-gateway-firstmate-comms"))
+from intake import dedicated_channel
+if dedicated_channel(Path(sys.argv[2])) != sys.argv[3]:
+    sys.exit(0)
+text = os.fdopen(3).read().strip()
+message_ms = (int(sys.argv[4]) >> 22) + 1420070400000
+clock = datetime.fromtimestamp(message_ms / 1000, timezone(timedelta(hours=8))).strftime("%H:%M")
+labels = {"aceh": "Aceh", "infoconnect": "InfoConnect", "firstmate": "Firstmate", "question": "Question"}
+fallback = "Firstmate request"
+if sys.argv[5] == "1":
+    allowed = {label + " " + clock for label in (*labels.values(), fallback)}
+    print(text if text in allowed else fallback + " " + clock)
+else:
+    words = set(text.casefold().split())
+    label = next((label for word, label in labels.items() if word in words), fallback)
+    print(label + " " + clock)
+PY
