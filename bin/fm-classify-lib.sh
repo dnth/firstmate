@@ -651,15 +651,26 @@ status_resolved_key_count() {  # <status-file> <key>
 # before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
-status_open_decisions() {  # <status-file>
-  local f=$1 line resolve held open=''
-  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+# A "-" argument folds standard input instead, so a caller that has already
+# selected the only lines able to move one key can fold just those lines.
+_fm_status_open_decisions_stream() {
+  local line resolve held open=''
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
-  done < "$f"
+  done
   printf '%s' "$open"
+}
+
+status_open_decisions() {  # <status-file-or-dash>
+  local f=$1
+  if [ "$f" = - ]; then
+    _fm_status_open_decisions_stream
+    return 0
+  fi
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  _fm_status_open_decisions_stream < "$f"
 }
 
 # Fleet-wide wrapper around status_open_decisions: scans every task's status

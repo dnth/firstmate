@@ -19,9 +19,12 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" "$CLAIMS"
 cleanup() {
-  local worker_pid attempt=0
-  FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
-    "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  local worker_pid attempt=0 home
+  for home in "$PARENT" "$TMP_ROOT/big"; do
+    [ -d "$home/state" ] || continue
+    FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
+      "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  done
   worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid" 2>/dev/null || true)
   case "$worker_pid" in
     ''|*[!0-9]*) ;;
@@ -692,12 +695,12 @@ pass "AC4: ensure-armed repairs a live route and skips a suspended one"
 # Retirement still refuses while an unhandled capture exists, then succeeds
 # once it is handled and removes the cursor. The route is still armed from the
 # ensure-armed case above.
-# Hold the lifecycle lock so autohandle parks (rc75) and the capture stays
-# un-ingested for the refusal.
-hold_lifecycle_lock ios
-printf 'done: zz-retire-guard\n' >> "$REMOTE/state/parent-replies.status"
+# A missing referenced document keeps the capture un-ingested until the
+# refusal is checked, even if the capturing runner's autohandle is still in flight.
+printf 'done: zz-retire-guard (data/reply/retire-guard.md)\n' >> "$REMOTE/state/parent-replies.status"
 capture_delta 10
-release_lifecycle_lock
+assert_absent "$PARENT/state/procevent-inbox/$SID.10.handled" \
+  "the retirement fixture's capture was already handled"
 set +e
 remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-refused.out" 2>&1
 retire_rc=$?
@@ -705,7 +708,8 @@ set -e
 [ "$retire_rc" -ne 0 ] || fail "retire succeeded with an unhandled captured reply"
 assert_contains "$(cat "$TMP_ROOT/retire-refused.out")" 'unhandled' \
   "the retirement refusal did not name the pending capture"
-# A reconcile retries the parked capture through the detached autohandle.
+# Restore the document so reconcile can handle the pending capture.
+printf '# Retirement guard reply\n' > "$REMOTE/data/reply/retire-guard.md"
 remote_env "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
 wait_handled 10
 remote_env "$ADAPTER" retire ios > /dev/null
@@ -730,6 +734,17 @@ RESULT_BREAK="$PARENT/state/procevent-inbox/$SID.12.result"
 [ "$(remote_env "$ADAPTER" classify "$RESULT_BREAK")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 wait_handled 12
+assert_absent "$PARENT/state/.remote-reply-ingest-ios.lock" \
+  "continuity handling retained the ingest lock"
+assert_absent "$PARENT/state/.remote-reply-lifecycle-ios.lock" \
+  "continuity handling retained the lifecycle lock"
+break_rc=0
+out=$(remote_env "$ADAPTER" handle ios 12 "$RESULT_BREAK" 2>&1) || break_rc=$?
+[ "$break_rc" -eq 3 ] || fail "replayed continuity handling returned $break_rc instead of 3: $out"
+assert_absent "$PARENT/state/.remote-reply-ingest-ios.lock" \
+  "replayed continuity handling retained the ingest lock"
+assert_absent "$PARENT/state/.remote-reply-lifecycle-ios.lock" \
+  "replayed continuity handling retained the lifecycle lock"
 assert_grep 'blocked [key=remote-reply-continuity-ios]: remote reply continuity broke for ios at sequence 12 (truncated)' \
   "$PARENT/state/ios.status" "continuity break did not escalate with its sequence"
 assert_present "$PARENT/state/remote-replies/ios.continuity-broken" \
@@ -813,5 +828,197 @@ out=$(remote_env "$ADAPTER" arm ios)
 assert_contains "$out" "armed: $SID offset=" \
   "an acknowledged stale continuity break still blocked arming"
 pass "a superseded continuity-broken result acknowledges and clears the route"
+
+# A long-lived route: hundreds of settled pending-reply records for the mate,
+# a parent status log several hundred lines long, and a few still-escalated
+# requests. Handling, the next capture, concurrent autohandle attempts, and the
+# watcher's pending-reply tick must each finish within a bound instead of
+# rescanning the whole history once per record.
+BIG="$TMP_ROOT/big"
+BIG_REMOTE="$TMP_ROOT/big-remote"
+BIG_SID='remote-reply-big'
+BIG_BOUND=60
+mkdir -p "$BIG/data" "$BIG/state/pending-replies" "$BIG/state/procevent-inbox" \
+  "$BIG/state/remote-replies" "$BIG_REMOTE/state"
+printf -- '- big - long-lived remote (host: remote-mac; root: %s; home: %s; scope: x; projects: alpha; added 2026-08-02)\n' \
+  "$ROOT" "$BIG_REMOTE" > "$BIG/data/secondmates.md"
+big_env() { remote_env env FM_HOME="$BIG" "$@"; }
+big_corr() { printf '%016x' "$1"; }
+big_record() {  # <corr> <task> <phase>
+  {
+    printf 'schema=fm-pending-reply.v1\ncorr_id=%s\ntask_id=%s\nparent_home=%s\n' "$1" "$2" "$BIG"
+    printf 'parent_status=%s\nrequest_summary=req %s\ncreated_epoch=1\n' "$BIG/state/$2.status" "$1"
+    printf 'delivered_epoch=2\nphase=%s\n' "$3"
+  } > "$BIG/state/pending-replies/$1"
+}
+BIG_STATUS="$BIG/state/big.status"
+big_pad=$(printf '%0300d' 0)
+: > "$BIG_STATUS"
+for k in $(seq 1 200); do
+  c=$(big_corr "$k")
+  big_record "$c" big resolved
+  if [ $((k % 3)) -eq 0 ]; then
+    printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=big pending-reply-id=%s request=req %s\n' "$c" "$c" "$c"
+    printf 'done [corr=%s]: answer %s %s\n' "$c" "$k" "$big_pad"
+    printf 'resolved [key=pending-reply-%s]: pending-reply-resolved: task=big via=status\n' "$c"
+  else
+    printf 'working: progress %s %s\n' "$k" "$big_pad"
+    printf 'done [corr=%s]: answer %s %s\n' "$c" "$k" "$big_pad"
+  fi
+done >> "$BIG_STATUS"
+for k in $(seq 1001 1800); do big_record "$(big_corr "$k")" other resolved; done
+for k in 901 902 903; do
+  c=$(big_corr "$k")
+  big_record "$c" big escalated
+  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=big pending-reply-id=%s request=req %s\n' \
+    "$c" "$c" "$c" >> "$BIG_STATUS"
+done
+[ "$(grep -c '' "$BIG_STATUS")" -ge 450 ] || fail "the long-lived status fixture is too short"
+printf 'working: earlier report\n' > "$BIG_REMOTE/state/parent-replies.status"
+printf 'schema=fm-remote-reply-cursor.v1\noffset=%s\nprefix_sha256=%s\n' \
+  "$(LC_ALL=C wc -c < "$BIG_REMOTE/state/parent-replies.status" | tr -d ' ')" \
+  "$(sha256_file "$BIG_REMOTE/state/parent-replies.status")" > "$BIG/state/remote-replies/big.cursor"
+
+# Append <payload> to the remote log and stage it as captured generation <seq>
+# continuing the committed cursor, exactly as the runner records a capture.
+big_capture() {  # <seq> <payload-file>
+  local seq=$1 payload=$2 log from fhash to thash res
+  log="$BIG_REMOTE/state/parent-replies.status"
+  from=$(sed -n 's/^offset=//p' "$BIG/state/remote-replies/big.cursor")
+  fhash=$(sed -n 's/^prefix_sha256=//p' "$BIG/state/remote-replies/big.cursor")
+  cat "$payload" >> "$log"
+  to=$(LC_ALL=C wc -c < "$log" | tr -d ' ')
+  thash=$(sha256_file "$log")
+  res="$BIG/state/procevent-inbox/$BIG_SID.$seq.result"
+  {
+    printf 'schema=fm-remote-delta.v1\nstatus=delta\npath=state/parent-replies.status\n'
+    printf 'from_offset=%s\nto_offset=%s\n' "$from" "$to"
+    printf 'from_prefix_sha256=%s\nto_prefix_sha256=%s\n' "$fhash" "$thash"
+    printf 'payload_sha256=%s\npayload_bytes=%s\nreason=\n\n' "$(sha256_file "$payload")" \
+      "$(LC_ALL=C wc -c < "$payload" | tr -d ' ')"
+    cat "$payload"
+  } > "$res"
+  printf 'remote-reply\n' > "${res%.result}.adapter"
+}
+
+# Run a command in its own process group under a deadline; a run still going
+# at the deadline has its whole group stopped and returns 124.
+run_bounded() {  # <seconds> <command...>
+  perl -e '
+    my $limit = shift @ARGV;
+    my $pid = fork;
+    die "fork failed\n" unless defined $pid;
+    if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127; }
+    local $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid $pid, 0; exit 124; };
+    alarm $limit;
+    waitpid $pid, 0;
+    alarm 0;
+    exit($? >> 8);
+  ' "$@"
+}
+
+BIG_LOCK="$BIG/state/.remote-reply-lifecycle-big.lock"
+
+# A captured delta whose only line is already in the parent status ingests as
+# a no-op, then must reach handled promptly and release the lifecycle lock.
+present_line=$(grep -m1 '^done \[corr=' "$BIG_STATUS")
+printf '%s\n' "$present_line" > "$TMP_ROOT/big-present.payload"
+big_capture 1 "$TMP_ROOT/big-present.payload"
+big_rc=0
+run_bounded "$BIG_BOUND" env FM_HOME="$BIG" FM_ROOT_OVERRIDE="$ROOT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
+  FM_SSH_BIN="$FAKEBIN/fake-ssh" "$ADAPTER" handle big 1 "$BIG/state/procevent-inbox/$BIG_SID.1.result" \
+  > "$TMP_ROOT/big-handle.out" 2>&1 || big_rc=$?
+assert_grep 'ingested: big appended=0' "$TMP_ROOT/big-handle.out" \
+  "the already-present delta was not ingested as a no-op"
+[ "$big_rc" = 0 ] \
+  || fail "handle of an already-present delta did not finish within ${BIG_BOUND}s (rc=$big_rc): $(cat "$TMP_ROOT/big-handle.out")"
+assert_present "$BIG/state/procevent-inbox/$BIG_SID.1.handled" \
+  "a fully ingested already-present delta was never marked handled"
+assert_absent "$BIG_LOCK" "handle left the reply lifecycle lock held"
+[ "$(grep -cxF -- "$present_line" "$BIG_STATUS")" = 1 ] \
+  || fail "the already-present line was appended a second time"
+pass "an already-present delta on a long-lived route is handled promptly and releases the lock"
+
+# The next capture for the same mate carries a late correlated reply: the
+# autohandle seam ingests it, resolves the escalated request, closes its
+# reserved decision once, and acknowledges it within the same bound.
+late_corr=$(big_corr 901)
+printf 'done [corr=%s]: late correlated answer\n' "$late_corr" > "$TMP_ROOT/big-late.payload"
+big_capture 2 "$TMP_ROOT/big-late.payload"
+big_rc=0
+run_bounded "$BIG_BOUND" env FM_HOME="$BIG" FM_ROOT_OVERRIDE="$ROOT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
+  FM_SSH_BIN="$FAKEBIN/fake-ssh" "$ADAPTER" autohandle "$BIG_SID" 2 "$BIG/state/procevent-inbox/$BIG_SID.2.result" \
+  > "$TMP_ROOT/big-next.out" 2>&1 || big_rc=$?
+[ "$big_rc" = 0 ] \
+  || fail "autohandle of the next capture did not finish within ${BIG_BOUND}s (rc=$big_rc): $(cat "$TMP_ROOT/big-next.out")"
+assert_present "$BIG/state/procevent-inbox/$BIG_SID.2.handled" \
+  "the next capture after a long-lived history was never handled"
+assert_absent "$BIG_LOCK" "autohandle left the reply lifecycle lock held"
+[ "$(grep -cxF "done [corr=$late_corr]: late correlated answer" "$BIG_STATUS")" = 1 ] \
+  || fail "the late correlated reply did not reach parent status exactly once"
+[ "$(fm_pending_reply_get "$BIG/state/pending-replies/$late_corr" phase)" = resolved ] \
+  || fail "the late correlated reply did not resolve its escalated request"
+[ "$(grep -c "^resolved \[key=pending-reply-$late_corr\]" "$BIG_STATUS")" = 1 ] \
+  || fail "the resolved request did not close its reserved decision exactly once"
+[ "$(grep -c '^resolved \[key=pending-reply-' "$BIG_STATUS")" = "$(( $(grep -c '^blocked \[key=pending-reply-' "$BIG_STATUS") - 2 ))" ] \
+  || fail "handling closed a decision other than the resolved request's"
+pass "the next capture on a long-lived route ingests, resolves, and closes only its own decision"
+
+# Concurrent autohandle attempts for one capture never queue behind the lock:
+# each finishes within the bound, either handling it or deferring busy (75),
+# none counts a failure, and the handled capture is never offered again.
+second_present=$(grep -m2 '^working: progress' "$BIG_STATUS" | tail -1)
+printf '%s\n' "$second_present" > "$TMP_ROOT/big-concurrent.payload"
+big_capture 3 "$TMP_ROOT/big-concurrent.payload"
+concurrent_pids=
+for attempt in 1 2 3 4; do
+  (
+    rc=0
+    run_bounded "$BIG_BOUND" env FM_HOME="$BIG" FM_ROOT_OVERRIDE="$ROOT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
+      FM_SSH_BIN="$FAKEBIN/fake-ssh" "$ADAPTER" autohandle "$BIG_SID" 3 "$BIG/state/procevent-inbox/$BIG_SID.3.result" \
+      > "$TMP_ROOT/big-concurrent-$attempt.out" 2>&1 || rc=$?
+    printf '%s\n' "$rc" > "$TMP_ROOT/big-concurrent-$attempt.rc"
+  ) &
+  concurrent_pids="$concurrent_pids $!"
+done
+for pid in $concurrent_pids; do wait "$pid" || true; done
+handled_attempts=0
+for attempt in 1 2 3 4; do
+  rc=$(cat "$TMP_ROOT/big-concurrent-$attempt.rc" 2>/dev/null || printf missing)
+  case "$rc" in
+    0) handled_attempts=$((handled_attempts + 1)) ;;
+    75) ;;
+    *) fail "concurrent autohandle attempt $attempt did not finish cleanly within ${BIG_BOUND}s (rc=$rc): $(cat "$TMP_ROOT/big-concurrent-$attempt.out")" ;;
+  esac
+done
+[ "$handled_attempts" -ge 1 ] || fail "no concurrent autohandle attempt handled the capture"
+assert_present "$BIG/state/procevent-inbox/$BIG_SID.3.handled" \
+  "concurrent autohandle attempts left the capture unhandled"
+assert_absent "$BIG/state/remote-replies/big.3.autohandle-failures" \
+  "a busy concurrent autohandle attempt counted a handling failure"
+assert_absent "$BIG_LOCK" "concurrent autohandle attempts left the lifecycle lock held"
+[ "$(grep -cxF -- "$second_present" "$BIG_STATUS")" = 1 ] \
+  || fail "concurrent autohandle attempts appended the same line twice"
+big_env "$ROOT/bin/fm-procevent.sh" retire "$BIG_SID" >/dev/null
+reconcile_out=$(big_env "$ROOT/bin/fm-procevent.sh" reconcile)
+assert_contains "$reconcile_out" 'published=0' \
+  "a handled capture was still re-announced for another autohandle attempt"
+pass "concurrent autohandle attempts finish within the bound and the handled capture is not offered again"
+
+# The watcher's pending-reply tick over the same history finishes within the
+# bound, still resolving an escalated request whose correlated report landed.
+tick_corr=$(big_corr 902)
+printf 'done [corr=%s]: reported straight to the parent\n' "$tick_corr" >> "$BIG_STATUS"
+big_rc=0
+# shellcheck disable=SC2016 # The inner shell expands its own positional arguments.
+run_bounded "$BIG_BOUND" bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_tick "$2"' \
+  _ "$ROOT" "$BIG/state" > "$TMP_ROOT/big-tick.out" 2>&1 || big_rc=$?
+[ "$big_rc" = 0 ] \
+  || fail "the pending-reply tick did not finish within ${BIG_BOUND}s (rc=$big_rc): $(cat "$TMP_ROOT/big-tick.out")"
+[ "$(fm_pending_reply_get "$BIG/state/pending-replies/$tick_corr" phase)" = resolved ] \
+  || fail "the bounded tick did not resolve an escalated request whose report landed"
+[ "$(fm_pending_reply_get "$BIG/state/pending-replies/$(big_corr 903)" phase)" = escalated ] \
+  || fail "the bounded tick resolved a request with no correlated report"
+pass "the watcher's pending-reply tick stays bounded on a long-lived history and still resolves late reports"
 
 echo "ALL TESTS PASSED"
