@@ -4164,6 +4164,24 @@ spawn_send_text_line() {  # <target> <text>
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
   esac
 }
+# Prove the pane executes shell commands before the first pane-typed byte.
+# Defined beside the other spawn_send_* primitives because the early probe
+# below runs long before the launch-staging block at the end of this script.
+spawn_probe_launch_execution() {  # <target> <label>
+  local target=$1 label=$2 tail
+  if ! fm_pane_launch_prove_execution "$BACKEND" "$target" "$TASK_TMP" spawn_send_text_line "$label"; then
+    tail=$(fm_pane_launch_tail "$BACKEND" "$target" 15 "$label")
+    # The state dir may not exist yet this early (it is created with the
+    # turn-end markers below), so the status append must not fail the
+    # refusal when the dir is absent; the stderr diagnostic always lands.
+    if [ -d "$STATE" ]; then
+      printf 'failed: launch pane %s is not executing shell commands; refusing to type the %s launch into an unknown prompt; pane tail:\n%s\n' "$target" "$HARNESS" "$tail" >> "$STATE/$ID.status"
+    fi
+    echo "error: launch pane $target is not executing shell commands; refusing to type the $HARNESS launch into an unknown prompt; pane tail: $tail" >&2
+    exit 1
+  fi
+}
+
 spawn_current_path() {  # <target>
   case "$BACKEND" in
     tmux) fm_backend_tmux_current_path "$1" ;;
@@ -4202,10 +4220,17 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     # above), but a bare shell can still sit behind an unread rc prompt
     # that passes the process-shape idle proof while swallowing input.
     # Prove execution before the first typed byte (the herdr cd below,
-    # or GOTMPDIR export and launch). Active-harness refusals stay first:
-    # a probe must never be injected into a running agent.
+    # or GOTMPDIR export and launch). Active-harness refusals stay first,
+    # and the probe itself never fires into a non-idle pane: herdr checks
+    # idle shape first (tmux already did above), so a busy foreground is
+    # refused without typing anything into it.
     case "$BACKEND" in
-      tmux|herdr) spawn_probe_launch_execution "$T" "$W" ;;
+      tmux) spawn_probe_launch_execution "$T" "$W" ;;
+      herdr)
+        if fm_backend_herdr_pane_idle_foreground_shell_pid "$HERDR_SES" "$HERDR_PANE_ID" >/dev/null 2>&1; then
+          spawn_probe_launch_execution "$T" "$W"
+        fi
+        ;;
     esac
     relaunch_worktree_real=$(real_path_or_raw "$WT")
     if ! relaunch_endpoint_in_worktree "$T" "$relaunch_worktree_real"; then
@@ -4247,23 +4272,7 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
-# Prove the pane executes shell commands before the first pane-typed byte.
-# Defined beside the other spawn_send_* primitives because the early probe
-# below runs long before the launch-staging block at the end of this script.
-spawn_probe_launch_execution() {  # <target> <label>
-  local target=$1 label=$2 tail
-  if ! fm_pane_launch_prove_execution "$BACKEND" "$target" "$TASK_TMP" spawn_send_text_line "$label"; then
-    tail=$(fm_pane_launch_tail "$BACKEND" "$target" 15 "$label")
-    # The state dir may not exist yet this early (it is created with the
-    # turn-end markers below), so the status append must not fail the
-    # refusal when the dir is absent; the stderr diagnostic always lands.
-    if [ -d "$STATE" ]; then
-      printf 'failed: launch pane %s is not executing shell commands; refusing to type the %s launch into an unknown prompt; pane tail:\n%s\n' "$target" "$HARNESS" "$tail" >> "$STATE/$ID.status"
-    fi
-    echo "error: launch pane $target is not executing shell commands; refusing to type the $HARNESS launch into an unknown prompt; pane tail: $tail" >&2
-    exit 1
-  fi
-}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
