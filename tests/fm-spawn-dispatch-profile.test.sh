@@ -2692,8 +2692,8 @@ test_launch_probe_refuses_blocked_pane_with_visible_tail() {
     else
       out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
     fi
-    unset FM_FAKE_PANE_TAIL
     status=$?
+    unset FM_FAKE_PANE_TAIL
     unset FM_TEST_PROBE_SWALLOW FM_TEST_PROBE_POLLS FM_TEST_PROBE_INTERVAL
     expect_code 1 "$status" "$backend spawn into a startup-prompt-blocked pane must refuse"
     assert_contains "$out" "not executing shell commands" \
