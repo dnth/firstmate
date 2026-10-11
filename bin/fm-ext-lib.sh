@@ -1311,8 +1311,8 @@ fm_ext_attachments_prune() {
   done < <(find "$dir" -maxdepth 1 -mindepth 1 -print0 2>/dev/null)
   return 0
 }
-# fm_ext_attachment_safe_name <name>: strip path components, control bytes,
-# and empty or dot-only names down to a safe file stem. Prints the safe name
+# fm_ext_attachment_safe_name <name>: reject path-like names, strip control
+# bytes, and reject empty or dot-only names. Prints the safe name
 # or returns 1 when nothing usable remains. The caller prefixes an index so
 # two attachments with the same Discord name cannot collide.
 fm_ext_attachment_safe_name() {

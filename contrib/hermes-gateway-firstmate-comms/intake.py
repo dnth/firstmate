@@ -472,7 +472,7 @@ def attachment_manifest_entries(
     media_urls: list[str] | None, media_types: list[str] | None,
 ) -> list[dict[str, str]]:
     """Manifest entries for locally cached adapter attachments.
-    Only local paths are listed; a CDN-URL fallback entry keeps its URL so
+    Local paths are listed; a CDN-URL fallback entry keeps its URL so
     the shell records it as uncached, and it is never fetched here.
     """
     urls = list(media_urls or [])
