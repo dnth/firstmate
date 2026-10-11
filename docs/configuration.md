@@ -772,6 +772,12 @@ For a slash command, `<message>` is the Discord interaction id and `<thread>` de
 Inside a thread, `<channel>` is the thread's parent channel, which is what the allowlist matches, and `<thread>` is the thread, so the reply posts into the thread; a top-level channel's category is never used as its channel.
 Filenames use the SHA-256 hex digest of that canonical id (`slug`).
 `bin/fm-ext-intake.sh` publishes `state/ext-inbox/<slug>.json` (mode 0600), durable destination context at `state/ext-context/<slug>.json`, and a one-wake offer marker at `state/ext-context/<slug>.offered.json`.
+A message carrying Discord attachments copies each locally cached file into `state/ext-attachments/<slug>/` (mode 0700 dir, 0600 files) and lists it in the inbox record as `attachments` (`name`, `path`, `media_type`, `bytes`).
+Files that cannot be copied are listed as `skipped_attachments` (`name`, `reason`) and are never fetched or followed.
+Only regular files inside the gateway adapter cache are copied: symlinks, remote URLs, paths outside the cache, oversize files, and entries past the count cap are skipped.
+The caps are `FM_EXT_ATTACHMENT_MAX_BYTES` (default 33554432) and `FM_EXT_ATTACHMENT_MAX_COUNT` (default 10).
+Attachment bytes are untrusted input: read them with the normal read tools and never execute them.
+The manifest never changes admission or authority, and an attachment-only message with empty text still becomes a request.
 The same message id claims the existing offer and does not append a second wake.
 Each new offer appends one durable `ext-request <slug>` wake row keyed `ext-request:<slug>`, so every pending request presents its own row.
 State directories are mode 0700.
@@ -822,7 +828,9 @@ A payload whose generation has reached a receipt or a terminal failed marker is 
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
 Local bridge records expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
-Each poll drops `state/ext-context/` destination and offer records past that window, keeping an offer marker whose request is still sitting unhandled in the inbox, and drops the leftover markers of already retired outbox generations.
+Each poll drops `state/ext-context/` destination and offer records past that window, keeping an offer marker whose request is still sitting unhandled in the inbox.
+It drops the leftover markers of already retired outbox generations.
+It removes `state/ext-attachments/<slug>/` folders whose request is past the window and no longer sitting unhandled in the inbox.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.

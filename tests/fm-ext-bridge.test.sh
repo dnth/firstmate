@@ -2411,4 +2411,175 @@ test_40_recovery_exhausted_reply_warns
 test_41_real_reaction_uses_discord_rest_edge
 test_42_intake_records_origin_and_bounded_reply_context
 
+# --- 43. cached attachments are copied into a private per-request folder ---
+
+test_43_intake_copies_cached_attachments() {
+  local home slug inbox dir mode
+  home="$TMP_ROOT/c43"
+  setup_home "$home"
+  mkdir -p "$home/cache/images" "$home/cache/documents"
+  printf 'IMGDATA' > "$home/cache/images/pic.png"
+  printf 'DOCDATA' > "$home/cache/documents/notes.txt"
+  write_text "$home/text.txt" "see the attached files"
+  "$PYTHON_BIN" - "$home/cache/images/pic.png" "$home/cache/documents/notes.txt" "$home/manifest.json" <<'PY'
+import json, sys
+pic, doc, out = sys.argv[1], sys.argv[2], sys.argv[3]
+json.dump([
+  {"path": pic, "media_type": "image/png", "name": "pic.png"},
+  {"path": doc, "media_type": "", "name": "notes.txt"},
+], open(out, "w"))
+PY
+  slug=$(home_env "$home" env FM_EXT_ATTACHMENT_CACHE_DIRS="$home/cache/images:$home/cache/documents" \
+    "$INTAKE" \
+    --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
+    --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" \
+    --text-file "$home/text.txt" --attachment-manifest "$home/manifest.json")
+  inbox="$home/state/ext-inbox/${slug}.json"
+  assert_present "$inbox" "an attachment request must write the inbox"
+  dir="$home/state/ext-attachments/${slug}"
+  [ -d "$dir" ] || fail "copied attachments must live in a per-request folder"
+  if [ "$(uname)" = Darwin ]; then mode=$(stat -f %Lp "$dir"); else mode=$(stat -c %a "$dir"); fi
+  [ "$mode" = 700 ] || fail "the attachment folder must be mode 0700, got $mode"
+  [ "$(jq -r '.attachments | length' "$inbox")" = 2 ] \
+    || fail "the inbox must list each copied file"
+  [ "$(jq -r '.attachments[0].name' "$inbox")" = pic.png ] \
+    || fail "the inbox must record the attachment name"
+  [ "$(jq -r '.attachments[0].media_type' "$inbox")" = image/png ] \
+    || fail "the inbox must record the media type"
+  [ "$(jq -r '.attachments[0].bytes' "$inbox")" = 7 ] \
+    || fail "the inbox must record the byte count"
+  case "$(jq -r '.attachments[0].path' "$inbox")" in
+    "$dir"/*) ;;
+    *) fail "the inbox path must point inside the per-request folder" ;;
+  esac
+  [ "$(jq -r '.attachments[1].media_type' "$inbox")" = application/octet-stream ] \
+    || fail "an unknown media type must be kept as application/octet-stream"
+  [ "$(jq -r '.skipped_attachments | length' "$inbox")" = 0 ] \
+    || fail "a clean manifest must skip nothing"
+  if [ "$(uname)" = Darwin ]; then fmode=$(stat -f %Lp "$dir/0-pic.png"); else fmode=$(stat -c %a "$dir/0-pic.png"); fi
+  [ "$fmode" = 600 ] || fail "a copied attachment must be mode 0600"
+  cmp -s "$home/cache/images/pic.png" "$dir/0-pic.png" \
+    || fail "the copied bytes must match the cached file"
+  pass "43 cached attachments are copied into a private per-request folder"
+}
+
+# --- 44. oversize, over-count, uncached, symlink, and unsafe names skip -----
+
+test_44_intake_skips_uncopyable_attachments() {
+  local home slug inbox dir
+  home="$TMP_ROOT/c44"
+  setup_home "$home"
+  mkdir -p "$home/cache/images" "$home/evil-real"
+  printf '1234567' > "$home/cache/images/ok.png"
+  printf '0123456789abcdef0123456789abcdef' > "$home/cache/images/big.png"
+  printf 'EVIL' > "$home/evil-real/evil.png"
+  ln -s "$home/evil-real" "$home/cache/images/evildir"
+  ln -s "$home/cache/images/ok.png" "$home/cache/images/link.png"
+  write_text "$home/text.txt" "mixed attachments"
+  "$PYTHON_BIN" - "$home/cache/images/ok.png" "$home/cache/images/link.png" \
+    "$home/cache/images/evildir/evil.png" "$home/cache/images/missing.png" \
+    "$home/cache/images/big.png" "$home/manifest.json" <<'PY'
+import json, sys
+ok, link, evildir, missing, big, out = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+json.dump([
+  {"path": ok, "media_type": "image/png", "name": "ok.png"},
+  {"path": "https://cdn.discordapp.com/x.png", "media_type": "image/png", "name": "cdn.png"},
+  {"path": link, "media_type": "image/png", "name": "link.png"},
+  {"path": evildir, "media_type": "image/png", "name": "evil.png"},
+  {"path": missing, "media_type": "image/png", "name": "missing.png"},
+  {"path": ok, "media_type": "image/png", "name": "../evil2.png"},
+  {"path": big, "media_type": "image/png", "name": "big.png"},
+  {"path": ok, "media_type": "image/png", "name": "tiny.png"},
+  {"path": ok, "media_type": "image/png", "name": "extra.png"},
+], open(out, "w"))
+PY
+  slug=$(home_env "$home" env FM_EXT_ATTACHMENT_CACHE_DIRS="$home/cache/images" \
+    FM_EXT_ATTACHMENT_MAX_BYTES=8 FM_EXT_ATTACHMENT_MAX_COUNT=2 \
+    "$INTAKE" \
+    --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
+    --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" \
+    --text-file "$home/text.txt" --attachment-manifest "$home/manifest.json")
+  inbox="$home/state/ext-inbox/${slug}.json"
+  dir="$home/state/ext-attachments/${slug}"
+  [ "$(jq -r '.attachments | length' "$inbox")" = 2 ] \
+    || fail "two files fit the count cap"
+  [ "$(jq -r '.attachments[0].name' "$inbox")" = ok.png ] \
+    || fail "the kept file must be the first cache entry"
+  for want in "cdn.png uncached" "link.png not-found" "evil.png not-found" \
+      "missing.png not-found" "../evil2.png unsafe-name" "big.png too-large" "extra.png over-count"; do
+    set -- $want
+    [ "$(jq -r --arg n "$1" '.skipped_attachments[] | select(.name == $n) | .reason' "$inbox")" = "$2" ] \
+      || fail "skipped $1 must be listed as $2, got: $(jq -c '.skipped_attachments' "$inbox")"
+  done
+  [ "$(jq -r '.attachments[1].name' "$inbox")" = tiny.png ] \
+    || fail "the second kept file must be tiny.png"
+  [ "$(find "$dir" -type f | wc -l | tr -d ' ')" = 2 ] \
+    || fail "only the kept files may be copied"
+  pass "44 oversize, over-count, uncached, symlink, and unsafe names are skipped and listed"
+}
+
+# --- 45. allowlist, text-only, attachment-only, and retention ---------------
+
+test_45_attachment_admission_and_retention() {
+  local home slug inbox rc future dir denied_msg
+  home="$TMP_ROOT/c45"
+  setup_home "$home"
+  mkdir -p "$home/cache/images"
+  printf 'IMG' > "$home/cache/images/a.png"
+  "$PYTHON_BIN" - "$home/cache/images/a.png" "$home/manifest.json" <<'PY'
+import json, sys
+json.dump([{"path": sys.argv[1], "media_type": "image/png", "name": "a.png"}], open(sys.argv[2], "w"))
+PY
+  # A non-allowlisted author copies nothing and records nothing.
+  denied_msg=700000000000000001
+  write_text "$home/text.txt" "denied with a file"
+  home_env "$home" env FM_EXT_ATTACHMENT_CACHE_DIRS="$home/cache/images" \
+    "$INTAKE" \
+    --request-id "discord:${GUILD}:${CHANNEL}:${THREAD}:${denied_msg}" \
+    --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$THREAD" \
+    --message-id "$denied_msg" --author 999999999999999999 \
+    --secret-file "$home/config/ext-secret" \
+    --text-file "$home/text.txt" --attachment-manifest "$home/manifest.json" \
+    >/dev/null 2>&1; rc=$?
+  expect_code 3 "$rc" "a denied author with attachments must be refused"
+  [ -z "$(find "$home/state" -mindepth 1 2>/dev/null)" ] \
+    || fail "a refused intake must copy no file and record nothing"
+  # A text-only request is unchanged: empty attachment lists.
+  write_text "$home/text.txt" "plain hello"
+  slug=$(intake_ok "$home" "plain hello" 700000000000000002)
+  inbox="$home/state/ext-inbox/$slug.json"
+  [ "$(jq -c '.attachments' "$inbox")" = '[]' ] \
+    || fail "a text-only request must record empty attachments"
+  [ "$(jq -c '.skipped_attachments' "$inbox")" = '[]' ] \
+    || fail "a text-only request must record empty skipped_attachments"
+  # An attachment-only message with empty text still becomes a request.
+  : > "$home/text.txt"
+  slug=$(home_env "$home" env FM_EXT_ATTACHMENT_CACHE_DIRS="$home/cache/images" \
+    "$INTAKE" \
+    --request-id "discord:${GUILD}:${CHANNEL}:${THREAD}:700000000000000003" \
+    --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$THREAD" \
+    --message-id 700000000000000003 --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" \
+    --text-file "$home/text.txt" --attachment-manifest "$home/manifest.json")
+  inbox="$home/state/ext-inbox/$slug.json"
+  [ "$(jq -r '.text' "$inbox")" = "" ] \
+    || fail "an attachment-only request keeps its empty text"
+  [ "$(jq -r '.attachments | length' "$inbox")" = 1 ] \
+    || fail "an attachment-only message must still record its file"
+  # The folder follows the bridge retention window with the other records.
+  dir="$home/state/ext-attachments/$slug"
+  assert_present "$dir/0-a.png" "the attachment copy must exist before retention"
+  rm -f "$home/state/ext-inbox/$slug.json"
+  future=$(( $(date +%s) + 604800 + 86400 ))
+  home_env "$home" env FM_EXT_NOW_OVERRIDE="$future" "$POLL" >/dev/null
+  assert_absent "$dir" "the attachment folder must expire with the request records"
+  pass "45 allowlist, text-only, attachment-only, and retention hold"
+}
+
+
+test_43_intake_copies_cached_attachments
+test_44_intake_skips_uncopyable_attachments
+test_45_attachment_admission_and_retention
 echo "all fm-ext-bridge tests passed"

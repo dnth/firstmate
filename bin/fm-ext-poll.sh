@@ -32,6 +32,7 @@ command -v jq >/dev/null 2>&1 || exit 0
 
 fm_ext_context_prune "$STATE"
 fm_ext_outbox_prune "$STATE"
+fm_ext_attachments_prune "$STATE"
 
 INBOX=$(fm_ext_inbox_dir)
 CONTEXT=$(fm_ext_context_dir)

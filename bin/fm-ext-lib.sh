@@ -25,6 +25,7 @@ FM_EXT_SCHEMA_VERSION=1
 FM_EXT_INBOX_DIRNAME='ext-inbox'
 FM_EXT_CONTEXT_DIRNAME='ext-context'
 FM_EXT_OUTBOX_DIRNAME='ext-outbox'
+FM_EXT_ATTACHMENTS_DIRNAME='ext-attachments'
 FM_EXT_WATCH_SHIM='ext-watch.check.sh'
 FM_EXT_SECRET_BASENAME='ext-secret'
 FM_EXT_ALLOWLIST_BASENAME='ext-allowlist'
@@ -88,6 +89,22 @@ fm_ext_private_artifact_dir_prepare() {
     (umask 077; mkdir -p "$dir" 2>/dev/null) || return 1
   fi
   fm_ext_private_artifact_dir_device "$dir"
+}
+
+# fm_ext_private_request_dir_prepare <state> <dirname> <slug>: prepare the
+# private per-request directory state/<dirname>/<slug> (mode 0700) and print
+# its path. The slug is the only path component, so no caller input can
+# escape the directory. Refuses symlinks and wrong modes like the file
+# publisher above.
+fm_ext_private_request_dir_prepare() {
+  local state=$1 dirname=$2 slug=$3 dir device
+  fm_ext_slug_valid "$slug" || return 1
+  case "$dirname" in
+    ''|.*|*/*) return 1 ;;
+  esac
+  dir="$state/$dirname/$slug"
+  device=$(fm_ext_private_artifact_dir_prepare "$dir") || return 1
+  printf '%s\n' "$dir"
 }
 
 fm_ext_private_artifact_publish_stdin() {
@@ -302,6 +319,7 @@ fm_ext_bridge_path() {
 fm_ext_inbox_dir()  { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_INBOX_DIRNAME"; }
 fm_ext_context_dir(){ printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_CONTEXT_DIRNAME"; }
 fm_ext_outbox_dir() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_OUTBOX_DIRNAME"; }
+fm_ext_attachments_dir() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_ATTACHMENTS_DIRNAME"; }
 fm_ext_watch_shim_path() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_WATCH_SHIM"; }
 
 # --- activation and secret --------------------------------------------------
@@ -1236,6 +1254,322 @@ fm_ext_retention_max_age_secs() {
   [ "${#raw}" -le 18 ] || raw=604800
   [ "$raw" -le 604800 ] || raw=604800
   printf '%s\n' "$raw"
+}
+
+# Per-file attachment byte cap for the local bridge. Mirrors the
+# fm_ext_discord_reply_max_chars clamp shape: non-numeric values reset to the
+# default, and the 32 MiB default matches the Discord adapter's own
+# historical per-attachment cap.
+fm_ext_attachment_max_bytes() {
+  local raw=${1:-${FM_EXT_ATTACHMENT_MAX_BYTES-}}
+  case "$raw" in
+    ''|*[!0-9]*) raw=33554432 ;;
+  esac
+  [ "$raw" -ge 1 ] 2>/dev/null || raw=33554432
+  printf '%s\n' "$raw"
+}
+
+# Per-request attachment count cap. Non-numeric values reset to the default.
+fm_ext_attachment_max_count() {
+  local raw=${1:-${FM_EXT_ATTACHMENT_MAX_COUNT-}}
+  case "$raw" in
+    ''|*[!0-9]*) raw=10 ;;
+  esac
+  [ "$raw" -ge 1 ] 2>/dev/null || raw=10
+  printf '%s\n' "$raw"
+}
+
+# fm_ext_attachments_prune <state>: drop per-request attachment folders past
+# the retention window so state/ext-attachments stays bounded. A folder whose
+# request is still sitting unhandled in the inbox is kept: expiring it would
+# leave a request whose files are already gone. Best effort, like the context
+# prune above: an unreadable folder is left alone rather than failing.
+fm_ext_attachments_prune() {
+  local state=$1 dir inbox now max_age folder base slug recorded_at age
+  dir="$state/$FM_EXT_ATTACHMENTS_DIRNAME"
+  inbox="$state/$FM_EXT_INBOX_DIRNAME"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  max_age=$(fm_ext_retention_max_age_secs)
+  while IFS= read -r -d '' folder; do
+    base=${folder##*/}
+    slug=$base
+    fm_ext_slug_valid "$slug" || continue
+    if fm_ext_private_artifact_file_valid "$inbox" "$slug.json" 600; then
+      continue
+    fi
+    recorded_at=$(fm_ext_file_mtime "$folder") || continue
+    case "$recorded_at" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    age=$((now - recorded_at))
+    [ "$age" -gt "$max_age" ] 2>/dev/null || continue
+    rm -rf -- "$folder" 2>/dev/null || true
+  done < <(find "$dir" -maxdepth 1 -mindepth 1 -print0 2>/dev/null)
+  return 0
+}
+# fm_ext_attachment_safe_name <name>: strip path components, control bytes,
+# and empty or dot-only names down to a safe file stem. Prints the safe name
+# or returns 1 when nothing usable remains. The caller prefixes an index so
+# two attachments with the same Discord name cannot collide.
+fm_ext_attachment_safe_name() {
+  local name=$1 safe
+  case "$name" in
+    */*|*\\*) return 1 ;;
+  esac
+  safe=${name%%$'\n'*}
+  safe=${safe%$'\r'*}
+  case "$safe" in
+    */*|*\\*) return 1 ;;
+  esac
+  safe=$(printf '%s' "$safe" | tr -d '\000-\037\177') || return 1
+  safe=$(printf '%s' "$safe" | sed 's/^ *//;s/ *$//') || return 1
+  [ -n "$safe" ] || return 1
+  case "$safe" in
+    .|..) return 1 ;;
+  esac
+  [ "${#safe}" -le 128 ] || safe=$(printf '%s' "$safe" | cut -c1-128)
+
+  [ -n "$safe" ] || return 1
+  printf '%s\n' "$safe"
+}
+
+# fm_ext_attachment_cache_roots: print the Hermes adapter cache roots the
+# gateway may hand us, one per line. The adapter caches downloads under
+# HERMES_HOME/cache/{images,audio,documents} (legacy
+# HERMES_HOME/{image_cache,audio_cache,document_cache} when populated), so a
+# manifest path outside those roots is never copied. Roots come from
+# FM_EXT_ATTACHMENT_CACHE_DIRS (colon-separated, tests) or HERMES_HOME, and
+# resolve physically so a symlinked root cannot escape the comparison.
+fm_ext_attachment_cache_roots() {
+  local roots=${FM_EXT_ATTACHMENT_CACHE_DIRS-} dir resolved
+  if [ -n "$roots" ]; then
+    while IFS= read -r dir; do
+      [ -n "$dir" ] || continue
+      resolved=$(cd -- "$dir" 2>/dev/null && pwd -P) || continue
+      printf '%s\n' "$resolved"
+    done <<EOF2
+$(printf '%s' "$roots" | tr ':' '\n')
+EOF2
+    return 0
+  fi
+  dir=${HERMES_HOME-}
+  [ -n "$dir" ] || return 0
+  resolved=$(cd -- "$dir" 2>/dev/null && pwd -P) || return 0
+  printf '%s\n' "$resolved/cache/images"
+  printf '%s\n' "$resolved/cache/audio"
+  printf '%s\n' "$resolved/cache/documents"
+  printf '%s\n' "$resolved/image_cache"
+  printf '%s\n' "$resolved/audio_cache"
+  printf '%s\n' "$resolved/document_cache"
+}
+
+# fm_ext_attachments_stage <stage-dir> <manifest>: copy the gateway's cached
+# attachments into a staging dir and print {"kept":[...],"skipped":[...]}.
+# The manifest is a JSON array of {path, media_type, name} written by the
+# gateway plugin. Only regular files inside the adapter cache roots are
+# copied: symlinks (including symlinked parents), remote URLs, paths outside
+# the cache, missing files, oversize files, and entries past the count cap
+# are skipped with a reason, never fetched or followed. The copy opens the
+# source with O_NOFOLLOW, checks fstat, and reads at most max-bytes+1 so a
+# file grown or replaced after sizing cannot defeat the byte cap. Prints kept
+# entries as {name, staged, media_type, bytes} with staged as the temp path;
+# the caller rewrites it to the per-request path. Best effort per entry: one
+# bad entry never fails the whole request.
+fm_ext_attachments_stage() {
+  local stage=$1 manifest=$2 max_bytes max_count count kept skipped rc roots
+  [ -d "$stage" ] && [ ! -L "$stage" ] || return 1
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  max_bytes=$(fm_ext_attachment_max_bytes)
+  max_count=$(fm_ext_attachment_max_count)
+  kept=$(mktemp "${TMPDIR:-/tmp}/fm-ext-kept.XXXXXX") || return 1
+  skipped=$(mktemp "${TMPDIR:-/tmp}/fm-ext-skipped.XXXXXX") || return 1
+  : > "$kept"
+  : > "$skipped"
+  roots=$(mktemp "${TMPDIR:-/tmp}/fm-ext-roots.XXXXXX") || return 1
+  fm_ext_attachment_cache_roots >"$roots" 2>/dev/null || : >"$roots"
+  count=0
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    count=$(wc -l <"$kept" 2>/dev/null | tr -d ' ') || count=0
+    case "$count" in
+      ''|*[!0-9]*) count=0 ;;
+    esac
+    FM_EXT_ATTACHMENT_ROOTS_FILE="$roots" fm_ext_attachments_stage_one \
+      "$stage" "$entry" "$max_bytes" "$max_count" "$count" "$kept" "$skipped" || true
+  done < <(jq -c '.[]' "$manifest" 2>/dev/null)
+  jq -cn --slurpfile kept "$kept" --slurpfile skipped "$skipped" '{kept:$kept, skipped:$skipped}' 2>/dev/null
+  rc=$?
+  rm -f -- "$kept" "$skipped" "$roots" 2>/dev/null || true
+  return "$rc"
+}
+
+# fm_ext_attachments_stage_one <stage> <entry-json> <max-bytes> <max-count>
+# <index> <kept-file> <skipped-file>: stage one manifest entry. Appends one
+# JSON line to the kept or skipped file. Kept lines carry
+# {name, staged, media_type, bytes}; skipped lines carry {name, reason} with
+# reason one of uncached, not-found, unsafe-name, too-large, or over-count.
+# The source must resolve inside one of the adapter cache roots
+# ($FM_EXT_ATTACHMENT_ROOTS_FILE, one physical path per line): anything else
+# is uncached. The copy itself runs through the no-follow helper below, which
+# refuses symlinks at every path component and reads at most max-bytes+1.
+fm_ext_attachments_stage_one() {
+  local stage=$1 entry=$2 max_bytes=$3 max_count=$4 index=$5 kept=$6 skipped=$7
+  local path media_type raw_name name reason dest safe match match_root match_rel out rc
+  local roots=${FM_EXT_ATTACHMENT_ROOTS_FILE-}
+  path=$(printf '%s' "$entry" | jq -er '.path | select(type=="string")' 2>/dev/null) || path=
+  media_type=$(printf '%s' "$entry" | jq -er '.media_type | select(type=="string")' 2>/dev/null) || media_type=
+  raw_name=$(printf '%s' "$entry" | jq -er '.name | select(type=="string")' 2>/dev/null) || raw_name=
+  [ -n "$raw_name" ] || raw_name=${path##*/}
+  [ -n "$raw_name" ] || raw_name="attachment-$((index + 1))"
+  if ! safe=$(fm_ext_attachment_safe_name "$raw_name"); then
+    reason="unsafe-name"
+    jq -cn --arg name "$raw_name" --arg reason "$reason" '{name:$name, reason:$reason}' >>"$skipped"
+    return 0
+  fi
+  name="$safe"
+  case "$path" in
+    http://*|https://*|ftp://*|data:*)
+      jq -cn --arg name "$name" --arg reason "uncached" '{name:$name, reason:$reason}' >>"$skipped"
+      return 0
+      ;;
+  esac
+  if ! match=$(fm_ext_attachment_cache_match "$path" "$roots"); then
+    jq -cn --arg name "$name" --arg reason "uncached" '{name:$name, reason:$reason}' >>"$skipped"
+    return 0
+  fi
+  match_root=${match%% *}
+  match_rel=${match#* }
+  [ -n "$match_root" ] && [ -n "$match_rel" ] || {
+    jq -cn --arg name "$name" --arg reason "uncached" '{name:$name, reason:$reason}' >>"$skipped"
+    return 0
+  }
+  if [ "$index" -ge "$max_count" ] 2>/dev/null; then
+    jq -cn --arg name "$name" --arg reason "over-count" '{name:$name, reason:$reason}' >>"$skipped"
+    return 0
+  fi
+  case "$media_type" in
+    ''|*/*) ;;
+    *) media_type="application/octet-stream" ;;
+  esac
+  [ -n "$media_type" ] || media_type="application/octet-stream"
+  dest="$stage/$index-$name"
+  case "$dest" in
+    "$stage/"*) ;;
+    *) jq -cn --arg name "$name" --arg reason "unsafe-name" '{name:$name, reason:$reason}' >>"$skipped"; return 0 ;;
+  esac
+  out=$(fm_ext_attachment_copy_nofollow "$match_root" "$match_rel" "$dest" "$max_bytes")
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f -- "$dest" 2>/dev/null || true
+    if [ "$rc" = 11 ]; then
+      jq -cn --arg name "$name" --arg reason "too-large" '{name:$name, reason:$reason}' >>"$skipped"
+    else
+      jq -cn --arg name "$name" --arg reason "not-found" '{name:$name, reason:$reason}' >>"$skipped"
+    fi
+    return 0
+  fi
+  case "$out" in
+    ''|*[!0-9]*) jq -cn --arg name "$name" --arg reason "not-found" '{name:$name, reason:$reason}' >>"$skipped"; return 0 ;;
+  esac
+  jq -cn --arg name "$name" --arg staged "$dest" --arg media_type "$media_type" --argjson bytes "$out" \
+    '{name:$name, staged:$staged, media_type:$media_type, bytes:$bytes}' >>"$kept"
+}
+
+# fm_ext_attachment_copy_nofollow <root> <rel> <dest> <max-bytes>: copy one
+# regular file without following any symlink, printing the byte count.
+# Opens the cache root, then walks each path component relative to directory
+# FDs with O_NOFOLLOW, requires a regular-file fstat, creates the destination
+# with O_NOFOLLOW|O_EXCL at mode 0600, and reads at most max-bytes+1 so growth
+# after sizing still trips too-large. Exits 10 on a non-file or symlink, 11
+# past the byte cap, and 1 on any other failure.
+fm_ext_attachment_copy_nofollow() {
+  FM_EXT_ATTACHMENT_ROOT=$1 FM_EXT_ATTACHMENT_REL=$2 FM_EXT_ATTACHMENT_DEST=$3 FM_EXT_ATTACHMENT_MAX=$4 python3 -c \
+    'import os,stat,sys
+root=os.environ["FM_EXT_ATTACHMENT_ROOT"]; rel=os.environ["FM_EXT_ATTACHMENT_REL"]
+dest=os.environ["FM_EXT_ATTACHMENT_DEST"]
+limit=int(os.environ.get("FM_EXT_ATTACHMENT_MAX") or 0)
+parts=[p for p in rel.split("/") if p not in ("", ".", "..")]
+if not parts:
+  sys.exit(1)
+rfd=os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+  dfd=rfd
+  closer=[]
+  try:
+    for part in parts[:-1]:
+      nfd=os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+      closer.append(dfd if dfd != rfd else None)
+      if dfd != rfd:
+        os.close(dfd)
+      dfd=nfd
+    fd=os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+  finally:
+    if dfd != rfd:
+      os.close(dfd)
+    for c in closer:
+      if c is not None:
+        try:
+          os.close(c)
+        except OSError:
+          pass
+  try:
+    st=os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+      sys.exit(10)
+    try:
+      out=os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+      sys.exit(1)
+    try:
+      got=0
+      while True:
+        chunk=os.read(fd, 65536)
+        if not chunk:
+          break
+        got+=len(chunk)
+        if got > limit:
+          sys.exit(11)
+        os.write(out, chunk)
+    finally:
+      os.close(out)
+    sys.stdout.write(str(got))
+  finally:
+    os.close(fd)
+finally:
+  os.close(rfd)
+' 2>/dev/null
+}
+
+# fm_ext_attachment_cache_match <path> <roots-file>: print "<root> <rel>"
+# when the path sits under one of the cache roots, else return 1.
+# The match is lexical on the unresolved path, so a swapped parent cannot
+# race it: the no-follow copy below re-verifies every component at open time
+# and refuses symlinks there. Remote-looking values fail closed.
+fm_ext_attachment_cache_match() {
+  local path=$1 roots=$2 root
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ -n "$roots" ] && [ -f "$roots" ] || return 1
+  while IFS= read -r root || [ -n "$root" ]; do
+    [ -n "$root" ] || continue
+    case "$path" in
+      "$root"/*)
+        rel=${path#"$root"/}
+        case "$rel" in
+          ''|*//*|*/|/*) continue ;;
+        esac
+        printf '%s %s\n' "$root" "$rel"
+        return 0
+        ;;
+    esac
+  done <"$roots"
+  return 1
 }
 
 # fm_ext_context_prune <state>: drop destination-context and offer records past

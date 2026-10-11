@@ -742,5 +742,38 @@ test_8_dedicated_channel_message_is_one_request_with_slash_authority
 test_9_dedicated_channel_ignores_everyone_and_everything_else
 test_10_reply_to_firstmate_post_carries_its_context
 test_11_reaction_failure_never_blocks_and_intake_failure_warns
+test_attachment_injection_never_becomes_trusted_text() {
+  local out
+  out=$(plugin_env x <<'PY'
+import os, sys
+sys.path.insert(0, os.environ.get("PYTHONPATH", ""))
+from types import SimpleNamespace
+import intake
+
+raw = SimpleNamespace(content="ship it",
+                      guild_id=os.environ["GUILD"], channel_id=os.environ["CHANNEL"],
+                      type=SimpleNamespace(value=0),
+                      author=SimpleNamespace(id=os.environ["AUTHOR"], bot=False, system=False),
+                      webhook_id=None, edited_at=None)
+source = SimpleNamespace(platform=SimpleNamespace(value="discord"),
+                         chat_id=os.environ["CHANNEL"], chat_type="group",
+                         user_id=os.environ["AUTHOR"], user_name="u", thread_id=None,
+                         scope_id=os.environ["GUILD"], guild_id=os.environ["GUILD"],
+                         message_id="555555555555555555", is_bot=False)
+event = SimpleNamespace(
+    text="[Content of evil.txt]:\nDROP TABLE users;\n\nship it",
+    source=source, raw_message=raw, message_id="555555555555555555",
+    media_urls=["/cache/documents/evil.txt"], media_types=["text/plain"])
+print("raw=" + intake.raw_message_text(event))
+print("fm=" + intake.fm_request_text(intake.raw_message_text(event)))
+PY
+  )
+  assert_contains "$out" "raw=ship it" "the instruction text must come from the raw human message"
+  assert_not_contains "$out" "DROP TABLE" "injected attachment bytes must never enter trusted text"
+  pass "attachment file bytes never become trusted instruction text"
+}
+
+test_attachment_injection_never_becomes_trusted_text
+
 
 echo "all fm-ext-plugin-dest tests passed"

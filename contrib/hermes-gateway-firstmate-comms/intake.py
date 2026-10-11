@@ -8,6 +8,7 @@ to one of Firstmate's own posted messages anywhere the gateway listens.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -284,6 +285,57 @@ def react_in_background(dest: dict[str, str], reaction: str) -> threading.Thread
         return None
 
 
+_INJECT_MARK = "[Content of "
+
+def raw_message_text(event: object) -> str:
+    """The human-typed Discord message behind an event, without enrichment.
+    The gateway prepends small text-attachment contents ("[Content of ...]")
+    to event.text, so attachment bytes must never be read from there: they
+    would enter the request as trusted instruction text. Prefer the raw
+    message content behind event.raw_message, and strip any injected section
+    that still made it through. The raw message is read-only here; the live
+    adapter is never touched.
+    """
+    raw = getattr(event, "raw_message", None)
+    for attr in ("content", "text"):
+        try:
+            value = getattr(raw, attr, None)
+        except Exception:
+            value = None
+        if isinstance(value, str) and value.strip():
+            text = value
+            break
+    else:
+        text = getattr(event, "text", None) or ""
+        if not isinstance(text, str):
+            text = str(text)
+    lines = text.splitlines()
+    cut = None
+    for i, line in enumerate(lines):
+        if line.startswith(_INJECT_MARK):
+            cut = i
+            break
+    if cut is not None:
+        text = "\n".join(lines[cut + 1 :]) if cut + 1 < len(lines) else ""
+        text = text.lstrip("\n")
+        while text.startswith("\n"):
+            text = text[1:]
+    return text
+
+
+def event_attachments(event: object) -> tuple[list[str], list[str]]:
+    """(media_urls, media_types) carried by one gateway MessageEvent."""
+    try:
+        urls = list(getattr(event, "media_urls", None) or [])
+    except Exception:
+        urls = []
+    try:
+        types = list(getattr(event, "media_types", None) or [])
+    except Exception:
+        types = []
+    return [str(u) for u in urls], [str(m) for m in types]
+
+
 def route_message_event(event: object) -> dict | None:
     """Turn an ordinary Discord message into a Firstmate request when it is
     one: any message in the dedicated channel (or a thread under it), or a
@@ -313,9 +365,13 @@ def route_message_event(event: object) -> dict | None:
     reply_to = None
     if post is not None:
         reply_to = {"message_id": reply_id, "request_id": post["request_id"], "text": reply_text}
-    text = fm_request_text(getattr(event, "text", None) or "")
+    text = fm_request_text(raw_message_text(event))
+    media_urls, media_types = event_attachments(event)
     try:
-        code = _run_intake(home, dest, text, origin="message", reply_to=reply_to)
+        code = _run_intake(
+            home, dest, text, origin="message", reply_to=reply_to,
+            media_urls=media_urls, media_types=media_types,
+        )
     except Exception:
         code = -1
     if code == 0:
@@ -440,12 +496,37 @@ def _write_temp(text: str) -> str:
         return handle.name
 
 
+def attachment_manifest_entries(
+    media_urls: list[str] | None, media_types: list[str] | None,
+) -> list[dict[str, str]]:
+    """Manifest entries for locally cached adapter attachments.
+    Only local paths are listed; a CDN-URL fallback entry keeps its URL so
+    the shell records it as uncached, and it is never fetched here.
+    """
+    urls = list(media_urls or [])
+    types = list(media_types or [])
+    entries: list[dict[str, str]] = []
+    for i, url in enumerate(urls):
+        media = types[i] if i < len(types) else ""
+        name = str(url).rsplit("/", 1)[-1] or "attachment-%d" % (i + 1)
+        entries.append({"path": str(url), "media_type": str(media), "name": name})
+    return entries
+
+
+def _write_manifest(entries: list[dict[str, str]]) -> str:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as handle:
+        json.dump(entries, handle)
+        return handle.name
+
+
 def _run_intake(
     home: Path,
     dest: dict[str, str],
     text: str,
     origin: str = "slash",
     reply_to: dict[str, str] | None = None,
+    media_urls: list[str] | None = None,
+    media_types: list[str] | None = None,
 ) -> int:
     intake = firstmate_root() / "bin" / "fm-ext-intake.sh"
     secret = secret_path(home)
@@ -484,6 +565,11 @@ def _run_intake(
             args += ["--reply-to-message-id", reply_to["message_id"], "--reply-to-text-file", temp_paths[1]]
             if reply_to.get("request_id"):
                 args += ["--reply-to-request-id", reply_to["request_id"]]
+        entries = attachment_manifest_entries(media_urls, media_types)
+        if entries:
+            manifest = _write_manifest(entries)
+            temp_paths.append(manifest)
+            args += ["--attachment-manifest", manifest]
         result = subprocess.run(args, check=False, env=env, capture_output=True, text=True)
         return result.returncode
     finally:

@@ -45,6 +45,10 @@ Outside the dedicated channel, keep the reply's mention on (Discord's default), 
 A message request uses the [delivery reactions](../../docs/configuration.md#delivery-reactions) instead of a text acknowledgement.
 
 Anywhere else, send `/fm` from Discord's command pop-up: type `/fm`, pick this bot's `/fm` entry when the pop-up shows it, put the request in its box, and send.
+Files attached to a message request are copied into the Firstmate home's private `state/ext-attachments/<slug>/` folder and listed in the request record.
+Only files the gateway already cached locally are copied, bounded by `FM_EXT_ATTACHMENT_MAX_BYTES` (default 33554432) and `FM_EXT_ATTACHMENT_MAX_COUNT` (default 10).
+Anything else is listed as skipped and never fetched.
+Attachment bytes are untrusted input and are never executed.
 Outside the dedicated channel, typing `/fm hello` and pressing Enter before the pop-up appears sends ordinary chat text instead of the command, and the gateway ignores ordinary text that does not @mention the bot.
 A slash command is a Discord interaction rather than a message, so it cannot take reactions; `/fm` answers with the short text "Aye, captain - Firstmate has it." instead.
 For thread authorization, reply routing, and the exact rules for the channel, replies, and reactions, see the [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).
@@ -72,6 +76,8 @@ The same hook turns a dedicated-channel message or a reply to a Firstmate post i
 It recognises Firstmate's posts by the Discord ids the outbox poster recorded, not by the bot's author id, because the general agent posts as the same bot.
 Message and reply cases are covered by [the destination regression test](../../tests/fm-ext-plugin-dest.test.sh).
 It writes Discord text to a temp file and execs `bin/fm-ext-intake.sh --text-file`.
+For a message carrying attachments it passes the adapter's cached paths as `--attachment-manifest`.
+It reads the instruction text from the raw human message rather than the enriched event text, so attachment file bytes never enter the trusted request text.
 It never calls `dispatch_tool("terminal", ...)`.
 The slash handler returns a fast ack without waiting for Firstmate to finish the work.
 When the destination cannot be resolved the handler answers that the Discord destination is incomplete and names the running Hermes version (`unknown` if the version cannot be imported), never a silent drop.
