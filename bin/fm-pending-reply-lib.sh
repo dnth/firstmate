@@ -528,8 +528,8 @@ fm_pending_reply_close_decision() {  # <status-file> <corr_id> <task-id> <reques
   legacy_delivery_unknown="pending-reply-delivery-unknown: task=$task_id pending-reply-id=$corr request=$summary"
   legacy_recovery_failed="pending-reply-recovery-delivery-failed: task=$task_id pending-reply-id=$corr request=$summary"
   legacy_recovery_unknown="pending-reply-recovery-delivery-unknown: task=$task_id pending-reply-id=$corr request=$summary"
-  # Fold only what can move this record's decisions, so the cost tracks the
-  # record rather than the whole status history. A stated key always appears as
+  # Select candidates from the whole log, then fold only what can move this
+  # record's decisions. A stated key always appears as
   # its literal [key=<key>] token, so the keyed decision folds from those lines
   # alone. The legacy blocker shares the keyless default decision with every
   # other keyless line, so it needs the whole-log fold - but only when a
@@ -627,10 +627,10 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
 }
 
 # Resolve every still-open record of one task, and return 0 only when none
-# remains unresolved. A record reaches `resolved` only through
-# fm_pending_reply_try_resolve, which closes its decisions in that same step,
-# so the sweep skips settled records instead of rescanning the status log for
-# each of them; its cost tracks the open records, not the task's history.
+# remains unresolved. Sweeps still read record fields but skip status scans and
+# decision cleanup for settled records. Any open decision for such a record
+# remains visible; an explicit fm_pending_reply_try_resolve call still closes
+# it. The watcher tick uses the same settled-record policy.
 fm_pending_reply_reconcile_task() {  # <state-dir> <task_id> [status-file-override]
   local state=$1 task_id=$2 status_override=${3-} dir rec rec_task corr phase unresolved=0
   dir=$(fm_pending_reply_dir "$state")
@@ -1167,8 +1167,8 @@ fm_pending_reply_tick() {  # <state-dir>
     case "${rec##*/}" in
       .*) continue ;;
     esac
-    # Settled records are the bulk of a long-lived home; skip them before any
-    # other work so the per-tick cost tracks the open records.
+    # Skip settled records after reading their phase; the reconciliation
+    # comment above owns the decision-cleanup policy.
     fm_pending_reply_read "$rec" phase phase
     [ "$phase" != resolved ] || continue
     fm_pending_reply_read "$rec" corr_id corr
