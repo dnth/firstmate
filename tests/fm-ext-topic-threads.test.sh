@@ -337,7 +337,7 @@ test_6_sensitive_tokens_never_name_threads() {
     out=$(deliver "$home")
     assert_contains "$out" "thread-create=$CHANNEL/$message/$(expected_topic "$message")" \
       "sensitive request tokens must not reach the creator"
-    home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$text" "$(expected_topic "$message")" <<'PY'
+    if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$text" "$(expected_topic "$message")" <<'PY'
 import io, json, os, sys
 from pathlib import Path
 from unittest.mock import patch
@@ -355,7 +355,8 @@ def respond(request, **kwargs):
 with patch.object(poster.urllib.request, "urlopen", respond):
     assert poster.discord_create_thread(payload, text)["thread_id"] == "777777777777777777"
 PY
-    [ "$?" = 0 ] || fail "poster and API must enforce fixed-label safety"
+then fail "poster and API must enforce fixed-label safety"
+fi
   done
   pass "6 sensitive tokens never name threads"
 }
@@ -368,7 +369,7 @@ test_7_resumed_chunks_keep_their_destination() {
   write_text "$home/ans.txt" "$(printf 'word %.0s' {1..600})"
   home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
     --text-file "$home/ans.txt" >/dev/null
-  home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
 import errno, json, os, sys, tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -420,7 +421,8 @@ assert not list(record.parent.glob("fm-ext-thread.*"))
 payload["origin"] = "slash"
 assert poster.ensure_topic_thread(payload, {"posted_count": 0}, home, create) == ""
 PY
-  [ "$?" = 0 ] || fail "partial replies stay put and thread records publish locally"
+then fail "partial replies stay put and thread records publish locally"
+fi
   pass "7 resumed chunks stay put and thread records publish locally"
 }
 
@@ -432,11 +434,13 @@ test_8_pending_skips_thread_records() {
   printf '{}\n' > "$home/state/ext-outbox/topic.thread.json"
   printf '#!/usr/bin/env bash\nprintf "called\\n" >> "%s"\nexit 1\n' "$home/jq-calls" > "$home/fakebin/jq"
   chmod +x "$home/fakebin/jq"
-  PATH="$home/fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  if PATH="$home/fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
     bash "$ROOT/bin/fm-ext-outbox.sh" pending > "$home/pending"
-  [ "$?" = 0 ] && [ ! -s "$home/pending" ] && [ ! -e "$home/jq-calls" ] \
+  then [ ! -s "$home/pending" ] && [ ! -e "$home/jq-calls" ] \
     || fail "thread markers must bypass payload validation entirely"
+  else fail "thread markers must bypass payload validation entirely"
+  fi
   pass "8 pending skips thread records without invoking jq"
 }
 
@@ -450,7 +454,7 @@ test_9_concurrent_generations_reuse_existing_thread() {
     home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation "$generation" \
       --text-file "$home/ans.txt" >/dev/null
   done
-  home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
 import io, json, os, sys, threading, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -498,7 +502,8 @@ with patch.object(poster.urllib.request, "urlopen", existing):
     with patch.object(poster, "save_request_thread", side_effect=OSError("unwritable")):
         assert poster.ensure_topic_thread(payload, {"posted_count": 0}, home) == payload["message_id"]
 PY
-  [ "$?" = 0 ] || fail "concurrent generations must share the source message thread"
+then fail "concurrent generations must share the source message thread"
+fi
   pass "9 concurrent generations reuse the existing thread"
 }
 
@@ -517,7 +522,7 @@ test_10_outside_channel_keeps_its_route() {
   assert_contains "$out" "posted-to=$CHANNEL Noted." "outside-channel replies stay in place"
   [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
     || fail "outside-channel replies must not create threads"
-  home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
 import json, sys
 from pathlib import Path
 from unittest.mock import patch
@@ -535,7 +540,8 @@ with patch.object(poster.urllib.request, "urlopen", forbidden):
     else:
         raise AssertionError("outside-channel API creation must be refused")
 PY
-  [ "$?" = 0 ] || fail "all outside-channel creation paths must be excluded"
+then fail "all outside-channel creation paths must be excluded"
+fi
   pass "10 outside-channel replies keep their route"
 }
 
