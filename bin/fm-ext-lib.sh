@@ -1341,22 +1341,10 @@ fm_ext_attachment_safe_name() {
 # gateway may hand us, one per line. The adapter caches downloads under
 # HERMES_HOME/cache/{images,audio,documents} (legacy
 # HERMES_HOME/{image_cache,audio_cache,document_cache} when populated), so a
-# manifest path outside those roots is never copied. Roots come from
-# FM_EXT_ATTACHMENT_CACHE_DIRS (colon-separated, tests) or HERMES_HOME, and
-# resolve physically so a symlinked root cannot escape the comparison.
+# manifest path outside those roots is never copied. HERMES_HOME resolves
+# physically so a symlinked root cannot escape the comparison.
 fm_ext_attachment_cache_roots() {
-  local roots=${FM_EXT_ATTACHMENT_CACHE_DIRS-} dir resolved
-  if [ -n "$roots" ]; then
-    while IFS= read -r dir; do
-      [ -n "$dir" ] || continue
-      resolved=$(cd -- "$dir" 2>/dev/null && pwd -P) || continue
-      printf '%s\n' "$resolved"
-    done <<EOF2
-$(printf '%s' "$roots" | tr ':' '\n')
-EOF2
-    return 0
-  fi
-  dir=${HERMES_HOME-}
+  local dir=${HERMES_HOME-} resolved
   [ -n "$dir" ] || return 0
   resolved=$(cd -- "$dir" 2>/dev/null && pwd -P) || return 0
   printf '%s\n' "$resolved/cache/images"

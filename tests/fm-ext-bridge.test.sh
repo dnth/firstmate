@@ -2494,7 +2494,7 @@ json.dump([
   {"path": ok, "media_type": "image/png", "name": "extra.png"},
 ], open(out, "w"))
 PY
-  slug=$(home_env "$home" env FM_EXT_ATTACHMENT_CACHE_DIRS="$home/cache/images" \
+  slug=$(home_env "$home" env HERMES_HOME="$home" \
     FM_EXT_ATTACHMENT_MAX_BYTES=8 FM_EXT_ATTACHMENT_MAX_COUNT=2 \
     "$INTAKE" \
     --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
@@ -2535,7 +2535,7 @@ PY
   # A non-allowlisted author copies nothing and records nothing.
   denied_msg=700000000000000001
   write_text "$home/text.txt" "denied with a file"
-  home_env "$home" env FM_EXT_ATTACHMENT_CACHE_DIRS="$home/cache/images" \
+  home_env "$home" env HERMES_HOME="$home" \
     "$INTAKE" \
     --request-id "discord:${GUILD}:${CHANNEL}:${THREAD}:${denied_msg}" \
     --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$THREAD" \
@@ -2584,7 +2584,7 @@ assert got == want, "text-only inbox differs from the original shape: " + got
 PY
   # An attachment-only message with empty text still becomes a request.
   : > "$home/text.txt"
-  slug=$(home_env "$home" env FM_EXT_ATTACHMENT_CACHE_DIRS="$home/cache/images" \
+  slug=$(home_env "$home" env HERMES_HOME="$home" \
     "$INTAKE" \
     --request-id "discord:${GUILD}:${CHANNEL}:${THREAD}:700000000000000003" \
     --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$THREAD" \

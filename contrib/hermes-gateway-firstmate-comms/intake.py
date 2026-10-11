@@ -286,31 +286,13 @@ def react_in_background(dest: dict[str, str], reaction: str) -> threading.Thread
 
 
 def raw_message_text(event: object) -> str:
-    """The human-typed Discord message behind an event, without enrichment.
-    The gateway prepends small text-attachment contents ("[Content of ...]")
-    to event.text, so attachment bytes must never be read from there: they
-    would enter the request as trusted instruction text. Prefer the raw
-    message content behind event.raw_message. The raw message is read-only
-    here; the live adapter is never touched.
-    """
+    """Prefer raw Discord content, otherwise preserve the event text unchanged."""
     raw = getattr(event, "raw_message", None)
-    for attr in ("content", "text"):
-        try:
-            value = getattr(raw, attr, None)
-        except Exception:
-            value = None
-        if isinstance(value, str):
-            text = value
-            break
-    else:
-        media_urls, _media_types = event_attachments(event)
-        if media_urls:
-            text = ""
-        else:
-            text = getattr(event, "text", None) or ""
-            if not isinstance(text, str):
-                text = str(text)
-    return text
+    try:
+        content = getattr(raw, "content", None)
+    except Exception:
+        content = None
+    return content if isinstance(content, str) else (getattr(event, "text", None) or "")
 
 
 def event_attachments(event: object) -> tuple[list[str], list[str]]:

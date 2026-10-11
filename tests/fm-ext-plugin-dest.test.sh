@@ -767,9 +767,11 @@ event = SimpleNamespace(
 print("raw=" + intake.raw_message_text(event))
 print("fm=" + intake.fm_request_text(intake.raw_message_text(event)))
 literal = "Review this example:\n[Content of example.txt]:\nhello\n\n"
-for raw in (SimpleNamespace(content=literal), SimpleNamespace(text=literal), None):
-    assert intake.raw_message_text(SimpleNamespace(raw_message=raw, text=literal)) == literal
-assert intake.raw_message_text(SimpleNamespace(text=event.text, media_urls=event.media_urls)) == ""
+for raw in (SimpleNamespace(content=literal), SimpleNamespace(text="ignored alias"), None):
+    for urls in ([], event.media_urls):
+        assert intake.raw_message_text(SimpleNamespace(raw_message=raw, text=literal, media_urls=urls)) == literal
+assert intake.raw_message_text(SimpleNamespace(text=event.text, media_urls=event.media_urls)) == event.text
+assert intake.raw_message_text(SimpleNamespace(raw_message=SimpleNamespace(content=""), text=literal)) == ""
 PY
   )
   assert_contains "$out" "raw=ship it" "the instruction text must come from the raw human message"
@@ -798,7 +800,7 @@ Path(home, "config", "ext-channel").write_text(C + "\n")
 cache = Path(os.environ["CACHE_IMG"])
 cache.mkdir(parents=True, exist_ok=True)
 (cache / "evil.txt").write_bytes(b"DROP TABLE users;")
-os.environ["FM_EXT_ATTACHMENT_CACHE_DIRS"] = str(cache)
+os.environ["HERMES_HOME"] = home
 raw = SimpleNamespace(content="",
                       guild_id=G, channel_id=C,
                       type=SimpleNamespace(value=0),
