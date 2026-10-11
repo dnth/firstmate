@@ -235,3 +235,9 @@ fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
 "$SCRIPT_DIR/fm-landing.sh" report "$ID" >/dev/null \
   || echo "warning: could not report PR custody for $ID to the main home" >&2
 printf 'armed: state/%s.check.sh\n' "$ID"
+# Keep the pinned waiting message current after a PR turns ready.
+# Best effort: a failed refresh never blocks the arm.
+if [ -x "$SCRIPT_DIR/fm-ext-waiting-pin.sh" ]; then
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-ext-waiting-pin.sh" refresh >/dev/null 2>&1 || true
+fi

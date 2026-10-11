@@ -2102,10 +2102,16 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+refresh_waiting_pin_after_board_mutation() {
+  [ -x "$SCRIPT_DIR/fm-ext-waiting-pin.sh" ] || return 0
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-ext-waiting-pin.sh" refresh >/dev/null 2>&1 || true
+  return 0
+}
+
 case "${1:-}" in
-  hold) shift; command_hold "$@" ;;
-  answer) shift; command_answer "$@" ;;
-  answers) shift; command_answers "$@" ;;
+  hold) shift; command_hold "$@"; rc=$?; refresh_waiting_pin_after_board_mutation; exit "$rc" ;;
+  answer) shift; command_answer "$@"; rc=$?; refresh_waiting_pin_after_board_mutation; exit "$rc" ;;
+  answers) shift; command_answers "$@"; rc=$?; refresh_waiting_pin_after_board_mutation; exit "$rc" ;;
   reconcile-requests) shift; command_reconcile_requests "$@" ;;
   bind) shift; command_bind "$@" ;;
   unbind) shift; command_unbind "$@" ;;
@@ -2114,7 +2120,7 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
   diverged) shift; command_diverged "$@" ;;
-  reconcile) shift; command_reconcile "$@" ;;
+  reconcile) shift; command_reconcile "$@"; rc=$?; refresh_waiting_pin_after_board_mutation; exit "$rc" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

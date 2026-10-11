@@ -3438,6 +3438,9 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+if [ -x "$FM_ROOT/bin/fm-ext-waiting-pin.sh" ]; then
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-ext-waiting-pin.sh" refresh >/dev/null 2>&1 || true
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

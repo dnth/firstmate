@@ -36,6 +36,7 @@ import os
 import re
 import subprocess
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -507,6 +508,149 @@ def firstmate_post_for(message_id: str, home: Path | None = None) -> dict | None
     return None
 
 
+WAITING_PIN_STATE = "ext-waiting-pin.json"
+WAITING_PIN_MISSING_PERMISSIONS = {403, 50013, 50001}
+
+
+def waiting_pin_state_path(home: Path) -> Path:
+    return state_dir(home) / WAITING_PIN_STATE
+
+
+def waiting_pin_http(action: str, path: str, token: str, body: dict | None = None) -> dict:
+    import urllib.request
+
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(
+        f"{DISCORD_API_BASE}{path}",
+        data=data,
+        method={"edit": "PATCH", "post": "POST", "pin": "PUT"}[action],
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read().decode("utf-8") or "{}"
+    except urllib.error.HTTPError as err:
+        raise DiscordSendError(classify_http_code(err.code), f"discord HTTP {err.code}", err.code) from err
+    except urllib.error.URLError as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    except (TimeoutError, OSError) as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as err:
+        raise DiscordSendError("ambiguous", "discord HTTP 200 with invalid JSON") from err
+
+
+def waiting_pin_load(home: Path) -> dict | None:
+    path = waiting_pin_state_path(home)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def waiting_pin_store(home: Path, record: dict) -> None:
+    path = waiting_pin_state_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=".ext-waiting-pin.", delete=False) as stream:
+        tmp = Path(stream.name)
+        stream.write(json.dumps(record))
+    try:
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def waiting_pin_deliver(payload: dict, home: Path) -> str:
+    target = subprocess.run([str(outbox_cli()), "pin-target"], env=_env_for(home), capture_output=True, text=True)
+    expected = f"{payload.get('guild_id', '')} {payload.get('channel_id', '')}"
+    if target.returncode != 0 or target.stdout.strip() != expected:
+        return "obsolete"
+    if any(key in payload for key in ("request_id", "slug", "generation")):
+        return "obsolete"
+    identity = {"slug": "0" * 64, "kind": "waiting-pin", "generation": 1}
+    claim = subprocess.run(
+        [str(outbox_cli()), "claim", "--slug", identity["slug"], "--kind", identity["kind"], "--generation", "1"],
+        env=dict(_env_for(home), FM_EXT_INFLIGHT_OWNER_PID=str(os.getpid())), capture_output=True, text=True,
+    )
+    if claim.returncode == 1:
+        return "mid-delivery"
+    if claim.returncode != 0:
+        raise DiscordSendError("transient", claim.stderr.strip() or "pin claim failed")
+    try:
+        target = subprocess.run([str(outbox_cli()), "pin-target"], env=_env_for(home), capture_output=True, text=True)
+        if target.returncode != 0 or target.stdout.strip() != expected:
+            return "obsolete"
+        return _waiting_pin_deliver_claimed(payload, home)
+    finally:
+        release_inflight(identity, home=home)
+
+
+def _waiting_pin_deliver_claimed(payload: dict, home: Path) -> str:
+    """Post once, pin once, then edit the pinned message in place."""
+    token = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("HERMES_DISCORD_TOKEN")
+    if not token:
+        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
+    channel = str(payload.get("channel_id") or "")
+    text = str(payload.get("text") or "")
+    if not channel or not text:
+        raise DiscordSendError("permanent", "waiting-pin payload missing channel or text")
+    stored = waiting_pin_load(home) or {}
+    snapshot_id = int(payload.get("snapshot_id") or int(payload.get("recorded_at") or 0) * 1_000_000_000)
+    stored_snapshot = int(stored.get("snapshot_id") or int(stored.get("refreshed_at") or 0) * 1_000_000_000)
+    if snapshot_id < stored_snapshot:
+        return "superseded"
+    guild = str(payload.get("guild_id") or "")
+    message_id = str(stored.get("message_id") or "")
+    if str(stored.get("channel_id") or "") != channel or str(stored.get("guild_id") or "") != guild:
+        message_id = ""
+    pinned = False
+    created_message = False
+    if message_id:
+        try:
+            edited = waiting_pin_http("edit", f"/channels/{channel}/messages/{message_id}", token, {"content": text})
+            pinned = edited.get("pinned") is True
+        except DiscordSendError as err:
+            if err.http_code != 404:
+                raise
+            message_id = ""
+    if not message_id:
+        created = waiting_pin_http("post", f"/channels/{channel}/messages", token, {"content": text})
+        message_id = str(created.get("id") or "")
+        if not message_id:
+            raise DiscordSendError("ambiguous", "discord post returned no message id")
+        pinned = created.get("pinned") is True
+        created_message = True
+    record = {
+        "message_id": message_id,
+        "guild_id": guild,
+        "channel_id": channel,
+        "pinned": pinned,
+        "content_hash": str(payload.get("content_hash") or ""),
+        "refreshed_at": int(payload.get("recorded_at") or 0),
+        "snapshot_id": snapshot_id,
+    }
+    waiting_pin_store(home, record)
+    if not pinned:
+        try:
+            waiting_pin_http("pin", f"/channels/{channel}/pins/{message_id}", token, {})
+        except DiscordSendError as err:
+            if err.http_code not in WAITING_PIN_MISSING_PERMISSIONS:
+                raise
+            record["pin_error"] = f"missing Manage Messages (discord HTTP {err.http_code})"
+        else:
+            record["pinned"] = True
+        waiting_pin_store(home, record)
+    if created_message:
+        return "posted-pinned" if record["pinned"] else "posted-unpinned"
+    return "edited"
+
+
 def deliver_one(
     path: Path,
     send: SendFn | None = None,
@@ -522,6 +666,11 @@ def deliver_one(
         # than an error that would abort the whole drain pass.
         return "retired"
     home = home or firstmate_home()
+    if isinstance(payload.get("kind"), str) and payload["kind"] == "waiting-pin":
+        result = waiting_pin_deliver(payload, home)
+        if result != "mid-delivery":
+            path.unlink(missing_ok=True)
+        return result
     status = begin_delivery(payload, home=home)
     if status == "recovery-exhausted":
         react_to_request(payload, REACT_FAILED, react)
@@ -612,7 +761,10 @@ def drain_outbox(
 ) -> list[str]:
     results = []
     for path in list_pending(home=home):
-        results.append(deliver_one(path, send=send, home=home, react=react))
+        try:
+            results.append(deliver_one(path, send=send, home=home, react=react))
+        except DiscordSendError:
+            results.append("failed")
     return results
 
 

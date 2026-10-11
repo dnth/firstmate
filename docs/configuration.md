@@ -817,7 +817,7 @@ Each chunk attempt refreshes the progress artifact before sending, so a poster s
 After `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts, `begin` records a terminal failed marker, exits 5, and appends `ext-delivery-failed <slug>` keyed `ext-delivery-failed:<slug>` for the watcher to ring.
 So an ordinary network timeout costs at most a repeated chunk and, at worst, a surfaced failure - never a silently truncated reply that no shipped command can clear.
 
-`pending` lists only generations that are still genuinely pending.
+For ordinary replies, `pending` lists only generations that are still genuinely pending.
 A payload whose generation has reached a receipt or a terminal failed marker is retired on sight, so poll cost stays flat as delivered replies accumulate instead of growing with every reply ever sent.
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
@@ -826,8 +826,22 @@ Each poll drops `state/ext-context/` destination and offer records past that win
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
-`bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id` as `ext_request=` / `ext_request_slug=` / `ext_request_ts=` / `ext_followups=`, never `x_request=`.
+`bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id`; its header owns the recorded metadata fields.
 
+The optional pinned "Waiting on you" message lists actionable captain-held items and recorded PR URLs in one explicitly configured channel.
+`config/ext-waiting-pin` must be a regular non-symlink file whose first line is `<guild>:<channel>`, with numeric Discord IDs; there is no default channel, and the active bridge is also required.
+Captain calls must have an open board row, a nonempty captain-hold reason, no blocker, and no future hold date.
+PR URLs come from task metadata for open board rows, or retained landing records awaiting the captain's merge word; refresh does not query the forge for readiness.
+The message includes an updated time in UTC, abbreviates long titles, and omits overflow items to fit Discord's 2000-character limit.
+`bin/fm-ext-waiting-pin.sh` owns refresh and preview command syntax in its header and help.
+Refresh queues a dedicated waiting-pin snapshot in the local outbox; the gateway edits the recorded message, recreates a deleted message, or restores a removed pin when it delivers that snapshot.
+Publication serializes board capture through snapshot creation, and competing posters serialize the complete message read/send/store transaction with the existing exclusive send claims.
+Before sending, delivery rechecks bridge activation and the pin target, retiring obsolete or superseded snapshots it encounters.
+Best-effort refresh runs through todo projection, captain hold/answer/reconciliation, PR registration, and successful teardown.
+Matching pending content is skipped; other publication is rate-limited, including reconciliation of unchanged delivered content.
+A changed snapshot suppressed by the interval is not queued for later: another refresh is needed, and deletion or unpinning is detected only during delivery.
+When the bot lacks Manage Messages, the message stays as a single edited post and the shortfall is recorded in `state/ext-waiting-pin.json`.
+The [waiting-pin regression test](../tests/fm-ext-waiting-pin.test.sh) covers publication, destination checks, competing callers, edit/recreation, and permission fallback.
 For Hermes 0.20.0 and newer, install the gateway plugin into a dedicated gateway profile, never the crewmate TUI profile; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md) owns profile installation, compatibility verification, and destination resolution.
 Crewmate Hermes still launches as `hermes chat --tui`.
 The `ext-respond` skill owns drain, classification, lifecycle action, and local emit.
@@ -1010,6 +1024,7 @@ FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds without a claim or progress hea
 FM_EXT_MIDDELIVERY_RECOVERY_MAX=3   # reopen attempts before a stuck generation is failed terminally and surfaced as ext-delivery-failed
 FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records and retired ext-outbox markers (7 days); larger values clamp back to it
 FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes
+FM_EXT_WAITING_PIN_MIN_SECS=60   # minimum seconds between waiting-pin snapshot publications; see bin/fm-ext-waiting-pin.sh --help for bypass and skip behavior
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
