@@ -210,6 +210,7 @@ cmd_refresh() {
   command -v jq >/dev/null 2>&1 || defer "jq is required"
   outbox=$(fm_ext_outbox_dir "$FM_HOME")
   publication_slug=$(printf '%064d' 1)
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   FM_EXT_INFLIGHT_OWNER_PID=$$ fm_run_timed 30 bash -c '
     . "$1/fm-ext-lib.sh"
     while :; do
@@ -220,6 +221,7 @@ cmd_refresh() {
     done
   ' _ "$SCRIPT_DIR" "$outbox" "$publication_slug" || defer "the publication claim could not be acquired"
   printf -v publication_release 'fm_ext_outbox_inflight_release %q %q waiting-pin 1 >/dev/null 2>&1' "$outbox" "$publication_slug"
+  # shellcheck disable=SC2064 # Capture shell-escaped locals before the function returns.
   trap "$publication_release" EXIT
   target=$(fm_ext_waiting_pin_target "$FM_HOME") || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
   read -r guild channel <<< "$target"

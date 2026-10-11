@@ -153,7 +153,8 @@ case "$cmd" in
         waiting-pin.*.json)
           fm_ext_private_artifact_file_valid "$OUTBOX" "$base" 600 || continue
           kind=$(jq -r '.kind // empty' "$file") || continue
-          [ "$kind" = waiting-pin ] && fm_ext_kind_valid "$kind" || continue
+          [ "$kind" = waiting-pin ] || continue
+          fm_ext_kind_valid "$kind" || continue
           printf '%s\n' "$file"
           continue
           ;;
@@ -179,7 +180,8 @@ case "$cmd" in
     ;;
   claim)
     fm_ext_slug_valid "$SLUG" || die "unsafe slug"
-    [ "$KIND" = waiting-pin ] && fm_ext_kind_valid "$KIND" || die "invalid pin kind"
+    [ "$KIND" = waiting-pin ] || die "invalid pin kind"
+    fm_ext_kind_valid "$KIND" || die "invalid pin kind"
     fm_ext_generation_valid "$GENERATION" || die "invalid generation"
     fm_ext_outbox_inflight_claim "$OUTBOX" "$SLUG" "$KIND" "$GENERATION"
     exit "$?"

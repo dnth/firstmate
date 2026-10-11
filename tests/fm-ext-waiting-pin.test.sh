@@ -264,7 +264,7 @@ test_8_snapshot_delivery_recovery() {
   home="$TMP_ROOT/c8"
   setup_home "$home"
   home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token \
-    "$PYTHON_BIN" - "$home" <<'PYTEST'
+    "$PYTHON_BIN" - "$home" <<'PYTEST' || fail "snapshot recovery checks must succeed"
 import io, json, sys, urllib.error
 from pathlib import Path
 import outbox_poster as poster
@@ -358,7 +358,6 @@ assert poster.waiting_pin_load(home)["channel_id"] == "555555555555555555"
 assert poster.drain_outbox(home=home) == ["superseded"]
 assert not bad.exists()
 PYTEST
-  [ "$?" = 0 ] || fail "snapshot recovery checks must succeed"
   pass "8 snapshots retire, stay ordered, and retry pinning without duplicate posts"
 }
 
@@ -377,7 +376,9 @@ test_9_large_board_and_private_publication() {
   home_env "$home" env FM_EXT_NOW_OVERRIDE=100 "$REFRESH" refresh --force >/dev/null
   [ "$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | wc -l | tr -d ' ')" = 2 ] || fail "same-second updates must remain distinct"
   payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | head -1)
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_private_artifact_file_valid "$2/state/ext-outbox" "${3##*/}" 600' _ "$ROOT" "$home" "$payload" || fail "pin publication must satisfy ordinary private artifact rules"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; ! fm_ext_reply_kind_valid waiting-pin' _ "$ROOT" || fail "ordinary replies must reject waiting-pin"
   pass "9 large boards fit Discord and snapshots use private publication"
 }
@@ -412,7 +413,7 @@ test_11_unchanged_reconciliation_and_pending_limits() {
   setup_home "$home"
   hold_call "$home" call1 "Choose the wording" waiting
   home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token TASKS_AXI_REAL="$TASKS_AXI_BIN" \
-    "$PYTHON_BIN" - "$home" "$REFRESH" <<'PYTEST'
+    "$PYTHON_BIN" - "$home" "$REFRESH" <<'PYTEST' || fail "normal unchanged refresh must reach reconciliation and limit publication"
 import io, json, os, subprocess, sys, urllib.error
 from pathlib import Path
 import outbox_poster as poster
@@ -479,7 +480,6 @@ assert len(poster.list_pending(home=home)) == 1
 assert publish(283, True) == "waiting-pin: refreshed"
 assert len(poster.list_pending(home=home)) == 2
 PYTEST
-  [ "$?" = 0 ] || fail "normal unchanged refresh must reach reconciliation and limit publication"
   pass "11 unchanged refresh repairs deletion, pins, and permissions without duplicate pending snapshots"
 }
 
@@ -519,7 +519,7 @@ test_13_pr_selection_uses_state_fields() {
   (cd "$home/data" && PATH="$BASE_PATH" tasks-axi update state-title --title "Fix state: done detection" >/dev/null) || fail "state-like title must be accepted"
   (cd "$home/data" && PATH="$BASE_PATH" tasks-axi update absence-title --title "Fix not found in this backlog detection" >/dev/null) || fail "absence-like title must be accepted"
   (cd "$home/data" && PATH="$BASE_PATH" tasks-axi start absence-title >/dev/null) || fail "in-flight fixture must start"
-  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi done completed >/dev/null) || fail "completed fixture must close"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi "done" completed >/dev/null) || fail "completed fixture must close"
   out=$(home_env "$home" "$REFRESH" content) || fail "state-like titles must not prevent rendering"
   assert_contains "$out" "https://github.com/o/r/pull/51" "queued PR eligibility must use the state field"
   assert_contains "$out" "https://github.com/o/r/pull/52" "in-flight PR eligibility must use lookup status"
@@ -564,7 +564,7 @@ test_14_existing_task_captain_holds() {
   assert_not_contains "$out" "Approve ship in_flight work" "future existing-task holds must remain deferred"
   today=$(date -u '+%Y-%m-%d')
   home_env "$home" "$ROOT/bin/fm-captain-hold.sh" hold ship-in_flight --reason "approval due" --until "$today" >/dev/null || fail "existing-task due date must be accepted"
-  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi done scout-queued >/dev/null) || fail "completed fixture must close"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi "done" scout-queued >/dev/null) || fail "completed fixture must close"
   (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold ship-queued --kind external --reason "external approval" >/dev/null) || fail "external hold fixture must be accepted"
   out=$(home_env "$home" "$REFRESH" content) || fail "due existing-task holds must render"
   assert_contains "$out" "Approve ship in_flight work" "due existing-task holds must resurface even when held becomes no"
@@ -585,8 +585,9 @@ test_15_pin_targets_and_reply_separation() {
   out=$(home_env "$home" "$ROOT/bin/fm-ext-emit.sh" --request-id "discord:$GUILD:$CHANNEL:$CHANNEL:999" --kind waiting-pin --generation 1 --text-file - <<< 'ordinary reply' 2>&1); rc=$?
   [ "$rc" = 2 ] || fail "ordinary emit must reject the pin kind"
   assert_contains "$out" "reply kind must be ack, answer, followup, or final" "emit must explain supported reply kinds"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_kind_valid waiting-pin && ! fm_ext_reply_kind_valid waiting-pin' _ "$ROOT" || fail "dedicated pin kinds and ordinary reply kinds must remain distinct"
-  home_env "$home" bash -s -- "$ROOT" "$home" <<'SH'
+  home_env "$home" bash -s -- "$ROOT" "$home" <<'SH' || fail "ordinary request/generation schemas must reject the pin kind"
 set -euo pipefail
 . "$1/bin/fm-ext-lib.sh"
 for kind in ack answer followup final waiting-pin; do
@@ -599,8 +600,7 @@ for kind in ack answer followup final waiting-pin; do
   fi
 done
 SH
-  [ "$?" = 0 ] || fail "ordinary request/generation schemas must reject the pin kind"
-  home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token "$PYTHON_BIN" - "$home" <<'PYTEST'
+  home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token "$PYTHON_BIN" - "$home" <<'PYTEST' || fail "disabled and obsolete target checks must succeed"
 import json, sys
 from pathlib import Path
 import outbox_poster as poster
@@ -630,7 +630,6 @@ path = snapshot(2)
 assert poster.deliver_one(path, home=home) == "obsolete" and not path.exists()
 assert not poster.waiting_pin_state_path(home).exists()
 PYTEST
-  [ "$?" = 0 ] || fail "disabled and obsolete target checks must succeed"
   pass "15 ordinary emit rejects pin kinds and obsolete snapshots retire without Discord calls"
 }
 
@@ -638,7 +637,7 @@ test_16_competing_pin_posters_share_one_claim() {
   local home
   home="$TMP_ROOT/c16"
   setup_home "$home"
-  home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token "$PYTHON_BIN" - "$home" <<'PYTEST'
+  home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token "$PYTHON_BIN" - "$home" <<'PYTEST' || fail "competing posters must serialize creation, recreation, and state updates"
 import json, multiprocessing as mp, sys
 from pathlib import Path
 import outbox_poster as poster
@@ -703,7 +702,6 @@ assert not stale.exists() and posts.value == 2
 assert not list(home.joinpath("state").glob(".ext-waiting-pin.*"))
 assert not list(box.glob("*.inflight"))
 PYTEST
-  [ "$?" = 0 ] || fail "competing posters must serialize creation, recreation, and state updates"
   pass "16 competing pin posters share the existing exclusive claim across snapshots"
 }
 
@@ -735,7 +733,7 @@ exec "$REAL_JQ" "$@"
 SH
   chmod 700 "$fake/tasks-axi" "$fake/jq"
   home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token REAL_TASKS_AXI="$TASKS_AXI_BIN" REAL_JQ="$(command -v jq)" RACE_HOME="$home" PATH="$fake:$BASE_PATH" \
-    "$PYTHON_BIN" - "$home" "$REFRESH" <<'PYTEST'
+    "$PYTHON_BIN" - "$home" "$REFRESH" <<'PYTEST' || fail "overlapping refreshes must preserve capture and publication order"
 import json, os, subprocess, sys, time
 from pathlib import Path
 import outbox_poster as poster
@@ -781,7 +779,6 @@ assert poster.drain_outbox(home=home) == ["posted-pinned", "edited"]
 assert "Nothing waiting - all clear." in contents[-1]
 assert not list(home.joinpath("state/ext-outbox").glob("*.inflight"))
 PYTEST
-  [ "$?" = 0 ] || fail "overlapping refreshes must preserve capture and publication order"
   pass "17 overlapping refreshes capture and publish in the same order"
 }
 
