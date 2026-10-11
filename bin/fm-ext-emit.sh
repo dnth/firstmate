@@ -65,7 +65,7 @@ done
 [ -n "$TEXT_FILE" ] || { usage; exit 2; }
 
 fm_ext_request_id_valid "$REQUEST_ID" || die "unsafe request_id: $REQUEST_ID"
-fm_ext_kind_valid "$KIND" || die "kind must be ack, answer, followup, or final"
+fm_ext_reply_kind_valid "$KIND" || die "reply kind must be ack, answer, followup, or final"
 fm_ext_generation_valid "$GENERATION" || die "generation must be a positive integer"
 fm_ext_active "$FM_HOME" || die "local ext-bridge is not active" 1
 command -v jq >/dev/null 2>&1 || die "jq is required" 1

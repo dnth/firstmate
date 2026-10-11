@@ -257,11 +257,33 @@ fm_ext_slug_valid() {
   [ "${#v}" -eq 64 ]
 }
 
-fm_ext_kind_valid() {
+fm_ext_reply_kind_valid() {
   case "$1" in
     ack|answer|followup|final) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+fm_ext_kind_valid() {
+  [ "$1" = waiting-pin ] || fm_ext_reply_kind_valid "$1"
+}
+
+fm_ext_waiting_pin_target() {
+  local cfg line guild channel rest
+  cfg="$(fm_ext_config_dir "${1:-$FM_HOME}")/ext-waiting-pin"
+  [ -f "$cfg" ] && [ ! -L "$cfg" ] || return 1
+  line=$(sed -n '1p' "$cfg" 2>/dev/null) || return 1
+  case "$line" in
+    *:*) guild=${line%%:*}; rest=${line#*:} ;;
+    *) return 1 ;;
+  esac
+  case "$rest" in
+    *:*|*/*|*' '*) return 1 ;;
+  esac
+  channel=$rest
+  case "$guild" in ''|*[!0-9]*) return 1 ;; esac
+  case "$channel" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s %s\n' "$guild" "$channel"
 }
 
 fm_ext_generation_valid() {

@@ -47,7 +47,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-axi-rows-lib.sh"
 
 WAITING_PIN_STATE_BASENAME='ext-waiting-pin.json'
-WAITING_PIN_CONFIG_BASENAME='ext-waiting-pin'
 
 usage() {
   awk '
@@ -69,32 +68,8 @@ defer() {
   exit 0
 }
 
-waiting_pin_config_path() {
-  printf '%s\n' "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/$WAITING_PIN_CONFIG_BASENAME"
-}
-
 waiting_pin_state_path() {
   printf '%s\n' "${FM_STATE_OVERRIDE:-$FM_HOME/state}/$WAITING_PIN_STATE_BASENAME"
-}
-
-# Print "<guild_id> <channel_id>" from config/ext-waiting-pin. The file holds
-# one `<guild>:<channel>` line; callers ignore extra lines after the first.
-waiting_pin_target() {
-  local cfg line guild channel rest
-  cfg=$(waiting_pin_config_path)
-  [ -f "$cfg" ] && [ ! -L "$cfg" ] || return 1
-  line=$(sed -n '1p' "$cfg" 2>/dev/null) || return 1
-  case "$line" in
-    *:*) guild=${line%%:*}; rest=${line#*:} ;;
-    *) return 1 ;;
-  esac
-  case "$rest" in
-    *:*|*/*|*' '*) return 1 ;;
-  esac
-  channel=$rest
-  case "$guild" in ''|*[!0-9]*) return 1 ;; esac
-  case "$channel" in ''|*[!0-9]*) return 1 ;; esac
-  printf '%s %s\n' "$guild" "$channel"
 }
 
 waiting_pin_min_secs() {
@@ -216,9 +191,9 @@ print(text)
 cmd_content() {
   local guild channel now
   fm_ext_active "$FM_HOME" >/dev/null 2>&1 || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
-  waiting_pin_target >/dev/null || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
-  guild=$(waiting_pin_target | cut -d' ' -f1)
-  channel=$(waiting_pin_target | cut -d' ' -f2)
+  fm_ext_waiting_pin_target "$FM_HOME" >/dev/null || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
+  guild=$(fm_ext_waiting_pin_target "$FM_HOME" | cut -d' ' -f1)
+  channel=$(fm_ext_waiting_pin_target "$FM_HOME" | cut -d' ' -f2)
   now=$(waiting_pin_now) || fail "could not read the current time"
   waiting_pin_render "$now"
 }
@@ -230,9 +205,9 @@ cmd_refresh() {
   local records reference outbox file pending same=0
   case "${1:-}" in ''|--force) [ "${1:-}" != "--force" ] || force=1 ;; *) fail "invalid arguments '$*'" ;; esac
   fm_ext_active "$FM_HOME" >/dev/null 2>&1 || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
-  waiting_pin_target >/dev/null || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
-  guild=$(waiting_pin_target | cut -d' ' -f1)
-  channel=$(waiting_pin_target | cut -d' ' -f2)
+  fm_ext_waiting_pin_target "$FM_HOME" >/dev/null || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
+  guild=$(fm_ext_waiting_pin_target "$FM_HOME" | cut -d' ' -f1)
+  channel=$(fm_ext_waiting_pin_target "$FM_HOME" | cut -d' ' -f2)
   now=$(waiting_pin_now) || defer "the current time could not be read"
   command -v jq >/dev/null 2>&1 || defer "jq is required"
   body=$(waiting_pin_body) || defer "the board could not be read"

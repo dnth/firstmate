@@ -3,6 +3,8 @@
 #
 # Usage:
 #   fm-ext-outbox.sh pending
+#   fm-ext-outbox.sh pin-target
+#   fm-ext-outbox.sh claim --slug <slug> --kind waiting-pin --generation <n>
 #   fm-ext-outbox.sh begin --slug <slug> --kind <kind> --generation <n>
 #   fm-ext-outbox.sh receipt --slug <slug> --kind <kind> --generation <n>
 #     --receipt-file <path>
@@ -65,6 +67,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 usage() {
   cat >&2 <<'EOF'
 usage: fm-ext-outbox.sh pending
+       fm-ext-outbox.sh pin-target
+       fm-ext-outbox.sh claim --slug <slug> --kind waiting-pin --generation <n>
        fm-ext-outbox.sh begin --slug <slug> --kind <kind> --generation <n>
        fm-ext-outbox.sh receipt --slug <slug> --kind <kind> --generation <n> --receipt-file <path>
        fm-ext-outbox.sh abort --slug <slug> --kind <kind> --generation <n>
@@ -128,11 +132,9 @@ esac
 
 OUTBOX=$(fm_ext_outbox_dir)
 
-# Every subcommand below writes or reads state/ext-outbox, so all of them are
-# gated on the same activation the intake, emit, and poll paths use. Only
-# `split` runs ungated, because it is a pure text function over stdin.
 case "$cmd" in
   pending) ;;
+  release) [ "$KIND" = waiting-pin ] || { fm_ext_active "$FM_HOME" || die "local ext-bridge is not active" 1; } ;;
   *) fm_ext_active "$FM_HOME" || die "local ext-bridge is not active" 1 ;;
 esac
 
@@ -148,7 +150,13 @@ case "$cmd" in
       base=${file##*/}
       case "$base" in
         *.receipt.json|*.failed.json|*.progress.json) continue ;;
-        waiting-pin.*.json) fm_ext_private_artifact_file_valid "$OUTBOX" "$base" 600 || continue; printf '%s\n' "$file"; continue ;;
+        waiting-pin.*.json)
+          fm_ext_private_artifact_file_valid "$OUTBOX" "$base" 600 || continue
+          kind=$(jq -r '.kind // empty' "$file") || continue
+          [ "$kind" = waiting-pin ] && fm_ext_kind_valid "$kind" || continue
+          printf '%s\n' "$file"
+          continue
+          ;;
       esac
       fm_ext_outbox_schema_valid "$file" || continue
       slug=$(jq -r '.slug' "$file")
@@ -165,6 +173,16 @@ case "$cmd" in
       fi
       printf '%s\n' "$file"
     done
+    ;;
+  pin-target)
+    fm_ext_waiting_pin_target "$FM_HOME" || exit 3
+    ;;
+  claim)
+    fm_ext_slug_valid "$SLUG" || die "unsafe slug"
+    [ "$KIND" = waiting-pin ] && fm_ext_kind_valid "$KIND" || die "invalid pin kind"
+    fm_ext_generation_valid "$GENERATION" || die "invalid generation"
+    fm_ext_outbox_inflight_claim "$OUTBOX" "$SLUG" "$KIND" "$GENERATION"
+    exit "$?"
     ;;
   begin)
     fm_ext_slug_valid "$SLUG" || die "unsafe slug"

@@ -294,6 +294,7 @@ def edge(request, timeout):
     return Response(json.dumps({"id": "message", "pinned": pinned if method == "PATCH" else False}).encode())
 poster.urllib.request.urlopen = edge
 def payload(n, channel="222222222222222222"):
+    (home / "config/ext-waiting-pin").write_text(f"111111111111111111:{channel}\n")
     path = box / f"waiting-pin.{n}.json"
     path.write_text(json.dumps(dict(kind="waiting-pin", guild_id="111111111111111111",
         channel_id=channel, text=f"snapshot {n}", snapshot_id=n, recorded_at=0, content_hash=str(n))))
@@ -345,11 +346,11 @@ assert poster.deliver_one(next_path, home=home) == "edited"
 assert sum(method == "POST" for method, _ in calls) == posts
 original_edge = edge
 def broken_channel(request, timeout):
-    if "/channels/444444444444444444/" in request.full_url:
+    if request.get_method() == "POST" and json.loads(request.data)["content"] == "snapshot 8":
         raise urllib.error.HTTPError(request.full_url, 404, "missing channel", {}, None)
     return original_edge(request, timeout)
 poster.urllib.request.urlopen = broken_channel
-bad = payload(8, "444444444444444444")
+bad = payload(8, "555555555555555555")
 good = payload(9, "555555555555555555")
 assert poster.drain_outbox(home=home) == ["failed", "posted-pinned"]
 assert bad.exists() and not good.exists()
@@ -377,7 +378,7 @@ test_9_large_board_and_private_publication() {
   [ "$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | wc -l | tr -d ' ')" = 2 ] || fail "same-second updates must remain distinct"
   payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | head -1)
   home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_private_artifact_file_valid "$2/state/ext-outbox" "${3##*/}" 600' _ "$ROOT" "$home" "$payload" || fail "pin publication must satisfy ordinary private artifact rules"
-  home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; ! fm_ext_kind_valid waiting-pin' _ "$ROOT" || fail "ordinary replies must reject waiting-pin"
+  home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; ! fm_ext_reply_kind_valid waiting-pin' _ "$ROOT" || fail "ordinary replies must reject waiting-pin"
   pass "9 large boards fit Discord and snapshots use private publication"
 }
 
@@ -577,6 +578,135 @@ test_14_existing_task_captain_holds() {
   pass "14 existing ship and scout captain holds respect state and date gates"
 }
 
+test_15_pin_targets_and_reply_separation() {
+  local home out rc
+  home="$TMP_ROOT/c15"
+  setup_home "$home"
+  out=$(home_env "$home" "$ROOT/bin/fm-ext-emit.sh" --request-id "discord:$GUILD:$CHANNEL:$CHANNEL:999" --kind waiting-pin --generation 1 --text-file - <<< 'ordinary reply' 2>&1); rc=$?
+  [ "$rc" = 2 ] || fail "ordinary emit must reject the pin kind"
+  assert_contains "$out" "reply kind must be ack, answer, followup, or final" "emit must explain supported reply kinds"
+  home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_kind_valid waiting-pin && ! fm_ext_reply_kind_valid waiting-pin' _ "$ROOT" || fail "dedicated pin kinds and ordinary reply kinds must remain distinct"
+  home_env "$home" bash -s -- "$ROOT" "$home" <<'SH'
+set -euo pipefail
+. "$1/bin/fm-ext-lib.sh"
+for kind in ack answer followup final waiting-pin; do
+  jq -cn --argjson schema "$FM_EXT_SCHEMA_VERSION" --arg kind "$kind" \
+    '{schema_version:$schema,request_id:"discord:test",slug:("a" * 64),kind:$kind,generation:1,platform:"discord",source:"hermes-gateway",guild_id:"111",channel_id:"222",thread_id:"222",message_id:"333",text:"reply"}' > "$2/reply-schema.json"
+  if [ "$kind" = waiting-pin ]; then
+    ! fm_ext_outbox_schema_valid "$2/reply-schema.json"
+  else
+    fm_ext_outbox_schema_valid "$2/reply-schema.json"
+  fi
+done
+SH
+  [ "$?" = 0 ] || fail "ordinary request/generation schemas must reject the pin kind"
+  home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token "$PYTHON_BIN" - "$home" <<'PYTEST'
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+home = Path(sys.argv[1])
+config = home / "config/ext-waiting-pin"
+box = home / "state/ext-outbox"
+box.mkdir(mode=0o700)
+def no_network(*args, **kwargs):
+    raise AssertionError("obsolete snapshots must never contact Discord")
+poster.waiting_pin_http = no_network
+def snapshot(n):
+    path = box / f"waiting-pin.{n}.json"
+    path.write_text(json.dumps(dict(kind="waiting-pin", guild_id="111111111111111111", channel_id="222222222222222222", text="private board", snapshot_id=n)))
+    path.chmod(0o600)
+    return path
+for target in (None, "111111111111111111:333333333333333333", "999999999999999999:222222222222222222", "invalid"):
+    if target is None:
+        config.unlink(missing_ok=True)
+    else:
+        config.write_text(target + "\n")
+    path = snapshot(1)
+    assert poster.deliver_one(path, home=home) == "obsolete"
+    assert not path.exists()
+config.write_text("111111111111111111:222222222222222222\n")
+(home / "config/ext-bridge").unlink()
+path = snapshot(2)
+assert poster.deliver_one(path, home=home) == "obsolete" and not path.exists()
+assert not poster.waiting_pin_state_path(home).exists()
+PYTEST
+  [ "$?" = 0 ] || fail "disabled and obsolete target checks must succeed"
+  pass "15 ordinary emit rejects pin kinds and obsolete snapshots retire without Discord calls"
+}
+
+test_16_competing_pin_posters_share_one_claim() {
+  local home
+  home="$TMP_ROOT/c16"
+  setup_home "$home"
+  home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token "$PYTHON_BIN" - "$home" <<'PYTEST'
+import json, multiprocessing as mp, sys
+from pathlib import Path
+import outbox_poster as poster
+home = Path(sys.argv[1])
+box = home / "state/ext-outbox"
+box.mkdir(mode=0o700)
+ctx = mp.get_context("fork")
+posts = ctx.Value("i", 0)
+entered, finish = ctx.Event(), ctx.Event()
+results = ctx.Queue()
+recreate = False
+def edge(action, path, token, body):
+    if action == "edit" and recreate:
+        raise poster.DiscordSendError("permanent", "deleted", 404)
+    if action == "post":
+        with posts.get_lock():
+            posts.value += 1
+            message = str(posts.value)
+        entered.set()
+        assert finish.wait(20), "first poster was never released"
+        return {"id": message}
+    return {"pinned": True}
+poster.waiting_pin_http = edge
+def payload(n):
+    path = box / f"waiting-pin.{n}.json"
+    path.write_text(json.dumps(dict(kind="waiting-pin", guild_id="111111111111111111", channel_id="222222222222222222", text=f"board {n}", snapshot_id=n, recorded_at=n)))
+    path.chmod(0o600)
+    return path
+def worker(path):
+    try:
+        results.put(poster.deliver_one(path, home=home))
+    except Exception as error:
+        results.put(repr(error))
+def overlap(first_path, second_path):
+    entered.clear(); finish.clear()
+    first = ctx.Process(target=worker, args=(first_path,))
+    first.start()
+    assert entered.wait(20), "first poster must reach creation"
+    second = ctx.Process(target=worker, args=(second_path,))
+    second.start()
+    assert results.get(timeout=20) == "mid-delivery"
+    second.join(20)
+    assert second.exitcode == 0 and first_path.exists() and second_path.exists()
+    finish.set()
+    assert results.get(timeout=20) == "posted-pinned"
+    first.join(20)
+    assert first.exitcode == 0
+path = payload(1)
+overlap(path, path)
+assert posts.value == 1 and not path.exists()
+assert poster.waiting_pin_load(home)["message_id"] == "1"
+recreate = True
+older, newer = payload(2), payload(3)
+overlap(older, newer)
+assert posts.value == 2 and not older.exists() and newer.exists()
+recreate = False
+assert poster.deliver_one(newer, home=home) == "edited"
+assert poster.waiting_pin_load(home)["snapshot_id"] == 3 and posts.value == 2
+stale = payload(1)
+assert poster.deliver_one(stale, home=home) == "superseded"
+assert not stale.exists() and posts.value == 2
+assert not list(home.joinpath("state").glob(".ext-waiting-pin.*"))
+assert not list(box.glob("*.inflight"))
+PYTEST
+  [ "$?" = 0 ] || fail "competing posters must serialize creation, recreation, and state updates"
+  pass "16 competing pin posters share the existing exclusive claim across snapshots"
+}
+
 test_1_content_lists_calls_and_prs_without_leaks
 test_2_refresh_creates_then_edits_in_place
 test_3_deleted_message_recreated_once
@@ -595,5 +725,8 @@ test_12_landing_and_dated_calls
 test_13_pr_selection_uses_state_fields
 
 test_14_existing_task_captain_holds
+
+test_15_pin_targets_and_reply_separation
+test_16_competing_pin_posters_share_one_claim
 
 echo "all fm-ext-waiting-pin tests passed"

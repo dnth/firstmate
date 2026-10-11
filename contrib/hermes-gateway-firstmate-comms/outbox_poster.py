@@ -36,6 +36,7 @@ import os
 import re
 import subprocess
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -556,14 +557,41 @@ def waiting_pin_load(home: Path) -> dict | None:
 def waiting_pin_store(home: Path, record: dict) -> None:
     path = waiting_pin_state_path(home)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as stream:
-        os.chmod(tmp, 0o600)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=".ext-waiting-pin.", delete=False) as stream:
+        tmp = Path(stream.name)
         stream.write(json.dumps(record))
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def waiting_pin_deliver(payload: dict, home: Path) -> str:
+    target = subprocess.run([str(outbox_cli()), "pin-target"], env=_env_for(home), capture_output=True, text=True)
+    expected = f"{payload.get('guild_id', '')} {payload.get('channel_id', '')}"
+    if target.returncode != 0 or target.stdout.strip() != expected:
+        return "obsolete"
+    if any(key in payload for key in ("request_id", "slug", "generation")):
+        return "obsolete"
+    identity = {"slug": "0" * 64, "kind": "waiting-pin", "generation": 1}
+    claim = subprocess.run(
+        [str(outbox_cli()), "claim", "--slug", identity["slug"], "--kind", identity["kind"], "--generation", "1"],
+        env=dict(_env_for(home), FM_EXT_INFLIGHT_OWNER_PID=str(os.getpid())), capture_output=True, text=True,
+    )
+    if claim.returncode == 1:
+        return "mid-delivery"
+    if claim.returncode != 0:
+        raise DiscordSendError("transient", claim.stderr.strip() or "pin claim failed")
+    try:
+        target = subprocess.run([str(outbox_cli()), "pin-target"], env=_env_for(home), capture_output=True, text=True)
+        if target.returncode != 0 or target.stdout.strip() != expected:
+            return "obsolete"
+        return _waiting_pin_deliver_claimed(payload, home)
+    finally:
+        release_inflight(identity, home=home)
+
+
+def _waiting_pin_deliver_claimed(payload: dict, home: Path) -> str:
     """Post once, pin once, then edit the pinned message in place."""
     token = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("HERMES_DISCORD_TOKEN")
     if not token:
@@ -640,7 +668,8 @@ def deliver_one(
     home = home or firstmate_home()
     if isinstance(payload.get("kind"), str) and payload["kind"] == "waiting-pin":
         result = waiting_pin_deliver(payload, home)
-        path.unlink(missing_ok=True)
+        if result != "mid-delivery":
+            path.unlink(missing_ok=True)
         return result
     status = begin_delivery(payload, home=home)
     if status == "recovery-exhausted":
