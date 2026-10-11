@@ -101,7 +101,15 @@ case "${1:-}" in
               marker=${a#touch }
               marker=${marker#\'}
               marker=${marker%\'}
-              : > "$marker"
+              if [ "${FM_FAKE_PROBE_SWALLOW_NESTED:-0}" = 1 ]; then
+                n=0
+                [ ! -f "${FM_FAKE_PROBE_COUNT_FILE:-/dev/null}" ] || n=$(cat "$FM_FAKE_PROBE_COUNT_FILE" 2>/dev/null || echo 0)
+                n=$((n + 1))
+                printf '%s\n' "$n" > "$FM_FAKE_PROBE_COUNT_FILE" 2>/dev/null || true
+                [ "$n" -ge 2 ] || : > "$marker"
+              else
+                : > "$marker"
+              fi
             fi
             ;;
         esac
@@ -286,7 +294,15 @@ case "$cmd $sub" in
           marker=${4#touch }
           marker=${marker#\'}
           marker=${marker%\'}
-          : > "$marker"
+            if [ "${FM_FAKE_PROBE_SWALLOW_NESTED:-0}" = 1 ]; then
+              n=0
+              [ ! -f "${FM_FAKE_PROBE_COUNT_FILE:-/dev/null}" ] || n=$(cat "$FM_FAKE_PROBE_COUNT_FILE" 2>/dev/null || echo 0)
+              n=$((n + 1))
+              printf '%s\n' "$n" > "$FM_FAKE_PROBE_COUNT_FILE" 2>/dev/null || true
+              [ "$n" -ge 2 ] || : > "$marker"
+            else
+              : > "$marker"
+            fi
         fi
         ;;
     esac
@@ -587,6 +603,8 @@ run_spawn() {
     FM_FAKE_PANE_BASH_ENV="${FM_TEST_PANE_BASH_ENV:-}" \
     FM_FAKE_RAW_EXECUTION_LOG="${FM_TEST_RAW_EXECUTION_LOG:-}" \
     FM_FAKE_PROBE_SWALLOW="${FM_TEST_PROBE_SWALLOW:-0}" \
+    FM_FAKE_PROBE_SWALLOW_NESTED="${FM_TEST_PROBE_SWALLOW_NESTED:-0}" \
+    FM_FAKE_PROBE_COUNT_FILE="${FM_TEST_PROBE_COUNT_FILE:-}" \
     FM_PANE_LAUNCH_PROBE_POLLS="${FM_TEST_PROBE_POLLS:-}" \
     FM_PANE_LAUNCH_PROBE_INTERVAL="${FM_TEST_PROBE_INTERVAL:-}" \
     FM_FAKE_PANE_TAIL="${FM_FAKE_PANE_TAIL:-}" \
@@ -2760,6 +2778,33 @@ test_doorbell_timeout_diagnoses_pane_tail_and_setup_hint_branches() {
   pass "doorbell timeout names the pane tail and gates the setup hint on confirmed OMP identity"
 }
 
+# Parent-ready but nested-rc-blocked: the early probe passes the parent
+# shell, treehouse-get starts a fresh nested shell whose rc blocks, and
+# the re-prove after the handoff refuses before GOTMPDIR or the launch.
+test_nested_shell_blocked_after_treehouse_handoff_refuses() {
+  local rec id out status countfile
+  id=$(profile_id profile-nested-blocked)
+  rec=$(make_spawn_case profile-nested-blocked claude "$id")
+  read_case_record "$rec"
+  countfile="$CASE_DIR/probe-count"
+  : > "$countfile"
+  export FM_TEST_PROBE_SWALLOW_NESTED=1
+  export FM_TEST_PROBE_COUNT_FILE="$countfile"
+  export FM_TEST_PROBE_POLLS=2
+  export FM_TEST_PROBE_INTERVAL=0.1
+  FM_FAKE_PANE_TAIL="nested FAKE-UPDATE [Y/n]" \
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  unset FM_TEST_PROBE_SWALLOW_NESTED FM_TEST_PROBE_COUNT_FILE FM_TEST_PROBE_POLLS FM_TEST_PROBE_INTERVAL
+  expect_code 1 "$status" "nested-rc-blocked spawn must refuse after the handoff"
+  assert_contains "$out" "not executing shell commands" "nested re-prove did not name the unproven shell"
+  assert_contains "$out" "nested FAKE-UPDATE" "nested re-prove did not carry the nested visible tail"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "claude --dangerously-skip-permissions" \
+    "spawn typed the agent launch into the blocked nested shell"
+  [ "$(cat "$countfile")" = 2 ] || fail "expected exactly two probes (parent pass, nested refuse), got $(cat "$countfile")"
+  pass "nested-shell re-prove refuses a blocked nested shell after parent success"
+}
+
 test_omp_whitespace_identity_paths_refuse_before_endpoint() {
   local mode rec id out status spaced path
   for mode in omp bun; do
@@ -3454,6 +3499,7 @@ test_omp_spawn_requires_doorbell_handshake
 test_launch_probe_refuses_blocked_pane_with_visible_tail
 test_typed_launch_line_is_short_private_script_invocation
 test_doorbell_timeout_diagnoses_pane_tail_and_setup_hint_branches
+test_nested_shell_blocked_after_treehouse_handoff_refuses
 test_omp_whitespace_identity_paths_refuse_before_endpoint
 test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata
 test_omp_launch_requires_observable_turn_start_acknowledgement

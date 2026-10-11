@@ -4198,6 +4198,15 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
         exit 1
         ;;
     esac
+    # The accepted endpoint is a bare shell (a live harness was refused
+    # above), but a bare shell can still sit behind an unread rc prompt
+    # that passes the process-shape idle proof while swallowing input.
+    # Prove execution before the first typed byte (the herdr cd below,
+    # or GOTMPDIR export and launch). Active-harness refusals stay first:
+    # a probe must never be injected into a running agent.
+    case "$BACKEND" in
+      tmux|herdr) spawn_probe_launch_execution "$T" "$W" ;;
+    esac
     relaunch_worktree_real=$(real_path_or_raw "$WT")
     if ! relaunch_endpoint_in_worktree "$T" "$relaunch_worktree_real"; then
       # A live endpoint that drifted out of the recorded worktree refuses, so a
