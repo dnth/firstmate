@@ -881,10 +881,10 @@ The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#dedicate
 
 ### Topic threads (one thread per request)
 
-A top-level request's first reply creates a Discord thread on its message, named only from an explicit safe topic vocabulary with an `fm ` prefix (`fm request` when the request holds no vocabulary word), and every later `ack`/`answer`/`followup`/`final` for that request posts into the same thread, including work linked to it after the inbox is gone.
-Only vocabulary membership admits a word into the name: secrets, ids, paths, hostnames, numbers, and unfamiliar words are dropped, never redacted, so request values cannot survive in the thread name.
+A top-level message request's first reply creates a Discord thread on its message, named only from an explicit safe topic vocabulary with an `fm ` prefix (`fm request` when the request holds no vocabulary word), and every later `ack`/`answer`/`followup`/`final` for that request posts into the same thread, including work linked to it after the inbox is gone.
+Only whole whitespace-delimited request words that exactly match the fixed vocabulary are admitted, with case normalized; tokens containing digits or punctuation are dropped without harvesting subwords, and names are checked by the same rule before publication to Discord.
 A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
-A `/fm` slash request keeps its current behaviour: its replies post to its originating thread, which is the channel itself for a top-level interaction.
+Slash commands are unchanged: `/fm` replies post to their originating thread (the channel itself for a top-level interaction) and never attempt thread creation.
 A thread-creation failure (missing permission, archived parent) falls back to posting in place and never blocks or loses the reply; a later generation retries the create.
 Thread names and posts never carry task ids, branch names, paths, hostnames, secrets, or captain-private material, and a thread never widens who the allowlist admits.
 The intake records the name in the durable destination context (`bin/fm-ext-topic.sh` owns the vocabulary); the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record so every generation shares the same thread.

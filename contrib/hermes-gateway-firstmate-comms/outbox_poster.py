@@ -41,6 +41,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import tempfile
 import time
@@ -57,7 +58,7 @@ except ImportError:  # loaded from sys.path in hermetic tests
 
 SendFn = Callable[[dict], dict]
 ReactFn = Callable[[str, str, str], None]
-ThreadFn = Callable[[dict], dict]
+ThreadFn = Callable[[dict, str], dict]
 
 _WATCHER_STARTED = False
 _WATCHER_LOCK = threading.Lock()
@@ -394,8 +395,6 @@ class _temp_json:
 
 
 def _mktemp() -> tuple[int, str]:
-    import tempfile
-
     return tempfile.mkstemp(prefix="fm-ext-receipt.")
 
 
@@ -437,7 +436,7 @@ def save_request_thread(payload: dict, thread_id: str, home: Path) -> None:
     A private state artifact beside the outbox, written with the same guards
     the shell publication helper enforces: a regular single-link file at mode
     0600, replaced atomically. Its basename is <slug>.thread.json, which the
-    pending scan skips because it fails payload schema validation, so poll
+    pending scan skips as a marker, so poll
     cost stays flat as threads accumulate.
     """
     path = request_progress_path(payload, home)
@@ -445,31 +444,15 @@ def save_request_thread(payload: dict, thread_id: str, home: Path) -> None:
         raise RuntimeError("thread record is a symlink")
     body = json.dumps({"request_id": payload.get("request_id"), "topic_thread_id": thread_id})
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, tmp = _mktemp()
+    fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(body)
         os.chmod(tmp, 0o600)
-        # Same-filesystem atomic replace: the temp file lives in the system
-        # temp dir, so link it into the outbox dir first and rename there.
-        # A cross-filesystem link raises and the caller falls back to posting
-        # this generation in place, never to a half-written record.
-        tmp_in_dir = str(path) + ".tmp.%d" % os.getpid()
-        try:
-            os.link(tmp, tmp_in_dir)
-        finally:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-        os.replace(tmp_in_dir, path)
+        os.replace(tmp, path)
     finally:
         try:
             os.unlink(tmp)
-        except OSError:
-            pass
-        try:
-            os.unlink(str(path) + ".tmp.%d" % os.getpid())
         except OSError:
             pass
     try:
@@ -481,6 +464,17 @@ def save_request_thread(payload: dict, thread_id: str, home: Path) -> None:
     os.chmod(path, 0o600)
 
 
+def public_topic_name(payload: dict, name: str) -> str:
+    result = subprocess.run(
+        [str(firstmate_root() / "bin" / "fm-ext-topic.sh"),
+         "--text-file", "-", "--origin", str(payload.get("origin") or "slash"),
+         "--thread-id", str(payload.get("thread_id") or ""),
+         "--channel-id", str(payload.get("channel_id") or "")],
+        input=name.removeprefix("fm "), capture_output=True, text=True, check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def thread_name_for(payload: dict, home: Path) -> str:
     """Public-safe thread name for this request, or "" when it needs none.
 
@@ -489,6 +483,8 @@ def thread_name_for(payload: dict, home: Path) -> str:
     name the first reply used. Anything unusable - no context, no recorded
     name, an already-threaded request - means no thread is created.
     """
+    if payload.get("origin") != "message":
+        return ""
     if str(payload.get("thread_id") or "") != str(payload.get("channel_id") or ""):
         return ""
     try:
@@ -499,7 +495,7 @@ def thread_name_for(payload: dict, home: Path) -> str:
     if not isinstance(context, dict):
         return ""
     name = context.get("topic") or ""
-    return str(name)[:100] if isinstance(name, str) else ""
+    return public_topic_name(payload, name) if isinstance(name, str) and name else ""
 
 
 def discord_create_thread(payload: dict, name: str) -> dict:
@@ -510,6 +506,9 @@ def discord_create_thread(payload: dict, name: str) -> dict:
     request, so reaching here with one set would post the thread in the wrong
     place; that caller error is permanent, never retried as a channel post.
     """
+    name = public_topic_name(payload, name)
+    if not name:
+        raise DiscordSendError("permanent", "request does not need a topic thread")
     token = _bot_token()
     if not token:
         raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
@@ -567,6 +566,10 @@ def ensure_topic_thread(
     failure never blocks or loses the reply. Records a created thread id in
     progress so later generations reuse it; the caller persists progress.
     """
+    if payload.get("origin") != "message":
+        return ""
+    if int(progress.get("posted_count") or 0) > 0:
+        return str(progress.get("topic_thread_id", load_request_thread(payload, home)) or "")
     recorded = load_request_thread(payload, home)
     if recorded:
         return recorded
@@ -901,6 +904,7 @@ def deliver_one(
         release_inflight(payload, home=home)
         return "mid-delivery"
     thread_id = ensure_topic_thread(payload, progress, home, create_thread)
+    progress["topic_thread_id"] = thread_id
     write_progress(payload, progress, home)
     start = int(progress.get("posted_count") or 0)
     ids = list(progress.get("discord_message_ids") or [])

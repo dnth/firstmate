@@ -14,9 +14,8 @@
 # explicit SAFE_WORDS vocabulary below survive, in request order, up to four.
 # Everything else - secrets, ids, paths, hostnames, numbers, unfamiliar words -
 # is dropped, and a request with no safe word falls back to "fm request".
-# Stripping punctuation is not what makes this safe: an alphanumeric secret
-# survives punctuation-stripping unchanged, so only vocabulary membership
-# admits a word. Admission and authority stay owned by bin/fm-ext-intake.sh.
+# Only whole whitespace-delimited vocabulary words are admitted.
+# Admission and authority stay owned by bin/fm-ext-intake.sh.
 # The name stays far under Discord's 100-character thread-name limit.
 set -u
 
@@ -71,7 +70,7 @@ esac
 
 # A request that already arrived inside a thread stays in that thread: there is
 # nothing to name, so print nothing and succeed.
-if [ "$THREAD_ID" != "$CHANNEL_ID" ]; then
+if [ "$ORIGIN" != message ] || [ "$THREAD_ID" != "$CHANNEL_ID" ]; then
   exit 0
 fi
 
@@ -82,16 +81,16 @@ else
   TEXT=$(cat -- "$TEXT_FILE")
 fi
 
-# Lowercase, then split on anything but a-z: digits, punctuation, and
-# non-ASCII all become separators, so numbers never survive as tokens. Only
-# the head matters for a topic, which also bounds the work.
-WORDS=$(printf '%s' "$TEXT" | head -c 500 | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs '[:lower:]' '\n') \
+WORDS=$(printf '%s' "$TEXT" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -s '[:space:]' '\n') \
   || die "could not tokenize the text" 1
 
 KEPT=
 COUNT=0
 while IFS= read -r word; do
   [ "$COUNT" -lt 4 ] || break
+  case "$word" in
+    *[!a-z]*) continue ;;
+  esac
   case ${#word} in
     2|3|4|5|6|7|8|9|10|11|12) ;;
     *) continue ;;
@@ -110,4 +109,4 @@ $WORDS
 EOF
 
 [ -n "$KEPT" ] || { printf 'fm request\n'; exit 0; }
-printf 'fm %s\n' "$(printf '%s' "$KEPT" | tr ' ' '-')"
+printf 'fm %s\n' "$KEPT"
