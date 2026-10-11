@@ -448,7 +448,17 @@ test_herdr_spawn_executes_one_atomic_launch_with_trace_context() {
   # Two prove-execution probes (early + nested-shell re-prove) ride the
   # same pane run path alongside treehouse setup and the launch itself.
   [ "$run_count" -eq 4 ] || fail "Herdr must submit treehouse setup and launch through four pane run calls incl. two probes (got $run_count)"
-  launch_payload=$(awk -F "$unit_separator" '$2 == "pane" && $3 == "run" && $5 !~ /fm-treehouse-get.sh/ { print $5; exit }' "$log")
+  # The typed launch is the short staged-script invocation: select it
+  # explicitly (not merely the first non-Treehouse run, which is now a
+  # prove-execution probe) and resolve its content, since the env
+  # bindings live inside the staged script.
+  launch_invocation=$(awk -F "$unit_separator" '$2 == "pane" && $3 == "run" && $5 ~ /\/bin\/bash / { print $5; exit }' "$log")
+  [ -n "$launch_invocation" ] || fail "no staged-script launch invocation was submitted through pane run"
+  launch_script=${launch_invocation#/bin/bash }
+  launch_script=${launch_script#\'}
+  launch_script=${launch_script%\'}
+  [ -f "$launch_script" ] || fail "staged launch script is missing: $launch_script"
+  launch_payload=$(cat "$launch_script")
   assert_contains "$launch_payload" "GOTMPDIR=" "the recorded Herdr launch command must bind GOTMPDIR"
   assert_contains "$launch_payload" "TRACEPARENT=" "the recorded Herdr launch command must bind TRACEPARENT"
   pass "an executable Herdr spawn records metadata and executes one atomic trace-aware launch"
