@@ -27,12 +27,26 @@
 # established submit primitive for the single probe line.
 #
 # Contract (single owner here; callers cross-reference, never restate):
-#   fm_pane_launch_prove_execution <backend> <target> <task-tmp> [label]
-# prints the typed probe line length on stdout and returns 0 once the marker
-# exists, else returns 1 after FM_PANE_LAUNCH_PROBE_POLLS (default 20) polls
+#   fm_pane_launch_prove_execution <backend> <target> <task-tmp> <submit-fn> [label]
+# returns 0 once the marker exists, with no stdout, else returns 1 on unsafe
+# submission or after FM_PANE_LAUNCH_PROBE_POLLS (default 20) polls
 # of FM_PANE_LAUNCH_PROBE_INTERVAL (default 0.5) seconds. Never types more
 # than the one probe line. The marker dir must already exist; the probe
 # creates only the marker file inside it.
+# fm-spawn probes fresh and recreated panes before setup input, retained idle
+# relaunch shells before cwd correction, and nested Treehouse shells again
+# before their setup input. Existing live-agent and ownership refusals precede
+# any probe. Failure includes an ownership-checked, bounded pane tail.
+# Both probing and script staging require a non-symlink task root owned by
+# the current user with no group/other write permission; mode 0700 on a script
+# alone cannot prevent replacement by an untrusted directory owner.
+# Full launches are staged through fm_pane_launch_write_script; fm-spawn
+# submits only the short Bash invocation, refusing lines over 512 bytes.
+# Template and normalized raw agent commands use exec to preserve foreground
+# identity. Script write failure restores the umask, removes partial output,
+# and publishes no path. Task teardown removes the scripts with the temp root.
+# Portable coverage: tests/fm-spawn-dispatch-profile.test.sh simulates swallowed
+# probe input; tests/fm-spawn-relaunch-dead-endpoint.test.sh covers relaunch.
 
 # fm_pane_launch_probe_nonce: one unpredictable marker stem per launch, so a
 # stale marker from an earlier incarnation can never satisfy this proof.
@@ -93,7 +107,7 @@ fm_pane_launch_write_script() {  # <dir> <command> -> prints script path
 # fm_pane_launch_typed_line: the short Bash invocation for a written script.
 # Single-quoted (never %q double-quoted): the script path is task-tmp under
 # /tmp with no spaces in practice, and single quotes keep the typed line byte
-# stable; the writer refuses paths containing a single quote outright.
+# stable; this formatter refuses paths containing a single quote outright.
 fm_pane_launch_typed_line() {  # <script-path> -> prints typed line
   case "${1:-}" in
     ''|*"'"*) return 1 ;;

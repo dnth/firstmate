@@ -55,7 +55,8 @@ Without forge authentication the remote second mate still runs, does local and s
 
 Verified against OMP `omp/18.4.4` on 2026-10-03.
 In the installed native binary's `@oh-my-pi/pi-coding-agent` source, `packages/tui/src/setup/wizard.ts` reads `Bun.env.OMP_SKIP_SETUP` during setup-scene selection, with the setup scenes under `packages/tui/src/setup/scenes/`; Firstmate sets `OMP_SKIP_SETUP=1` on every verified OMP launch so a fresh non-interactive SSH account cannot stop in the first-run wizard.
-If the doorbell or session bind does not appear, the launch fails with the pane visible tail; the diagnostic names the potentially unhonored setup bypass only when an OMP process was actually observed in the pane, since a missing doorbell with no OMP process means the launch never ran rather than a wizard blocking it.
+If the doorbell or session bind does not appear, the launch fails with the visible pane tail.
+Only a doorbell timeout can suggest an unhonored setup bypass, gated by the OMP identity check owned by [`fm_pane_launch_omp_observed`](../bin/fm-pane-launch-lib.sh); a missing marker alone does not establish whether OMP started or why it failed.
 
 ## Non-interactive tool contract
 

@@ -4398,8 +4398,8 @@ hermes_wait_for_reasoning() {  # <effort>
 # shell-startup prompt eats the first byte of whatever is typed first: proving
 # only before the launch lets an earlier setup line dismiss the prompt, pass
 # the probe against a shell that never proved its first byte, and launch with
-# that setup line corrupted. Fresh panes only: a live relaunch endpoint
-# already runs a harness (no shell to prove). A proven-gone endpoint was
+# that setup line corrupted. Retained idle relaunch shells were proven above,
+# after the live-agent refusal. A proven-gone endpoint was
 # recreated above as a fresh pane, so it is proven here with the fresh path
 # before its first typed byte (the GOTMPDIR export below - not the launch).
 # Covers
@@ -5465,9 +5465,9 @@ if [ "$HARNESS" = omp ] && [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ]; then
       OMP_DOORBELL_DETAIL="doorbell activation failed: $(head -n 1 "$OMP_DOORBELL_FAILED" 2>/dev/null || printf 'unreadable journal') (journal: $OMP_DOORBELL_FAILED)"
     fi
     # Name the setup bypass only when an OMP process was actually observed in
-    # the pane: after probe-then-launch the launch is known typed, so a
-    # missing doorbell with no OMP process means the script never ran (not a
-    # wizard), and the pane tail names the real cause instead.
+    # the pane: successful probe and submission do not prove OMP started or
+    # stayed alive. Without observed OMP identity, include the pane tail
+    # without speculating about a setup wizard.
     OMP_DOORBELL_TAIL=$(fm_pane_launch_tail "$BACKEND" "$T" 15 "$W")
     # Name the setup bypass only on OMP-specific observed identity (not
     # any live agent): see fm_pane_launch_omp_observed in
