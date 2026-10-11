@@ -57,6 +57,20 @@ publish_omp_ack() { # <pane> <launch>
   local pane=$1 launch=$2 cwd session version normalized_launch
   local broken_pid doorbell turn_started
   [ -n "$OMP_ACK_PID" ] && [ -n "$OMP_BUN" ] && [ -n "$OMP_BIN" ] || return 0
+  # The typed launch may be a short staged-script invocation: resolve its
+  # content before classifying, so acknowledgement sees the real launch
+  # exactly as the pane would execute it. Probe input never reaches here
+  # as a launch (it carries no session pointer), so agent state is
+  # untouched by probes.
+  case "$launch" in
+    *.fm-launch-*)
+      _ack_script=${launch#/bin/bash }
+      _ack_marker=$_ack_script
+      _ack_marker=${_ack_marker#\'}
+      _ack_script=${_ack_marker%\'}
+      [ ! -f "$_ack_script" ] || launch=$(cat "$_ack_script")
+      ;;
+  esac
   case "$launch" in
     *FM_OMP_SESSION_POINTER=*)
       cwd=$(jq_state -r --arg p "$pane" '.tabs[] | select(.pane_id == $p) | .cwd // empty')
@@ -182,6 +196,17 @@ case "${1:-} ${2:-}" in
     jq_state --arg p "${3:-}" --arg text "${4:-}" \
       '.typed[$p] = true | .composer[$p] = $text' | save ;;
   "pane run")
+    [ ! -f "$SEND_FAIL" ] || exit 1
+    pane=${3:-}; launch=${4:-}
+    # Honor the spawn prove-execution probe: a ready pane runs it.
+    case "$launch" in
+      touch\ */.fm-launch-probe.*)
+        marker=${launch#touch }
+        marker=${marker#\'}
+        marker=${marker%\'}
+        : > "$marker"
+        ;;
+    esac
     [ ! -f "$SEND_FAIL" ] || exit 1
     pane=${3:-}; launch=${4:-}
     jq_state --arg p "$pane" --arg text "$launch" \
