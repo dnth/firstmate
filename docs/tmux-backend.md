@@ -88,7 +88,7 @@ The one remaining rendered-tail reader is Grok's isolated fallback inside that c
 The submit acknowledgement and away-mode supervisor-pane busy guard below still consult rendered output, but only to decide whether input can be delivered, never to decide recorded task state.
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
 
-`bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
+`bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics. Spawn-time launches add a prove-execution step on top: before the first pane-typed byte, `fm-spawn.sh` submits a short probe (`touch <task-tmp>/.fm-launch-probe.<nonce>`) through the same send path and requires its marker, then stages the full launch as a private mode-0700 script and types only the short `/bin/bash <script>` invocation. A shell-startup prompt that swallows the probe leaves no marker, and the spawn refuses with the pane visible tail instead of typing into an unknown prompt.
 It types a message once and retries Enter only while the backend still permits another safe submission attempt.
 A proven empty composer is the ordinary positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.

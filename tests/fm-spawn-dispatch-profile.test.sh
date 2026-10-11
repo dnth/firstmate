@@ -72,6 +72,7 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane) printf '%s\n' "${FM_FAKE_PANE_TAIL:-}"; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session) exit 0 ;;
   kill-window)
@@ -90,12 +91,35 @@ case "${1:-}" in
       esac
     done
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
+      # The probe proves the pane executes commands: a ready pane runs it
+      # (marker file appears); a startup-prompt-blocked pane swallows its
+      # first byte, so no marker appears (FM_FAKE_PROBE_SWALLOW=1).
       for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
+        case "$a" in
+          touch\ */.fm-launch-probe.*)
+            if [ "${FM_FAKE_PROBE_SWALLOW:-0}" != 1 ]; then
+              marker=${a#touch }
+              marker=${marker#\'}
+              marker=${marker%\'}
+              : > "$marker"
+            fi
+            ;;
+        esac
+      done
+      for a in "$@"; do
+        # The typed launch is a short script invocation; the fake pane honors
+        # it by recording the staged script's content, so the full command's
+        # markers (FM_OMP_HARNESS=omp, the OMP extension path) reach the log
+        # the doorbell emulation below reads.
+        case "$a" in
+          *.fm-launch-*)
+            script=${a#/bin/bash }
+            marker=$script
+            marker=${marker#\'}
+            script=${marker%\'}
+            printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"; [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_LAUNCH_LOG"
+            ;;
+        esac
       done
       case "$*" in
         *Enter*)
@@ -243,6 +267,9 @@ case "$cmd $sub" in
       printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"fish","argv0":"fish"}]}}}'
     fi
     ;;
+  "pane read")
+    printf '%s\n' "${FM_FAKE_PANE_TAIL:-}"
+    ;;
   "pane get")
     if [ -n "${FM_FAKE_HERDR_PANE_FLAG:-}" ] && [ ! -f "$FM_FAKE_HERDR_PANE_FLAG" ]; then
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
@@ -251,6 +278,18 @@ case "$cmd $sub" in
     printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "${3:-w1:p2}" "${FM_FAKE_PANE_PATH:-}"
     ;;
   "pane run")
+    # The probe proves the pane executes commands: a swallowed probe
+    # (FM_FAKE_PROBE_SWALLOW=1) leaves no marker.
+    case "${4:-}" in
+      touch\ */.fm-launch-probe.*)
+        if [ "${FM_FAKE_PROBE_SWALLOW:-0}" != 1 ]; then
+          marker=${4#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+        fi
+        ;;
+    esac
     if printf '%s' "${4:-}" | grep -Fq 'fm-treehouse-get.sh'; then
       [ -z "${FM_FAKE_HERDR_NESTED_SHELL_FLAG:-}" ] || : > "$FM_FAKE_HERDR_NESTED_SHELL_FLAG"
       case "${4:-}" in
@@ -262,8 +301,25 @@ case "$cmd $sub" in
       esac
     fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
-      if printf '%s' "${4:-}" | grep -Fq 'FM_OMP_HARNESS=omp'; then
+      # The typed launch is a short script invocation; record the staged
+      # script's content so the doorbell emulation below sees the same
+      # markers a real pane would execute.
+      case "${4:-}" in
+        *.fm-launch-*)
+          printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
+          script=${4:-}
+          script=${script#/bin/bash }
+          marker=$script
+          marker=${marker#\'}
+          script=${marker%\'}
+          [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_LAUNCH_LOG"
+          ;;
+        *)
+          printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
+          ;;
+      esac
+      launch_text=$(cat "$FM_FAKE_LAUNCH_LOG")
+      if printf '%s' "$launch_text" | grep -Fq 'FM_OMP_HARNESS=omp'; then
         for extension in "${FM_FAKE_OMP_ACK_DIR:-/nonexistent}"/*.omp-ext.ts; do
           [ -e "$extension" ] || continue
           omp_doorbell_emulate "${extension%.omp-ext.ts}"
@@ -273,7 +329,7 @@ case "$cmd $sub" in
           omp_doorbell_emulate "${FM_FAKE_OMP_ACK%.omp-started}"
         fi
         if [ "${FM_FAKE_OMP_DYNAMIC_ACK:-0}" = 1 ]; then
-          ack=$(printf '%s\n' "${4:-}" | sed -n "s/.* -e '\([^']*\)\.omp-ext\.ts'.*/\1.omp-started/p")
+          ack=$(printf '%s' "$launch_text" | sed -n "s/.* -e '\([^']*\)\.omp-ext\.ts'.*/\1.omp-started/p")
           [ -z "$ack" ] || { : > "$ack"; omp_doorbell_emulate "${ack%.omp-started}"; }
         fi
         omp_secondmate_emulate
@@ -316,7 +372,9 @@ case "$cmd $sub" in
       printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
       exit 1
     fi
-    printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}'
+    # FM_FAKE_HERDR_AGENT lets the doorbell-hint test observe a live non-OMP
+    # agent (identity-gated hint must stay silent) or a confirmed OMP one.
+    printf '%s\n' "{\"result\":{\"agent\":{\"agent\":\"${FM_FAKE_HERDR_AGENT:-omp}\",\"agent_status\":\"idle\"}}}"
     ;;
 esac
 exit 0
@@ -522,11 +580,16 @@ run_spawn() {
     FM_FAKE_HERDR_REFUSE_NESTED_SHELL="${FM_TEST_HERDR_REFUSE_NESTED_SHELL:-0}" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="${FM_TEST_HERDR_IDLE_SHELL_PROOF_POLLS:-}" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
+    FM_FAKE_HERDR_AGENT="${FM_TEST_HERDR_AGENT:-}" \
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
     FM_FAKE_EXECUTE_RAW_LAUNCH="${FM_TEST_EXECUTE_RAW_LAUNCH:-0}" \
     FM_FAKE_RAW_OMP_EXECUTED="${FM_TEST_RAW_OMP_EXECUTED:-}" \
     FM_FAKE_PANE_BASH_ENV="${FM_TEST_PANE_BASH_ENV:-}" \
     FM_FAKE_RAW_EXECUTION_LOG="${FM_TEST_RAW_EXECUTION_LOG:-}" \
+    FM_FAKE_PROBE_SWALLOW="${FM_TEST_PROBE_SWALLOW:-0}" \
+    FM_PANE_LAUNCH_PROBE_POLLS="${FM_TEST_PROBE_POLLS:-}" \
+    FM_PANE_LAUNCH_PROBE_INTERVAL="${FM_TEST_PROBE_INTERVAL:-}" \
+    FM_FAKE_PANE_TAIL="${FM_FAKE_PANE_TAIL:-}" \
     BASH_ENV="${FM_TEST_SPAWN_BASH_ENV:-}" \
     FM_HERDR_PS_BIN="$fakebin/herdr-ps" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
@@ -562,7 +625,7 @@ assert_meta_profile() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status launch tasktmp script typed
   id=$(profile_id profile-off-z1)
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
@@ -574,8 +637,18 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  # The launch is staged to a private script typed as a short /bin/bash
+  # invocation: the staged content carries the canonical command while the
+  # typed line stays well under the pane-typing bound. The exec prefix is
+  # part of that canonical staged command.
+  assert_contains "$launch" "FM_TASK_ID='$id'" "staged launch did not carry the task identity"
+  assert_contains "$launch" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false exec claude --dangerously-skip-permissions" "staged launch did not carry the canonical claude command"
+  assert_contains "$launch" "encode launch-brief" "staged launch did not carry the brief encoder"
+  tasktmp=$(sed -n 's/^tasktmp=//p' "$HOME_DIR/state/$id.meta")
+  script=$(printf '%s\n' "$launch" | grep -F "/bin/bash '$tasktmp" | head -1)
+  [ -n "$script" ] || fail "typed launch line did not invoke the staged script: $launch"
+  typed=${script#/bin/bash }
+  [ "${#typed}" -le 512 ] || fail "typed launch line exceeds the 512-byte pane-typing bound"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
@@ -772,7 +845,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "exec codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -807,7 +880,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' /usr/bin/env $RAW_DIRECT_TRUE --flag __KEEPLITERAL__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  assert_contains "$launch" "/usr/bin/env $RAW_DIRECT_TRUE --flag __KEEPLITERAL__" "raw launch command changed"
   pass "active crew-dispatch profile preserves raw direct non-OMP launch arguments"
 }
 
@@ -924,8 +997,8 @@ test_raw_non_omp_launches_keep_their_existing_escape_hatch() {
   expect_code 0 "$status" "lookalike non-OMP raw command should still launch"
   assert_contains "$out" "spawned $id harness=custom-omp-agent" \
     "lookalike non-OMP raw command lost its executable identity"
-  [ "$(cat "$LAUNCH_LOG")" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' /usr/bin/env $RAW_DIRECT_TRUE --legacy" ] \
-    || fail "lookalike non-OMP raw launch changed"
+  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' /usr/bin/env $RAW_DIRECT_TRUE --legacy" \
+    "lookalike non-OMP raw launch changed"
   pass "lookalike non-OMP raw launches preserve the escape hatch"
 }
 
@@ -949,8 +1022,8 @@ SH
   unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
   expect_code 0 "$status" "raw direct non-OMP launch should bypass an ambient pane function"
   assert_absent "$CASE_DIR/raw-omp-executed" "ambient pane function executed the harmless fake OMP"
-  [ "$(cat "$LAUNCH_LOG")" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' /usr/bin/env $RAW_DIRECT_TRUE --legacy" ] \
-    || fail "raw direct non-OMP launch did not use the alias-safe command form"
+  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' /usr/bin/env $RAW_DIRECT_TRUE --legacy" \
+    "raw direct non-OMP launch did not use the alias-safe command form"
   pass "raw direct non-OMP launches bypass ambient pane aliases and functions"
 }
 
@@ -970,8 +1043,8 @@ test_raw_non_omp_launches_preserve_plain_assignments() {
   expect_code 0 "$status" "raw direct non-OMP launch should preserve a plain assignment"
   [ "$(cat "$CASE_DIR/raw-execution.log")" = bar ] \
     || fail "raw direct non-OMP launch did not pass its assignment to the executable: $(cat "$CASE_DIR/raw-execution.log")"
-  [ "$(cat "$LAUNCH_LOG")" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' /usr/bin/env FOO=bar $RAW_DIRECT_PRINTENV FOO" ] \
-    || fail "raw direct non-OMP assignment launch was not normalized safely"
+  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' /usr/bin/env FOO=bar $RAW_DIRECT_PRINTENV FOO" \
+    "raw direct non-OMP assignment launch was not normalized safely"
   pass "raw direct non-OMP launches preserve plain assignments"
 }
 
@@ -1556,7 +1629,7 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "exec claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   pass "claude receives --model and --effort profile flags"
 }
@@ -1572,7 +1645,7 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "exec codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
@@ -1588,7 +1661,7 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "exec codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
@@ -1605,7 +1678,7 @@ test_grok_threads_model_and_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' --reasoning-effort 'high'" \
+  assert_contains "$launch" "exec grok --always-approve --model 'grok-4' --reasoning-effort 'high'" \
     "grok launch did not thread model and reasoning-effort flags"
   assert_not_contains "$launch" "--effort" "grok launch must use --reasoning-effort, not --effort"
   pass "grok receives --model and --reasoning-effort profile flags"
@@ -1622,7 +1695,7 @@ test_grok_omits_invalid_max_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
+  assert_contains "$launch" "exec grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
     "grok launch did not preserve the model flag and typed brief when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
@@ -1641,7 +1714,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported xhigh reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
+  assert_contains "$launch" "exec grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
     "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
@@ -1679,7 +1752,7 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-luna max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi pi --model 'openai-codex/gpt-5.6-luna' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi exec pi --model 'openai-codex/gpt-5.6-luna' --thinking 'max' -e" \
     "pi launch did not thread the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
@@ -1701,7 +1774,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-luna max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model 'openai-codex/gpt-5.6-luna' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed exec pi-signed --model 'openai-codex/gpt-5.6-luna' --thinking 'max' -e" \
     "pi-signed launch did not share Pi's model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
@@ -1764,7 +1837,7 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     assert_contains "$launch" "FM_OMP_BUN=" "OMP launch omitted its canonical Bun runtime identity"
     assert_contains "$launch" "$expected_bun" "OMP launch omitted its canonical Bun runtime path"
     assert_contains "$launch" "$expected_bin" "OMP launch omitted its canonical entrypoint path"
-    assert_contains "$launch" "/bin/bash -c" "OMP launch did not use its Bash-owned command wrapper"
+    assert_contains "$launch" "/bin/bash '" "OMP launch did not stage its Bash-owned script invocation"
     # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
     assert_not_contains "$launch" '${PATH:+' "OMP launch exposed POSIX parameter expansion to the pane shell"
     assert_contains "$launch" "$expected_bin" \
@@ -1817,7 +1890,7 @@ test_omp_broker_env_uses_mode_600_file_without_exposing_bearer() {
   expect_code 1 "$status" "OMP spawn must refuse a broker token file broader than mode 0600"
   assert_contains "$out" 'OMP auth-broker token file must have mode 0600' \
     "unsafe OMP broker token refusal did not name the required mode"
-  [ ! -s "$LAUNCH_LOG" ] || fail "unsafe OMP broker token mode typed a backend launch command"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "/bin/bash '/tmp/fm-" "unsafe OMP broker token mode typed a backend launch command"
 
   unset FM_TEST_OMP_ACK FM_TEST_OMP_AUTH_BROKER_URL FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE
   pass "OMP broker launch env reads a mode-600 file inside the pane and never exposes bearer bytes"
@@ -2263,7 +2336,7 @@ test_non_omp_prewalk_refuses_without_changing_normal_claude_launch() {
   status=$?
   expect_code 0 "$status" "ordinary Claude launch should remain unaffected"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "exec claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
     "ordinary Claude launch changed after adding the OMP-only profile axis"
   assert_not_contains "$launch" "--prewalk" "ordinary Claude launch received OMP Prewalk flags"
   assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$normal_id.meta" \
@@ -2293,7 +2366,7 @@ test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
     launch=$(cat "$LAUNCH_LOG")
     assert_contains "$launch" "GOTMPDIR=" \
       "OMP Herdr $kind launch did not bind GOTMPDIR to its agent command"
-    assert_contains "$launch" "/bin/bash -c" "OMP Herdr $kind launch did not use its Bash-owned command wrapper"
+    assert_contains "$launch" "/bin/bash '" "OMP Herdr $kind launch did not stage its Bash-owned script invocation"
     # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
     assert_not_contains "$launch" '${PATH:+' "OMP Herdr $kind launch exposed POSIX parameter expansion to the pane shell"
     assert_contains "$launch" "$(cd "$FAKEBIN_DIR" && pwd -P)/omp" \
@@ -2577,6 +2650,114 @@ test_omp_spawn_requires_doorbell_handshake() {
     "the spawn failure did not surface the journaled activation reason"
   unset FM_TEST_OMP_ACK FM_TEST_OMP_DOORBELL_FAIL
   pass "OMP spawn bounded-waits on .omp-doorbell-ready and fails loudly on absence or journaled failure"
+}
+
+# A shell-startup prompt (an oh-my-zsh update check reads one key before the
+# line editor) swallows the probe's first byte, so no marker appears: the
+# spawn must refuse with the pane's visible tail before typing any setup line
+# or the launch, on both tmux and herdr.
+test_launch_probe_refuses_blocked_pane_with_visible_tail() {
+  local rec id out status backend
+  for backend in tmux herdr; do
+    id=$(profile_id "profile-probe-blocked-$backend")
+    rec=$(make_spawn_case "profile-probe-blocked-$backend" claude "$id")
+    read_case_record "$rec"
+    export FM_TEST_PROBE_SWALLOW=1
+    export FM_TEST_PROBE_POLLS=2
+    export FM_TEST_PROBE_INTERVAL=0.1
+    FM_FAKE_PANE_TAIL="[oh-my-zsh] Would you like to update? [Y/n]" \
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+        $([ "$backend" = herdr ] && printf '%s' "--backend herdr"))
+    status=$?
+    unset FM_TEST_PROBE_SWALLOW FM_TEST_PROBE_POLLS FM_TEST_PROBE_INTERVAL
+    expect_code 1 "$status" "$backend spawn into a startup-prompt-blocked pane must refuse"
+    assert_contains "$out" "not executing shell commands" \
+      "$backend probe refusal did not name the unproven pane"
+    assert_contains "$out" "[Y/n]" \
+      "$backend probe refusal did not carry the pane visible tail"
+    assert_not_contains "$(cat "$LAUNCH_LOG")" "claude --dangerously-skip-permissions" \
+      "$backend spawn typed the agent launch into the unready shell"
+    assert_not_contains "$(cat "$LAUNCH_LOG")" "export GOTMPDIR" \
+      "$backend spawn typed a setup line into the unready shell"
+  done
+  pass "prove-execution probe refuses a startup-prompt-blocked pane with its visible tail before any typing"
+}
+
+test_typed_launch_line_is_short_private_script_invocation() {
+  local rec id out status launch typed tasktmp script mode tmpdir
+  id=$(profile_id profile-typed-bound-omp)
+  rec=$(make_spawn_case profile-typed-bound omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-luna --effort low)
+  status=$?
+  unset FM_TEST_OMP_ACK
+  expect_code 0 "$status" "OMP spawn should succeed for the typed-bound assertion"
+  launch=$(cat "$LAUNCH_LOG")
+  tasktmp=$(sed -n 's/^tasktmp=//p' "$HOME_DIR/state/$id.meta")
+  typed=$(printf '%s\n' "$launch" | grep -F "/bin/bash '$tasktmp" | head -1)
+  [ -n "$typed" ] || fail "typed launch line did not invoke the staged script: $launch"
+  [ "${#typed}" -le 512 ] || fail "typed launch line exceeds the pane-typing bound: $typed"
+  assert_contains "$launch" "FM_OMP_HARNESS=omp" "staged script lost the OMP harness marker"
+  assert_contains "$launch" "exec " "staged script lost the exec agent replacement"
+  # Privacy is proven against the lib directly: a fresh staged script is
+  # mode 0700 from creation (restrictive-first under any umask).
+  tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/fm-launch-mode-check.XXXXXX")
+  (umask 022; script=$(FM_ROOT="$ROOT" bash -c 'source "$0/bin/fm-pane-launch-lib.sh"; fm_pane_launch_write_script "$1" "echo probe-cmd"' "$ROOT" "$tmpdir");
+    [ -n "$script" ] || exit 1; mode=$(stat -c %a "$script" 2>/dev/null || stat -f %Lp "$script");
+    [ "$mode" = 700 ] || { echo "mode=$mode" >&2; exit 1; }) \
+    || fail "staged launch script is not private from creation"
+  rm -rf "$tmpdir"
+  pass "typed launch is a short private script invocation carrying the full command"
+}
+
+test_doorbell_timeout_diagnoses_pane_tail_and_setup_hint_branches() {
+  local rec id out status
+  # No OMP process observed: pane tail is named, setup hint stays silent.
+  id=$(profile_id profile-doorbell-no-omp)
+  rec=$(make_spawn_case profile-doorbell-no-omp omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_NO_DOORBELL=1
+  export FM_TEST_OMP_DOORBELL_ACK_POLLS=2
+  FM_FAKE_PANE_TAIL="[oh-my-zsh] Would you like to update? [Y/n]" \
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  unset FM_TEST_OMP_NO_DOORBELL FM_TEST_OMP_DOORBELL_ACK_POLLS
+  expect_code 1 "$status" "doorbell timeout with no OMP process must fail"
+  assert_contains "$out" "[Y/n]" "doorbell timeout did not carry the pane tail"
+  assert_not_contains "$out" "OMP_SKIP_SETUP=1 may not have been honored" \
+    "doorbell timeout blamed setup with no OMP process observed"
+  # Live non-OMP agent on herdr: hint stays silent (identity-gated).
+  id=$(profile_id profile-doorbell-live-other)
+  rec=$(make_spawn_case profile-doorbell-live-other omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_NO_DOORBELL=1
+  export FM_TEST_OMP_DOORBELL_ACK_POLLS=2
+  export FM_TEST_HERDR_AGENT=codex
+  FM_FAKE_PANE_TAIL="codex working" \
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend herdr)
+  status=$?
+  unset FM_TEST_OMP_NO_DOORBELL FM_TEST_OMP_DOORBELL_ACK_POLLS FM_TEST_HERDR_AGENT
+  expect_code 1 "$status" "doorbell timeout with a live non-OMP agent must fail"
+  assert_contains "$out" "codex working" "doorbell timeout did not carry the pane tail"
+  assert_not_contains "$out" "OMP_SKIP_SETUP=1 may not have been honored" \
+    "doorbell timeout blamed OMP setup for a live non-OMP agent"
+  # Confirmed live OMP on herdr: hint fires.
+  id=$(profile_id profile-doorbell-live-omp)
+  rec=$(make_spawn_case profile-doorbell-live-omp omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_NO_DOORBELL=1
+  export FM_TEST_OMP_DOORBELL_ACK_POLLS=2
+  export FM_TEST_HERDR_AGENT=omp
+  FM_FAKE_PANE_TAIL="omp idle" \
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend herdr)
+  status=$?
+  unset FM_TEST_OMP_NO_DOORBELL FM_TEST_OMP_DOORBELL_ACK_POLLS FM_TEST_HERDR_AGENT
+  expect_code 1 "$status" "doorbell timeout with a live OMP agent must fail"
+  assert_contains "$out" "OMP_SKIP_SETUP=1 may not have been honored" \
+    "doorbell timeout did not name the setup bypass for a confirmed live OMP agent"
+  pass "doorbell timeout names the pane tail and gates the setup hint on confirmed OMP identity"
 }
 
 test_omp_whitespace_identity_paths_refuse_before_endpoint() {
@@ -3050,7 +3231,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
     "pi-signed secondmate spawn did not preserve its runtime identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed exec pi-signed -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not share Pi's primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
@@ -3270,6 +3451,9 @@ test_omp_scout_uses_external_turn_extension
 test_omp_worker_doorbell_observes_turns_and_recovers_parked_steer
 test_omp_worker_extension_gates_ready_on_doorbell_activation
 test_omp_spawn_requires_doorbell_handshake
+test_launch_probe_refuses_blocked_pane_with_visible_tail
+test_typed_launch_line_is_short_private_script_invocation
+test_doorbell_timeout_diagnoses_pane_tail_and_setup_hint_branches
 test_omp_whitespace_identity_paths_refuse_before_endpoint
 test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata
 test_omp_launch_requires_observable_turn_start_acknowledgement

@@ -62,6 +62,16 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_ENDPOINT_LOG:-}" ]; then printf '%s\n' "$1" >> "$FM_FAKE_ENDPOINT_LOG"; fi
     exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+          touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     if [ -n "${FM_FAKE_SEND_LOG:-}" ]; then
       printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
     fi

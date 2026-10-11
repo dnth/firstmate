@@ -172,13 +172,36 @@ case "$cmd" in
   send-keys)
     target=""
     prev=""
+    # Honor the prove-execution probe so recreated panes proceed: a ready
+    # pane runs it (marker file appears).
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     for a in "$@"; do [ "$prev" = "-t" ] && target=$a; prev=$a; done
     line=$(resolve "$target") || exit 1
     ses=${line%%	*}
     wid=$(printf '%s' "$line" | awk -F '\t' '{print $2}')
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       for a in "$@"; do
-        case "$a" in -*|"$target") ;; *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;; esac
+        case "$a" in
+          -*|"$target") ;;
+          *.fm-launch-*)
+            printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+            script=${a#/bin/bash }
+            marker=$script
+            marker=${marker#\'}
+            script=${marker%\'}
+            [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_LAUNCH_LOG"
+            ;;
+          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+        esac
       done
       touch_omp_acks
     fi
@@ -360,8 +383,26 @@ case "$cmd" in
       run)
         running || { printf '{"error":{"code":"server_not_running"}}\n'; exit 0; }
         p=${3:-}; text=${4:-}
+        case "$text" in
+          touch\ */.fm-launch-probe.*)
+            marker=${text#touch }
+            marker=${marker#\'}
+            marker=${marker%\'}
+            : > "$marker"
+            ;;
+        esac
         if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-          printf '%s\n' "$text" >> "$FM_FAKE_LAUNCH_LOG"
+          case "$text" in
+            *.fm-launch-*)
+              printf '%s\n' "$text" >> "$FM_FAKE_LAUNCH_LOG"
+              script=${text#/bin/bash }
+              marker=$script
+              marker=${marker#\'}
+              script=${marker%\'}
+              [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_LAUNCH_LOG"
+              ;;
+            *) printf '%s\n' "$text" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          esac
           touch_omp_acks
         fi
         case "$text" in
@@ -456,8 +497,22 @@ if [ "${1:-}" = "action" ]; then
       printf '%s|%s|false\n' "$pid" "$tid" >> "$STATE/$ses.panes"
       printf '%s\n' "$tid"
       ;;
-    go-to-tab-by-id|paste|send-keys|close-tab|close-pane) : ;;
+    go-to-tab-by-id|paste|send-keys|close-tab|close-pane)
+      for a in "$@"; do
+        case "$a" in
+          touch\ */.fm-launch-probe.*)
+            marker=${a#touch }
+            marker=${marker#\'}
+            marker=${marker%\'}
+            : > "$marker"
+            ;;
+        esac
+      done
+      : ;;
     *) : ;;
+  esac
+  case "${act:-}" in
+    dump-screen) printf '%s\n' "${FM_FAKE_PANE_TAIL:-}" ;;
   esac
 fi
 exit 0
@@ -505,7 +560,19 @@ case "$cmd" in
     for a in "$@"; do [ "$prev" = "--workspace" ] && ws=$a; prev=$a; done
     if [ -f "$STATE/$ws.panes" ]; then cat "$STATE/$ws.panes"; else printf '{"panes":[]}\n'; fi
     exit 0 ;;
-  send|send-key) exit 0 ;;
+  send|send-key)
+      for a in "$@"; do
+        case "$a" in
+          touch\ */.fm-launch-probe.*)
+            marker=${a#touch }
+            marker=${marker#\'}
+            marker=${marker%\'}
+            : > "$marker"
+            ;;
+        esac
+      done
+      exit 0 ;;
+  read-screen) printf '{"text":%s}\n' "$(printf '%s' "${FM_FAKE_PANE_TAIL:-}" | jq -Rs .)" ;;
 esac
 exit 0
 SH
