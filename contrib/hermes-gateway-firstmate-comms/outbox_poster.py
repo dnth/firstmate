@@ -2,12 +2,9 @@
 
 Posts pending ``state/ext-outbox`` payloads to the Discord destination stored
 in each payload and records receipts through ``bin/fm-ext-outbox.sh``.
-A top-level request's first reply creates a Discord thread on its message and
-every later reply for that request posts into the same thread; a request that
-already arrived inside a thread stays in that thread. A slash-command request
-keeps its current behaviour: its replies post to its originating thread. A
-thread-creation failure falls back to the current post-in-place behaviour and
-never blocks or loses the reply.
+The topic-thread routing contract is owned by docs/configuration.md under
+"Topic threads (one thread per request)"; bin/fm-ext-topic.sh owns the fixed
+public labels and source-message MYT time used for names.
 Unsent payloads (no posting marker, no receipt, no terminal failed marker)
 are retried after restart.
 Oversized replies are split with the X-mode Discord budget pattern
@@ -437,8 +434,8 @@ def save_request_thread(payload: dict, thread_id: str, home: Path) -> None:
     A private state artifact beside the outbox, written with the same guards
     the shell publication helper enforces: a regular single-link file at mode
     0600, replaced atomically. Its basename is <slug>.thread.json, which the
-    pending scan skips as a marker, so poll
-    cost stays flat as threads accumulate.
+    pending scan skips as a marker, avoiding payload validation for completed
+    topics.
     """
     path = request_progress_path(payload, home)
     if path.is_symlink():
@@ -566,11 +563,15 @@ def ensure_topic_thread(
 ) -> str:
     """Return the thread id this generation must post into.
 
-    Reuses the recorded topic-thread id when one exists, creates a thread on
-    the request's own message for a top-level request, and returns "" when no
-    thread applies or creation failed: the caller then posts in place, so a
-    failure never blocks or loses the reply. Records a created thread id in
-    progress so later generations reuse it; the caller persists progress.
+    A partially posted generation keeps its original destination so retries
+    cannot split one reply between conversations, even if another generation
+    creates a topic thread in the meantime. New generations reuse the
+    request-wide record, or create a thread only for a top-level message in
+    the dedicated channel. Discord error 160004 identifies an existing thread
+    by the source message id, including when concurrent creators race.
+    An empty result lets the caller post in place; the caller records this
+    generation's destination in chunk progress, while save_request_thread
+    persists the shared destination for later generations.
     """
     if (payload.get("origin") != "message"
             or str(payload.get("thread_id") or "") != str(payload.get("channel_id") or "")):

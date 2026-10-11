@@ -43,8 +43,7 @@ In the [dedicated Firstmate channel](#dedicated-firstmate-channel), just write t
 Anywhere the gateway listens, a Discord reply to one of Firstmate's own messages is a request too, and Firstmate sees the message you replied to, so a reply of "yes" answers that message's question.
 Outside the dedicated channel, keep the reply's mention on (Discord's default), because the gateway only hears messages that mention the bot there.
 A message request uses the [delivery reactions](../../docs/configuration.md#delivery-reactions) instead of a text acknowledgement.
-The first reply to a top-level message in the configured dedicated channel creates a [topic thread](../../docs/configuration.md#topic-threads-one-thread-per-request) on that message, named with a fixed public label and the source message’s MYT time, and every later reply for that request posts into the same thread; a request inside a thread stays in that thread.
-Replies to Firstmate posts outside the dedicated channel keep their existing routing without creating threads.
+See the [topic-thread contract](../../docs/configuration.md#topic-threads-one-thread-per-request) for dedicated-channel conversations and routing elsewhere, including unchanged `/fm` replies.
 
 Anywhere else, send `/fm` from Discord's command pop-up: type `/fm`, pick this bot's `/fm` entry when the pop-up shows it, put the request in its box, and send.
 For files attached to ordinary message requests, see the [attachment handling contract](../../docs/configuration.md#discord-attachments).
@@ -57,7 +56,7 @@ For thread authorization, reply routing, and the exact rules for the channel, re
 The dedicated channel is off until you set it.
 
 1. In Discord, create a text channel for Firstmate, for example `#firstmate`, in the server the bot is in.
-2. Check that the bot can View Channel, Send Messages, Read Message History, and Add Reactions there.
+2. Check that the bot can View Channel, Send Messages, Read Message History, Add Reactions, Create Public Threads, and Send Messages in Threads there.
 3. With Developer Mode on (User Settings, Advanced), right-click the channel and pick Copy Channel ID.
 4. In the Firstmate home, write that id on its own line to `config/ext-channel`, and add a `<guild>:<channel>:<author>` line for it to `config/ext-allowlist` so your messages there carry standing authority.
 5. In the gateway profile's `.env`, add the channel id to `DISCORD_FREE_RESPONSE_CHANNELS` so Hermes hands this plugin messages that do not mention the bot, and set `DISCORD_REACTIONS=false` so Hermes's own processing reactions do not mark a message done before Firstmate has answered it.
@@ -89,7 +88,6 @@ For the optional pinned waiting message and its separate delivery contract, see 
 The following posting-marker, chunk-progress, and receipt rules apply to ordinary request replies.
 Unsent payloads retry after a gateway restart.
 Oversized replies split with `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900) and post as ordered Discord messages in the same thread.
-That thread is the request's topic thread when one exists, else the originating thread; a failed thread create falls back to posting in place without losing the reply.
 That split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 A transient definite send failure (HTTP 429 or 5xx) before a successful Discord response deletes the posting marker so that generation can retry.
 A permanent 4xx records a terminal failed marker so pending stops retrying that generation.
