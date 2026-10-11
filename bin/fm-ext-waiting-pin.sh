@@ -20,9 +20,9 @@
 #
 # State: state/ext-waiting-pin.json records the posted message id, the
 # channel it was posted in, whether it is pinned, and the last content hash.
-# A content hash match skips the Discord call (idempotent). A minimum
-# interval (FM_EXT_WAITING_PIN_MIN_SECS, default 60) rate-limits refreshes;
-# --force bypasses the interval but never the content-hash skip.
+# Matching pending content skips publication. A minimum interval
+# (FM_EXT_WAITING_PIN_MIN_SECS, default 60) rate-limits publication, including
+# reconciliation of unchanged delivered content; --force bypasses the interval.
 #
 # Delivery reuses the poster path: content is written as a one-shot outbox
 # payload that the gateway plugin's outbox_poster drains, through a
@@ -109,14 +109,19 @@ waiting_pin_now() {
 }
 
 # waiting_pin_board <data>: print the message body lines from durable board
-# records only. Captain calls come from tasks-axi held rows (open items only);
+# records only. Captain calls come from actionable queued captain rows;
 # PR-ready URLs come from the recorded pr= metadata fm-pr-lib.sh owns.
 # Prints nothing when there is nothing waiting.
 waiting_pin_board() {
-  local data=$1 listing rows
-  listing=$(FM_TASKS_AXI_TIMEOUT=10 fm_backlog_row_list "$data" --state held --fields held,hold_kind,hold_reason) || return 1
-  rows=$(axi_rows tasks "$listing" rows id title held hold_kind) || return 1
-  printf '%s\n' "$rows" | awk -F '\t' '$3 == "yes" && $4 == "captain" { print "CALL " $1 "\t" ($2 == "" ? $1 : $2) }'
+  local data=$1 listing rows today
+  today=$(date -u '+%Y-%m-%d') || return 1
+  listing=$(FM_TASKS_AXI_TIMEOUT=10 fm_backlog_row_list "$data" --state queued --kind captain --fields hold_kind,hold_reason,hold_until,blocked) || return 1
+  rows=$(axi_rows tasks "$listing" rows id title hold_kind hold_reason hold_until blocked) || return 1
+  printf '%s\n' "$rows" | awk -F '\t' -v today="$today" '
+    $3 == "captain" && $4 != "" && $4 != "null" && $4 != "-" && $6 == "no" &&
+      ($5 == "" || $5 == "null" || $5 == "-" || $5 <= today) {
+        print "CALL " $1 "\t" ($2 == "" ? $1 : $2)
+      }'
 }
 
 # waiting_pin_prs <state>: print PR-ready URLs from recorded task metadata.
@@ -133,8 +138,10 @@ waiting_pin_prs() {
     url=$(printf '%s\n' "$metadata" | grep '^pr=' 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$url" ] || continue
     fm_pr_url_parse "$url" >/dev/null 2>&1 || continue
-    rest=$(fm_backlog_row_show "$DATA" "$id" 2>/dev/null) || return 1
-    case "$rest" in *'state: done'*|*'not found in this backlog'*) continue ;; esac
+    if ! fm_pr_meta_kind_is "$meta" landing; then
+      rest=$(fm_backlog_row_show "$DATA" "$id" 2>/dev/null) || return 1
+      case "$rest" in *'state: done'*|*'not found in this backlog'*) continue ;; esac
+    fi
     printf 'PR %s\t%s\n' "$id" "$FM_PR_URL"
   done
   return 0
@@ -212,10 +219,11 @@ cmd_content() {
   waiting_pin_render "$now"
 }
 
-# refresh: recompute content; skip when unchanged or rate-limited; else write
+# refresh: recompute content; skip matching pending content or rate limits; write
 # a one-shot outbox payload the gateway poster drains into an edit-in-place.
 cmd_refresh() {
   local force=0 guild channel now body text hash state_path old_hash old_guild old_channel last_at min_secs age
+  local records reference outbox file pending same=0
   case "${1:-}" in ''|--force) [ "${1:-}" != "--force" ] || force=1 ;; *) fail "invalid arguments '$*'" ;; esac
   fm_ext_active "$FM_HOME" >/dev/null 2>&1 || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
   waiting_pin_target >/dev/null || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
@@ -228,23 +236,42 @@ cmd_refresh() {
   hash=$(printf '%s' "$body" | sha256sum 2>/dev/null | awk '{print $1}' \
     || printf '%s' "$body" | shasum -a 256 | awk '{print $1}') || defer "the content hash failed"
   state_path=$(waiting_pin_state_path)
+  records='{}'
   if [ -f "$state_path" ]; then
-    old_hash=$(jq -r '.content_hash // empty' "$state_path" 2>/dev/null) || old_hash=
-    last_at=$(jq -r '.refreshed_at // 0' "$state_path" 2>/dev/null) || last_at=0
-    old_guild=$(jq -r '.guild_id // empty' "$state_path" 2>/dev/null) || old_guild=
-    old_channel=$(jq -r '.channel_id // empty' "$state_path" 2>/dev/null) || old_channel=
-    if [ "$guild" = "$old_guild" ] && [ "$channel" = "$old_channel" ] && [ "$hash" = "$old_hash" ] && [ -n "$old_hash" ]; then
+    records=$(jq -c '. + {pending:false}' "$state_path") || defer "the delivery record could not be read"
+  fi
+  outbox=$(fm_ext_outbox_dir "$FM_HOME")
+  for file in "$outbox"/waiting-pin.*.json; do
+    [ -e "$file" ] || continue
+    fm_ext_private_artifact_file_valid "$outbox" "${file##*/}" 600 || defer "the pending snapshot is unsafe"
+    reference=$(jq -c '. + {pending:true}' "$file") || defer "the pending snapshot could not be read"
+    records="$records
+$reference"
+  done
+  reference=$(printf '%s\n' "$records" | jq -sc 'max_by((.snapshot_id // ((.refreshed_at // 0) * 1000000000)) | tonumber)') || defer "the refresh record could not be read"
+  old_hash=$(jq -r '.content_hash // empty' <<< "$reference")
+  old_guild=$(jq -r '.guild_id // empty' <<< "$reference")
+  old_channel=$(jq -r '.channel_id // empty' <<< "$reference")
+  last_at=$(jq -r '.recorded_at // .refreshed_at // 0' <<< "$reference")
+  pending=$(jq -r '.pending // false' <<< "$reference")
+  if [ "$guild" = "$old_guild" ] && [ "$channel" = "$old_channel" ] && [ "$hash" = "$old_hash" ] && [ -n "$old_hash" ]; then
+    same=1
+    if [ "$pending" = true ]; then
       printf 'waiting-pin: unchanged\n'
       return 0
     fi
-    if [ "$force" -eq 0 ]; then
-      min_secs=$(waiting_pin_min_secs)
-      case "$last_at" in ''|*[!0-9]*) last_at=0 ;; esac
-      age=$((now - last_at))
-      if [ "$age" -lt "$min_secs" ]; then
+  fi
+  if [ -n "$old_hash" ] && [ "$force" -eq 0 ]; then
+    min_secs=$(waiting_pin_min_secs)
+    case "$last_at" in ''|*[!0-9]*) last_at=0 ;; esac
+    age=$((now - last_at))
+    if [ "$age" -lt "$min_secs" ]; then
+      if [ "$same" -eq 1 ]; then
+        printf 'waiting-pin: unchanged\n'
+      else
         printf 'waiting-pin: rate-limited\n'
-        return 0
       fi
+      return 0
     fi
   fi
   # One-shot payload the gateway poster's waiting-pin helper drains: it posts

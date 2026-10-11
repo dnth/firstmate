@@ -732,7 +732,10 @@ def drain_outbox(
 ) -> list[str]:
     results = []
     for path in list_pending(home=home):
-        results.append(deliver_one(path, send=send, home=home, react=react))
+        try:
+            results.append(deliver_one(path, send=send, home=home, react=react))
+        except DiscordSendError:
+            results.append("failed")
     return results
 
 

@@ -105,7 +105,7 @@ def handle(request, timeout):
         result = {"id": "msg-1", "channel_id": payload["channel_id"]}
     return Response(json.dumps(result).encode())
 outbox_poster.urllib.request.urlopen = handle
-print(outbox_poster.waiting_pin_deliver(payload, home))
+print(outbox_poster.deliver_one(payload_path, home=home))
 PY
 }
 
@@ -144,7 +144,7 @@ test_2_refresh_creates_then_edits_in_place() {
   out=$(home_env "$home" "$REFRESH" refresh --force) || fail "forced refresh must succeed"
   assert_contains "$out" "refreshed" "a changed board must publish again"
   count2=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | wc -l | tr -d ' ')
-  [ "$count2" = 2 ] || fail "a changed board must publish a second payload (got $count2)"
+  [ "$count2" = 1 ] || fail "a changed board must publish one pending payload (got $count2)"
   payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | sort | tail -1)
   [ "$(stub_deliver "$home" "$payload" normal)" = "edited" ] || fail "the second refresh must edit in place"
   [ "$(jq -r .message_id "$home/state/ext-waiting-pin.json")" = "msg-1" ] \
@@ -163,9 +163,7 @@ test_3_deleted_message_recreated_once() {
   home_env "$home" "$REFRESH" refresh >/dev/null || fail "refresh must succeed"
   payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | head -1)
   [ "$(stub_deliver "$home" "$payload" normal)" = "posted-pinned" ] || fail "setup post must succeed"
-  # The message is deleted out of band; the next deliver recreates and pins.
-  payload=$(python3 -c "import json; p=json.load(open('$payload')); p['text']='After deletion'; print(json.dumps(p))" \
-    | tee "$home/recreated.json" >/dev/null; cat "$home/recreated.json" >/dev/null || true)
+  [ ! -e "$payload" ] || fail "setup delivery must retire its snapshot"
   home_env "$home" "$REFRESH" refresh --force >/dev/null || fail "forced refresh must succeed"
   payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | sort | tail -1)
   [ "$(stub_deliver "$home" "$payload" gone)" = "posted-pinned" ] || fail "a deleted message must be recreated and pinned"
@@ -237,6 +235,7 @@ test_6_missing_pin_permission_falls_back_reported() {
     || fail "the fallback must record pinned=false"
   assert_contains "$(jq -r .pin_error "$home/state/ext-waiting-pin.json")" "Manage Messages" \
     "the fallback must report the missing permission plainly"
+  home_env "$home" "$REFRESH" refresh --force >/dev/null || fail "fallback reconciliation must publish"
   payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | head -1)
   [ "$(stub_deliver "$home" "$payload" missing-pin)" = "edited" ] \
     || fail "later refreshes must keep editing the same unpinned message"
@@ -344,6 +343,19 @@ posts = sum(method == "POST" for method, _ in calls)
 pin_failure = 0
 assert poster.deliver_one(next_path, home=home) == "edited"
 assert sum(method == "POST" for method, _ in calls) == posts
+original_edge = edge
+def broken_channel(request, timeout):
+    if "/channels/444444444444444444/" in request.full_url:
+        raise urllib.error.HTTPError(request.full_url, 404, "missing channel", {}, None)
+    return original_edge(request, timeout)
+poster.urllib.request.urlopen = broken_channel
+bad = payload(8, "444444444444444444")
+good = payload(9, "555555555555555555")
+assert poster.drain_outbox(home=home) == ["failed", "posted-pinned"]
+assert bad.exists() and not good.exists()
+assert poster.waiting_pin_load(home)["channel_id"] == "555555555555555555"
+assert poster.drain_outbox(home=home) == ["superseded"]
+assert not bad.exists()
 PYTEST
   [ "$?" = 0 ] || fail "snapshot recovery checks must succeed"
   pass "8 snapshots retire, stay ordered, and retry pinning without duplicate posts"
@@ -393,6 +405,109 @@ SH
   pass "10 failed and wedged board reads defer publication"
 }
 
+test_11_unchanged_reconciliation_and_pending_limits() {
+  local home
+  home="$TMP_ROOT/c11"
+  setup_home "$home"
+  hold_call "$home" call1 "Choose the wording" waiting
+  home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token TASKS_AXI_REAL="$TASKS_AXI_BIN" \
+    "$PYTHON_BIN" - "$home" "$REFRESH" <<'PYTEST'
+import io, json, os, subprocess, sys, urllib.error
+from pathlib import Path
+import outbox_poster as poster
+home, refresh = Path(sys.argv[1]), sys.argv[2]
+mode = "normal"
+pinned = False
+posts = 0
+pins = 0
+class Response(io.BytesIO):
+    def __enter__(self): return self
+    def __exit__(self, *args): self.close()
+def edge(request, timeout):
+    global pinned, posts, pins, mode
+    method, url = request.get_method(), request.full_url
+    if method == "PATCH" and mode == "deleted":
+        mode = "normal"
+        raise urllib.error.HTTPError(url, 404, "deleted", {}, None)
+    if "/pins/" in url:
+        pins += 1
+        if mode == "forbidden":
+            raise urllib.error.HTTPError(url, 403, "forbidden", {}, None)
+        pinned = True
+        return Response(b"{}")
+    if method == "POST":
+        posts += 1
+        pinned = False
+    return Response(json.dumps({"id": f"message-{posts}", "pinned": pinned}).encode())
+poster.urllib.request.urlopen = edge
+def publish(now, force=False):
+    env = dict(os.environ, FM_EXT_NOW_OVERRIDE=str(now))
+    result = subprocess.run([refresh, "refresh"] + (["--force"] if force else []), env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+assert publish(100) == "waiting-pin: refreshed"
+assert publish(100) == "waiting-pin: unchanged"
+assert publish(200, True) == "waiting-pin: unchanged"
+assert len(poster.list_pending(home=home)) == 1
+assert poster.drain_outbox(home=home) == ["posted-pinned"]
+assert poster.list_pending(home=home) == []
+assert publish(159) == "waiting-pin: unchanged"
+assert publish(160) == "waiting-pin: refreshed"
+mode = "deleted"
+assert poster.drain_outbox(home=home) == ["posted-pinned"]
+assert posts == 2
+pinned = False
+before = pins
+assert publish(220) == "waiting-pin: refreshed"
+assert poster.drain_outbox(home=home) == ["edited"]
+assert pins == before + 1 and posts == 2
+pinned = False
+mode = "forbidden"
+assert publish(221, True) == "waiting-pin: refreshed"
+assert poster.drain_outbox(home=home) == ["edited"]
+assert not poster.waiting_pin_load(home)["pinned"]
+mode = "normal"
+assert publish(281) == "waiting-pin: refreshed"
+assert poster.drain_outbox(home=home) == ["edited"]
+assert poster.waiting_pin_load(home)["pinned"] and posts == 2
+assert publish(282, True) == "waiting-pin: refreshed"
+subprocess.run([os.environ["TASKS_AXI_REAL"], "add", "extra", "Choose another option", "--kind", "captain"], cwd=home / "data", check=True, capture_output=True)
+subprocess.run([os.environ["TASKS_AXI_REAL"], "hold", "extra", "--reason", "waiting", "--kind", "captain"], cwd=home / "data", check=True, capture_output=True)
+assert publish(283) == "waiting-pin: rate-limited"
+assert len(poster.list_pending(home=home)) == 1
+assert publish(283, True) == "waiting-pin: refreshed"
+assert len(poster.list_pending(home=home)) == 2
+PYTEST
+  [ "$?" = 0 ] || fail "normal unchanged refresh must reach reconciliation and limit publication"
+  pass "11 unchanged refresh repairs deletion, pins, and permissions without duplicate pending snapshots"
+}
+
+test_12_landing_and_dated_calls() {
+  local home out today
+  home="$TMP_ROOT/c12"
+  setup_home "$home"
+  hold_call "$home" future "Deferred future choice" waiting
+  hold_call "$home" due "Choice due today" waiting
+  hold_call "$home" past "Past choice still pending" waiting
+  today=$(date -u '+%Y-%m-%d')
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold future --kind captain --reason waiting --until 2099-01-01 >/dev/null) || fail "future hold must succeed"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold due --kind captain --reason waiting --until "$today" >/dev/null) || fail "today hold must succeed"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold past --kind captain --reason waiting --until 2000-01-01 >/dev/null) || fail "past hold must succeed"
+  printf 'kind=landing\nsecondmate=mate\npr=https://github.com/o/r/pull/44\n' > "$home/state/land-mate-44.meta"
+  record_pr "$home" ship1 "https://github.com/o/r/pull/42"
+  out=$(home_env "$home" "$REFRESH" content) || fail "landing metadata must not require a board row"
+  assert_not_contains "$out" "Deferred future choice" "future deferrals must stay out of captain calls"
+  assert_contains "$out" "Choice due today" "date gates must open on their date"
+  assert_contains "$out" "Past choice still pending" "expired held flags must not hide unresolved calls"
+  assert_contains "$out" "https://github.com/o/r/pull/44" "landing PRs must remain visible"
+  assert_contains "$out" "https://github.com/o/r/pull/42" "ordinary task PRs must remain visible"
+  printf 'pr=https://github.com/o/r/pull/45\n' > "$home/state/missing-task.meta"
+  out=$(home_env "$home" "$REFRESH" refresh 2>&1) || fail "a failed real task lookup must defer"
+  assert_contains "$out" deferred "missing task rows must still fail the refresh"
+  [ ! -d "$home/state/ext-outbox" ] || fail "task lookup failures must not publish"
+  pass "12 landing PRs and due calls render while future calls stay deferred"
+}
+
 test_1_content_lists_calls_and_prs_without_leaks
 test_2_refresh_creates_then_edits_in_place
 test_3_deleted_message_recreated_once
@@ -404,5 +519,8 @@ test_7_todo_emit_refreshes_without_blocking
 test_8_snapshot_delivery_recovery
 test_9_large_board_and_private_publication
 test_10_backend_failures_defer_without_publication
+
+test_11_unchanged_reconciliation_and_pending_limits
+test_12_landing_and_dated_calls
 
 echo "all fm-ext-waiting-pin tests passed"
