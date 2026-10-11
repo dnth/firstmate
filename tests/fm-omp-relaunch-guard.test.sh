@@ -74,6 +74,15 @@ case "${1:-}" in
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          case "$a" in
+            *.fm-launch-*)
+              script=${a#/bin/bash }
+              marker=$script
+              marker=${marker#\'}
+              script=${marker%\'}
+              [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_LAUNCH_LOG"
+              ;;
+          esac
         fi
         prev=$a
       done
