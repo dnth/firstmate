@@ -2415,7 +2415,7 @@ test_42_intake_records_origin_and_bounded_reply_context
 
 test_43_intake_copies_cached_attachments() {
   local home slug inbox dir mode
-  home="$TMP_ROOT/c43"
+  home="$TMP_ROOT/c43 Hermes Profile"
   setup_home "$home"
   mkdir -p "$home/cache/images" "$home/cache/documents"
   printf 'IMGDATA' > "$home/cache/images/pic.png"
@@ -2429,7 +2429,7 @@ json.dump([
   {"path": doc, "media_type": "", "name": "notes.txt"},
 ], open(out, "w"))
 PY
-  slug=$(home_env "$home" env FM_EXT_ATTACHMENT_CACHE_DIRS="$home/cache/images:$home/cache/documents" \
+  slug=$(home_env "$home" env HERMES_HOME="$home" \
     "$INTAKE" \
     --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
     --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
@@ -2610,4 +2610,68 @@ PY
 test_43_intake_copies_cached_attachments
 test_44_intake_skips_uncopyable_attachments
 test_45_attachment_admission_and_retention
+test_46_attachment_recovery() {
+  local home slug inbox dir rc failure
+  for failure in wake context; do
+    home="$TMP_ROOT/c46-$failure"
+    setup_home "$home"
+    mkdir -p "$home/cache/documents"
+    printf 'original attachment' > "$home/cache/documents/doc.txt"
+    write_text "$home/text.txt" "read the file"
+    jq -cn --arg path "$home/cache/documents/doc.txt" \
+      '[{path:$path, name:"doc.txt", media_type:"text/plain"}]' > "$home/manifest.json"
+    slug=$(slug_of "$RID")
+    inbox="$home/state/ext-inbox/$slug.json"
+    dir="$home/state/ext-attachments/$slug"
+    mkdir -p "$dir"
+    chmod 700 "$home/state" "$home/state/ext-attachments" "$dir"
+    printf 'partial' > "$dir/0-doc.txt"
+    chmod 600 "$dir/0-doc.txt"
+    if [ "$failure" = context ]; then
+      mkdir -p "$home/state/ext-context/$slug.json"
+      chmod 700 "$home/state/ext-context"
+    fi
+    home_env "$home" env HERMES_HOME="$home" FM_WAKE_QUEUE=/dev/full "$INTAKE" \
+      --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
+      --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
+      --secret-file "$home/config/ext-secret" --text-file "$home/text.txt" \
+      --attachment-manifest "$home/manifest.json" >"$home/out" 2>"$home/err"
+    rc=$?
+    expect_code 1 "$rc" "intake must expose the $failure failure"
+    jq -e '.attachments | length == 1' "$inbox" >/dev/null \
+      || fail "retrying interrupted staging must retain the attachment"
+    cmp -s "$home/cache/documents/doc.txt" "$dir/0-doc.txt" \
+      || fail "a published attachment must survive $failure failure with complete bytes"
+    cp "$inbox" "$home/published.json"
+    rm "$home/cache/documents/doc.txt"
+    if [ "$failure" = context ]; then
+      rmdir "$home/state/ext-context/$slug.json"
+    else
+      home_env "$home" "$POLL" >"$home/poll.out"
+      assert_present "$home/state/ext-context/$slug.offered.json" "poll must recover the published attachment request"
+    fi
+    home_env "$home" env HERMES_HOME="$home" "$INTAKE" \
+      --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
+      --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
+      --secret-file "$home/config/ext-secret" --text-file "$home/text.txt" \
+      --attachment-manifest "$home/manifest.json" >/dev/null \
+      || fail "intake must recover after $failure failure"
+    cmp -s "$inbox" "$home/published.json" \
+      || fail "retry must preserve the published request when cache files disappear"
+    [ "$(cat "$dir/0-doc.txt")" = 'original attachment' ] \
+      || fail "retry must preserve published attachment bytes"
+  done
+  printf 'oversized replacement' > "$home/cache/documents/doc.txt"
+  home_env "$home" bash -c '
+    . "$1/bin/fm-ext-lib.sh"
+    fm_ext_attachment_copy_nofollow "$2/cache/documents" doc.txt "$3/0-doc.txt" 1
+  ' _ "$ROOT" "$home" "$dir" >/dev/null 2>&1
+  rc=$?
+  expect_code 11 "$rc" "oversized replacement must fail"
+  [ "$(cat "$dir/0-doc.txt")" = 'original attachment' ] \
+    || fail "failed copying must not remove an earlier destination"
+  pass "46 interrupted staging and published attachment recovery preserve files"
+}
+
+test_46_attachment_recovery
 echo "all fm-ext-bridge tests passed"

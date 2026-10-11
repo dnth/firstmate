@@ -1441,8 +1441,8 @@ fm_ext_attachments_stage_one() {
     jq -cn --arg name "$name" --arg reason "uncached" '{name:$name, reason:$reason}' >>"$skipped"
     return 0
   fi
-  match_root=${match%% *}
-  match_rel=${match#* }
+  match_root=$(printf '%s' "$match" | jq -er '.root') || return 1
+  match_rel=$(printf '%s' "$match" | jq -er '.rel') || return 1
   [ -n "$match_root" ] && [ -n "$match_rel" ] || {
     jq -cn --arg name "$name" --arg reason "uncached" '{name:$name, reason:$reason}' >>"$skipped"
     return 0
@@ -1464,7 +1464,6 @@ fm_ext_attachments_stage_one() {
   out=$(fm_ext_attachment_copy_nofollow "$match_root" "$match_rel" "$dest" "$max_bytes")
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    rm -f -- "$dest" 2>/dev/null || true
     if [ "$rc" = 11 ]; then
       jq -cn --arg name "$name" --arg reason "too-large" '{name:$name, reason:$reason}' >>"$skipped"
     else
@@ -1483,12 +1482,12 @@ fm_ext_attachments_stage_one() {
 # regular file without following any symlink, printing the byte count.
 # Opens the cache root, then walks each path component relative to directory
 # FDs with O_NOFOLLOW, requires a regular-file fstat, creates the destination
-# with O_NOFOLLOW|O_EXCL at mode 0600, and reads at most max-bytes+1 so growth
-# after sizing still trips too-large. Exits 10 on a non-file or symlink, 11
-# past the byte cap, and 1 on any other failure.
+# as a temporary mode-0600 file, and reads at most max-bytes+1 so growth
+# after sizing still trips too-large before atomically replacing dest.
+# Exits 10 on a non-file or symlink, 11 past the byte cap, and 1 on any other failure.
 fm_ext_attachment_copy_nofollow() {
   FM_EXT_ATTACHMENT_ROOT=$1 FM_EXT_ATTACHMENT_REL=$2 FM_EXT_ATTACHMENT_DEST=$3 FM_EXT_ATTACHMENT_MAX=$4 python3 -c \
-    'import os,stat,sys
+    'import os,stat,sys,tempfile
 root=os.environ["FM_EXT_ATTACHMENT_ROOT"]; rel=os.environ["FM_EXT_ATTACHMENT_REL"]
 dest=os.environ["FM_EXT_ATTACHMENT_DEST"]
 limit=int(os.environ.get("FM_EXT_ATTACHMENT_MAX") or 0)
@@ -1520,10 +1519,7 @@ try:
     st=os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
       sys.exit(10)
-    try:
-      out=os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    except FileExistsError:
-      sys.exit(1)
+    out, temp=tempfile.mkstemp(prefix=".attachment-", dir=os.path.dirname(dest))
     try:
       got=0
       while True:
@@ -1533,9 +1529,14 @@ try:
         got+=len(chunk)
         if got > limit:
           sys.exit(11)
-        os.write(out, chunk)
+        view=memoryview(chunk)
+        while view:
+          view=view[os.write(out, view):]
+      os.replace(temp, dest)
     finally:
       os.close(out)
+      if os.path.exists(temp):
+        os.unlink(temp)
     sys.stdout.write(str(got))
   finally:
     os.close(fd)
@@ -1544,13 +1545,13 @@ finally:
 ' 2>/dev/null
 }
 
-# fm_ext_attachment_cache_match <path> <roots-file>: print "<root> <rel>"
+# fm_ext_attachment_cache_match <path> <roots-file>: print {root, rel}
 # when the path sits under one of the cache roots, else return 1.
 # The match is lexical on the unresolved path, so a swapped parent cannot
 # race it: the no-follow copy below re-verifies every component at open time
 # and refuses symlinks there. Remote-looking values fail closed.
 fm_ext_attachment_cache_match() {
-  local path=$1 roots=$2 root
+  local path=$1 roots=$2 root rel
   case "$path" in
     /*) ;;
     *) return 1 ;;
@@ -1564,7 +1565,7 @@ fm_ext_attachment_cache_match() {
         case "$rel" in
           ''|*//*|*/|/*) continue ;;
         esac
-        printf '%s %s\n' "$root" "$rel"
+        jq -cn --arg root "$root" --arg rel "$rel" '{root:$root, rel:$rel}'
         return 0
         ;;
     esac

@@ -285,16 +285,13 @@ def react_in_background(dest: dict[str, str], reaction: str) -> threading.Thread
         return None
 
 
-_INJECT_MARK = "[Content of "
-
 def raw_message_text(event: object) -> str:
     """The human-typed Discord message behind an event, without enrichment.
     The gateway prepends small text-attachment contents ("[Content of ...]")
     to event.text, so attachment bytes must never be read from there: they
     would enter the request as trusted instruction text. Prefer the raw
-    message content behind event.raw_message, and strip any injected section
-    that still made it through. The raw message is read-only here; the live
-    adapter is never touched.
+    message content behind event.raw_message. The raw message is read-only
+    here; the live adapter is never touched.
     """
     raw = getattr(event, "raw_message", None)
     for attr in ("content", "text"):
@@ -313,17 +310,6 @@ def raw_message_text(event: object) -> str:
             text = getattr(event, "text", None) or ""
             if not isinstance(text, str):
                 text = str(text)
-    lines = text.splitlines()
-    cut = None
-    for i, line in enumerate(lines):
-        if line.startswith(_INJECT_MARK):
-            cut = i
-            break
-    if cut is not None:
-        text = "\n".join(lines[cut + 1 :]) if cut + 1 < len(lines) else ""
-        text = text.lstrip("\n")
-        while text.startswith("\n"):
-            text = text[1:]
     return text
 
 

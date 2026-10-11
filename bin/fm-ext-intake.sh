@@ -266,37 +266,38 @@ if fm_ext_private_artifact_file_valid "$CONTEXT_DIR" "$SLUG.offered.json" 600; t
   exit 0
 fi
 
-if [ "$MANIFEST_PRESENT" = 1 ]; then
-  if ! ATTACH_DIR=$(fm_ext_private_request_dir_prepare "$STATE" "$FM_EXT_ATTACHMENTS_DIRNAME" "$SLUG"); then
-    die "could not prepare the attachment folder" 1
+if ! fm_ext_private_artifact_file_valid "$INBOX_DIR" "$SLUG.json" 600; then
+  if [ "$MANIFEST_PRESENT" = 1 ]; then
+    if ! ATTACH_DIR=$(fm_ext_private_request_dir_prepare "$STATE" "$FM_EXT_ATTACHMENTS_DIRNAME" "$SLUG"); then
+      die "could not prepare the attachment folder" 1
+    fi
+    if ! ATTACH_OUT=$(fm_ext_attachments_stage "$ATTACH_DIR" "$ATTACHMENT_MANIFEST"); then
+      rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
+      die "could not read the attachment manifest" 1
+    fi
+    ATTACH_KEPT_JSON=$(printf '%s\n' "$ATTACH_OUT" | jq -c '[.kept[] | {name, path: (.staged | split("/") | last), media_type, bytes}]') \
+      || ATTACH_KEPT_JSON='[]'
+    ATTACH_SKIPPED_JSON=$(printf '%s\n' "$ATTACH_OUT" | jq -c '.skipped') || ATTACH_SKIPPED_JSON='[]'
+    INBOX_JSON=$(printf '%s\n' "$INBOX_JSON" | jq -c --argjson kept "$ATTACH_KEPT_JSON" --argjson skipped "$ATTACH_SKIPPED_JSON" --arg dir "$ATTACH_DIR" '
+      .attachments = [$kept[] | {name, path: ($dir + "/" + .path), media_type, bytes}]
+      | .skipped_attachments = $skipped
+    ') || {
+      rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
+      die "could not record the attachments" 1
+    }
   fi
-  if ! ATTACH_OUT=$(fm_ext_attachments_stage "$ATTACH_DIR" "$ATTACHMENT_MANIFEST"); then
-    rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
-    die "could not read the attachment manifest" 1
-  fi
-  ATTACH_KEPT_JSON=$(printf '%s\n' "$ATTACH_OUT" | jq -c '[.kept[] | {name, path: (.staged | split("/") | last), media_type, bytes}]') \
-    || ATTACH_KEPT_JSON='[]'
-  ATTACH_SKIPPED_JSON=$(printf '%s\n' "$ATTACH_OUT" | jq -c '.skipped') || ATTACH_SKIPPED_JSON='[]'
-  INBOX_JSON=$(printf '%s\n' "$INBOX_JSON" | jq -c --argjson kept "$ATTACH_KEPT_JSON" --argjson skipped "$ATTACH_SKIPPED_JSON" --arg dir "$ATTACH_DIR" '
-    .attachments = [$kept[] | {name, path: ($dir + "/" + .path), media_type, bytes}]
-    | .skipped_attachments = $skipped
-  ') || {
-    rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
-    die "could not record the attachments" 1
-  }
-fi
 
-printf '%s\n' "$INBOX_JSON" \
-  | fm_ext_private_artifact_publish_stdin "$INBOX_DIR" "$SLUG.json" 600 \
-  || {
-    [ -z "$ATTACH_DIR" ] || rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
-    die "could not write inbox" 1
-  }
+  printf '%s\n' "$INBOX_JSON" \
+    | fm_ext_private_artifact_publish_stdin "$INBOX_DIR" "$SLUG.json" 600 \
+    || {
+      [ -z "$ATTACH_DIR" ] || rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
+      die "could not write inbox" 1
+    }
+fi
 
 printf '%s\n' "$CONTEXT_JSON" \
   | fm_ext_private_artifact_publish_stdin "$CONTEXT_DIR" "$SLUG.json" 600 \
   || {
-    [ -z "$ATTACH_DIR" ] || rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
     die "could not write destination context" 1
   }
 
@@ -307,17 +308,14 @@ case "$offer_rc" in
     if [ "$WAKE" = 1 ]; then
       if ! fm_wake_append check "$(fm_ext_wake_key ext-request "$SLUG")" "ext-request $SLUG"; then
         if ! fm_ext_offer_registry_unclaim "$STATE" "$SLUG"; then
-          [ -z "$ATTACH_DIR" ] || rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
           die "could not append the wake, and the offer marker could not be released" 1
         fi
-        [ -z "$ATTACH_DIR" ] || rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
         die "could not append the wake" 1
       fi
     fi
     ;;
   1) ;;
   *) {
-    [ -z "$ATTACH_DIR" ] || rm -rf -- "$ATTACH_DIR" 2>/dev/null || true
     die "could not claim the offer marker" 1
   } ;;
 esac

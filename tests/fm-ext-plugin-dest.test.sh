@@ -766,6 +766,10 @@ event = SimpleNamespace(
     media_urls=["/cache/documents/evil.txt"], media_types=["text/plain"])
 print("raw=" + intake.raw_message_text(event))
 print("fm=" + intake.fm_request_text(intake.raw_message_text(event)))
+literal = "Review this example:\n[Content of example.txt]:\nhello\n\n"
+for raw in (SimpleNamespace(content=literal), SimpleNamespace(text=literal), None):
+    assert intake.raw_message_text(SimpleNamespace(raw_message=raw, text=literal)) == literal
+assert intake.raw_message_text(SimpleNamespace(text=event.text, media_urls=event.media_urls)) == ""
 PY
   )
   assert_contains "$out" "raw=ship it" "the instruction text must come from the raw human message"
