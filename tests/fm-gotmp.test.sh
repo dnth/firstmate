@@ -55,6 +55,7 @@ make_fake_root() {
   # resolves sibling libraries relative to fake/bin).
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/fm-omp-process-lib.sh" "$fake/bin/fm-omp-process-lib.sh"
+  ln -s "$ROOT/bin/fm-pane-launch-lib.sh" "$fake/bin/fm-pane-launch-lib.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
@@ -152,6 +153,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/fm-omp-process-lib.sh" "$fake/bin/fm-omp-process-lib.sh"
+  ln -s "$ROOT/bin/fm-pane-launch-lib.sh" "$fake/bin/fm-pane-launch-lib.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
