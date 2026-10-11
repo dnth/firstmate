@@ -508,6 +508,29 @@ test_12_landing_and_dated_calls() {
   pass "12 landing PRs and due calls render while future calls stay deferred"
 }
 
+test_13_pr_selection_uses_state_fields() {
+  local home out
+  home="$TMP_ROOT/c13"
+  setup_home "$home"
+  record_pr "$home" state-title "https://github.com/o/r/pull/51"
+  record_pr "$home" absence-title "https://github.com/o/r/pull/52"
+  record_pr "$home" completed "https://github.com/o/r/pull/53"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi update state-title --title "Fix state: done detection" >/dev/null) || fail "state-like title must be accepted"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi update absence-title --title "Fix not found in this backlog detection" >/dev/null) || fail "absence-like title must be accepted"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi start absence-title >/dev/null) || fail "in-flight fixture must start"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi done completed >/dev/null) || fail "completed fixture must close"
+  out=$(home_env "$home" "$REFRESH" content) || fail "state-like titles must not prevent rendering"
+  assert_contains "$out" "https://github.com/o/r/pull/51" "queued PR eligibility must use the state field"
+  assert_contains "$out" "https://github.com/o/r/pull/52" "in-flight PR eligibility must use lookup status"
+  assert_not_contains "$out" "https://github.com/o/r/pull/53" "completed PRs must remain absent"
+  home_env "$home" "$REFRESH" refresh >/dev/null || fail "state-field selection must publish"
+  out=$(jq -r '.text' "$home/state/ext-outbox/"waiting-pin.*.json) || fail "published snapshot must be readable"
+  assert_contains "$out" "https://github.com/o/r/pull/51" "refresh must publish the eligible queued PR"
+  assert_contains "$out" "https://github.com/o/r/pull/52" "refresh must publish the eligible in-flight PR"
+  assert_not_contains "$out" "https://github.com/o/r/pull/53" "refresh must omit the completed PR"
+  pass "13 PR selection ignores state-like and absence-like task titles"
+}
+
 test_1_content_lists_calls_and_prs_without_leaks
 test_2_refresh_creates_then_edits_in_place
 test_3_deleted_message_recreated_once
@@ -522,5 +545,7 @@ test_10_backend_failures_defer_without_publication
 
 test_11_unchanged_reconciliation_and_pending_limits
 test_12_landing_and_dated_calls
+
+test_13_pr_selection_uses_state_fields
 
 echo "all fm-ext-waiting-pin tests passed"

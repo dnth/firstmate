@@ -128,7 +128,7 @@ waiting_pin_board() {
 # A PR counts as ready when state/<id>.meta carries a canonical pr= URL and
 # the board row for <id> is still open (not Done).
 waiting_pin_prs() {
-  local state=$1 meta id url rest metadata
+  local state=$1 meta id url metadata
   [ -d "$state" ] && [ -r "$state" ] || return 1
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
@@ -139,8 +139,12 @@ waiting_pin_prs() {
     [ -n "$url" ] || continue
     fm_pr_url_parse "$url" >/dev/null 2>&1 || continue
     if ! fm_pr_meta_kind_is "$meta" landing; then
-      rest=$(fm_backlog_row_show "$DATA" "$id" 2>/dev/null) || return 1
-      case "$rest" in *'state: done'*|*'not found in this backlog'*) continue ;; esac
+      fm_backlog_row_probe "$DATA" "$id" >/dev/null 2>&1 || return 1
+      case "${FM_BACKLOG_ROW_STATE%% *}" in
+        done) continue ;;
+        queued|in_flight) ;;
+        *) return 1 ;;
+      esac
     fi
     printf 'PR %s\t%s\n' "$id" "$FM_PR_URL"
   done
