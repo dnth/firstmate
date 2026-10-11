@@ -109,16 +109,16 @@ waiting_pin_now() {
 }
 
 # waiting_pin_board <data>: print the message body lines from durable board
-# records only. Captain calls come from actionable queued captain rows;
+# records only. Captain calls come from actionable open captain-hold annotations;
 # PR-ready URLs come from the recorded pr= metadata fm-pr-lib.sh owns.
 # Prints nothing when there is nothing waiting.
 waiting_pin_board() {
   local data=$1 listing rows today
   today=$(date -u '+%Y-%m-%d') || return 1
-  listing=$(FM_TASKS_AXI_TIMEOUT=10 fm_backlog_row_list "$data" --state queued --kind captain --fields hold_kind,hold_reason,hold_until,blocked) || return 1
-  rows=$(axi_rows tasks "$listing" rows id title hold_kind hold_reason hold_until blocked) || return 1
+  listing=$(FM_TASKS_AXI_TIMEOUT=10 fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked) || return 1
+  rows=$(axi_rows tasks "$listing" rows id title hold_kind hold_reason hold_until blocked state) || return 1
   printf '%s\n' "$rows" | awk -F '\t' -v today="$today" '
-    $3 == "captain" && $4 != "" && $4 != "null" && $4 != "-" && $6 == "no" &&
+    ($7 == "queued" || $7 == "in_flight") && $3 == "captain" && $4 != "" && $4 != "null" && $4 != "-" && $6 == "no" &&
       ($5 == "" || $5 == "null" || $5 == "-" || $5 <= today) {
         print "CALL " $1 "\t" ($2 == "" ? $1 : $2)
       }'

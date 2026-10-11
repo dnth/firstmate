@@ -531,6 +531,52 @@ test_13_pr_selection_uses_state_fields() {
   pass "13 PR selection ignores state-like and absence-like task titles"
 }
 
+test_14_existing_task_captain_holds() {
+  local home out kind phase id today payload
+  home="$TMP_ROOT/c14"
+  setup_home "$home"
+  for kind in ship scout; do
+    for phase in queued in_flight; do
+      id="$kind-$phase"
+      (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add "$id" "Approve $kind $phase work" --kind "$kind" >/dev/null) || fail "existing task fixture must be created"
+      if [ "$phase" = in_flight ]; then
+        (cd "$home/data" && PATH="$BASE_PATH" tasks-axi start "$id" >/dev/null) || fail "existing task fixture must start"
+      fi
+      home_env "$home" env FM_EXT_WAITING_PIN_MIN_SECS=0 "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason "captain approval pending" >/dev/null || fail "existing tasks must accept captain holds"
+      out=$(cd "$home/data" && PATH="$BASE_PATH" tasks-axi show "$id") || fail "held task must remain readable"
+      assert_contains "$out" "kind: $kind" "holding an existing task must preserve its kind"
+      assert_contains "$out" "state: $phase" "holding an existing task must preserve its state"
+    done
+  done
+  out=$(home_env "$home" "$REFRESH" content) || fail "open holds must render"
+  for kind in ship scout; do
+    for phase in queued in_flight; do
+      assert_contains "$out" "Approve $kind $phase work" "every open existing-task hold must be listed"
+    done
+  done
+  payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | sort | tail -1)
+  out=$(jq -r '.text' "$payload") || fail "hold lifecycle must publish a snapshot"
+  assert_contains "$out" "Approve ship in_flight work" "hold refresh must publish ship calls"
+  assert_contains "$out" "Approve scout in_flight work" "hold refresh must publish scout calls"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" hold ship-in_flight --reason "later approval" --until 2099-01-01 >/dev/null || fail "existing-task date gate must be accepted"
+  out=$(home_env "$home" "$REFRESH" content) || fail "future hold must render"
+  assert_not_contains "$out" "Approve ship in_flight work" "future existing-task holds must remain deferred"
+  today=$(date -u '+%Y-%m-%d')
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" hold ship-in_flight --reason "approval due" --until "$today" >/dev/null || fail "existing-task due date must be accepted"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi done scout-queued >/dev/null) || fail "completed fixture must close"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold ship-queued --kind external --reason "external approval" >/dev/null) || fail "external hold fixture must be accepted"
+  out=$(home_env "$home" "$REFRESH" content) || fail "due existing-task holds must render"
+  assert_contains "$out" "Approve ship in_flight work" "due existing-task holds must resurface even when held becomes no"
+  assert_not_contains "$out" "Approve scout queued work" "completed holds must stay absent"
+  assert_not_contains "$out" "Approve ship queued work" "external holds must stay absent"
+  home_env "$home" "$REFRESH" refresh --force >/dev/null || fail "corrected board must publish"
+  payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | sort | tail -1)
+  out=$(jq -r '.text' "$payload") || fail "corrected snapshot must be readable"
+  assert_contains "$out" "Approve ship in_flight work" "published snapshots must include due existing-task holds"
+  assert_not_contains "$out" "Approve scout queued work" "published snapshots must omit completed holds"
+  pass "14 existing ship and scout captain holds respect state and date gates"
+}
+
 test_1_content_lists_calls_and_prs_without_leaks
 test_2_refresh_creates_then_edits_in_place
 test_3_deleted_message_recreated_once
@@ -547,5 +593,7 @@ test_11_unchanged_reconciliation_and_pending_limits
 test_12_landing_and_dated_calls
 
 test_13_pr_selection_uses_state_fields
+
+test_14_existing_task_captain_holds
 
 echo "all fm-ext-waiting-pin tests passed"
