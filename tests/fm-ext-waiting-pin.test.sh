@@ -726,13 +726,25 @@ if [ "$1" = list ]; then
 fi
 exec "$REAL_TASKS_AXI" "$@"
 SH
-  cat > "$fake/jq" <<'SH'
+  # Pause a failed claim link until the owner releases it, reproducing the
+  # contention-to-release race before the contender validates the destination.
+  cat > "$fake/ln" <<'SH'
 #!/usr/bin/env bash
-[ "$REFRESH_ACTOR" != second ] || touch "$RACE_HOME/second-attempt"
-exec "$REAL_JQ" "$@"
+"$REAL_LN" "$@"
+rc=$?
+dest="${@: -1}"
+if [ "$REFRESH_ACTOR" = second ] && [ "$rc" -ne 0 ]; then
+  case "$dest" in
+    *.inflight)
+      touch "$RACE_HOME/second-contended"
+      while [ -e "$dest" ]; do sleep 0.05; done
+      ;;
+  esac
+fi
+exit "$rc"
 SH
-  chmod 700 "$fake/tasks-axi" "$fake/jq"
-  home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token REAL_TASKS_AXI="$TASKS_AXI_BIN" REAL_JQ="$(command -v jq)" RACE_HOME="$home" PATH="$fake:$BASE_PATH" \
+  chmod 700 "$fake/tasks-axi" "$fake/ln"
+  home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test-token REAL_TASKS_AXI="$TASKS_AXI_BIN" REAL_LN="$(command -v ln)" RACE_HOME="$home" PATH="$fake:$BASE_PATH" \
     "$PYTHON_BIN" - "$home" "$REFRESH" <<'PYTEST' || fail "overlapping refreshes must preserve capture and publication order"
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -751,7 +763,7 @@ try:
     wait_for("first-captured")
     subprocess.run([os.environ["REAL_TASKS_AXI"], "done", "choice"], cwd=home / "data", check=True, capture_output=True)
     second = launch("second")
-    wait_for("second-attempt")
+    wait_for("second-contended")
     assert not (home / "second-read").exists(), "a competing refresh read the board before obtaining the publication claim"
     (home / "first-release").touch()
     for process in (first, second):

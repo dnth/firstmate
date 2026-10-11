@@ -719,8 +719,8 @@ fm_ext_outbox_inflight_publish_once() {
 
 # CAS-claim the exclusive send marker. Returns 0 when this caller owns the
 # next send, 1 when another valid inflight marker already holds it (live
-# owner, or dead owner still inside the TTL), and 2 on validation or
-# publication failure. A dead owner whose claim is at least
+# owner, or dead owner still inside the TTL) or was released during acquisition,
+# and 2 on validation or publication failure. A dead owner whose claim is at least
 # FM_EXT_INFLIGHT_TTL_SECS (default 30) old may be stolen: the steal is
 # serialized with a momentary lock directory whose reclaim floor is
 # max(TTL, 1) so TTL=0 cannot reopen dual claim.
@@ -733,7 +733,16 @@ fm_ext_outbox_inflight_claim() {
   case "$rc" in
     0) return 0 ;;
     1) ;;
-    *) return 2 ;;
+    *)
+      # A competing owner can release after our link fails but before the
+      # publisher validates the existing marker. Retry contention when the
+      # marker is now absent; never grant ownership without a successful claim.
+      if [ ! -e "$dir/$inflight" ] && [ ! -L "$dir/$inflight" ] \
+        && fm_ext_private_artifact_dir_device "$dir" >/dev/null; then
+        return 1
+      fi
+      return 2
+      ;;
   esac
   if ! fm_ext_outbox_inflight_is_stale "$dir" "$inflight"; then
     return 1
