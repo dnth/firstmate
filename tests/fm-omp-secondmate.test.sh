@@ -144,6 +144,16 @@ case "$cmd" in
     esac
     ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     args=("$@")
     for ((i=0; i<${#args[@]}; i++)); do
       if [ "${args[$i]}" = -l ] && [ $((i + 1)) -lt ${#args[@]} ]; then

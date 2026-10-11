@@ -104,6 +104,16 @@ case "${1:-}" in
   list-windows) [ -n "${FM_FAKE_LIST_WINDOWS:-}" ] && printf '%s\n' "$FM_FAKE_LIST_WINDOWS"; exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     if [ -n "${FM_FAKE_SEND_LOG:-}" ]; then
       printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
     fi

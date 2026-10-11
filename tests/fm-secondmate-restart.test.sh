@@ -50,6 +50,16 @@ set -u
 D=$FM_FAKE_DIR
 case "${1:-}" in
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     shift
     literal=0
     target=

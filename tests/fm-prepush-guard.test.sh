@@ -55,6 +55,16 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     [ -z "${FM_FAKE_SEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
     exit 0
     ;;

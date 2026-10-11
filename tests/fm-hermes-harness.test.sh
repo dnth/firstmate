@@ -105,6 +105,16 @@ case "${1:-}" in
   kill-window) rm -f "$FM_FAKE_WINDOW_STATE"; exit 0 ;;
   has-session|new-session|set-window-option) exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     case " $* " in
       *' C-c '*) : > "$FM_FAKE_PENDING_COMMAND"; printf 'idle\n' > "$FM_FAKE_HERMES_TUI_STATE"; exit 0 ;;
     esac

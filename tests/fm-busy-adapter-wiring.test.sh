@@ -31,10 +31,29 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     prev=
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
         [ -z "${FM_FAKE_LITERAL_LOG:-}" ] || printf '%s\n' "$arg" >> "$FM_FAKE_LITERAL_LOG"
+        case "$arg" in
+          *.fm-launch-*)
+            script=${arg#/bin/bash }
+            marker=$script
+            marker=${marker#\'}
+            script=${marker%\'}
+            [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_LITERAL_LOG"
+            ;;
+        esac
         break
       fi
       prev=$arg

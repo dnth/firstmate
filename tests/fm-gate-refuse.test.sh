@@ -248,6 +248,16 @@ make_send_fakebin() {
 set -u
 case "${1:-}" in
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     shift; literal=0; target=
     while [ $# -gt 0 ]; do
       case "$1" in

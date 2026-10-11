@@ -32,6 +32,16 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
       for a in "$@"; do
         case "$a" in
@@ -68,7 +78,17 @@ case "${1:-}" in
           -t) skip_next=1; continue ;;
           -l) continue ;;
           Enter|C-m) continue ;;
-          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          *)
+            printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+            case "$a" in
+              *.fm-launch-*)
+                script=${a#/bin/bash }
+                marker=$script
+                marker=${marker#\'}
+                script=${marker%\'}
+                [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_LAUNCH_LOG"
+                ;;
+            esac ;;
         esac
       done
     fi

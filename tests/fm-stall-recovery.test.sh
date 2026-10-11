@@ -204,6 +204,16 @@ case "$cmd" in
     esac
     exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     target=""
     prev=""
     for a in "$@"; do [ "$prev" = "-t" ] && target=$a; prev=$a; done
