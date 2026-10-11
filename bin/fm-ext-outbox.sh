@@ -16,10 +16,17 @@
 #   fm-ext-outbox.sh release --slug <slug> --kind <kind> --generation <n>
 #   fm-ext-outbox.sh split [--max <n>] [--cap <n>]
 #
-# pending lists only generations that are still genuinely pending: a payload
+# pending lists dedicated waiting-pin snapshots and ordinary reply generations
+# that are still genuinely pending. For ordinary replies, a payload
 # whose generation has reached a receipt or a terminal failed marker is retired
 # on sight, so the scan cost stays flat as delivered replies accumulate instead
 # of growing with every reply ever sent.
+# pin-target prints the active configured waiting-pin destination as
+# `<guild> <channel>`; it fails when the bridge or target is unconfigured.
+# claim acquires the exclusive waiting-pin inflight marker without a posting
+# marker: exit 0 for ownership, 1 for contention, or 2 for validation or
+# publication failure. release can drop that claim even after bridge opt-out.
+# The following posting-marker and chunk-progress rules apply to ordinary replies.
 # begin CAS-claims the posting marker, then CAS-claims an exclusive inflight
 # send marker (recording owner pid and recorded_at) before returning a send
 # right. Exit 0 on a new claim, a resumable split this caller exclusively

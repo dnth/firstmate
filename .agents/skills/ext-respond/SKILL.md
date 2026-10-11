@@ -66,7 +66,7 @@ Flag destructive, irreversible, or security-sensitive asks through the normal tr
 Speak only in outcomes.
 Keep Discord replies short: every answer leads with a one-line headline, then at most a few bullets, then links to the full report or PR.
 Long detail only on request.
-Oversized replies still split into an ordered thread through the existing fallback; that split is unchanged.
+For oversized replies, consult the [local outbox delivery contract](../../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).
 Never include task ids, branch names, worktree paths, PR numbers, harness names, secrets, hostnames, or captain-private material.
 When in doubt, say less.
 

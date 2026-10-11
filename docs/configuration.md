@@ -817,7 +817,7 @@ Each chunk attempt refreshes the progress artifact before sending, so a poster s
 After `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts, `begin` records a terminal failed marker, exits 5, and appends `ext-delivery-failed <slug>` keyed `ext-delivery-failed:<slug>` for the watcher to ring.
 So an ordinary network timeout costs at most a repeated chunk and, at worst, a surfaced failure - never a silently truncated reply that no shipped command can clear.
 
-`pending` lists only generations that are still genuinely pending.
+For ordinary replies, `pending` lists only generations that are still genuinely pending.
 A payload whose generation has reached a receipt or a terminal failed marker is retired on sight, so poll cost stays flat as delivered replies accumulate instead of growing with every reply ever sent.
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
@@ -826,7 +826,7 @@ Each poll drops `state/ext-context/` destination and offer records past that win
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
-`bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id` as `ext_request=` / `ext_request_slug=` / `ext_followups=`, never `x_request=`.
+`bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id`; its header owns the recorded metadata fields.
 
 The optional pinned "Waiting on you" message lists actionable captain-held items and recorded PR URLs in one explicitly configured channel.
 `config/ext-waiting-pin` must be a regular non-symlink file whose first line is `<guild>:<channel>`, with numeric Discord IDs; there is no default channel, and the active bridge is also required.
