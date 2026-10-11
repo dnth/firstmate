@@ -40,6 +40,7 @@ config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source
 config/ext-bridge    optional presence flag enabling the sibling local Communication Officer bridge; LOCAL, gitignored, and not inherited; see docs/configuration.md "Local Communication Officer bridge"
 config/ext-secret    local ext-bridge shared secret; LOCAL, gitignored, mode 0600, not inherited
 config/ext-allowlist fail-closed Discord guild/channel/author allowlist for the local ext-bridge; LOCAL, gitignored, not inherited
+config/ext-channel   optional dedicated Discord channel id for the local ext-bridge, read by the gateway plugin per message; LOCAL, gitignored, not inherited
 config/inbox-result-targets  mode-0600 exact Hermes reply-target allowlist for trusted-local inbox results; LOCAL, gitignored, not inherited; see docs/configuration.md "Trusted-local inbox results"
 config/runpod.env    RUNPOD_API_KEY for the optional RunPod compute lifecycle beneath a remote secondmate; LOCAL, gitignored, parsed never sourced, not inherited; see docs/runpod-secondmates.md
 config/runpod/       generated SSH state plus the mode-600 workstation OMP broker bearer for RunPod-backed remote routes; LOCAL, gitignored, written only by bin/fm-runpod.sh and bin/fm-runpod-omp-auth.sh

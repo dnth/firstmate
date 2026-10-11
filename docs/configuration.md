@@ -736,19 +736,20 @@ Its opt-in, request allowlist, authority levels, audit context, correlation, chu
 
 ## Local Communication Officer bridge (config/ext-bridge)
 
-The sibling local bridge lets a dedicated Hermes Gateway plugin deliver Discord `/fm` requests into this firstmate home and post replies from a local outbox.
+The sibling local bridge lets a dedicated Hermes Gateway plugin deliver Discord requests into this firstmate home and post replies from a local outbox.
+A request arrives three ways: the `/fm` slash command, an ordinary message in the optional dedicated channel, or a Discord reply to one of Firstmate's own posted messages.
 It is a different seam from optional X mode.
 It does not use `FMX_PAIRING_TOKEN`, `https://myfirstmate.io`, hosted public-follow-up, or pending-reply.
 Firstmate core contains no Discord library.
 Discord text is untrusted and must enter through `--text-file` or stdin.
-Send `/fm` from Discord's command pop-up; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#sending-a-request) owns how to send a request and why typed `/fm` text is ignored.
+Outside the dedicated channel, send `/fm` from Discord's command pop-up; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#sending-a-request) owns how to send a request and why typed `/fm` text is ignored there.
 
 The bridge is off unless `config/ext-bridge` is a regular non-symlink file **and** `config/ext-secret` is a non-empty mode-0600 regular file.
 That presence file is the single activation authority, so the bootstrap, the watcher, the poll, the intake, and the gateway plugin always reach the same verdict in one home.
 `FM_EXT_BRIDGE` can only turn a configured bridge off: an explicit empty/`0`/`false`/`no`/`off` value opts out even when the presence file exists, and no environment value can opt in.
 A caller that could set the environment could otherwise activate the intake half of a home whose supervision half still believed the bridge was off.
 `FM_EXT_SECRET_FILE` and `FM_EXT_ALLOWLIST_FILE` may redirect those two files for tests.
-The secret and allowlist are not inherited into secondmate homes.
+The secret, allowlist, and `config/ext-channel` are not inherited into secondmate homes.
 
 `config/ext-allowlist` is fail-closed.
 Missing, empty, comments-only, unreadable, or symlink allowlists deny every request.
@@ -766,6 +767,7 @@ Every other shape - a trailing or embedded empty component such as `<guild>:` or
 The recorded request and its destination context both carry the granted `authority`, which is what the `ext-respond` skill reads.
 
 Canonical `request_id` is `discord:<guild>:<channel>:<thread>:<message>` and keeps those colons in JSON bodies.
+For a message request, `<message>` is that Discord message's id.
 For a slash command, `<message>` is the Discord interaction id and `<thread>` defaults to the channel; replies post to that same thread.
 Inside a thread, `<channel>` is the thread's parent channel, which is what the allowlist matches, and `<thread>` is the thread, so the reply posts into the thread; a top-level channel's category is never used as its channel.
 Filenames use the SHA-256 hex digest of that canonical id (`slug`).
@@ -829,6 +831,32 @@ Unsent payloads (no posting marker, no receipt, and no terminal failed marker) r
 For Hermes 0.20.0 and newer, install the gateway plugin into a dedicated gateway profile, never the crewmate TUI profile; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md) owns profile installation, compatibility verification, and destination resolution.
 Crewmate Hermes still launches as `hermes chat --tui`.
 The `ext-respond` skill owns drain, classification, lifecycle action, and local emit.
+
+### Dedicated channel and reply continuation (config/ext-channel)
+
+`config/ext-channel` names one Discord channel by id, on its own line; comments and blank lines are ignored.
+The channel path is off while that file is absent, a symlink, unreadable, empty, or names anything other than exactly one id.
+The plugin reads it for every message, so changing it needs no gateway restart.
+In that channel, and in any thread under it, every ordinary message becomes a request through `bin/fm-ext-intake.sh`, exactly like `/fm`: the same allowlist decides admission and the same rule grants the same authority.
+A typed `/fm` prefix is dropped from the request text.
+A message from an author the allowlist refuses is ignored there, with no request and no reply.
+
+Anywhere the gateway listens, a Discord reply from an allowlisted author to one of Firstmate's own posted messages also becomes a request.
+Firstmate's own posts are the Discord message ids the outbox poster recorded in chunk progress, so a reply to the general Hermes agent or to anyone else keeps its normal path; that memory follows the retention window above.
+The request records `reply_to` with the replied-to `message_id`, the `request_id` that post answered when known, and that message's `text` cut to its first 1000 characters (a trailing `…` marks a cut), so a short answer such as "yes" can be read against what it answers.
+In the dedicated channel a reply to anyone else's message is still a request, just without `reply_to`.
+
+Only a new, human-written text message or reply qualifies: bot and webhook posts (Firstmate's own included), edits, and system messages never become requests, and neither path widens who the allowlist admits.
+A message the plugin turns into a request, or ignores in the dedicated channel, is withheld from the gateway's general agent so it is not answered twice; every other message keeps its normal path.
+Every recorded request carries `origin`: `slash` for `/fm`, `message` for the two message paths.
+The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#dedicated-firstmate-channel) owns the Discord and gateway-profile setup that lets plain channel messages reach the plugin.
+
+### Delivery reactions
+
+A request that arrived as a message gets reactions on the captain's message instead of a text acknowledgement: 👀 when intake accepts it, ✅ once its `answer` or `final` reply has posted, and ⚠️ when a reply fails terminally (a permanent HTTP 4xx or a spent mid-delivery recovery budget) or the request could not be recorded.
+A slash command is a Discord interaction with no message to react to, so `/fm` keeps its short text acknowledgement instead.
+Reactions are best effort and use the same bot token and User-Agent as replies: one that fails is dropped, and the poster adds ✅ or ⚠️ only after that delivery outcome is durable, so a failed reaction can neither block nor repeat a reply.
+`bin/fm-ext-emit.sh` copies the request's `origin` into every outbox payload, which is how the poster knows whether a message exists to react to.
 
 ## Process-to-event sources (state/procevent)
 

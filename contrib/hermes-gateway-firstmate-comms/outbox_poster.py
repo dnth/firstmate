@@ -17,16 +17,28 @@ succeeds deletes the posting marker so that generation can retry.
 A permanent 4xx records a terminal failed marker so pending stops retrying.
 A posting marker without a receipt is refused so an ambiguous crash or
 transport error after Discord may have accepted the post cannot double-post.
+
+For a request that arrived as an ordinary Discord message (payload origin
+``message``), the poster reacts on that message: ``✅`` once an ``answer`` or
+``final`` reply has posted and ``⚠️`` when any reply fails terminally. A
+reaction is best effort and runs only after the delivery outcome is durable,
+so a failed reaction can neither block nor repeat a reply. A slash-command
+request has no message to react to.
+Each chunk-progress record keeps the Discord ids Firstmate posted for its
+request, which is how ``firstmate_post_for`` recognises a reply to one of
+Firstmate's own messages.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Callable
@@ -37,6 +49,7 @@ except ImportError:  # loaded from sys.path in hermetic tests
     from intake import firstmate_home, firstmate_root
 
 SendFn = Callable[[dict], dict]
+ReactFn = Callable[[str, str, str], None]
 
 _WATCHER_STARTED = False
 _WATCHER_LOCK = threading.Lock()
@@ -48,6 +61,10 @@ DISCORD_API_BASE = "https://discord.com/api/v10"
 # refuses urllib's default "Python-urllib/x.y" with HTTP 403 and the plain-text
 # body "error code: 1010" before the API, so every post failed without it.
 USER_AGENT = "DiscordBot (https://github.com/dnth/firstmate, 0.1.0)"
+REACT_SEEN = "\U0001f440"  # eyes: the request was accepted
+REACT_DONE = "\u2705"  # check mark: the answer has posted
+REACT_FAILED = "\u26a0\ufe0f"  # warning: a reply could not be delivered
+_SNOWFLAKE = re.compile(r"^[0-9]+$")
 
 
 class DiscordSendError(Exception):
@@ -374,9 +391,13 @@ def _mktemp() -> tuple[int, str]:
     return tempfile.mkstemp(prefix="fm-ext-receipt.")
 
 
+def _bot_token() -> str:
+    return os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("HERMES_DISCORD_TOKEN") or ""
+
+
 def discord_send(payload: dict) -> dict:
     """Post one outbox payload to Discord REST. No Discord library."""
-    token = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("HERMES_DISCORD_TOKEN")
+    token = _bot_token()
     if not token:
         raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
     channel = payload["thread_id"] or payload["channel_id"]
@@ -412,7 +433,86 @@ def discord_send(payload: dict) -> dict:
     }
 
 
-def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None) -> str:
+def discord_add_reaction(channel_id: str, message_id: str, emoji: str) -> None:
+    """Add this bot's reaction to one Discord message over REST.
+    Raises DiscordSendError on any failure; callers treat reactions as best
+    effort and never let one decide a delivery outcome.
+    """
+    token = _bot_token()
+    if not token:
+        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
+    if not (_SNOWFLAKE.fullmatch(channel_id or "") and _SNOWFLAKE.fullmatch(message_id or "")):
+        raise DiscordSendError("permanent", "reaction target is not a Discord message id")
+    request = urllib.request.Request(
+        f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}"
+        f"/reactions/{urllib.parse.quote(emoji, safe='')}/@me",
+        data=b"",
+        method="PUT",
+        headers={
+            "Authorization": f"Bot {token}",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+    except urllib.error.HTTPError as err:
+        raise DiscordSendError(classify_http_code(err.code), f"discord HTTP {err.code}", err.code) from err
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+
+
+def react_to_request(payload: dict, emoji: str, react: ReactFn | None = None) -> bool:
+    """React on the Discord message a request came from, best effort.
+    Only a message-origin request has a message to react to; a slash command
+    is an interaction. Returns whether the reaction was added and never raises.
+    """
+    if payload.get("origin") != "message":
+        return False
+    channel = str(payload.get("thread_id") or payload.get("channel_id") or "")
+    try:
+        (react or discord_add_reaction)(channel, str(payload.get("message_id") or ""), emoji)
+    except Exception:
+        return False
+    return True
+
+
+def firstmate_post_for(message_id: str, home: Path | None = None) -> dict | None:
+    """Return {"request_id": ...} when Firstmate's outbox posted message_id.
+    The chunk-progress records hold every Discord id the poster has sent,
+    including the leading chunks of a reply still being delivered, and they
+    follow the bridge's retention window. request_id is empty for a record
+    written before progress carried it. None means the message is not one of
+    Firstmate's own posts that this home still remembers.
+    """
+    if not _SNOWFLAKE.fullmatch(str(message_id or "")):
+        return None
+    home = home or firstmate_home()
+    outbox = state_dir(home) / "ext-outbox"
+    if outbox.is_symlink() or not outbox.is_dir():
+        return None
+    for path in sorted(outbox.glob("*.progress.json")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        posted = data.get("discord_message_ids")
+        if isinstance(posted, list) and str(message_id) in [str(item) for item in posted]:
+            request_id = data.get("request_id")
+            return {"request_id": request_id if isinstance(request_id, str) else ""}
+    return None
+
+
+def deliver_one(
+    path: Path,
+    send: SendFn | None = None,
+    home: Path | None = None,
+    react: ReactFn | None = None,
+) -> str:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -423,6 +523,8 @@ def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None
         return "retired"
     home = home or firstmate_home()
     status = begin_delivery(payload, home=home)
+    if status == "recovery-exhausted":
+        react_to_request(payload, REACT_FAILED, react)
     if status != "claimed":
         return status
     sender = send or discord_send
@@ -442,6 +544,7 @@ def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None
         return "failed"
     chunks = split["texts"]
     progress = stored or {
+        "request_id": payload["request_id"],
         "total": len(chunks),
         "posted_count": 0,
         "inflight": None,
@@ -476,6 +579,7 @@ def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None
                 fail_status = record_failed(payload, failure_reason(err), home=home)
                 if fail_status == "already-receipted":
                     return fail_status
+                react_to_request(payload, REACT_FAILED, react)
                 return "terminal-failed"
             return "mid-delivery"
         if not isinstance(receipt, dict):
@@ -496,13 +600,19 @@ def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None
         },
         home=home,
     )
+    if payload.get("kind") in ("answer", "final"):
+        react_to_request(payload, REACT_DONE, react)
     return "sent"
 
 
-def drain_outbox(send: SendFn | None = None, home: Path | None = None) -> list[str]:
+def drain_outbox(
+    send: SendFn | None = None,
+    home: Path | None = None,
+    react: ReactFn | None = None,
+) -> list[str]:
     results = []
     for path in list_pending(home=home):
-        results.append(deliver_one(path, send=send, home=home))
+        results.append(deliver_one(path, send=send, home=home, react=react))
     return results
 
 

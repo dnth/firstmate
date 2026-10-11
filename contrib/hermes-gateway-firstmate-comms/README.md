@@ -39,15 +39,38 @@ The allowlist decision lives in `bin/fm-ext-intake.sh`, which this plugin calls;
 
 ## Sending a request
 
-Send `/fm` from Discord's command pop-up: type `/fm`, pick this bot's `/fm` entry when the pop-up shows it, put the request in its box, and send.
-Typing `/fm hello` and pressing Enter before the pop-up appears sends ordinary chat text instead of the command, and the gateway ignores ordinary text that does not @mention the bot.
-For thread authorization and reply routing, see the [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).
+In the [dedicated Firstmate channel](#dedicated-firstmate-channel), just write the request as an ordinary message; every message an allowlisted author sends there, or in a thread under it, is a request.
+Anywhere the gateway listens, a Discord reply to one of Firstmate's own messages is a request too, and Firstmate sees the message you replied to, so a reply of "yes" answers that message's question.
+Outside the dedicated channel, keep the reply's mention on (Discord's default), because the gateway only hears messages that mention the bot there.
+A message request uses the [delivery reactions](../../docs/configuration.md#delivery-reactions) instead of a text acknowledgement.
+
+Anywhere else, send `/fm` from Discord's command pop-up: type `/fm`, pick this bot's `/fm` entry when the pop-up shows it, put the request in its box, and send.
+Outside the dedicated channel, typing `/fm hello` and pressing Enter before the pop-up appears sends ordinary chat text instead of the command, and the gateway ignores ordinary text that does not @mention the bot.
+A slash command is a Discord interaction rather than a message, so it cannot take reactions; `/fm` answers with the short text "Aye, captain - Firstmate has it." instead.
+For thread authorization, reply routing, and the exact rules for the channel, replies, and reactions, see the [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).
+
+## Dedicated Firstmate channel
+
+The dedicated channel is off until you set it.
+
+1. In Discord, create a text channel for Firstmate, for example `#firstmate`, in the server the bot is in.
+2. Check that the bot can View Channel, Send Messages, Read Message History, and Add Reactions there.
+3. With Developer Mode on (User Settings, Advanced), right-click the channel and pick Copy Channel ID.
+4. In the Firstmate home, write that id on its own line to `config/ext-channel`, and add a `<guild>:<channel>:<author>` line for it to `config/ext-allowlist` so your messages there carry standing authority.
+5. In the gateway profile's `.env`, add the channel id to `DISCORD_FREE_RESPONSE_CHANNELS` so Hermes hands this plugin messages that do not mention the bot, and set `DISCORD_REACTIONS=false` so Hermes's own processing reactions do not mark a message done before Firstmate has answered it.
+6. Restart the gateway service so it reads the new `.env`; `config/ext-channel` itself is read per message and needs no restart.
+
+Only the allowlist decides who may instruct Firstmate in that channel; anyone it refuses is ignored there.
+`DISCORD_REACTIONS=false` also stops the 👀 and ✅ Hermes adds to messages its general agent handles in this gateway profile.
 
 ## How it works
 
 The plugin registers slash command `fm` and the `pre_gateway_dispatch` hook.
 Hermes 0.20.x dispatches plugin commands as `handler(user_args)` with no event, so the hook binds each inbound `/fm` MessageEvent destination task-locally before dispatch and the handler consumes it in the same task.
 Concurrent identical `/fm` texts never share a destination: the binding is task-local, never a shared cache.
+The same hook turns a dedicated-channel message or a reply to a Firstmate post into a request and returns Hermes's skip action for it, so the general agent never answers it as well.
+It recognises Firstmate's posts by the Discord ids the outbox poster recorded, not by the bot's author id, because the general agent posts as the same bot.
+Message and reply cases are covered by [the destination regression test](../../tests/fm-ext-plugin-dest.test.sh).
 It writes Discord text to a temp file and execs `bin/fm-ext-intake.sh --text-file`.
 It never calls `dispatch_tool("terminal", ...)`.
 The slash handler returns a fast ack without waiting for Firstmate to finish the work.
