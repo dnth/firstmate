@@ -2410,15 +2410,18 @@ test_herdr_launch_refuses_after_nested_shell_timeout() {
   unset FM_TEST_HERDR_REFUSE_NESTED_SHELL
   unset FM_TEST_HERDR_IDLE_SHELL_PROOF_POLLS
   expect_code 1 "$status" "Herdr spawn should refuse when the nested worktree shell is not provably idle"
-  assert_contains "$out" "launch pane did not reach a proven idle shell" \
-    "Herdr nested-shell timeout did not identify the refused atomic launch"
+  # The nested re-prove refuses first: the probe submit path itself
+  # requires the idle shell, so a busy nested pane is refused with the
+  # pane tail before the atomic launch is ever attempted.
+  assert_contains "$out" "not executing shell commands" \
+    "Herdr nested-shell timeout did not identify the refused nested shell"
   assert_contains "$(cat "$LAUNCH_LOG")" "fm-treehouse-get.sh" \
     "Herdr readiness fixture did not enter its nested Treehouse shell"
   assert_contains "$(cat "$LAUNCH_LOG")" "fm-treehouse-get.sh --ready-file " \
     "Herdr readiness fixture did not use the acquisition-owned worktree handoff"
   assert_not_contains "$(cat "$LAUNCH_LOG")" "claude --dangerously-skip-permissions" \
     "Herdr spawn launched the agent without a proven idle nested shell"
-  pass "Herdr atomic launch refuses when the nested worktree shell never proves idle"
+  pass "Herdr nested re-prove refuses when the nested worktree shell never proves idle"
 }
 
 test_herdr_spawn_uses_acquisition_owned_worktree_handoff() {
