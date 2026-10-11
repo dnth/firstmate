@@ -9,8 +9,8 @@
 # In one configured channel, a single bot message lists what is waiting on
 # the captain: open captain-held board items (titles only), PRs ready for
 # the captain's merge word (full URLs), and a last-updated time. The message
-# is edited in place, never re-posted. When it was deleted or unpinned, it
-# is recreated once and the new id is recorded.
+# is edited in place. When deleted, it is recreated once and the new id is
+# recorded; when unpinned, its pin is restored.
 #
 # The bridge must be active (config/ext-bridge plus a mode-0600 secret; see
 # bin/fm-ext-lib.sh) AND the pin target must be configured
@@ -30,7 +30,7 @@
 # refresh command never touches the Discord network itself, so it stays
 # hermetic and a failed refresh never blocks Firstmate's own work: refresh
 # failures exit 0 after printing `waiting-pin: deferred <reason>`.
-set -u
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -43,6 +43,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-axi-rows-lib.sh
+. "$SCRIPT_DIR/fm-axi-rows-lib.sh"
 
 WAITING_PIN_STATE_BASENAME='ext-waiting-pin.json'
 WAITING_PIN_CONFIG_BASENAME='ext-waiting-pin'
@@ -111,53 +113,27 @@ waiting_pin_now() {
 # PR-ready URLs come from the recorded pr= metadata fm-pr-lib.sh owns.
 # Prints nothing when there is nothing waiting.
 waiting_pin_board() {
-  local data=$1 root backend listing rows
-  data=$(fm_backlog_data_absolute "$data") || return 1
-  root=$(fm_backlog_root "$data") || return 1
-  backend=$(fm_tasks_axi_backend "$root") || return 1
-  if [ "$backend" = markdown ]; then
-    file=$(fm_backlog_file "$data") || return 1
-    listing=$(cd "$root" && tasks-axi list --state held --fields held,hold_kind,hold_reason --file "$file" 2>/dev/null) || return 1
-  else
-    listing=$(cd "$root" && tasks-axi list --state held --fields held,hold_kind,hold_reason 2>/dev/null) || return 1
-  fi
-  rows=$(printf '%s\n' "$listing" | LC_ALL=C awk '
-    /^tasks\[[0-9]+\]/ { declared = 1; next }
-    /^count:/ { next }
-    /^help\[/ { exit }
-    /^task:/ { exit }
-    NF == 0 { next }
-    { print }
-  ') || true
-  [ -n "$rows" ] || return 0
-  printf '%s\n' "$rows" | while IFS=, read -r id _state _kind _repo title held hold_kind _rest; do
-    id=$(printf '%s' "$id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    title=$(printf '%s' "$title" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    held=$(printf '%s' "$held" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    hold_kind=$(printf '%s' "$hold_kind" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    [ -n "$id" ] || continue
-    [ "$held" = yes ] || continue
-    [ "$hold_kind" = captain ] || continue
-    case "$title" in '"'*) title=$(printf '%s' "$title" | sed 's/^"//;s/"$//') ;; esac
-    [ -n "$title" ] || title=$id
-    printf 'CALL %s\t%s\n' "$id" "$title"
-  done
-  return 0
+  local data=$1 listing rows
+  listing=$(FM_TASKS_AXI_TIMEOUT=10 fm_backlog_row_list "$data" --state held --fields held,hold_kind,hold_reason) || return 1
+  rows=$(axi_rows tasks "$listing" rows id title held hold_kind) || return 1
+  printf '%s\n' "$rows" | awk -F '\t' '$3 == "yes" && $4 == "captain" { print "CALL " $1 "\t" ($2 == "" ? $1 : $2) }'
 }
 
 # waiting_pin_prs <state>: print PR-ready URLs from recorded task metadata.
 # A PR counts as ready when state/<id>.meta carries a canonical pr= URL and
 # the board row for <id> is still open (not Done).
 waiting_pin_prs() {
-  local state=$1 meta id url rest
+  local state=$1 meta id url rest metadata
+  [ -d "$state" ] && [ -r "$state" ] || return 1
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
     case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
-    url=$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    metadata=$(cat "$meta") || return 1
+    url=$(printf '%s\n' "$metadata" | grep '^pr=' 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$url" ] || continue
     fm_pr_url_parse "$url" >/dev/null 2>&1 || continue
-    rest=$(fm_backlog_row_show "$DATA" "$id" 2>/dev/null) || continue
+    rest=$(fm_backlog_row_show "$DATA" "$id" 2>/dev/null) || return 1
     case "$rest" in *'state: done'*|*'not found in this backlog'*) continue ;; esac
     printf 'PR %s\t%s\n' "$id" "$FM_PR_URL"
   done
@@ -168,8 +144,8 @@ waiting_pin_prs() {
 # content hash is stable across refreshes with unchanged board state.
 waiting_pin_body() {
   local calls prs line title url
-  calls=$(waiting_pin_board "$DATA") || calls=
-  prs=$(waiting_pin_prs "$STATE") || prs=
+  calls=$(waiting_pin_board "$DATA") || return 1
+  prs=$(waiting_pin_prs "$STATE") || return 1
   if [ -z "$calls" ] && [ -z "$prs" ]; then
     printf 'Nothing waiting - all clear.\n'
     return 0
@@ -180,7 +156,7 @@ waiting_pin_body() {
       [ -n "$line" ] || continue
       title=${line#*	}
       [ -n "$title" ] || continue
-      printf -- '- %s\n' "$title" | cut -c1-200
+      printf -- '- %s\n' "$title"
     done <<< "$calls"
   fi
   if [ -n "$prs" ]; then
@@ -197,10 +173,32 @@ waiting_pin_body() {
 
 # waiting_pin_render <now>: print the full message text to stdout.
 waiting_pin_render() {
-  local now=$1 stamp
+  local now=$1 body=${2-} stamp
+  if [ "$#" -lt 2 ]; then
+    body=$(waiting_pin_body) || return 1
+  fi
   stamp=$(date -u -d "@$now" '+%Y-%m-%d %H:%M' 2>/dev/null || date -u '+%Y-%m-%d %H:%M')
-  printf 'Waiting on you (updated %s UTC)\n' "$stamp"
-  waiting_pin_body
+  printf 'Waiting on you (updated %s UTC)\n%s\n' "$stamp" "$body" | python3 -c '
+import sys
+text = sys.stdin.read().rstrip("\n")
+lines = text.splitlines()
+in_calls = False
+for index, line in enumerate(lines):
+    if line == "Open decisions:":
+        in_calls = True
+    elif line == "PRs ready for your merge word:":
+        in_calls = False
+    elif in_calls and line.startswith("- ") and len(line) > 200:
+        lines[index] = line[:199] + "…"
+text = "\n".join(lines)
+if len(text) > 2000:
+    suffix = "\n… More waiting items omitted; check the board for the full list."
+    lines = text.splitlines()
+    while lines and len("\n".join(lines)) + len(suffix) > 2000:
+        lines.pop()
+    text = "\n".join(lines) + suffix
+print(text)
+'
 }
 
 # content: print the rendered message to stdout (for tests and previews).
@@ -217,7 +215,7 @@ cmd_content() {
 # refresh: recompute content; skip when unchanged or rate-limited; else write
 # a one-shot outbox payload the gateway poster drains into an edit-in-place.
 cmd_refresh() {
-  local force=0 guild channel now body text hash state_path old_hash last_at min_secs age
+  local force=0 guild channel now body text hash state_path old_hash old_guild old_channel last_at min_secs age
   case "${1:-}" in ''|--force) [ "${1:-}" != "--force" ] || force=1 ;; *) fail "invalid arguments '$*'" ;; esac
   fm_ext_active "$FM_HOME" >/dev/null 2>&1 || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
   waiting_pin_target >/dev/null || { printf 'waiting-pin: unconfigured\n' >&2; return 3; }
@@ -226,14 +224,16 @@ cmd_refresh() {
   now=$(waiting_pin_now) || defer "the current time could not be read"
   command -v jq >/dev/null 2>&1 || defer "jq is required"
   body=$(waiting_pin_body) || defer "the board could not be read"
-  text=$(waiting_pin_render "$now") || defer "the board could not be read"
+  text=$(waiting_pin_render "$now" "$body") || defer "the board could not be read"
   hash=$(printf '%s' "$body" | sha256sum 2>/dev/null | awk '{print $1}' \
     || printf '%s' "$body" | shasum -a 256 | awk '{print $1}') || defer "the content hash failed"
   state_path=$(waiting_pin_state_path)
   if [ -f "$state_path" ]; then
     old_hash=$(jq -r '.content_hash // empty' "$state_path" 2>/dev/null) || old_hash=
     last_at=$(jq -r '.refreshed_at // 0' "$state_path" 2>/dev/null) || last_at=0
-    if [ "$hash" = "$old_hash" ] && [ -n "$old_hash" ]; then
+    old_guild=$(jq -r '.guild_id // empty' "$state_path" 2>/dev/null) || old_guild=
+    old_channel=$(jq -r '.channel_id // empty' "$state_path" 2>/dev/null) || old_channel=
+    if [ "$guild" = "$old_guild" ] && [ "$channel" = "$old_channel" ] && [ "$hash" = "$old_hash" ] && [ -n "$old_hash" ]; then
       printf 'waiting-pin: unchanged\n'
       return 0
     fi
@@ -258,25 +258,23 @@ cmd_refresh() {
 # posts or edits the pinned message, and records state/ext-waiting-pin.json.
 outbox_publish() {
   local guild=$1 channel=$2 text=$3 hash=$4 now=$5
-  local outbox payload tmp
+  local outbox snapshot payload
   outbox=$(fm_ext_outbox_dir "$FM_HOME")
-  mkdir -p "$outbox" || return 1
-  payload="$outbox/waiting-pin.$now.json"
-  tmp="$payload.tmp.$$"
-  jq -cn \
+  snapshot=$(python3 -c 'import time; print(time.time_ns())') || return 1
+  payload=$(jq -cn \
     --argjson schema_version "$FM_EXT_SCHEMA_VERSION" \
     --arg kind "waiting-pin" \
     --arg guild_id "$guild" \
     --arg channel_id "$channel" \
     --arg text "$text" \
     --arg content_hash "$hash" \
+    --arg snapshot_id "$snapshot" \
     --argjson recorded_at "$now" \
     '{schema_version:$schema_version, kind:$kind, platform:"discord",
       source:"hermes-gateway", guild_id:$guild_id, channel_id:$channel_id,
-      text:$text, content_hash:$content_hash, recorded_at:$recorded_at}' > "$tmp" || { rm -f "$tmp"; return 1; }
-  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f -- "$tmp" "$payload" || { rm -f "$tmp"; return 1; }
-  return 0
+      text:$text, content_hash:$content_hash, recorded_at:$recorded_at,
+      snapshot_id:$snapshot_id}') || return 1
+  printf '%s\n' "$payload" | fm_ext_private_artifact_publish_stdin_once "$outbox" "waiting-pin.$snapshot.json" 600
 }
 
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"

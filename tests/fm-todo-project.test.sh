@@ -172,7 +172,7 @@ run_project() {  # <home> <arguments>...
 make_lifecycle_project() {  # <home> -> echoes executable path
   local home=$1 root="$1/todo-root"
   mkdir -p "$root/bin"
-  cp "$ROOT/bin/fm-todo-project.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
+  cp "$ROOT/bin/fm-todo-project.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" "$ROOT/bin/fm-axi-rows-lib.sh" \
     "$ROOT/bin/fm-tasks-axi.sh" "$ROOT/bin/fm-backlog-transition-lib.sh" \
     "$ROOT/bin/fm-timeout-lib.sh" \
     "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-secondmate-registry-lib.sh" \

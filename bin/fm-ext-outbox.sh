@@ -148,7 +148,7 @@ case "$cmd" in
       base=${file##*/}
       case "$base" in
         *.receipt.json|*.failed.json|*.progress.json) continue ;;
-        waiting-pin.*.json) printf '%s\n' "$file"; continue ;;
+        waiting-pin.*.json) fm_ext_private_artifact_file_valid "$OUTBOX" "$base" 600 || continue; printf '%s\n' "$file"; continue ;;
       esac
       fm_ext_outbox_schema_valid "$file" || continue
       slug=$(jq -r '.slug' "$file")

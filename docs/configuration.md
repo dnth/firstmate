@@ -830,7 +830,7 @@ Unsent payloads (no posting marker, no receipt, and no terminal failed marker) r
 
 The pinned "Waiting on you" message (`config/ext-waiting-pin`) lists open captain calls and ready PR URLs in one channel.
 The file holds one `<guild>:<channel>` line (the #firstmate channel by default); without it the pin stays off.
-`bin/fm-ext-waiting-pin.sh refresh` rebuilds the content from the board and recorded PR metadata, edits the message in place, and recreates plus re-pins it when deleted or unpinned.
+`bin/fm-ext-waiting-pin.sh refresh` rebuilds the content from the board and recorded PR metadata, edits the message in place, recreates it when deleted, and restores its pin when unpinned.
 Refresh runs after board-changing events through the existing lifecycle points and is idempotent, rate-limited, and best-effort.
 When the bot lacks Manage Messages, the message stays as a single edited post and the shortfall is recorded in `state/ext-waiting-pin.json`.
 For Hermes 0.20.0 and newer, install the gateway plugin into a dedicated gateway profile, never the crewmate TUI profile; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md) owns profile installation, compatibility verification, and destination resolution.

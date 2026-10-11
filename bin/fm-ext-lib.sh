@@ -259,7 +259,7 @@ fm_ext_slug_valid() {
 
 fm_ext_kind_valid() {
   case "$1" in
-    ack|answer|followup|final|waiting-pin) return 0 ;;
+    ack|answer|followup|final) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -991,7 +991,7 @@ fm_ext_outbox_schema_valid() {
     .schema_version == $schema
     and (.request_id | type == "string" and startswith("discord:"))
     and (.slug | type == "string" and test("^[0-9a-f]{64}$"))
-    and (.kind | . == "ack" or . == "answer" or . == "followup" or . == "final" or . == "waiting-pin")
+    and (.kind | . == "ack" or . == "answer" or . == "followup" or . == "final")
     and (.generation | type == "number" and . >= 1)
     and (.platform == "discord")
     and (.source == "hermes-gateway")

@@ -522,7 +522,7 @@ def waiting_pin_http(action: str, path: str, token: str, body: dict | None = Non
     request = urllib.request.Request(
         f"{DISCORD_API_BASE}{path}",
         data=data,
-        method="GET" if body is None else ("PATCH" if action == "edit" else "POST"),
+        method={"edit": "PATCH", "post": "POST", "pin": "PUT"}[action],
         headers={
             "Authorization": f"Bot {token}",
             "Content-Type": "application/json",
@@ -557,7 +557,9 @@ def waiting_pin_store(home: Path, record: dict) -> None:
     path = waiting_pin_state_path(home)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(record), encoding="utf-8")
+    with tmp.open("w", encoding="utf-8") as stream:
+        os.chmod(tmp, 0o600)
+        stream.write(json.dumps(record))
     os.replace(tmp, path)
 
 
@@ -570,56 +572,54 @@ def waiting_pin_deliver(payload: dict, home: Path) -> str:
     text = str(payload.get("text") or "")
     if not channel or not text:
         raise DiscordSendError("permanent", "waiting-pin payload missing channel or text")
-    stored = waiting_pin_load(home)
-    message_id = str((stored or {}).get("message_id") or "")
-    if message_id and str((stored or {}).get("channel_id") or "") == channel:
+    stored = waiting_pin_load(home) or {}
+    snapshot_id = int(payload.get("snapshot_id") or int(payload.get("recorded_at") or 0) * 1_000_000_000)
+    stored_snapshot = int(stored.get("snapshot_id") or int(stored.get("refreshed_at") or 0) * 1_000_000_000)
+    if snapshot_id < stored_snapshot:
+        return "superseded"
+    guild = str(payload.get("guild_id") or "")
+    message_id = str(stored.get("message_id") or "")
+    if str(stored.get("channel_id") or "") != channel or str(stored.get("guild_id") or "") != guild:
+        message_id = ""
+    pinned = False
+    created_message = False
+    if message_id:
         try:
-            waiting_pin_http("edit", f"/channels/{channel}/messages/{message_id}", token, {"content": text})
+            edited = waiting_pin_http("edit", f"/channels/{channel}/messages/{message_id}", token, {"content": text})
+            pinned = edited.get("pinned") is True
         except DiscordSendError as err:
             if err.http_code != 404:
                 raise
             message_id = ""
-        else:
-            record = dict(stored or {})
-            record.update(
-                {
-                    "message_id": message_id,
-                    "channel_id": channel,
-                    "content_hash": str(payload.get("content_hash") or ""),
-                    "refreshed_at": int(payload.get("recorded_at") or 0),
-                }
-            )
-            waiting_pin_store(home, record)
-            return "edited"
     if not message_id:
         created = waiting_pin_http("post", f"/channels/{channel}/messages", token, {"content": text})
         message_id = str(created.get("id") or "")
         if not message_id:
             raise DiscordSendError("ambiguous", "discord post returned no message id")
+        pinned = created.get("pinned") is True
+        created_message = True
+    record = {
+        "message_id": message_id,
+        "guild_id": guild,
+        "channel_id": channel,
+        "pinned": pinned,
+        "content_hash": str(payload.get("content_hash") or ""),
+        "refreshed_at": int(payload.get("recorded_at") or 0),
+        "snapshot_id": snapshot_id,
+    }
+    waiting_pin_store(home, record)
+    if not pinned:
         try:
-            waiting_pin_http("post", f"/channels/{channel}/pins/{message_id}", token, {})
+            waiting_pin_http("pin", f"/channels/{channel}/pins/{message_id}", token, {})
         except DiscordSendError as err:
-            if err.http_code in WAITING_PIN_MISSING_PERMISSIONS:
-                record = {
-                    "message_id": message_id,
-                    "channel_id": channel,
-                    "pinned": False,
-                    "pin_error": f"missing Manage Messages (discord HTTP {err.http_code})",
-                    "content_hash": str(payload.get("content_hash") or ""),
-                    "refreshed_at": int(payload.get("recorded_at") or 0),
-                }
-                waiting_pin_store(home, record)
-                return "posted-unpinned"
-            raise
-        record = {
-            "message_id": message_id,
-            "channel_id": channel,
-            "pinned": True,
-            "content_hash": str(payload.get("content_hash") or ""),
-            "refreshed_at": int(payload.get("recorded_at") or 0),
-        }
+            if err.http_code not in WAITING_PIN_MISSING_PERMISSIONS:
+                raise
+            record["pin_error"] = f"missing Manage Messages (discord HTTP {err.http_code})"
+        else:
+            record["pinned"] = True
         waiting_pin_store(home, record)
-        return "posted-pinned"
+    if created_message:
+        return "posted-pinned" if record["pinned"] else "posted-unpinned"
     return "edited"
 
 
@@ -639,7 +639,9 @@ def deliver_one(
         return "retired"
     home = home or firstmate_home()
     if isinstance(payload.get("kind"), str) and payload["kind"] == "waiting-pin":
-        return waiting_pin_deliver(payload, home)
+        result = waiting_pin_deliver(payload, home)
+        path.unlink(missing_ok=True)
+        return result
     status = begin_delivery(payload, home=home)
     if status == "recovery-exhausted":
         react_to_request(payload, REACT_FAILED, react)
