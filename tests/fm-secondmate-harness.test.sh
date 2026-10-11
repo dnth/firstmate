@@ -429,12 +429,23 @@ test_propagate_lib() {
 # ===========================================================================
 
 # A tmux stub that accepts every subcommand and prints nothing, so no window
-# pre-exists and the spawn proceeds to write its meta. Echoes the fakebin dir.
+# pre-exists and the spawn proceeds to write its meta. Honors the spawn
+# prove-execution probe (a ready pane runs it). Echoes the fakebin dir.
 make_noop_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    touch\ */.fm-launch-probe.*)
+      marker=${a#touch }
+      marker=${marker#\'}
+      marker=${marker%\'}
+      : > "$marker"
+      ;;
+  esac
+done
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -1087,7 +1098,10 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
 "$ROOT/bin/fm-guard.sh"
 SH
     chmod +x "$fakebin/$harness"
-    launch=$(cat "$launchlog")
+    # The log holds the probe line, the short script invocation, and the
+    # staged script content: execute the staged command (last line), which is
+    # what the pane would run.
+    launch=$(tail -1 "$launchlog")
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
     case "$harness" in
       codex)

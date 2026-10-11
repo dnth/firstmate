@@ -492,8 +492,8 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
 
   out=$(run_spawn_herdr 2>&1) || fail "fresh OMP Herdr secondmate spawn failed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "/bin/bash -c" \
-    "OMP Herdr secondmate launch did not use its Bash-owned command wrapper"
+  assert_contains "$launch" "/bin/bash '" \
+    "OMP Herdr secondmate launch did not stage its Bash-owned script invocation"
   # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
   assert_not_contains "$launch" '${PATH:+' \
     "OMP Herdr secondmate launch exposed POSIX parameter expansion to the pane shell"
@@ -595,8 +595,8 @@ test_launch_and_exact_resume() {
     || fail "executable OMP fixture did not reach its first turn with setup bypassed"
   assert_contains "$launch" "FM_OMP_SESSION_POINTER=" "OMP launch did not bind the home-owned session pointer"
   assert_contains "$launch" "$HOME_DIR/state/.omp-session" "OMP launch did not retain the home-owned session pointer path"
-  assert_contains "$launch" "/bin/bash -c" \
-    "OMP launch did not use its Bash-owned command wrapper"
+  assert_contains "$launch" "/bin/bash '" \
+    "OMP launch did not stage its Bash-owned script invocation"
   # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
   assert_not_contains "$launch" '${PATH:+' \
     "OMP launch exposed POSIX parameter expansion to the pane shell"

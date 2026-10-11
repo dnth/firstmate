@@ -1489,8 +1489,8 @@ OMP_REMOTE_LAUNCH=$(grep -F 'FM_OMP_SESSION_POINTER=' "$HERDR_LOG" | tail -1 || 
 assert_contains "$OMP_REMOTE_LAUNCH" \
   "FM_OMP_BUN='\\''$REMOTE_OMP_BUN'\\'' FM_OMP_BIN='\\''$REMOTE_OMP_BIN'\\''" \
   "remote OMP pane did not receive the canonical runtime and entrypoint identities"
-assert_contains "$OMP_REMOTE_LAUNCH" "/bin/bash -c" \
-  "remote OMP pane did not keep PATH validation inside its Bash-owned command wrapper"
+assert_contains "$OMP_REMOTE_LAUNCH" "/bin/bash '" \
+  "remote OMP pane did not stage its Bash-owned script invocation"
 assert_contains "$OMP_REMOTE_LAUNCH" "PATH='\\''$REMOTE_ROOT/bin:" \
   "remote OMP pane did not put the canonical Bun directory first in PATH"
 # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
