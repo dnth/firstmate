@@ -2722,6 +2722,7 @@ test_launch_artifacts_reject_untrusted_directories() {
     . "$ROOT/bin/fm-pane-launch-lib.sh"
     local_dir="$TMP_ROOT/launch-dir-trust"
     mkdir -p "$local_dir"
+    # shellcheck disable=SC2329 # Invoked by name through the probe's submit callback.
     probe_submit() {
       touch "$local_dir/submitted"
       bash -c "$2"
@@ -2774,12 +2775,14 @@ test_launch_script_write_failure_refuses_partial_output() {
       . "$ROOT/bin/fm-pane-launch-lib.sh"
       umask 022
       before=$(umask)
+      # shellcheck disable=SC2329 # Overrides printf calls in the sourced launch writer.
       printf() {
         if { [ "$stage" = header ] && [ "$1" = '#!/bin/bash\n' ]; } ||
           { [ "$stage" = command ] && [ "${2:-}" = 'exec /usr/bin/true' ]; }; then
           builtin printf 'partial'
           return 1
         fi
+        # shellcheck disable=SC2059 # Forward the caller's format and arguments unchanged.
         builtin printf "$@"
       }
       if fm_pane_launch_write_script "$dir/scripts" 'exec /usr/bin/true' > "$dir/published"; then
