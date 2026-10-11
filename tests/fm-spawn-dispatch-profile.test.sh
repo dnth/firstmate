@@ -2717,6 +2717,54 @@ test_launch_probe_refuses_blocked_pane_with_visible_tail() {
   pass "prove-execution probe refuses a startup-prompt-blocked pane with its visible tail before any typing"
 }
 
+test_launch_artifacts_reject_untrusted_directories() {
+  (
+    . "$ROOT/bin/fm-pane-launch-lib.sh"
+    local_dir="$TMP_ROOT/launch-dir-trust"
+    mkdir -p "$local_dir"
+    probe_submit() {
+      touch "$local_dir/submitted"
+      bash -c "$2"
+    }
+    for mode in 700 755 770 707 777; do
+      dir="$local_dir/mode-$mode"
+      mkdir -m "$mode" "$dir"
+      chmod "$mode" "$dir"
+      if [ "$mode" = 700 ] || [ "$mode" = 755 ]; then
+        script=$(fm_pane_launch_write_script "$dir" 'exec /usr/bin/printf staged-ok') || fail "trusted mode $mode refused staging"
+        assert_equals staged-ok "$(bash "$script")" "trusted launch script did not execute"
+        fm_pane_launch_prove_execution tmux fixture "$dir" probe_submit || fail "trusted mode $mode refused probe"
+        rm -f "$local_dir/submitted"
+      else
+        if fm_pane_launch_write_script "$dir" 'exec /usr/bin/true' > "$local_dir/published"; then
+          fail "writable mode $mode accepted staging"
+        fi
+        [ ! -s "$local_dir/published" ] || fail "writable directory published a script"
+        if fm_pane_launch_prove_execution tmux fixture "$dir" probe_submit; then
+          fail "writable mode $mode accepted a probe"
+        fi
+        assert_absent "$local_dir/submitted" "untrusted directory received probe input"
+        shopt -s nullglob dotglob
+        remaining=("$dir/"*)
+        [ "${#remaining[@]}" -eq 0 ] || fail "untrusted directory received launch artifacts"
+      fi
+    done
+    ln -s "$local_dir/mode-700" "$local_dir/link"
+    if fm_pane_launch_write_script "$local_dir/link" 'exec /usr/bin/true'; then
+      fail "symlink accepted staging"
+    fi
+    if fm_pane_launch_prove_execution tmux fixture "$local_dir/link" probe_submit; then
+      fail "symlink accepted probe"
+    fi
+    if [ ! -O / ]; then
+      if fm_pane_launch_trusted_dir /; then
+        fail "foreign-owned directory accepted"
+      fi
+    fi
+  ) || fail "launch directory trust checks failed"
+  pass "launch artifacts require owned nonsymlink directories without group/other writes"
+}
+
 test_launch_script_write_failure_refuses_partial_output() {
   local stage dir
   for stage in header command; do
@@ -3544,6 +3592,7 @@ test_omp_worker_doorbell_observes_turns_and_recovers_parked_steer
 test_omp_worker_extension_gates_ready_on_doorbell_activation
 test_omp_spawn_requires_doorbell_handshake
 test_launch_probe_refuses_blocked_pane_with_visible_tail
+test_launch_artifacts_reject_untrusted_directories
 test_launch_script_write_failure_refuses_partial_output
 test_typed_launch_line_is_short_private_script_invocation
 test_doorbell_timeout_diagnoses_pane_tail_and_setup_hint_branches

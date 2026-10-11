@@ -45,6 +45,14 @@ fm_pane_launch_probe_nonce() {
   printf '%s' "$nonce"
 }
 
+fm_pane_launch_trusted_dir() {
+  local dir=$1 mode
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
+  mode=$(stat -c %a "$dir" 2>/dev/null) || mode=$(stat -f %Lp "$dir" 2>/dev/null) || return 1
+  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+  [ "$((8#$mode & 022))" -eq 0 ]
+}
+
 # fm_pane_launch_write_script: write <command> to a private 0700 script under
 # <dir> and print its path. The typed launch then stays a short Bash
 # invocation (well under the 1024-byte macOS canonical-mode limit) no matter
@@ -60,7 +68,7 @@ fm_pane_launch_probe_nonce() {
 fm_pane_launch_write_script() {  # <dir> <command> -> prints script path
   local dir=$1 command=$2 script old_umask
   [ -n "$dir" ] && [ -n "$command" ] || return 1
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  fm_pane_launch_trusted_dir "$dir" || return 1
   script="$dir/.fm-launch-$(fm_pane_launch_probe_nonce).sh"
   [ ! -e "$script" ] && [ ! -L "$script" ] || return 1
   # Restrictive-first: the script carries bearer-adjacent launch secrets, so
@@ -101,7 +109,7 @@ fm_pane_launch_prove_execution() {  # <backend> <target> <task-tmp> <submit-fn> 
   local polls=${FM_PANE_LAUNCH_PROBE_POLLS:-20} interval=${FM_PANE_LAUNCH_PROBE_INTERVAL:-0.5}
   local nonce marker probe i
   [ -n "$backend" ] && [ -n "$target" ] && [ -n "$task_tmp" ] && [ -n "$submit_fn" ] || return 1
-  [ -d "$task_tmp" ] && [ ! -L "$task_tmp" ] || return 1
+  fm_pane_launch_trusted_dir "$task_tmp" || return 1
   case "$polls" in ''|*[!0-9]*|0) polls=20 ;; esac
   case "$interval" in ''|*[!0-9.]*) interval=0.5 ;; esac
   nonce=$(fm_pane_launch_probe_nonce) || return 1

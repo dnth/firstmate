@@ -4136,6 +4136,16 @@ if [ -L "$TASK_TMP" ]; then
   echo "error: task temp root must not be a symlink: $TASK_TMP" >&2
   exit 1
 fi
+if [ ! -e "$TASK_TMP" ]; then
+  mkdir -m 700 -- "$TASK_TMP" || {
+    echo "error: could not create task temp root: $TASK_TMP" >&2
+    exit 1
+  }
+fi
+fm_pane_launch_trusted_dir "$TASK_TMP" || {
+  echo "error: task temp root must be owned by the current user and not group/other-writable: $TASK_TMP" >&2
+  exit 1
+}
 task_tmp_dirs=("$TASK_TMP/gotmp")
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   task_tmp_dirs+=("$TASK_TMP/omp-sessions")
