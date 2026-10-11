@@ -224,14 +224,11 @@ INBOX_JSON=$(jq -cn \
   --arg reply_text "$REPLY_TEXT" \
   --argjson reply_max "$REPLY_TEXT_MAX" \
   --argjson recorded_at "$NOW" \
-  --argjson attachments "$ATTACH_KEPT_JSON" \
-  --argjson skipped_attachments "$ATTACH_SKIPPED_JSON" \
   '{schema_version:$schema_version, request_id:$request_id, slug:$slug,
     platform:$platform, source:$source, guild_id:$guild_id,
     channel_id:$channel_id, thread_id:$thread_id, message_id:$message_id,
     author:$author, authority:$authority, origin:$origin, text:$text,
-    recorded_at:$recorded_at,
-    attachments:$attachments, skipped_attachments:$skipped_attachments}
+    recorded_at:$recorded_at}
    + if $reply_message_id == "" then {} else
        {reply_to: ({message_id:$reply_message_id,
          text: (if ($reply_text | length) > $reply_max

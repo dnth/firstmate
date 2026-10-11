@@ -2546,14 +2546,42 @@ PY
   expect_code 3 "$rc" "a denied author with attachments must be refused"
   [ -z "$(find "$home/state" -mindepth 1 2>/dev/null)" ] \
     || fail "a refused intake must copy no file and record nothing"
-  # A text-only request is unchanged: empty attachment lists.
+  # A text-only request is byte-for-byte the original shape: no attachment fields.
   write_text "$home/text.txt" "plain hello"
-  slug=$(intake_ok "$home" "plain hello" 700000000000000002)
+  slug=$(home_env "$home" env FM_EXT_NOW_OVERRIDE=1700000000 \
+    "$INTAKE" \
+    --request-id "discord:${GUILD}:${CHANNEL}:${THREAD}:700000000000000002" \
+    --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$THREAD" \
+    --message-id 700000000000000002 --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" \
+    --text-file "$home/text.txt")
   inbox="$home/state/ext-inbox/$slug.json"
-  [ "$(jq -c '.attachments' "$inbox")" = '[]' ] \
-    || fail "a text-only request must record empty attachments"
-  [ "$(jq -c '.skipped_attachments' "$inbox")" = '[]' ] \
-    || fail "a text-only request must record empty skipped_attachments"
+  jq -e 'has("attachments") | not' "$inbox" >/dev/null \
+    || fail "a text-only request must not gain an attachments field"
+  jq -e 'has("skipped_attachments") | not' "$inbox" >/dev/null \
+    || fail "a text-only request must not gain a skipped_attachments field"
+  "$PYTHON_BIN" - "$inbox" <<'PY'
+import json, sys
+record = json.load(open(sys.argv[1]))
+record.pop("recorded_at", None)
+got = json.dumps(record, sort_keys=True)
+want = json.dumps({
+  "schema_version": 1,
+  "request_id": "discord:111111111111111111:222222222222222222:333333333333333333:700000000000000002",
+  "slug": record["slug"],
+  "platform": "discord",
+  "source": "hermes-gateway",
+  "guild_id": "111111111111111111",
+  "channel_id": "222222222222222222",
+  "thread_id": "333333333333333333",
+  "message_id": "700000000000000002",
+  "author": "555555555555555555",
+  "authority": "standing",
+  "origin": "slash",
+  "text": "plain hello",
+}, sort_keys=True)
+assert got == want, "text-only inbox differs from the original shape: " + got
+PY
   # An attachment-only message with empty text still becomes a request.
   : > "$home/text.txt"
   slug=$(home_env "$home" env FM_EXT_ATTACHMENT_CACHE_DIRS="$home/cache/images" \

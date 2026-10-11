@@ -302,13 +302,17 @@ def raw_message_text(event: object) -> str:
             value = getattr(raw, attr, None)
         except Exception:
             value = None
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str):
             text = value
             break
     else:
-        text = getattr(event, "text", None) or ""
-        if not isinstance(text, str):
-            text = str(text)
+        media_urls, _media_types = event_attachments(event)
+        if media_urls:
+            text = ""
+        else:
+            text = getattr(event, "text", None) or ""
+            if not isinstance(text, str):
+                text = str(text)
     lines = text.splitlines()
     cut = None
     for i, line in enumerate(lines):
