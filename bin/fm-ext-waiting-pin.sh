@@ -101,7 +101,8 @@ waiting_pin_board() {
 
 # waiting_pin_prs <state>: print PR-ready URLs from recorded task metadata.
 # A PR counts as ready when state/<id>.meta carries a canonical pr= URL and
-# the board row for <id> is still open (not Done).
+# the board row for <id> is still open (not Done), or the metadata is a
+# retained landing record awaiting the captain's merge word.
 waiting_pin_prs() {
   local state=$1 meta id url metadata
   [ -d "$state" ] && [ -r "$state" ] || return 1

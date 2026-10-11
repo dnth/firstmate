@@ -79,6 +79,8 @@ The [local bridge configuration reference](../../docs/configuration.md#local-com
 Destination isolation, originating-thread and parent-channel routing, version diagnostics, and required hook registration are covered by [the destination regression test](../../tests/fm-ext-plugin-dest.test.sh).
 
 An outbox watcher drains `state/ext-outbox/` through `bin/fm-ext-outbox.sh`.
+For the optional pinned waiting message and its separate delivery contract, see the [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).
+The following posting-marker, chunk-progress, and receipt rules apply to ordinary request replies.
 Unsent payloads retry after a gateway restart.
 Oversized replies split with `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900) and post as ordered Discord messages in the same thread.
 That split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
