@@ -2467,7 +2467,7 @@ PY
 # --- 44. oversize, over-count, uncached, symlink, and unsafe names skip -----
 
 test_44_intake_skips_uncopyable_attachments() {
-  local home slug inbox dir
+  local home slug inbox dir want skipped_name skipped_reason
   home="$TMP_ROOT/c44"
   setup_home "$home"
   mkdir -p "$home/cache/images" "$home/evil-real"
@@ -2509,9 +2509,9 @@ PY
     || fail "the kept file must be the first cache entry"
   for want in "cdn.png uncached" "link.png not-found" "evil.png not-found" \
       "missing.png not-found" "../evil2.png unsafe-name" "big.png too-large" "extra.png over-count"; do
-    set -- $want
-    [ "$(jq -r --arg n "$1" '.skipped_attachments[] | select(.name == $n) | .reason' "$inbox")" = "$2" ] \
-      || fail "skipped $1 must be listed as $2, got: $(jq -c '.skipped_attachments' "$inbox")"
+    read -r skipped_name skipped_reason <<< "$want"
+    [ "$(jq -r --arg n "$skipped_name" '.skipped_attachments[] | select(.name == $n) | .reason' "$inbox")" = "$skipped_reason" ] \
+      || fail "skipped $skipped_name must be listed as $skipped_reason, got: $(jq -c '.skipped_attachments' "$inbox")"
   done
   [ "$(jq -r '.attachments[1].name' "$inbox")" = tiny.png ] \
     || fail "the second kept file must be tiny.png"
@@ -2662,6 +2662,7 @@ test_46_attachment_recovery() {
       || fail "retry must preserve published attachment bytes"
   done
   printf 'oversized replacement' > "$home/cache/documents/doc.txt"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   home_env "$home" bash -c '
     . "$1/bin/fm-ext-lib.sh"
     fm_ext_attachment_copy_nofollow "$2/cache/documents" doc.txt "$3/0-doc.txt" 1
