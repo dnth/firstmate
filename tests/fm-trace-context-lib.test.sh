@@ -445,7 +445,9 @@ test_herdr_spawn_executes_one_atomic_launch_with_trace_context() {
   assert_contains "$observed" "GOTMPDIR=/tmp/fm-$id/gotmp" "the launched command must receive the task GOTMPDIR"
   unit_separator=$'\x1f'
   run_count=$(awk -F "$unit_separator" '$2 == "pane" && $3 == "run" { count += 1 } END { print count + 0 }' "$log")
-  [ "$run_count" -eq 2 ] || fail "Herdr must submit treehouse setup and launch through two pane run calls (got $run_count)"
+  # Two prove-execution probes (early + nested-shell re-prove) ride the
+  # same pane run path alongside treehouse setup and the launch itself.
+  [ "$run_count" -eq 4 ] || fail "Herdr must submit treehouse setup and launch through four pane run calls incl. two probes (got $run_count)"
   launch_payload=$(awk -F "$unit_separator" '$2 == "pane" && $3 == "run" && $5 !~ /fm-treehouse-get.sh/ { print $5; exit }' "$log")
   assert_contains "$launch_payload" "GOTMPDIR=" "the recorded Herdr launch command must bind GOTMPDIR"
   assert_contains "$launch_payload" "TRACEPARENT=" "the recorded Herdr launch command must bind TRACEPARENT"
