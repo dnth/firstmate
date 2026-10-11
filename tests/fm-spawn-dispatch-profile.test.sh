@@ -3374,7 +3374,7 @@ test_claude_root_sandbox_launch_is_unattended() {
   status=$?
   expect_code 0 "$status" "sandboxed Claude spawn should succeed"$'\n'"$out"$'\n'"$(cat "$LAUNCH_LOG")"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "IS_SANDBOX=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "IS_SANDBOX=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false exec claude" \
     "sandboxed Claude launch did not carry the root bypass marker into the pane"
   project_key=$(cd "$WT_DIR" && pwd -P)
   jq -e --arg project "$project_key" '
