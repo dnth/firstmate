@@ -879,6 +879,17 @@ A message the plugin turns into a request, or ignores in the dedicated channel, 
 Every recorded request carries `origin`: `slash` for `/fm`, `message` for the two message paths.
 The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#dedicated-firstmate-channel) owns the Discord and gateway-profile setup that lets plain channel messages reach the plugin.
 
+### Topic threads (one thread per request)
+
+A top-level request's first reply creates a Discord thread on its message, named only from an explicit safe topic vocabulary with an `fm ` prefix (`fm request` when the request holds no vocabulary word), and every later `ack`/`answer`/`followup`/`final` for that request posts into the same thread, including work linked to it after the inbox is gone.
+Only vocabulary membership admits a word into the name: secrets, ids, paths, hostnames, numbers, and unfamiliar words are dropped, never redacted, so request values cannot survive in the thread name.
+A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
+A `/fm` slash request keeps its current behaviour: its replies post to its originating thread, which is the channel itself for a top-level interaction.
+A thread-creation failure (missing permission, archived parent) falls back to posting in place and never blocks or loses the reply; a later generation retries the create.
+Thread names and posts never carry task ids, branch names, paths, hostnames, secrets, or captain-private material, and a thread never widens who the allowlist admits.
+The intake records the name in the durable destination context (`bin/fm-ext-topic.sh` owns the vocabulary); the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record so every generation shares the same thread.
+The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, and unchanged-allowlist coverage.
+
 ### Delivery reactions
 
 A request that arrived as a message gets reactions on the captain's message instead of a text acknowledgement: 👀 when intake accepts it, ✅ once its `answer` or `final` reply has posted, and ⚠️ when a reply fails terminally (a permanent HTTP 4xx or a spent mid-delivery recovery budget) or the request could not be recorded.

@@ -24,8 +24,12 @@
 #
 # --origin records how the request arrived: "slash" (the default) for a /fm
 # command interaction, "message" for an ordinary Discord message, which is the
-# only kind the gateway can add reactions to. --reply-to-message-id marks a
-# request that answers one of Firstmate's own posted Discord messages: the
+# only kind the gateway can add reactions to. The destination context also
+# carries the safe-vocabulary Discord thread name from bin/fm-ext-topic.sh
+# (empty for a request that already arrived inside a thread, which keeps its
+# thread).
+# --reply-to-message-id marks a request that answers one of Firstmate's own
+# posted Discord messages: the
 # inbox record then carries reply_to {message_id, request_id, text}, with that
 # message's text cut to its first 1000 characters (a trailing ellipsis marks a
 # cut), so Firstmate can tell what a short answer such as "yes" refers to.
@@ -189,6 +193,9 @@ if [ -n "$ATTACHMENT_MANIFEST" ]; then
 fi
 [ -n "$TEXT" ] || [ "$MANIFEST_PRESENT" = 1 ] || die "text is empty"
 
+TOPIC=$(printf '%s' "$TEXT" | "$SCRIPT_DIR/fm-ext-topic.sh" --text-file - --origin "$ORIGIN" --thread-id "$THREAD_ID" --channel-id "$CHANNEL_ID") \
+  || die "could not derive the topic thread name" 1
+
 REPLY_TEXT=
 if [ -n "$REPLY_TEXT_FILE" ]; then
   [ -f "$REPLY_TEXT_FILE" ] && [ ! -L "$REPLY_TEXT_FILE" ] \
@@ -250,11 +257,13 @@ CONTEXT_JSON=$(jq -cn \
   --arg author "$AUTHOR" \
   --arg authority "$AUTHORITY" \
   --arg origin "$ORIGIN" \
+  --arg topic "$TOPIC" \
   --argjson recorded_at "$NOW" \
   '{request_id:$request_id, slug:$slug, platform:$platform, source:$source,
     guild_id:$guild_id, channel_id:$channel_id, thread_id:$thread_id,
     message_id:$message_id, author:$author, authority:$authority,
-    origin:$origin, recorded_at:$recorded_at}') \
+    origin:$origin, recorded_at:$recorded_at}
+   + if $topic == "" then {} else {topic:$topic} end') \
   || die "could not build the destination context" 1
 
 INBOX_DIR=$(fm_ext_inbox_dir)

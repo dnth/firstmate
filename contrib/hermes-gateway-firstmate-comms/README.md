@@ -43,6 +43,7 @@ In the [dedicated Firstmate channel](#dedicated-firstmate-channel), just write t
 Anywhere the gateway listens, a Discord reply to one of Firstmate's own messages is a request too, and Firstmate sees the message you replied to, so a reply of "yes" answers that message's question.
 Outside the dedicated channel, keep the reply's mention on (Discord's default), because the gateway only hears messages that mention the bot there.
 A message request uses the [delivery reactions](../../docs/configuration.md#delivery-reactions) instead of a text acknowledgement.
+The first reply to a top-level message creates a [topic thread](../../docs/configuration.md#topic-threads-one-thread-per-request) on that message, named only from the safe topic vocabulary, and every later reply for that request posts into the same thread; a request inside a thread stays in that thread.
 
 Anywhere else, send `/fm` from Discord's command pop-up: type `/fm`, pick this bot's `/fm` entry when the pop-up shows it, put the request in its box, and send.
 For files attached to ordinary message requests, see the [attachment handling contract](../../docs/configuration.md#discord-attachments).
@@ -87,6 +88,7 @@ For the optional pinned waiting message and its separate delivery contract, see 
 The following posting-marker, chunk-progress, and receipt rules apply to ordinary request replies.
 Unsent payloads retry after a gateway restart.
 Oversized replies split with `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900) and post as ordered Discord messages in the same thread.
+That thread is the request's topic thread when one exists, else the originating thread; a failed thread create falls back to posting in place without losing the reply.
 That split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 A transient definite send failure (HTTP 429 or 5xx) before a successful Discord response deletes the posting marker so that generation can retry.
 A permanent 4xx records a terminal failed marker so pending stops retrying that generation.

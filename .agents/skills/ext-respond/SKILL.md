@@ -106,4 +106,6 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
    Reusing a generation is the idempotency guard.
 
 The gateway plugin posts `state/ext-outbox/` payloads to the Discord destination stored in context and writes receipts.
+For a top-level request the first reply creates a topic thread on its message and every later reply for that request posts into the same thread; a request inside a thread stays in that thread.
+See [Topic threads](../../../docs/configuration.md#topic-threads-one-thread-per-request).
 Firstmate never talks to Discord itself.
