@@ -42,7 +42,7 @@ A missing or unrecognized `authority` value is treated as `confirm`.
 
 - **Work that completes now** - emit **one** `answer` reporting the outcome.
 - **Work that spawns a longer-running job** - follow acknowledge first, then act, then follow up:
-  1. Emit an immediate `ack` through `bin/fm-ext-emit.sh` (the gateway already acknowledged receipt with a short `/fm` text or a 👀 reaction; this outbox ack is the durable Discord thread update).
+  1. Emit an immediate `ack` through `bin/fm-ext-emit.sh`; this outbox ack is the durable Discord thread update, independent of the gateway's best-effort receipt acknowledgement.
   2. Dispatch the work through the normal lifecycle right away.
   3. Link the spawned task **before** clearing the inbox: `bin/fm-ext-link.sh <task-id> <request_id>`.
      This records `ext_request=`, not `x_request=`.
@@ -50,7 +50,7 @@ A missing or unrecognized `authority` value is treated as `confirm`.
      The terminal outcome uses `--kind final`.
      Duplicate generation is a no-op.
 
-A request whose `origin` is `message` shows ✅ on the captain's message only once its `answer` or `final` posts, so finish every request that needs a reply with one of those kinds.
+Finish every request that needs a reply with `answer` or `final`; the [delivery reaction contract](../../../docs/configuration.md#delivery-reactions) owns how completion is shown on Discord.
 
 Every drained request sorts into one of three cases:
 
@@ -78,7 +78,7 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
 1. **Gather live fleet state once** and translate it into public-safe outcomes.
 2. **Drain every pending request.** For each `state/ext-inbox/<slug>.json`:
    a. Read `request_id`, `text`, `author`, and destination ids.
-      When `reply_to` is present, the author replied to one of Firstmate's own posts: read `reply_to.text` (the first 1000 characters of that post) to resolve what a short answer such as "yes" refers to, and use `reply_to.request_id`, the earlier request that post answered, to find any task linked to it.
+      When `reply_to` is present, read `reply_to.text` to resolve what a short answer such as "yes" refers to, and use `reply_to.request_id` when present to find any task linked to the earlier request; the [reply-context contract](../../../docs/configuration.md#dedicated-channel-and-reply-continuation-configext-channel) owns its fields and bounds.
       The reply carries its own `authority`; the earlier request's authority never transfers to it.
       Ignore unknown extra fields.
    b. Classify as actionable, question, or pure acknowledgment.

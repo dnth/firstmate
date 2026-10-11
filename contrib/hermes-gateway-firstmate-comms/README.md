@@ -42,7 +42,7 @@ The allowlist decision lives in `bin/fm-ext-intake.sh`, which this plugin calls;
 In the [dedicated Firstmate channel](#dedicated-firstmate-channel), just write the request as an ordinary message; every message an allowlisted author sends there, or in a thread under it, is a request.
 Anywhere the gateway listens, a Discord reply to one of Firstmate's own messages is a request too, and Firstmate sees the message you replied to, so a reply of "yes" answers that message's question.
 Outside the dedicated channel, keep the reply's mention on (Discord's default), because the gateway only hears messages that mention the bot there.
-A message request gets reactions instead of a text acknowledgement: 👀 when Firstmate has taken it, ✅ when the answer has posted, and ⚠️ when a reply could not be delivered or the request could not be recorded.
+A message request uses the [delivery reactions](../../docs/configuration.md#delivery-reactions) instead of a text acknowledgement.
 
 Anywhere else, send `/fm` from Discord's command pop-up: type `/fm`, pick this bot's `/fm` entry when the pop-up shows it, put the request in its box, and send.
 Outside the dedicated channel, typing `/fm hello` and pressing Enter before the pop-up appears sends ordinary chat text instead of the command, and the gateway ignores ordinary text that does not @mention the bot.
