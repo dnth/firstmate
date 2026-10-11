@@ -68,10 +68,14 @@ fm_pane_launch_write_script() {  # <dir> <command> -> prints script path
   # umask. Create with umask 077 (0600), write, then chmod to 0700.
   old_umask=$(umask)
   umask 077
-  {
-    printf '#!/bin/bash\n'
-    printf '%s\n' "$command"
-  } > "$script"
+  if ! {
+    printf '#!/bin/bash\n' &&
+      printf '%s\n' "$command"
+  } > "$script"; then
+    umask "$old_umask"
+    rm -f "$script"
+    return 1
+  fi
   umask "$old_umask"
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   chmod 700 "$script" || return 1
@@ -122,7 +126,7 @@ fm_pane_launch_prove_execution() {  # <backend> <target> <task-tmp> <submit-fn> 
 fm_pane_launch_tail() {  # <backend> <target> <lines> [label]
   local backend=$1 target=$2 lines=${3:-15} label=${4:-pane} tail
   case "$lines" in ''|*[!0-9]*|0) lines=15 ;; esac
-  tail=$(fm_backend_capture "$backend" "$target" "$lines" 2>/dev/null || true)
+  tail=$(fm_backend_capture "$backend" "$target" "$lines" "$label" 2>/dev/null || true)
   if [ -z "$tail" ]; then
     printf 'pane %s of %s is unreadable; cannot show its visible state' "$label" "$target"
     return 0

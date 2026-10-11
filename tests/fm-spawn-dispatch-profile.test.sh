@@ -2717,6 +2717,37 @@ test_launch_probe_refuses_blocked_pane_with_visible_tail() {
   pass "prove-execution probe refuses a startup-prompt-blocked pane with its visible tail before any typing"
 }
 
+test_launch_script_write_failure_refuses_partial_output() {
+  local stage dir
+  for stage in header command; do
+    dir="$TMP_ROOT/write-failure-$stage"
+    mkdir -p "$dir/scripts"
+    (
+      . "$ROOT/bin/fm-pane-launch-lib.sh"
+      umask 022
+      before=$(umask)
+      printf() {
+        if { [ "$stage" = header ] && [ "$1" = '#!/bin/bash\n' ]; } ||
+          { [ "$stage" = command ] && [ "${2:-}" = 'exec /usr/bin/true' ]; }; then
+          builtin printf 'partial'
+          return 1
+        fi
+        builtin printf "$@"
+      }
+      if fm_pane_launch_write_script "$dir/scripts" 'exec /usr/bin/true' > "$dir/published"; then
+        fail "$stage write failure published a launch script"
+      fi
+      unset -f printf
+      assert_equals "$before" "$(umask)" "$stage failure did not restore umask"
+      [ ! -s "$dir/published" ] || fail "$stage failure published a path"
+      shopt -s nullglob dotglob
+      remaining=("$dir/scripts/"*)
+      [ "${#remaining[@]}" -eq 0 ] || fail "$stage failure left a partial script"
+    ) || fail "$stage write failure did not fail closed"
+  done
+  pass "launch script write failures restore umask and remove partial scripts"
+}
+
 test_typed_launch_line_is_short_private_script_invocation() {
   local rec id out status launch typed tasktmp script mode tmpdir
   id=$(profile_id profile-typed-bound-omp)
@@ -3513,6 +3544,7 @@ test_omp_worker_doorbell_observes_turns_and_recovers_parked_steer
 test_omp_worker_extension_gates_ready_on_doorbell_activation
 test_omp_spawn_requires_doorbell_handshake
 test_launch_probe_refuses_blocked_pane_with_visible_tail
+test_launch_script_write_failure_refuses_partial_output
 test_typed_launch_line_is_short_private_script_invocation
 test_doorbell_timeout_diagnoses_pane_tail_and_setup_hint_branches
 test_nested_shell_blocked_after_treehouse_handoff_refuses
