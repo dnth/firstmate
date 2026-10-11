@@ -1015,7 +1015,7 @@ test_raw_non_omp_launches_keep_their_existing_escape_hatch() {
   expect_code 0 "$status" "lookalike non-OMP raw command should still launch"
   assert_contains "$out" "spawned $id harness=custom-omp-agent" \
     "lookalike non-OMP raw command lost its executable identity"
-  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' /usr/bin/env $RAW_DIRECT_TRUE --legacy" \
+  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' exec /usr/bin/env $RAW_DIRECT_TRUE --legacy" \
     "lookalike non-OMP raw launch changed"
   pass "lookalike non-OMP raw launches preserve the escape hatch"
 }
@@ -1040,7 +1040,7 @@ SH
   unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
   expect_code 0 "$status" "raw direct non-OMP launch should bypass an ambient pane function"
   assert_absent "$CASE_DIR/raw-omp-executed" "ambient pane function executed the harmless fake OMP"
-  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' /usr/bin/env $RAW_DIRECT_TRUE --legacy" \
+  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' exec /usr/bin/env $RAW_DIRECT_TRUE --legacy" \
     "raw direct non-OMP launch did not use the alias-safe command form"
   pass "raw direct non-OMP launches bypass ambient pane aliases and functions"
 }
@@ -1051,17 +1051,26 @@ test_raw_non_omp_launches_preserve_plain_assignments() {
   rec=$(make_spawn_case profile-raw-assignment claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  cat > "$CASE_DIR/pane-env" <<'SH'
+touch "$FM_TEST_RAW_SHELL_STARTED"
+trap '[ "$(cat "$FM_TEST_RAW_EXECUTION_LOG")" != bar ] || touch "$FM_TEST_RAW_SHELL_EXIT"' EXIT
+SH
+  export FM_TEST_RAW_SHELL_STARTED="$CASE_DIR/shell-started"
+  export FM_TEST_PANE_BASH_ENV="$CASE_DIR/pane-env"
+  export FM_TEST_RAW_SHELL_EXIT="$CASE_DIR/shell-exited"
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "FOO=bar command -- $RAW_DIRECT_PRINTENV FOO")
   status=$?
-  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG FM_TEST_PANE_BASH_ENV FM_TEST_RAW_SHELL_EXIT FM_TEST_RAW_SHELL_STARTED
+  assert_present "$CASE_DIR/shell-started" "raw launch did not execute the instrumented shell"
+  assert_absent "$CASE_DIR/shell-exited" "raw launch retained a Bash parent instead of replacing it"
   expect_code 0 "$status" "raw direct non-OMP launch should preserve a plain assignment"
   [ "$(cat "$CASE_DIR/raw-execution.log")" = bar ] \
     || fail "raw direct non-OMP launch did not pass its assignment to the executable: $(cat "$CASE_DIR/raw-execution.log")"
-  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' /usr/bin/env FOO=bar $RAW_DIRECT_PRINTENV FOO" \
+  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' exec /usr/bin/env FOO=bar $RAW_DIRECT_PRINTENV FOO" \
     "raw direct non-OMP assignment launch was not normalized safely"
   pass "raw direct non-OMP launches preserve plain assignments"
 }

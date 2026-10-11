@@ -1080,7 +1080,9 @@ test_herdr_drift_refuses_when_shell_wont_go() {
 
   run_spawn "$CASE_DIR" "$HOME_DIR" "$id"
   [ "$SPAWN_STATUS" -ne 0 ] || fail "a herdr pane whose shell cannot be told to return should refuse; got: $SPAWN_OUT"
-  assert_contains "$SPAWN_OUT" "could not be told to return" "unrecoverable drift did not refuse with the cd reason"
+  assert_contains "$SPAWN_OUT" "not executing shell commands" "unrecoverable drift did not refuse with the proof reason"
+  assert_contains "$SPAWN_OUT" "pane tail:" "unrecoverable drift did not include pane diagnostics"
+  [ ! -s "$LAUNCH_LOG" ] || fail "busy retained pane received relaunch input"
   pass "fm-spawn --relaunch: a herdr shell that cannot return to the worktree refuses"
 }
 

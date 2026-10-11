@@ -1844,7 +1844,7 @@ raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target ind
   local command_p=$1 assignment_count=$2 target_index=$3 lookup_path execution_path path_entry entry target target_quoted index
   shift 3
   local -a words=("$@") lookup_entries
-  RAW_LAUNCH_NORMALIZED=/usr/bin/env
+  RAW_LAUNCH_NORMALIZED='exec /usr/bin/env'
   for ((index = 0; index < assignment_count; index++)); do
     RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
   done
@@ -4227,9 +4227,7 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     case "$BACKEND" in
       tmux) spawn_probe_launch_execution "$T" "$W" ;;
       herdr)
-        if fm_backend_herdr_pane_idle_foreground_shell_pid "$HERDR_SES" "$HERDR_PANE_ID" >/dev/null 2>&1; then
-          spawn_probe_launch_execution "$T" "$W"
-        fi
+        spawn_probe_launch_execution "$T" "$W"
         ;;
     esac
     relaunch_worktree_real=$(real_path_or_raw "$WT")
