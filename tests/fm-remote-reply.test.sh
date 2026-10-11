@@ -695,12 +695,12 @@ pass "AC4: ensure-armed repairs a live route and skips a suspended one"
 # Retirement still refuses while an unhandled capture exists, then succeeds
 # once it is handled and removes the cursor. The route is still armed from the
 # ensure-armed case above.
-# Hold the lifecycle lock so autohandle parks (rc75) and the capture stays
-# un-ingested for the refusal.
-hold_lifecycle_lock ios
-printf 'done: zz-retire-guard\n' >> "$REMOTE/state/parent-replies.status"
+# A missing referenced document keeps the capture un-ingested until the
+# refusal is checked, even if the capturing runner's autohandle is still in flight.
+printf 'done: zz-retire-guard (data/reply/retire-guard.md)\n' >> "$REMOTE/state/parent-replies.status"
 capture_delta 10
-release_lifecycle_lock
+assert_absent "$PARENT/state/procevent-inbox/$SID.10.handled" \
+  "the retirement fixture's capture was already handled"
 set +e
 remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-refused.out" 2>&1
 retire_rc=$?
@@ -708,7 +708,8 @@ set -e
 [ "$retire_rc" -ne 0 ] || fail "retire succeeded with an unhandled captured reply"
 assert_contains "$(cat "$TMP_ROOT/retire-refused.out")" 'unhandled' \
   "the retirement refusal did not name the pending capture"
-# A reconcile retries the parked capture through the detached autohandle.
+# Restore the document so reconcile can handle the pending capture.
+printf '# Retirement guard reply\n' > "$REMOTE/data/reply/retire-guard.md"
 remote_env "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
 wait_handled 10
 remote_env "$ADAPTER" retire ios > /dev/null
