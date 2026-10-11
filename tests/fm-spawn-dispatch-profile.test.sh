@@ -2686,9 +2686,13 @@ test_launch_probe_refuses_blocked_pane_with_visible_tail() {
     export FM_TEST_PROBE_SWALLOW=1
     export FM_TEST_PROBE_POLLS=2
     export FM_TEST_PROBE_INTERVAL=0.1
-    FM_FAKE_PANE_TAIL="[oh-my-zsh] Would you like to update? [Y/n]" \
-      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-        $([ "$backend" = herdr ] && printf '%s' "--backend herdr"))
+    export FM_FAKE_PANE_TAIL="[oh-my-zsh] Would you like to update? [Y/n]"
+    if [ "$backend" = herdr ]; then
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend herdr)
+    else
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    fi
+    unset FM_FAKE_PANE_TAIL
     status=$?
     unset FM_TEST_PROBE_SWALLOW FM_TEST_PROBE_POLLS FM_TEST_PROBE_INTERVAL
     expect_code 1 "$status" "$backend spawn into a startup-prompt-blocked pane must refuse"
