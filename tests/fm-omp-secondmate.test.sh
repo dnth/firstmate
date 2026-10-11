@@ -22,11 +22,10 @@ cleanup() {
 trap cleanup EXIT
 
 resolve_staged_omp_launch() { # <typed invocation> -> prints staged script content
-  local invocation=$1 script quote pat
+  local invocation=$1 script quote
   quote=$(printf '\x27')
-  pat="/bin/bash ${quote}*${quote}"
   case "$invocation" in
-    $pat) : ;;
+    "/bin/bash "*"$quote") : ;;
     *) fail "expected a staged launch invocation" ;;
   esac
   script=${invocation#/bin/bash }
