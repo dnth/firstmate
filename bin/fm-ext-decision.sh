@@ -185,6 +185,23 @@ post_field() {  # <stem> <jq filter>
   jq -r "($2) // empty | tostring" "$OUTBOX/$1.progress.json" 2>/dev/null
 }
 
+# post_thread <stem>: the Discord thread or channel the post actually lives in.
+# The poster records a topic thread it opened for the request in the post's
+# chunk progress; otherwise the post went where the request came from.
+post_thread() {
+  local thread
+  thread=$(post_field "$1" '.topic_thread_id')
+  if [ -z "$thread" ]; then
+    thread=$(post_field "$1" '.request_id')
+    thread=${thread#discord:*:*:}
+    thread=${thread%%:*}
+  fi
+  case "$thread" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$thread"
+}
+
 settled() { [ -f "$OUTBOX/$1.settled.json" ]; }
 settle_text() { jq -r '.text // empty' "$OUTBOX/$1.settled.json" 2>/dev/null; }
 sent() { [ -f "$OUTBOX/$1.sent.json" ]; }
@@ -310,8 +327,10 @@ settle_if_closed() {
 }
 
 # send_request <stem> <message-id> <text> <decision-json>: one request through
-# the same intake every Discord path uses, at the clicker's own authority. The
-# request id is fixed by its caller, so sending it again files nothing new.
+# the same intake every Discord path uses, at the clicker's own authority,
+# filed from the thread the post lives in so Firstmate answers it there, like
+# a typed message in that thread. The request id is fixed by its caller, so
+# sending it again files nothing new.
 send_request() {
   local stem=$1 message=$2 dir rc request rest guild channel thread
   request=$(post_field "$stem" '.request_id')
@@ -319,8 +338,7 @@ send_request() {
   guild=${rest%%:*}
   rest=${rest#*:}
   channel=${rest%%:*}
-  rest=${rest#*:}
-  thread=${rest%%:*}
+  thread=$(post_thread "$stem") || return 1
   dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-ext-decision.XXXXXX") || return 1
   printf '%s\n' "$3" > "$dir/text"
   printf '%s\n' "$4" > "$dir/decision.json"
@@ -378,8 +396,7 @@ command_click() {
   [ "${rest%%:*}" = "$GUILD_ID" ] || notice 6 "$EXPIRED"
   rest=${rest#*:}
   CHANNEL=${rest%%:*}
-  rest=${rest#*:}
-  [ "${rest%%:*}" = "$CHAT_ID" ] || notice 6 "$EXPIRED"
+  [ "$(post_thread "$stem")" = "$CHAT_ID" ] || notice 6 "$EXPIRED"
   DECISION_KEY=$(post_field "$stem" '.decision.key')
   fm_ext_decision_key_valid "$DECISION_KEY" || notice 6 "$EXPIRED"
   [ -z "$key" ] || [ "$key" = "$DECISION_KEY" ] || notice 6 "$EXPIRED"
@@ -478,9 +495,7 @@ command_posts() {
     [ "$content" != "$shown" ] || continue
     final=false
     settled "$stem" && final=true
-    thread=$(post_field "$stem" '.request_id')
-    thread=${thread#discord:*:*:}
-    thread=${thread%%:*}
+    thread=$(post_thread "$stem") || continue
     jq -cn --arg post "$stem" --arg channel "$thread" \
       --arg message "$(post_field "$stem" '.discord_message_ids[-1]')" \
       --arg content "$content" --argjson final "$final" \

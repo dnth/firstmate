@@ -1027,6 +1027,53 @@ test_11_unsent_click_releases_its_claim() {
   pass "11 a click that cannot be filed says nothing was decided and leaves the post open for another click"
 }
 
+# --- 12. a decision post in a request's topic thread -------------------------
+
+test_12_topic_thread_posts_take_clicks_there() {
+  local home out topic=999999999999999999 record
+  home="$TMP_ROOT/c12"
+  setup_home "$home"
+  printf '%s\n' "$CHANNEL" > "$home/config/ext-channel"
+  printf 'which route should the fix take?' > "$home/request.txt"
+  home_env "$home" "$INTAKE" --request-id "discord:$GUILD:$CHANNEL:$CHANNEL:$REQUEST_MESSAGE" \
+    --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$CHANNEL" \
+    --message-id "$REQUEST_MESSAGE" --author "$CAPTAIN" --origin message \
+    --secret-file "$home/config/ext-secret" --text-file "$home/request.txt" \
+    --no-wake >/dev/null || fail "the dedicated-channel request fixture was refused"
+  open_key "$home" pick
+  emit_decision "$home" 1 '{"key":"'"$KEY"'","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
+  out=$(TOPIC="$topic" plugin_py "$home" <<'PY'
+import json, os, sys
+from pathlib import Path
+import decisions, outbox_poster
+decisions.buttons_ready = lambda: True
+sent = []
+def send(p):
+    sent.append(p["thread_id"])
+    return {"ok": True, "discord_message_id": "700000000000000001", "buttons": bool(p.get("decision"))}
+outbox_poster.drain_outbox(send=send, home=Path(sys.argv[1]),
+                           create_thread=lambda p, name: {"ok": True, "thread_id": os.environ["TOPIC"]})
+print(json.dumps(sent))
+PY
+  ) || fail "the poster could not deliver the decision post"
+  [ "$out" = "[\"$topic\"]" ] || fail "the decision post must land in the request's topic thread: $out"
+
+  out=$(click "$home" "fmd:$KEY:2" "$CAPTAIN" 880000000000000081)
+  assert_contains "$out" "This decision post is no longer open - this click changed nothing." \
+    "a click reported from the parent channel does not come from the post's topic thread"
+  out=$(CHAT="$topic" click "$home" "fmd:$KEY:2" "$CAPTAIN" 880000000000000082)
+  assert_contains "$out" "Sent: South." "a click in the post's topic thread was not sent"
+  record=$(button_request "$home" option) || fail "the topic-thread click filed no request"
+  jq -e --arg ch "$CHANNEL" --arg th "$topic" \
+    '.channel_id == $ch and .thread_id == $th and (.request_id | endswith(":" + $th + ":880000000000000082"))' \
+    <<<"$record" >/dev/null || fail "the click request must come from the post's topic thread: $record"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" False)
+  printf '%s\n' "$out" | jq -se --arg th "$topic" \
+    'length == 1 and .[0].channel == $th and .[0].message == "700000000000000001"' >/dev/null \
+    || fail "the sent line must edit the post in its topic thread: $out"
+  pass "12 a decision post in a request's topic thread takes clicks there, files them there, and is edited there"
+}
+
 test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records
@@ -1038,3 +1085,4 @@ test_8_discuss_and_typed_replies_stay_as_fallbacks
 test_9_emit_refuses_unsafe_or_closed_decisions
 test_10_real_discord_client_routes_clicks
 test_11_unsent_click_releases_its_claim
+test_12_topic_thread_posts_take_clicks_there

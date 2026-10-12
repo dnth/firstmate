@@ -909,7 +909,8 @@ Each decision post is bound to exactly one decision Firstmate already tracks, na
 `bin/fm-ext-emit.sh --decision-file` posts one to five options, numbered in the same order as the post's numbered text, and refuses a key that is not open at that moment; its header owns the file format.
 Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every decision post also carries a Discuss button, `fmd:<key>:d`.
 Channel members can read a `custom_id` through the Discord API, so the key is never written into a label or the post text, and emit refuses a post that names the key or its task id.
-A decision post goes where every reply to its request goes: into the request's Discord thread when it has one, otherwise its channel.
+A decision post goes where every reply to its request goes: into the request's topic thread or Discord thread when it has one, otherwise its channel.
+A click is checked against, and its request filed from, the thread or channel the post actually landed in, so Firstmate answers a click in that same conversation.
 
 Only an author with a `<guild>:<channel>:<author>` allowlist rule can click: everyone else, including a confirm-rule author, gets an ephemeral "not authorised" and nothing is sent.
 A click is therefore never stronger than the same author's typed message.

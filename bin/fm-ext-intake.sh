@@ -221,8 +221,13 @@ if [ -n "$ATTACHMENT_MANIFEST" ]; then
 fi
 [ -n "$TEXT" ] || [ "$MANIFEST_PRESENT" = 1 ] || die "text is empty"
 
-TOPIC=$(printf '%s' "$TEXT" | "$SCRIPT_DIR/fm-ext-topic.sh" --text-file - --origin "$ORIGIN" --thread-id "$THREAD_ID" --channel-id "$CHANNEL_ID" --message-id "$MESSAGE_ID") \
-  || die "could not derive the topic thread name" 1
+# A button request is filed from the thread its decision post lives in and
+# never opens a topic thread of its own.
+TOPIC=
+if [ "$ORIGIN" != button ]; then
+  TOPIC=$(printf '%s' "$TEXT" | "$SCRIPT_DIR/fm-ext-topic.sh" --text-file - --origin "$ORIGIN" --thread-id "$THREAD_ID" --channel-id "$CHANNEL_ID" --message-id "$MESSAGE_ID") \
+    || die "could not derive the topic thread name" 1
+fi
 
 REPLY_TEXT=
 if [ -n "$REPLY_TEXT_FILE" ]; then
