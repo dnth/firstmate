@@ -75,6 +75,8 @@ FM_RUNPOD_OMP_AUTH_BROKER_URL=${FM_RUNPOD_OMP_AUTH_BROKER_URL:-http://127.0.0.1:
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-omp-auth-token-lib.sh
 . "$SCRIPT_DIR/fm-omp-auth-token-lib.sh"
+# shellcheck source=bin/fm-secondmate-charter-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 if [ -f "$SCRIPT_DIR/fm-task-inbox-lib.sh" ]; then
   . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
@@ -328,6 +330,7 @@ cmd_launch() {
 
   validate_id "$id"
   validate_home "$id"
+  secondmate_spawn_brief "$TARGET_HOME" "$CONTROL_DATA/$id/brief.md" >/dev/null || exit 1
   case "$harness" in omp|claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate harness: $harness" ;; esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
   case "$fallback_harness" in -|omp|claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate fallback harness: $fallback_harness" ;; esac
@@ -406,6 +409,7 @@ cmd_relaunch() {
   local id=$1 harness=$2 model=$3 effort=$4
   validate_id "$id"
   validate_home "$id"
+  secondmate_spawn_brief "$TARGET_HOME" "$CONTROL_DATA/$id/brief.md" >/dev/null || exit 1
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;
     *) die "unverified remote secondmate harness: $harness" ;;

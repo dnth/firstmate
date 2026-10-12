@@ -161,6 +161,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-secondmate-charter-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -898,6 +900,7 @@ do_relaunch() {
     secondmate)
       # The charter in the secondmate's own home is its instruction source and
       # stays untouched.
+      secondmate_spawn_brief "$WT" "$DATA/$ID/brief.md" >/dev/null || exit 1
       RELAUNCH_BRIEF=
       ;;
     *)

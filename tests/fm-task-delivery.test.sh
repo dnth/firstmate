@@ -146,24 +146,88 @@ SH
 }
 
 test_secondmate_spawn_refuses_unresolved_charter_placeholder() {
-  local rec home proj fakebin mate out status
+  local rec home proj fakebin mate primary before out status source
   rec=$(make_home charter-placeholder)
   IFS='|' read -r home proj fakebin <<EOF2
 $rec
 EOF2
-  printf '%s\n' claude > "$home/config/crew-harness"
+  primary="$TMP_ROOT/charter-placeholder/primary"
   mate="$TMP_ROOT/charter-placeholder/mate"
+  fm_git_init_commit "$primary"
+  git -C "$primary" branch -M main
+  mkdir -p "$primary/bin"
+  cp "$ROOT/bin/fm-harness.sh" "$primary/bin/"
+  printf '# Firstmate\n' > "$primary/AGENTS.md"
+  printf 'data/\nstate/\nconfig/\n.fm-secondmate-home\n' > "$primary/.gitignore"
+  git -C "$primary" add .
+  git -C "$primary" -c user.name=Test -c user.email=test@example.invalid commit -qm seeded
+  before=$(git -C "$primary" rev-parse HEAD)
+  git -C "$primary" worktree add -q --detach "$mate" "$before"
+  printf 'new version\n' >> "$primary/README.md"
+  git -C "$primary" -c user.name=Test -c user.email=test@example.invalid commit -qam advance
+  mkdir -p "$mate/data"
+  printf '%s\n' charter-placeholder-m1 > "$mate/.fm-secondmate-home"
+  printf '%s\n' claude > "$home/config/crew-harness"
+  write_brief "$home" charter-placeholder-m1
+  for source in charter fallback; do
+    if [ "$source" = charter ]; then
+      printf 'charter with {TASK}\n' > "$mate/data/charter.md"
+    else
+      rm "$mate/data/charter.md"
+      printf '{TASK}\n' >> "$home/data/charter-placeholder-m1/brief.md"
+    fi
+    out=$(FM_TEST_ROOT_OVERRIDE="$primary" run_spawn "$home" "$fakebin" charter-placeholder-m1 "$mate" --secondmate --harness claude)
+    status=$?
+    [ "$status" -ne 0 ] || fail "secondmate accepted an unresolved $source placeholder"
+    assert_contains "$out" 'secondmate brief still contains {TASK}' "secondmate did not identify the $source placeholder"
+    [ "$(git -C "$mate" rev-parse HEAD)" = "$before" ] || fail "refused $source spawn advanced the secondmate checkout"
+    assert_absent "$mate/state" "refused $source spawn prepared secondmate state"
+    assert_absent "$mate/config" "refused $source spawn propagated inheritance"
+    assert_absent "$home/state/charter-placeholder-m1.meta" "refused spawn wrote task metadata"
+  done
+  printf 'Concrete charter\n' > "$mate/data/charter.md"
+  out=$(FM_TEST_ROOT_OVERRIDE="$primary" run_spawn "$home" "$fakebin" charter-placeholder-m1 "$mate" --secondmate --harness claude)
+  assert_not_contains "$out" 'still contains {TASK}' "filled charter did not override unresolved fallback"
+  [ "$(git -C "$mate" rev-parse HEAD)" = "$(git -C "$primary" rev-parse HEAD)" ] || fail "filled charter did not reach ordinary checkout preparation"
+  pass "fm-spawn: secondmate charter and fallback refuse before checkout preparation"
+}
+
+test_remote_secondmate_refuses_placeholder_before_endpoint_access() {
+  local rec home proj fakebin mate out status action endpoint
+  rec=$(make_home remote-placeholder)
+  IFS='|' read -r home proj fakebin <<EOF2
+$rec
+EOF2
+  mate="$TMP_ROOT/remote-placeholder/mate"
   mkdir -p "$mate/bin" "$mate/data"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
-  printf '%s\n' "charter-placeholder-m1" > "$mate/.fm-secondmate-home"
-  printf 'charter for charter-placeholder-m1 with {TASK}\n' > "$mate/data/charter.md"
-  out=$(run_spawn "$home" "$fakebin" charter-placeholder-m1 "$mate" --secondmate)
-  status=$?
-  [ "$status" -ne 0 ] || fail "secondmate spawn accepted an unresolved charter placeholder"
-  assert_contains "$out" "still contains {TASK}" "secondmate spawn did not identify the charter placeholder"
-  assert_contains "$out" "secondmate brief" "secondmate refusal did not name its kind"
-  assert_absent "$home/state/charter-placeholder-m1.meta" "refused secondmate spawn wrote task metadata"
-  pass "fm-spawn: a secondmate spawn refuses an unresolved charter placeholder before launch"
+  printf '%s\n' remote-placeholder-m1 > "$mate/.fm-secondmate-home"
+  printf 'charter with {TASK}\n' > "$mate/data/charter.md"
+  for endpoint in absent recorded; do
+    if [ "$endpoint" = recorded ]; then
+      mkdir -p "$mate/state/parent-route"
+      printf 'endpoint_task_id=remote-placeholder-m1\nbackend=herdr\nherdr_session=fm-remote\n' > "$mate/state/parent-route/remote-placeholder-m1.meta"
+      cp "$mate/state/parent-route/remote-placeholder-m1.meta" "$home/endpoint-before"
+    fi
+    for action in launch relaunch; do
+      if [ "$action" = launch ]; then
+        set -- launch remote-placeholder-m1 claude - - herdr - - -
+      else
+        set -- relaunch remote-placeholder-m1 claude - -
+      fi
+      out=$(FM_HOME="$mate" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" 2>&1)
+      status=$?
+      [ "$status" -ne 0 ] || fail "remote $action accepted an unresolved charter"
+      assert_contains "$out" 'secondmate brief still contains {TASK}' "remote $action accessed $endpoint endpoint before validating charter"
+      assert_absent "$mate/data/.parent-route" "refused remote $action prepared control data"
+      if [ "$endpoint" = absent ]; then
+        assert_absent "$mate/state/parent-route" "refused remote $action prepared control state"
+      else
+        cmp -s "$home/endpoint-before" "$mate/state/parent-route/remote-placeholder-m1.meta" || fail "refused remote $action changed endpoint metadata"
+      fi
+    done
+  done
+  pass "remote secondmate launch and relaunch validate before endpoint access"
 }
 
 test_spawn_allows_legacy_brief_until_completion_gate() {
@@ -185,7 +249,7 @@ EOF
 run_spawn() {  # <home> <fakebin> <spawn-args...>
   local home=$1 fakebin=$2
   shift 2
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
@@ -814,6 +878,7 @@ test_promote_transaction_help
 test_spawn_refuses_unresolved_brief_placeholders
 test_scout_spawn_refuses_unresolved_task_placeholder
 test_secondmate_spawn_refuses_unresolved_charter_placeholder
+test_remote_secondmate_refuses_placeholder_before_endpoint_access
 test_spawn_allows_legacy_brief_until_completion_gate
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
