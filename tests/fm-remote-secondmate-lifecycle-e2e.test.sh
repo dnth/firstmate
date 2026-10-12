@@ -1487,28 +1487,29 @@ assert_grep "omp_bin=$REMOTE_OMP_BIN" "$PARENT/state/remote-omp.meta" \
   "parent route metadata did not preserve the remote OMP entrypoint identity"
 OMP_REMOTE_LAUNCH=$(grep -F 'FM_OMP_SESSION_POINTER=' "$HERDR_LOG" | tail -1 || true)
 assert_contains "$OMP_REMOTE_LAUNCH" \
-  "FM_OMP_BUN='\\''$REMOTE_OMP_BUN'\\'' FM_OMP_BIN='\\''$REMOTE_OMP_BIN'\\''" \
+  "FM_OMP_BUN='$REMOTE_OMP_BUN' FM_OMP_BIN='$REMOTE_OMP_BIN'" \
   "remote OMP pane did not receive the canonical runtime and entrypoint identities"
-assert_contains "$OMP_REMOTE_LAUNCH" "/bin/bash '" \
+OMP_REMOTE_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_REMOTE_HOME/state/parent-route/remote-omp.meta")
+assert_grep "pane run $OMP_REMOTE_PANE /bin/bash '" "$HERDR_LOG" \
   "remote OMP pane did not stage its Bash-owned script invocation"
-assert_contains "$OMP_REMOTE_LAUNCH" "PATH='\\''$REMOTE_ROOT/bin:" \
+assert_contains "$OMP_REMOTE_LAUNCH" "PATH='$REMOTE_ROOT/bin:" \
   "remote OMP pane did not put the canonical Bun directory first in PATH"
 # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
 assert_not_contains "$OMP_REMOTE_LAUNCH" '${PATH:+' \
   "remote OMP pane exposed POSIX parameter expansion to the pane shell"
 assert_contains "$OMP_REMOTE_LAUNCH" \
-  "FM_OMP_HARNESS=omp '\\''$REMOTE_OMP_BIN'\\''" \
+  "FM_OMP_HARNESS=omp exec '$REMOTE_OMP_BIN'" \
   "remote OMP pane did not execute the canonical entrypoint directly"
-assert_contains "$OMP_REMOTE_LAUNCH" "--session-dir '\\''$OMP_REMOTE_HOME/state/omp-sessions'\\''" \
+assert_contains "$OMP_REMOTE_LAUNCH" "--session-dir '$OMP_REMOTE_HOME/state/omp-sessions'" \
   "remote OMP pane did not receive its home-owned durable session directory"
 assert_contains "$OMP_REMOTE_LAUNCH" \
-  "FM_OMP_TASK_INBOX_DIR='\\''$OMP_REMOTE_HOME/state/parent-route/remote-omp.inbox'\\''" \
+  "FM_OMP_TASK_INBOX_DIR='$OMP_REMOTE_HOME/state/parent-route/remote-omp.inbox'" \
   "remote OMP extension did not receive its parent-route canonical inbox"
 assert_contains "$OMP_REMOTE_LAUNCH" \
-  "FM_OMP_TASK_DOORBELL_READY='\\''$OMP_REMOTE_HOME/state/parent-route/remote-omp.omp-doorbell-ready'\\''" \
+  "FM_OMP_TASK_DOORBELL_READY='$OMP_REMOTE_HOME/state/parent-route/remote-omp.omp-doorbell-ready'" \
   "remote OMP extension did not receive its parent-route doorbell readiness marker"
 assert_contains "$OMP_REMOTE_LAUNCH" \
-  "FM_OMP_TASK_TURN_STARTED='\\''$OMP_REMOTE_HOME/state/parent-route/remote-omp.omp-started'\\''" \
+  "FM_OMP_TASK_TURN_STARTED='$OMP_REMOTE_HOME/state/parent-route/remote-omp.omp-started'" \
   "remote OMP extension did not receive its parent-route turn-start marker"
 
 OMP_LISTENER_PID=$(cat "$OMP_ACTIVE_PID")

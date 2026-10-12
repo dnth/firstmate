@@ -419,7 +419,20 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0
     ;;
-  set-window-option|send-keys) exit 0 ;;
+  send-keys)
+    for arg in "$@"; do
+      case "$arg" in
+        touch\ */.fm-launch-probe.*)
+          marker=${arg#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
+    exit 0
+    ;;
+  set-window-option) exit 0 ;;
 esac
 exit 0
 SH
@@ -497,7 +510,17 @@ case "${1:-} ${2:-}" in
   "pane close")
     [ "${3:-}" = p-old ] && : > "$killed"
     ;;
-  "pane run"|"pane send-text"|"pane send-keys"|"tab close")
+  "pane run")
+    case "${4:-}" in
+      touch\ */.fm-launch-probe.*)
+        marker=${4#touch }
+        marker=${marker#\'}
+        marker=${marker%\'}
+        : > "$marker"
+        ;;
+    esac
+    ;;
+  "pane send-text"|"pane send-keys"|"tab close")
     ;;
   *)
     exit 1
