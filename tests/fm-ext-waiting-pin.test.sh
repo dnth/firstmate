@@ -109,6 +109,80 @@ print(outbox_poster.deliver_one(payload_path, home=home))
 PY
 }
 
+test_1b_long_titles_render_cleanly_without_ids_or_commands() {
+  local home out line len
+  home="$TMP_ROOT/c1b"
+  setup_home "$home"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add longcall "$(python3 -c 'print("B" * 300)')" --kind captain >/dev/null) \
+    || fail "tasks-axi add longcall must succeed"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold longcall --reason "waiting on captain" --kind captain >/dev/null) \
+    || fail "tasks-axi hold longcall must succeed"
+  hold_call "$home" short1 "Decide the merge wording" "waiting on captain"
+  record_pr "$home" ship1 "https://github.com/o/r/pull/42"
+  out=$(home_env "$home" "$REFRESH" content) || fail "content must succeed when configured"
+  assert_contains "$out" "Decide the merge wording" "short titles must pass through unchanged"
+  assert_contains "$out" "https://github.com/o/r/pull/42" "PR links must still render"
+  case "$out" in
+    *truncated*|*"--full"*|*"use show"*|*longcall*) fail "content must not leak task ids or tool help: $out" ;;
+  esac
+  line=$(printf '%s\n' "$out" | grep '^- B' | head -1)
+  [ -n "$line" ] || fail "the long title must render as its own pin line"
+  len=$(printf '%s' "$line" | wc -m | tr -d ' ')
+  [ "$len" = 200 ] || fail "the long title must use the existing 200-character call-line cap (got $len)"
+  case "$line" in
+    *"…"*) : ;;
+    *) fail "the long title must end in a plain ellipsis" ;;
+  esac
+  case "$out" in
+    *"$home"*|*"worktree"*|*"secret"*|*"token"*|*".meta"*) fail "content must not leak paths or secrets: $out" ;;
+  esac
+  [ "${#out}" -le 2000 ] || fail "message must fit Discord"
+  pass "1b long titles render cleanly with no task id or tool help"
+}
+
+test_1c_multiline_titles_remain_single_decisions() {
+  local home out phase payload fake
+  home="$TMP_ROOT/c1c"
+  setup_home "$home"
+  for phase in queued in_flight; do
+    (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add "$phase" "$phase Approve copy then merge" --kind ship >/dev/null) \
+      || fail "existing task must be created"
+    if [ "$phase" = in_flight ]; then
+      (cd "$home/data" && PATH="$BASE_PATH" tasks-axi start "$phase" >/dev/null) || fail "multiline task must start"
+    fi
+    (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold "$phase" --reason waiting --kind captain >/dev/null) \
+      || fail "multiline existing task must accept a captain hold"
+  done
+  fake="$home/fakebin"
+  mkdir "$fake"
+  cat > "$fake/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = show ]; then
+  "$REAL_TASKS_AXI" "$@" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if line.startswith("  title: "):
+        title = sys.argv[1] + " Approve\ncopy\rthen\tmerge"
+        print("  title: " + json.dumps(title))
+    else:
+        print(line, end="")
+' "$2"
+  exit "${PIPESTATUS[0]}"
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$fake/tasks-axi"
+  out=$(home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_EXT_NOW_OVERRIDE=100 "$REFRESH" content) || fail "multiline calls must render"
+  for phase in queued in_flight; do
+    assert_contains "$out" "- $phase Approve copy then merge" "line breaks and tabs must become spaces"
+  done
+  [ "$(printf '%s\n' "$out" | grep -c '^- ')" = 2 ] || fail "each held task must render exactly one decision"
+  home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_EXT_NOW_OVERRIDE=100 "$REFRESH" refresh >/dev/null || fail "multiline calls must publish"
+  payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | head -1)
+  [ "$(jq -r '.text' "$payload")" = "$out" ] || fail "published content must preserve the preview's single-line decisions"
+  pass "1c multiline titles remain single decisions in previews and publications"
+}
+
 test_1_content_lists_calls_and_prs_without_leaks() {
   local home out
   home="$TMP_ROOT/c1"
@@ -794,7 +868,9 @@ PYTEST
   pass "17 overlapping refreshes capture and publish in the same order"
 }
 
-test_1_content_lists_calls_and_prs_without_leaks
+test_1b_long_titles_render_cleanly_without_ids_or_commands
+test_1c_multiline_titles_remain_single_decisions
+ test_1_content_lists_calls_and_prs_without_leaks
 test_2_refresh_creates_then_edits_in_place
 test_3_deleted_message_recreated_once
 test_4_unconfigured_stays_silent
