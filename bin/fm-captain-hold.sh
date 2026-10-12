@@ -205,7 +205,7 @@
 # Exit 0 means a record was found, 1 means the task
 # carries none, and 2 means the row could not be read. The local Discord bridge
 # uses it to show on a decision post which option an answer given elsewhere
-# chose, and the count to tell that post's call from a later re-hold.
+# chose, and the stamp plus count to distinguish its lifecycle from a re-hold.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.

@@ -85,8 +85,8 @@ Every drained request sorts into one of three cases:
 - **Question** - answer from live fleet state; no follow-up.
 - **Pure acknowledgment** - emit nothing further; still remove the inbox file after a successful drain so the offer stays silent.
 
-**Public Discord channel, so destructive work still escalates first.**
-Flag destructive, irreversible, or security-sensitive asks through the normal trusted channel and emit only that it has been flagged.
+**For asks without the bounded confirmation described in Decisions with buttons, destructive work still escalates first.**
+Flag those destructive, irreversible, or security-sensitive asks through the normal trusted channel and emit only that it has been flagged.
 
 ## The reply is public. Treat it as such.
 

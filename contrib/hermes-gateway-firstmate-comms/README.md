@@ -68,16 +68,10 @@ Only the allowlist decides who may instruct Firstmate in that channel; anyone it
 ## Decision buttons
 
 When Firstmate asks the captain to settle a decision, its post can carry one button per numbered option, for example Approve / Hold, plus a Discuss button.
-Clicking an option sends Firstmate that answer to exactly that decision, like a typed reply; a merge, prod deploy, deletion, money, credential, or other destructive option first shows an ephemeral "Confirm: <label>?" with a Confirm button.
-The click turns the post's buttons off at once and the post reads "⏳ <option> sent by <user> <time>"; once Firstmate records the answer, by button or any other way, it reads "✅ <option> chosen by <user> <time>".
-Every click gets an ephemeral notice only the clicker sees: sent, the confirmation prompt, already sent, already decided, no longer open, or not authorised.
-Only an author with a `<guild>:<channel>:<author>` allowlist rule can click; anyone else gets "not authorised" and nothing is sent.
-While a decision is open, Discuss or a typed reply to the post remains the fallback; on a sent, decided, or replaced post every button, Discuss included, answers that nothing changed.
-The [decision buttons reference](../../docs/configuration.md#decision-buttons) owns who may click, what a click sends, confirmation, staleness, expiry, and the authority boundaries.
+The [decision buttons reference](../../docs/configuration.md#decision-buttons) owns the click workflow, sent and decided outcomes, notification recovery, fallbacks, confirmation, staleness, expiry, and authority boundaries.
 
 Buttons need no extra Discord permission or gateway setting beyond the ones above.
 After updating this plugin, restart the gateway service so it loads the click route.
-The plugin never records an answer: a click only files a request through `bin/fm-ext-intake.sh`, and the posts' outcome comes from reading Firstmate's ledgers.
 
 Hermes 0.20.x has no plugin hook for Discord component clicks, so the plugin registers a discord.py `DynamicItem` for the `fmd:` and `fmc:` custom ids on the Discord adapter's live client, found through the gateway runner's adapter registry the way Hermes's own platform actions find it.
 The outbox watcher re-registers it whenever the gateway reconnects with a new client, and logs one warning naming the Hermes version if a connected gateway cannot take it.

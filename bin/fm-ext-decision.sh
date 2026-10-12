@@ -36,9 +36,8 @@
 #   ✅ <label> chosen by the captain <time>
 #                                        Firstmate recorded an answer from
 #                                        another channel that names exactly one
-#                                        option, by a standalone number or label
-#   ✅ Decided <time>                    any other recorded answer, including
-#                                        one naming several options
+#                                        option (see answer_option below)
+#   ✅ Decided <time>                    an answer with no unique option match
 #   Closed - no longer needed <time>     closed with no captain answer: the
 #                                        task's terminal outcome, moved to a
 #                                        captain call, reconciled as moot, gone,
@@ -71,7 +70,10 @@
 #        the option, the decision text, any confirmation, and who and when;
 #        the post then shows the sent line with its buttons off
 #   Exit 1 means nothing was filed; the claim is released so the click can be
-#   tried again. Exit 2 is bad usage.
+#   tried again. If an inbox request was published but notification failed,
+#   exit 0 reports recovery needed; the sent claim remains and retrying uses
+#   the original request id. Discuss also retries its original request id.
+#   Exit 2 is bad usage.
 #
 # posts
 #   Prints one JSON line per button post whose current content Discord does
@@ -246,8 +248,9 @@ newer_post() {
   return 1
 }
 
-# answer_option <stem> <answer>: the id of the one option a recorded answer
-# names, by a standalone option number or an option label as whole words.
+# answer_option <stem> <answer>: ignore the audit suffix, then accept a unique
+# longest full label prefix immediately. Only without that prefix, collect
+# standalone option numbers and whole-word labels and require one distinct id.
 answer_option() {
   local stem=$1 answer=$2 ids='' word id label prefix
   local -a words

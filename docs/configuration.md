@@ -904,7 +904,7 @@ Reactions are best effort and use the same bot token and User-Agent as replies: 
 
 ### Decision buttons
 
-Firstmate can attach option buttons to an `answer`, `followup`, or `final`, so the captain settles a decision with one click.
+Firstmate can attach option buttons to an `answer`, `followup`, or `final`, so the captain sends a choice to Firstmate from the post.
 Each decision post is bound to exactly one decision Firstmate already tracks, named by its key: `hold:<task-id>` for a captain call held on the board, or `key:<task-id>:<slug>` for a worker's keyed status decision.
 `bin/fm-ext-emit.sh --decision-file` posts one to five options, numbered in the same order as the post's numbered text, and refuses a key that is not open at that moment; its header owns the file format.
 Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every decision post also carries a Discuss button, `fmd:<key>:d`.
@@ -919,7 +919,9 @@ Single use, staleness, and races between channels therefore stay with that exist
 The request's `decision` field carries the key, the post's lifecycle, the option id and label, the decision text cut to its first 1000 characters, any confirmation, and the audit: who clicked (Discord name and id) and when (UTC).
 Before recording, Firstmate runs `bin/fm-ext-decision.sh still-open` with the request's key and lifecycle and records nothing unless it reports `open`, so a request still queued when its question was answered elsewhere and reopened, or a captain call released and re-held, never answers the new question.
 The clicked post's buttons go off at once and it reads `⏳ <option> sent by <user> <time> - waiting for Firstmate to record it`.
-If the request cannot be filed, nothing is sent, the clicker is told nothing was decided, and the post stays open for another click.
+If no inbox request was published, the claim is released and the post stays open for another click.
+If intake published the request but context, offer, or wake notification failed, the post stays sent and the notice asks the clicker to retry notification; that retry uses the original request id and files no second request.
+Discuss retries also reuse the original request id after publication.
 A Discuss click on an open decision decides nothing and leaves the buttons on: it files one request so Firstmate picks the decision up in the thread, and a typed reply to the post, including a bare option number, keeps working exactly as before.
 
 An option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible needs a second click.
@@ -928,9 +930,11 @@ Emit marks an option this way when the emitter declares `confirm`, and always wh
 A confirmed click from a standing-rule author is that author's explicit word for that one decision only, never standing authority, and merge authority stays where `AGENTS.md` puts it.
 
 Each post is bound to the lifecycle of its decision that was open when it was posted, so a captain call re-held or a worker key reopened for a new question is a different decision to it.
-When Firstmate records an answer on any channel, its posts are disabled and edited to show the outcome, read from the same ledgers rather than from any step Firstmate must remember: `✅ <option> chosen by <user> <time>` names the clicker when the recorded answer is the option that post's click sent, and the captain for any other recorded answer that names exactly one option by number or label; `✅ Decided <time>` covers any other answer, including one naming several options, `Closed - no longer needed <time>` covers a decision closed with no captain answer or replaced by a later lifecycle, and `Replaced by a newer post <time>` covers an older post for the same decision.
+When Firstmate records an answer on any channel, its posts are disabled and edited to show the outcome, read from the same ledgers rather than from any step Firstmate must remember: `✅ <option> chosen by <user> <time>` names the clicker when the recorded answer is the option that post's click sent, and the captain for any other recorded answer that names exactly one option by number or label; `✅ Decided <time>` covers answers that cannot be matched to one option, `Closed - no longer needed <time>` covers a decision closed with no captain answer or replaced by a later lifecycle, and `Replaced by a newer post <time>` covers an older post for the same decision.
+Option matching ignores the appended Discord-button audit and the `Decision answer: ` prefix.
+A unique longest full option label at the start of the answer wins immediately, regardless of trailing text; otherwise the matcher collects standalone option numbers and whole-word labels and accepts only one distinct option.
 The answer text recorded elsewhere is never shown, and `<time>` is a Discord timestamp, so each reader sees it in their own time zone.
-A click, Discuss included, on a sent, decided, superseded, replaced, or expired post files nothing and gets an ephemeral notice, and a double click files one request because the first click claims the post.
+A click, Discuss included, on a sent, decided, superseded, replaced, or expired post files no new request and gets an ephemeral notice, and a double click files one request because the first click claims the post.
 The post's own records follow the retention window above, so its buttons expire with it.
 `bin/fm-ext-decision.sh`'s header owns the click checks, notices, and the post records; the plugin redraws a clicked post at once and sweeps for answers recorded elsewhere every 30 seconds.
 Labels and decision posts follow the same public-safety rule as every reply.

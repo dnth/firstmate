@@ -2,9 +2,8 @@
 
 Firstmate attaches option buttons to a decision post through the outbox. Each
 button's custom_id carries the decision key and a 1-based option id,
-``fmd:<key>:<n>``, plus ``fmd:<key>:d`` for the Discuss button that always
-stays as a fallback. The key is readable by channel members through the
-Discord API but is never rendered in a label or the post text. The ephemeral
+``fmd:<key>:<n>``, plus ``fmd:<key>:d`` for Discuss while the post is open.
+The key is readable by channel members through the Discord API but is never rendered in a label or the post text. The ephemeral
 confirmation button for a high-risk option is ``fmc:<post-id>:<n>``.
 
 A click runs ``bin/fm-ext-decision.sh click``, which owns every check and every
