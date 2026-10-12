@@ -34,9 +34,6 @@ test_buried_decision_still_surfaces() {
     || fail "buried needs-decision was not surfaced with its task, key, and note"
   grep -F "close one by answering it: bin/fm-send.sh <task> --resolve-key <key>" "$out" >/dev/null \
     || fail "open section is missing the answerer-closes hint"
-  if grep -F 'answer a backlog-backed call:' "$out" >/dev/null; then
-    fail "a status-only decision gained a backlog-backed answer hint"
-  fi
   pass "a needs-decision buried under later routine/other-key lines still reports as open"
 }
 
@@ -266,7 +263,7 @@ test_board_only_due_call_surfaces_without_status_logs() {
 
     grep -Fx 'board-only [key=board-only] needs-decision: Board only choice (due for review since 2026-08-15)' "$out" >/dev/null \
       || fail "$mode drain did not preserve the due row task/key/verb/note fields: $(cat "$out")"
-    grep -Fx 'OPEN DECISIONS: answer a backlog-backed call: bin/fm-captain-hold.sh answer <task> --decision-file <path> [--release]' "$out" >/dev/null \
+    grep -Fx "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'; answer a backlog-backed call: bin/fm-captain-hold.sh answer <task> --decision-file <path> [--release]" "$out" >/dev/null \
       || fail "$mode drain omitted the backlog-backed answer command"
     IFS=$(printf '\t') read -r channel task key endpoint ident extra < <(grep '^DECISION_REVISION' "$err") \
       || fail "$mode drain emitted no decision revision"

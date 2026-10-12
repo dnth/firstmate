@@ -2106,7 +2106,7 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   local decisions_routed_completely=false
   local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_OFFSET_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
   local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
-  local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'"
+  local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'; answer a backlog-backed call: bin/fm-captain-hold.sh answer <task> --decision-file <path> [--release]"
   recovery_projection_tmp=$(mktemp "$state/.subsuper-recovery-projection.XXXXXX") || return 1
   recovery_seen_tmp=$(mktemp "$state/.subsuper-recovery-seen.XXXXXX") || {
     rm -f "$recovery_projection_tmp"

@@ -117,7 +117,7 @@ waiting_pin_board() {
       ($4 == "" || $4 == "null" || $4 == "-" || $4 <= today) {
         print $1
       }') || return 1
-  due_ids=$("$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null | cut -f1) || due_ids=
+  due_ids=$(fm_run_timed 10 "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null | cut -f1) || due_ids=
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     title=$(waiting_pin_title "$data" "$id") || return 1

@@ -886,6 +886,49 @@ test_18_due_review_marks_batch_without_hiding_fresh() {
   pass "18 past-due calls are marked as a batch while fresh calls stay unmarked"
 }
 
+test_19_due_timeout_keeps_calls_visible_and_releases_claim() {
+  local home fake
+  home="$TMP_ROOT/c19"
+  setup_home "$home"
+  hold_call "$home" timeout-call 'Choose after due timeout' pending
+  fake="$home/fakebin"
+  mkdir -p "$fake"
+  cat > "$fake/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = list ]; then
+  if [ -e "$PIN_TEST_HOME/first-list" ]; then
+    : > "$PIN_TEST_HOME/due-started"
+    sleep 30
+  else
+    : > "$PIN_TEST_HOME/first-list"
+  fi
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$fake/tasks-axi"
+  home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" PIN_TEST_HOME="$home" \
+    "$PYTHON_BIN" - "$home" "$REFRESH" <<'PYTEST' || fail "timed-out due marking must return and release the pin claim"
+import json, pathlib, subprocess, sys, time
+home = pathlib.Path(sys.argv[1])
+start = time.monotonic()
+result = subprocess.run([sys.argv[2], "refresh"], capture_output=True, text=True, timeout=20)
+assert result.returncode == 0, result.stderr
+assert "refreshed" in result.stdout, result.stdout + result.stderr
+assert (home / "due-started").exists(), "the due subprocess never reached the blocked read"
+assert time.monotonic() - start < 20, "refresh did not honor the due bound"
+box = home / "state/ext-outbox"
+payloads = list(box.glob("waiting-pin.*.json"))
+assert len(payloads) == 1, payloads
+text = json.loads(payloads[0].read_text())["text"]
+assert "Choose after due timeout" in text, text
+assert "due for review" not in text, text
+assert not list(box.glob("*.inflight")), "refresh retained the publication claim"
+PYTEST
+  pass "19 a due timeout leaves calls visible without marking and releases the publication claim"
+}
+
+test_19_due_timeout_keeps_calls_visible_and_releases_claim
+
 test_1b_long_titles_render_cleanly_without_ids_or_commands
 test_1c_multiline_titles_remain_single_decisions
  test_1_content_lists_calls_and_prs_without_leaks

@@ -604,6 +604,57 @@ test_stale_pane_transient_persistent_resume() {
   pass "lifecycle: stale pane transient self-handles, persistent escalates once and clears, resumed clears quietly"
 }
 
+test_backlog_due_recovery_delivers_and_retires() (
+  local dir state fakebin task marker out
+  command -v tasks-axi >/dev/null 2>&1 || fail "backlog recovery test needs tasks-axi"
+  dir=$(make_supercase wd-backlog-due)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$dir/data" "$dir/config"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config"
+  export FM_CAPTAIN_HOLD_TODAY=2026-08-16 FM_CAPTAIN_HOLD_REVIEW_DAYS=14
+  export PATH="$fakebin:$PATH"
+  for task in due-answer due-release; do
+    (cd "$dir" && tasks-axi add "$task" "Choose $task" --kind captain --repo sample >/dev/null) || fail "create due call"
+    FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z "$ROOT/bin/fm-captain-hold.sh" hold "$task" --reason pending >/dev/null || fail "hold due call"
+    [ ! -e "$state/$task.status" ] || fail "board-only fixture has a status file"
+    if fm_advisory_superseded "$state" "$task" decision "$task" - -; then
+      fail "live backlog call was considered superseded without a status file"
+    fi
+  done
+  printf 'needs-decision [key=route]: choose the status route\n' > "$state/status-choice.status"
+  : > "$dir/sent.log"
+  : > "$dir/pane.txt"
+  export FM_FAKE_TMUX_SENT="$dir/sent.log" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_FAKE_TMUX_PANE_ALIVE=1
+  afk_enter "$state"
+  marker="$state/.watcher-down"
+  bash -c '. "$1"; fm_recovery_marker_publish "$2" downtime' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "publish backlog recovery marker"
+  handle_durable_wakes "check: rearm-resurface" "$state" || fail "due-call terminator invalidated recovery capture"
+  for task in due-answer due-release; do
+    assert_grep "$task [key=$task] needs-decision:" "$dir/sent.log" "recovery omitted a live board-only call"
+  done
+  assert_grep 'status-choice [key=route] needs-decision: choose the status route' "$dir/sent.log" "due-call capture swallowed the unrelated status decision"
+  case "$(cat "$marker")" in
+    acked:handling:*) ;;
+    *) fail "due-call recovery retained the episode after delivery" ;;
+  esac
+  printf 'Proceed.\n' > "$dir/answer.txt"
+  "$ROOT/bin/fm-captain-hold.sh" answer due-answer --decision-file "$dir/answer.txt" >/dev/null || fail "answer backlog call"
+  "$ROOT/bin/fm-captain-hold.sh" answer due-release --decision-file "$dir/answer.txt" --release >/dev/null || fail "release backlog call"
+  for task in due-answer due-release; do
+    fm_advisory_superseded "$state" "$task" decision "$task" - - || fail "settled backlog call stayed current"
+    escalate_add "$state" "old $task decision" "$task" decision "$task" - - || fail "buffer settled call"
+  done
+  out=$(escalate_buffer_reconcile "$state" "$state/.subsuper-escalations") || fail "reconcile settled backlog advisories"
+  [ -z "$out" ] || fail "settled backlog advisories remained deliverable: $out"
+  pass "due-call terminator accepts mixed recovery and backlog-only freshness delivers then retires"
+)
+
+test_backlog_due_recovery_delivers_and_retires || fail "backlog due recovery failed"
+
 test_routine_then_terminal_after_restart
 test_decision_only_recovery_routes_before_acknowledgement
 test_decision_route_failure_retains_recovery_for_retry
