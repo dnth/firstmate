@@ -993,6 +993,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           finishPendingActionable(owner, pending);
         } catch (error) {
           surfaceCleanupFailure(owner, error);
+          schedulePendingCleanup(owner);
         }
       },
       () => {

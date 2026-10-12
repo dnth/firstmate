@@ -1745,6 +1745,89 @@ JS
   done
 }
 
+
+test_native_omp_branch_settlement_retries_cleanup() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-branch-cleanup)
+  write_queue_watcher "$fixture"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const handoffDir = `${state}/extensions/omp-primary-watch`;
+const handoff = `${handoffDir}/session-replacement-actionable.json`;
+const message = "signal: branch cleanup regression";
+fs.mkdirSync(handoffDir, { recursive: true });
+fs.writeFileSync(handoff, JSON.stringify({ version: 2, pending: [
+  { version: 1, token: "999-999-1", message, predecessorArmPid: "" },
+] }));
+fs.writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const handlers = new Map();
+const wakes = [];
+let resolveBranch;
+let offers = 0;
+const api = {
+  zod: { object: () => ({}) },
+  events: { emit(name, offer) {
+    if (name !== "fm-branch-supervision:dispatch") return;
+    offers += 1;
+    offer.accept(new Promise((resolve) => { resolveBranch = resolve; }));
+  } },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(wake) {
+    if (wake?.customType === "firstmate-watcher-wake") wakes.push(String(wake.content));
+  },
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await sleep(10); }
+  throw new Error(`timeout waiting for ${label}`);
+}
+process.argv[1] = process.env.EXTENSION;
+const module = await import(pathToFileURL(process.env.EXTENSION).href);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-cleanup" } };
+const unlink = fs.unlinkSync;
+let failedUnlinks = 0;
+try {
+  await handlers.get("session_start")({ type: "session_start" }, context);
+  await waitFor(() => offers === 1, "replacement close accepted by branch");
+  await sleep(100);
+  fs.unlinkSync = (path) => {
+    if (path === handoff && failedUnlinks === 0) {
+      failedUnlinks += 1;
+      throw Object.assign(new Error("transient handoff unlink failure"), { code: "EIO" });
+    }
+    return unlink(path);
+  };
+  syncBuiltinESMExports();
+  resolveBranch();
+  await waitFor(() => failedUnlinks === 1, "injected cleanup failure");
+  await waitFor(() => !fs.existsSync(handoff), "cleanup retry without another close");
+  await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
+  await sleep(100);
+  if (offers !== 1 || wakes.some((wake) => wake.includes(message))) {
+    throw new Error("a handled branch wake was delivered again");
+  }
+} finally {
+  fs.unlinkSync = unlink;
+  syncBuiltinESMExports();
+  fs.writeFileSync(`${state}/watch-stop`, "stop\n");
+  await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+}
+console.log("omp-branch-cleanup-ok");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "OMP branch settlement cleanup: $out"
+  assert_contains "$out" omp-branch-cleanup-ok "branch settlement cleanup retry did not complete: $out"
+  pass "OMP branch settlement retries transient handoff cleanup without another close"
+}
+
 make_omp_queue_fixture() {  # <name>
   local fixture=$TMP_ROOT/$1
   mkdir -p "$fixture/.omp/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/config"
@@ -2546,6 +2629,7 @@ test_native_omp_session_switch_carries_inflight_actionable_close
 test_native_omp_unacknowledged_wake_keeps_successor_chain
 test_native_omp_busy_branch_does_not_block_main_or_successors
 test_native_omp_branch_handoff_regressions
+test_native_omp_branch_settlement_retries_cleanup
 test_native_omp_durable_queue_session_notifications
 test_native_omp_unowned_lock_preserves_startup_and_queue
 test_native_omp_empty_queue_suppresses_session_notifications
