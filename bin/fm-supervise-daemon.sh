@@ -2184,6 +2184,9 @@ handle_durable_wakes() {  # <watcher-reason> <state>
             decision_parse_state=complete
           else
             [ -n "$line" ] || { capture_valid=false; break; }
+            if [[ "$line" =~ ^OPEN\ DECISIONS:\ [0-9]+\ more\ omitted\ \(byte\ cap\)$ ]]; then
+              continue
+            fi
             decision_lines="$decision_lines$line
 "
             decision_count=$((decision_count + 1))

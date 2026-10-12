@@ -795,11 +795,15 @@ fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
   case "$kind" in
     decision)
       case "$key" in ''|-) return 1 ;; esac
-      if [ "$endpoint" = - ] && [ "$ident" = - ]; then
+      if [ "$endpoint" = backlog ]; then
         hold_rc=0
-        FM_STATE_OVERRIDE="$state" fm_run_timed 10 "$_FM_CLASSIFY_LIB_DIR/fm-captain-hold.sh" \
-          open "$task" --distinguish-absent >/dev/null 2>&1 || hold_rc=$?
-        case "$hold_rc" in 1|3) return 0 ;; *) return 1 ;; esac
+        live_ident=$(FM_STATE_OVERRIDE="$state" fm_run_timed 10 "$_FM_CLASSIFY_LIB_DIR/fm-captain-hold.sh" \
+          open "$task" --identity --distinguish-absent 2>/dev/null) || hold_rc=$?
+        case "$hold_rc" in
+          0) [ "$live_ident" = "$ident" ] && return 1; return 0 ;;
+          1|3) return 0 ;;
+          *) return 1 ;;
+        esac
       fi
       [ -e "$f" ] || return 0
       [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1

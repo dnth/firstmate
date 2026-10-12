@@ -605,7 +605,7 @@ test_stale_pane_transient_persistent_resume() {
 }
 
 test_backlog_due_recovery_delivers_and_retires() (
-  local dir state fakebin task marker out channel key endpoint ident
+  local dir state fakebin task marker out channel key endpoint ident before after repeat
   command -v tasks-axi >/dev/null 2>&1 || fail "backlog recovery test needs tasks-axi"
   dir=$(make_supercase wd-backlog-due)
   state="$dir/state"
@@ -626,7 +626,7 @@ test_backlog_due_recovery_delivers_and_retires() (
     case "$task" in
       due-answer|due-release) [ ! -e "$state/$task.status" ] || fail "board-only fixture has a status file" ;;
     esac
-    if fm_advisory_superseded "$state" "$task" decision "$task" - -; then
+    if fm_advisory_superseded "$state" "$task" decision "$task" backlog '2026-08-01T00:00:00Z#0'; then
       fail "live backlog call was considered superseded without a status file"
     fi
   done
@@ -635,12 +635,12 @@ test_backlog_due_recovery_delivers_and_retires() (
   assert_contains "$out" 'due-completed [key=due-completed] needs-decision: Choose due-completed (due for review since 2026-08-15)' "completed status log hid the due call"
   while IFS=$(printf '\t') read -r channel task key endpoint ident; do
     [ "$channel" = DECISION_REVISION ] && [ "$task" = due-completed ] || continue
-    [ "$key" = due-completed ] && [ "$endpoint" = - ] && [ "$ident" = - ] || fail "due call inherited its completed status revision"
+    [ "$key" = due-completed ] && [ "$endpoint" = backlog ] && [ "$ident" = '2026-08-01T00:00:00Z#0' ] || fail "due call inherited its completed status revision"
     if fm_advisory_superseded "$state" "$task" decision "$key" "$endpoint" "$ident"; then
       fail "completed status settled the live backlog call"
     fi
   done < "$dir/revisions.tsv"
-  assert_grep "$(printf 'DECISION_REVISION\tdue-completed\tdue-completed\t-\t-')" "$dir/revisions.tsv" "due call carried no backlog revision"
+  assert_grep "$(printf 'DECISION_REVISION\tdue-completed\tdue-completed\tbacklog\t2026-08-01T00:00:00Z#0')" "$dir/revisions.tsv" "due call carried no backlog revision"
   assert_contains "$out" 'due-overlap [key=due-overlap] needs-decision: choose the status-backed option' "drain omitted the overlapping status row"
   mkdir -p "$dir/daemon-bin"
   cat > "$dir/daemon-bin/fm-wake-drain.sh" <<'SH'
@@ -676,13 +676,83 @@ SH
   "$ROOT/bin/fm-captain-hold.sh" answer due-completed --decision-file "$dir/answer.txt" >/dev/null || fail "answer call with completed status"
   "$ROOT/bin/fm-captain-hold.sh" answer due-overlap --decision-file "$dir/answer.txt" --release >/dev/null || fail "release overlapping call"
   for task in due-answer due-release due-completed due-overlap; do
-    fm_advisory_superseded "$state" "$task" decision "$task" - - || fail "settled backlog call stayed current"
-    escalate_add "$state" "old $task decision" "$task" decision "$task" - - || fail "buffer settled call"
+    fm_advisory_superseded "$state" "$task" decision "$task" backlog '2026-08-01T00:00:00Z#0' || fail "settled backlog call stayed current"
+    escalate_add "$state" "old $task decision" "$task" decision "$task" backlog '2026-08-01T00:00:00Z#0' || fail "buffer settled call"
   done
   out=$(escalate_buffer_reconcile "$state" "$state/.subsuper-escalations") || fail "reconcile settled backlog advisories"
   [ -z "$out" ] || fail "settled backlog advisories remained deliverable: $out"
+  escalate_buffer_reconcile_inplace "$state" "$state/.subsuper-escalations" || fail "retire old buffered lifecycles"
+  before=$(grep -Fc 'due-release [key=due-release] needs-decision:' "$dir/sent.log")
+  FM_CAPTAIN_HOLD_NOW=2026-08-02T00:00:00Z "$ROOT/bin/fm-captain-hold.sh" hold due-release --reason second >/dev/null || fail "rehold delivered call"
+  export FM_CAPTAIN_HOLD_TODAY=2026-08-17
+  fm_advisory_superseded "$state" due-release decision due-release backlog '2026-08-01T00:00:00Z#0' || fail "old lifecycle stayed current after rehold"
+  for repeat in first same; do
+    bash -c '. "$1"; fm_recovery_marker_publish "$2" downtime' _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "publish reheld recovery"
+    handle_durable_wakes "check: rearm-resurface" "$state" || fail "deliver reheld recovery"
+    after=$(grep -Fc 'due-release [key=due-release] needs-decision:' "$dir/sent.log")
+    [ "$after" -eq "$((before + 1))" ] || fail "new lifecycle failed to deliver once or same lifecycle repeated"
+  done
+  assert_grep "$(printf 'due-release\tdecision\tdue-release\tbacklog\t2026-08-02T00:00:00Z#1')" "$state/.subsuper-advisory-acked" "delivery ledger lost the new lifecycle identity"
   pass "due calls retain backlog freshness with absent, completed, and overlapping status logs"
 )
+
+test_over_cap_decision_batches_still_deliver() (
+  local mode dir state fakebin task title marker line emitted i
+  title=$(python3 -c 'print("x" * 220)')
+  for mode in status backlog; do
+    dir=$(make_supercase "wd-over-cap-$mode")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    mkdir -p "$dir/data" "$dir/config" "$dir/daemon-bin"
+    cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+    printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+    export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config"
+    export FM_CAPTAIN_HOLD_TODAY=2026-08-16 FM_CAPTAIN_HOLD_REVIEW_DAYS=14
+    export PATH="$fakebin:$PATH"
+    printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n' > "$dir/body.txt"
+    for i in {1..19}; do
+      task="cap-$i"
+      if [ "$mode" = status ]; then
+        printf 'needs-decision [key=%s]: %s\n' "$task" "$title" > "$state/$task.status"
+      else
+        (cd "$dir" && tasks-axi add "$task" "$title" --kind captain >/dev/null \
+          && tasks-axi hold "$task" --kind captain --reason pending >/dev/null \
+          && tasks-axi update "$task" --body-file "$dir/body.txt" >/dev/null) || fail "create capped backlog fixture"
+      fi
+    done
+    cat > "$dir/daemon-bin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 0 ]; then
+  "$FM_REAL_WAKE_DRAIN" > "$FM_CAP_CAPTURE" || exit "$?"
+  cat "$FM_CAP_CAPTURE"
+else
+  exec "$FM_REAL_WAKE_DRAIN" "$@"
+fi
+SH
+    chmod +x "$dir/daemon-bin/fm-wake-drain.sh"
+    : > "$dir/sent.log"
+    : > "$dir/pane.txt"
+    export FM_FAKE_TMUX_SENT="$dir/sent.log" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_FAKE_TMUX_PANE_ALIVE=1
+    afk_enter "$state"
+    marker="$state/.watcher-down"
+    bash -c '. "$1"; fm_recovery_marker_publish "$2" downtime' _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "publish capped recovery"
+    FM_DAEMON_DIR="$dir/daemon-bin" FM_REAL_WAKE_DRAIN="$DRAIN" FM_CAP_CAPTURE="$dir/capture.txt" FM_DUE_REVIEW_TIMEOUT=120 \
+      handle_durable_wakes "check: rearm-resurface" "$state" || fail "$mode capped capture dropped the batch"
+    assert_grep 'more omitted (byte cap)' "$dir/capture.txt" "$mode batch did not reach the section cap: $(cat "$dir/capture.txt")"
+    emitted=0
+    while IFS= read -r line; do
+      case "$line" in cap-*) ;; *) continue ;; esac
+      emitted=$((emitted + 1))
+      assert_grep "$line" "$dir/sent.log" "$mode capped batch omitted a rendered decision from delivery"
+    done < "$dir/capture.txt"
+    [ "$emitted" -gt 0 ] && [ "$emitted" -lt 19 ] || fail "$mode capped fixture did not emit a partial batch"
+    assert_no_grep 'OPEN DECISIONS: 1 more omitted' "$dir/sent.log" "omission summary became an advisory"
+    case "$(cat "$marker")" in acked:handling:*) ;; *) fail "$mode capped recovery did not retire" ;; esac
+  done
+  pass "over-cap status and backlog batches deliver every rendered decision without consuming summary revisions"
+)
+
+test_over_cap_decision_batches_still_deliver || fail "capped decision batches failed"
 
 test_backlog_due_recovery_delivers_and_retires || fail "backlog due recovery failed"
 

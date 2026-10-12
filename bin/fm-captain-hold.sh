@@ -859,8 +859,6 @@ body_hold_set_timestamp() {  # <decoded-task-body>
     | sed -n \
       -e '1s/^Captain hold set: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\)$/\1/p' \
       -e '1s/^Captain hold set: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/\1/p' \
-      -e '1s/^Captain hold set: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\) .*/\1/p' \
-      -e '1s/^Captain hold set: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\) .*/\1/p' \
     | head -1
 }
 
@@ -868,7 +866,6 @@ body_hold_review_by() {  # <decoded-task-body>
   printf '%s\n' "$1" \
     | sed -n \
       -e '2s/^Captain hold review by: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/\1/p' \
-      -e '1s/^Captain hold set: [^ ]* Captain hold review by: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\).*/\1/p' \
     | head -1
 }
 

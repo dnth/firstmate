@@ -431,6 +431,9 @@ EOF
         done <<EOF_REV
 $revisions
 EOF_REV
+      else
+        d_endpoint=backlog
+        d_ident=$(fm_run_timed 10 "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" --identity --distinguish-absent 2>/dev/null) || return 1
       fi
       printf 'DECISION_REVISION\t%s\t%s\t%s\t%s\n' "$task" "$key" "$d_endpoint" "$d_ident" >&2
     fi

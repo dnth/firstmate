@@ -268,7 +268,7 @@ test_board_only_due_call_surfaces_without_status_logs() {
     IFS=$(printf '\t') read -r channel task key endpoint ident extra < <(grep '^DECISION_REVISION' "$err") \
       || fail "$mode drain emitted no decision revision"
     [ "$channel" = DECISION_REVISION ] && [ "$task" = board-only ] && [ "$key" = board-only ] \
-      && [ "$endpoint" = - ] && [ "$ident" = - ] && [ -z "$extra" ] \
+      && [ "$endpoint" = backlog ] && [ "$ident" = '2026-08-01T00:00:00Z#0' ] && [ -z "$extra" ] \
       || fail "$mode drain emitted malformed decision revision fields: $(cat "$err")"
   done
   printf 'Proceed with the work.\n' > "$dir/decision.txt"

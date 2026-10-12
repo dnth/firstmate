@@ -1322,7 +1322,7 @@ test_past_due_call_marked_due_while_held() {
     || fail "could not create the legacy fixture"
   run_captain "$home" hold legacy-due --reason "legacy pending" >/dev/null \
     || fail "could not hold the legacy fixture"
-  printf 'Captain hold set: 2026-08-01T00:00:00Z\n\nolder body without a review line' > "$home/legacy-body.txt"
+  printf 'Captain hold set: 2026-08-01\n\nolder body without a review line' > "$home/legacy-body.txt"
   (cd "$home" && tasks-axi update legacy-due --body-file "$home/legacy-body.txt" >/dev/null) \
     || fail "could not backdate the legacy body"
   out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
