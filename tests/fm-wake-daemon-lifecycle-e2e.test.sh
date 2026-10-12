@@ -605,7 +605,7 @@ test_stale_pane_transient_persistent_resume() {
 }
 
 test_backlog_due_recovery_delivers_and_retires() (
-  local dir state fakebin task marker out
+  local dir state fakebin task marker out channel key endpoint ident
   command -v tasks-axi >/dev/null 2>&1 || fail "backlog recovery test needs tasks-axi"
   dir=$(make_supercase wd-backlog-due)
   state="$dir/state"
@@ -616,15 +616,41 @@ test_backlog_due_recovery_delivers_and_retires() (
   export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config"
   export FM_CAPTAIN_HOLD_TODAY=2026-08-16 FM_CAPTAIN_HOLD_REVIEW_DAYS=14
   export PATH="$fakebin:$PATH"
-  for task in due-answer due-release; do
+  for task in due-answer due-release due-completed due-overlap; do
     (cd "$dir" && tasks-axi add "$task" "Choose $task" --kind captain --repo sample >/dev/null) || fail "create due call"
+    case "$task" in
+      due-completed) printf 'done: investigation completed\n' > "$state/$task.status" ;;
+      due-overlap) printf 'needs-decision [key=due-overlap]: choose the status-backed option\n' > "$state/$task.status" ;;
+    esac
     FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z "$ROOT/bin/fm-captain-hold.sh" hold "$task" --reason pending >/dev/null || fail "hold due call"
-    [ ! -e "$state/$task.status" ] || fail "board-only fixture has a status file"
+    case "$task" in
+      due-answer|due-release) [ ! -e "$state/$task.status" ] || fail "board-only fixture has a status file" ;;
+    esac
     if fm_advisory_superseded "$state" "$task" decision "$task" - -; then
       fail "live backlog call was considered superseded without a status file"
     fi
   done
   printf 'needs-decision [key=route]: choose the status route\n' > "$state/status-choice.status"
+  out=$(FM_WAKE_DRAIN_DECISION_REVISIONS=1 "$DRAIN" 2> "$dir/revisions.tsv") || fail "drain retained-status calls"
+  assert_contains "$out" 'due-completed [key=due-completed] needs-decision: Choose due-completed (due for review since 2026-08-15)' "completed status log hid the due call"
+  while IFS=$(printf '\t') read -r channel task key endpoint ident; do
+    [ "$channel" = DECISION_REVISION ] && [ "$task" = due-completed ] || continue
+    [ "$key" = due-completed ] && [ "$endpoint" = - ] && [ "$ident" = - ] || fail "due call inherited its completed status revision"
+    if fm_advisory_superseded "$state" "$task" decision "$key" "$endpoint" "$ident"; then
+      fail "completed status settled the live backlog call"
+    fi
+  done < "$dir/revisions.tsv"
+  assert_grep "$(printf 'DECISION_REVISION\tdue-completed\tdue-completed\t-\t-')" "$dir/revisions.tsv" "due call carried no backlog revision"
+  assert_contains "$out" 'due-overlap [key=due-overlap] needs-decision: choose the status-backed option' "drain omitted the overlapping status row"
+  mkdir -p "$dir/daemon-bin"
+  cat > "$dir/daemon-bin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+"$FM_REAL_WAKE_DRAIN" "$@" || exit "$?"
+if [ "$#" -eq 0 ]; then
+  printf 'resolved [key=due-overlap]: status choice settled\n' >> "$FM_STATE_OVERRIDE/due-overlap.status"
+fi
+SH
+  chmod +x "$dir/daemon-bin/fm-wake-drain.sh"
   : > "$dir/sent.log"
   : > "$dir/pane.txt"
   export FM_FAKE_TMUX_SENT="$dir/sent.log" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_FAKE_TMUX_PANE_ALIVE=1
@@ -632,10 +658,13 @@ test_backlog_due_recovery_delivers_and_retires() (
   marker="$state/.watcher-down"
   bash -c '. "$1"; fm_recovery_marker_publish "$2" downtime' \
     _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "publish backlog recovery marker"
-  handle_durable_wakes "check: rearm-resurface" "$state" || fail "due-call terminator invalidated recovery capture"
-  for task in due-answer due-release; do
-    assert_grep "$task [key=$task] needs-decision:" "$dir/sent.log" "recovery omitted a live board-only call"
+  FM_DAEMON_DIR="$dir/daemon-bin" FM_REAL_WAKE_DRAIN="$DRAIN" \
+    handle_durable_wakes "check: rearm-resurface" "$state" || fail "due-call terminator invalidated recovery capture"
+  for task in due-answer due-release due-completed due-overlap; do
+    assert_grep "$task [key=$task] needs-decision:" "$dir/sent.log" "recovery omitted a live backlog call"
   done
+  assert_no_grep 'due-overlap [key=due-overlap] needs-decision: choose the status-backed option' "$dir/sent.log" "settled status decision stayed deliverable"
+  assert_grep 'due-overlap [key=due-overlap] needs-decision: Choose due-overlap (due for review since 2026-08-15)' "$dir/sent.log" "overlapping due decision lost its backlog revision"
   assert_grep 'status-choice [key=route] needs-decision: choose the status route' "$dir/sent.log" "due-call capture swallowed the unrelated status decision"
   case "$(cat "$marker")" in
     acked:handling:*) ;;
@@ -644,13 +673,15 @@ test_backlog_due_recovery_delivers_and_retires() (
   printf 'Proceed.\n' > "$dir/answer.txt"
   "$ROOT/bin/fm-captain-hold.sh" answer due-answer --decision-file "$dir/answer.txt" >/dev/null || fail "answer backlog call"
   "$ROOT/bin/fm-captain-hold.sh" answer due-release --decision-file "$dir/answer.txt" --release >/dev/null || fail "release backlog call"
-  for task in due-answer due-release; do
+  "$ROOT/bin/fm-captain-hold.sh" answer due-completed --decision-file "$dir/answer.txt" >/dev/null || fail "answer call with completed status"
+  "$ROOT/bin/fm-captain-hold.sh" answer due-overlap --decision-file "$dir/answer.txt" --release >/dev/null || fail "release overlapping call"
+  for task in due-answer due-release due-completed due-overlap; do
     fm_advisory_superseded "$state" "$task" decision "$task" - - || fail "settled backlog call stayed current"
     escalate_add "$state" "old $task decision" "$task" decision "$task" - - || fail "buffer settled call"
   done
   out=$(escalate_buffer_reconcile "$state" "$state/.subsuper-escalations") || fail "reconcile settled backlog advisories"
   [ -z "$out" ] || fail "settled backlog advisories remained deliverable: $out"
-  pass "due-call terminator accepts mixed recovery and backlog-only freshness delivers then retires"
+  pass "due calls retain backlog freshness with absent, completed, and overlapping status logs"
 )
 
 test_backlog_due_recovery_delivers_and_retires || fail "backlog due recovery failed"

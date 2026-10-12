@@ -2102,7 +2102,7 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp recovery_offset_tmp
   local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
   local adv_task adv_key adv_rest adv_endpoint adv_ident
-  local decision_revisions='' rev_task rev_key rev_endpoint rev_ident rev_matched
+  local decision_revisions='' rev_task rev_key rev_matched
   local decisions_routed_completely=false
   local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_OFFSET_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
   local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
@@ -2216,17 +2216,14 @@ handle_durable_wakes() {  # <watcher-reason> <state>
         '[key='*) adv_key=${adv_rest#\[key=}; adv_key=${adv_key%%\]*} ;;
       esac
       rev_matched=false
-      while IFS="$tab" read -r rev_task rev_key rev_endpoint rev_ident; do
-        [ -n "$rev_task" ] || continue
-        if [ "$rev_task" = "$adv_task" ] && [ "$rev_key" = "$adv_key" ]; then
-          adv_endpoint=$rev_endpoint
-          adv_ident=$rev_ident
-          rev_matched=true
-          break
-        fi
-      done <<EOF3
-$decision_revisions
-EOF3
+      IFS="$tab" read -r rev_task rev_key adv_endpoint adv_ident <<<"${decision_revisions%%$'\n'*}"
+      case "$decision_revisions" in
+        *$'\n'*) decision_revisions=${decision_revisions#*$'\n'} ;;
+        *) decision_revisions='' ;;
+      esac
+      if [ "$rev_task" = "$adv_task" ] && [ "$rev_key" = "$adv_key" ]; then
+        rev_matched=true
+      fi
       if [ "$rev_matched" != true ]; then
         # A rendered decision without its drain-snapshot revision means the
         # producer and consumer disagree; retain the episode for a retry

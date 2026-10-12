@@ -358,7 +358,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open due bound task key verb note review title line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open due bound task key verb note review title line row_origin item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
   local revisions='' s_task s_endpoint s_ident d_endpoint d_ident emit_revisions=false
 
@@ -389,10 +389,11 @@ print_open_decisions_section() {
   bound=${FM_DUE_REVIEW_TIMEOUT:-20}
   case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
   due=$(fm_run_timed "$bound" "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null) || due=
+  open=$(printf '%s\n' "$open" | awk 'NF { printf "status\t%s\n", $0 }') || return 1
   if [ -n "$due" ]; then
     while IFS=$(printf '\t') read -r task review title; do
       [ -n "$task" ] || continue
-      open=$(printf '%s\n%s\t%s\t%s\t%s' "$open" "$task" "$task" \
+      open=$(printf '%s\nbacklog\t%s\t%s\t%s\t%s' "$open" "$task" "$task" \
         needs-decision "${title:-captain call} (due for review since $review)")
     done <<EOF
 $due
@@ -400,7 +401,7 @@ EOF
   fi
   [ -n "$open" ] || return 0
 
-  while IFS=$(printf '\t') read -r task key verb note; do
+  while IFS=$(printf '\t') read -r row_origin task key verb note; do
     [ -n "$task" ] || continue
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
@@ -421,14 +422,16 @@ EOF
     shown=$((shown + 1))
     if [ "$emit_revisions" = true ]; then
       d_endpoint=- d_ident=-
-      while IFS=$(printf '\t') read -r s_task s_endpoint s_ident; do
-        [ "$s_task" = "$task" ] || continue
-        d_endpoint=$s_endpoint
-        d_ident=$s_ident
-        break
-      done <<EOF_REV
+      if [ "$row_origin" = status ]; then
+        while IFS=$(printf '\t') read -r s_task s_endpoint s_ident; do
+          [ "$s_task" = "$task" ] || continue
+          d_endpoint=$s_endpoint
+          d_ident=$s_ident
+          break
+        done <<EOF_REV
 $revisions
 EOF_REV
+      fi
       printf 'DECISION_REVISION\t%s\t%s\t%s\t%s\n' "$task" "$key" "$d_endpoint" "$d_ident" >&2
     fi
   done <<EOF
