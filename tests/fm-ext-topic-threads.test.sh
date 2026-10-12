@@ -516,6 +516,8 @@ created = False
 posted = []
 def respond(request, **kwargs):
     global created
+    if request.get_method() == "GET":
+        return io.BytesIO(json.dumps({"id": payload["message_id"], "name": "ship login fix"}).encode())
     barrier.wait(timeout=30)
     with lock:
         if created:
@@ -790,6 +792,67 @@ PY
   pass "14 legacy titles and markers stay stable and long tokens fit"
 }
 
+test_15_existing_threads_keep_the_winning_name() {
+  local home slug legacy
+  home="$TMP_ROOT/c15"
+  setup_home "$home"
+  slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
+  legacy=$(expected_topic "$MESSAGE")
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$legacy" <<'PY'
+import io, json, os, sys
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+home, slug, legacy = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+context_path = home / "state/ext-context" / (slug + ".json")
+context = json.loads(context_path.read_text())
+context["topic"] = legacy
+context.pop("request_text")
+context_path.write_text(json.dumps(context))
+payload = dict(context, thread_title="Aceh · later title", thread_state="done")
+thread_id = payload["message_id"]
+poster.save_request_thread(payload, thread_id, home)
+renames = []
+assert poster.thread_name_for(payload, home) == legacy
+poster.maybe_rename_topic_thread(payload, thread_id, home,
+    rename_thread=lambda tid, name: renames.append(name))
+assert renames == ["✅ " + legacy]
+poster.request_progress_path(payload, home).unlink()
+context["request_text"] = "ship the login fix"
+context["topic"] = context["request_text"]
+context_path.write_text(json.dumps(context))
+os.environ["DISCORD_BOT_TOKEN"] = "fixture"
+def lost_create(request, name):
+    assert name == payload["thread_title"]
+    raise poster.DiscordSendError("permanent", "already exists", 400, {"code": 160004})
+with patch.object(poster.urllib.request, "urlopen", side_effect=OSError("offline")):
+    assert poster.ensure_topic_thread(payload, {}, home, lost_create) == thread_id
+assert not poster.load_request_topic(payload, home)
+renames.clear()
+poster.maybe_rename_topic_thread(payload, thread_id, home,
+    rename_thread=lambda tid, name: renames.append(name))
+assert renames == []
+for winner in ("InfoConnect · winning title", "❓ InfoConnect · winning title", "ship the login fix"):
+    def read_thread(request, **kwargs):
+        assert request.get_method() == "GET"
+        assert request.full_url.endswith("/channels/" + thread_id)
+        return io.BytesIO(json.dumps({"id": thread_id, "name": winner}).encode())
+    with patch.object(poster.urllib.request, "urlopen", read_thread):
+        assert poster.ensure_topic_thread(payload, {}, home, lost_create) == thread_id
+    assert poster.load_request_topic(payload, home)["topic_name"] == winner
+    renames.clear()
+    for state, prefix in (("done", "✅ "), ("needs-you", "❓ "), ("none", "")):
+        marked = dict(payload, thread_state=state)
+        poster.maybe_rename_topic_thread(marked, thread_id, home,
+            rename_thread=lambda tid, name: renames.append(name))
+        assert renames[-1] == prefix + poster.state_thread_name(winner, "none")
+    poster.request_progress_path(payload, home).unlink()
+PY
+  then fail "existing threads must retain their original or winning names"
+  fi
+  pass "15 existing threads keep the winning name"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -806,5 +869,6 @@ test_11_titles_win_and_empty_falls_back_to_label_time
 test_12_title_creates_and_states_rename
 test_13_rename_never_blocks_and_never_leaves_home
 test_14_legacy_titles_markers_and_long_tokens
+test_15_existing_threads_keep_the_winning_name
 
 echo "all fm-ext-topic-threads tests passed"

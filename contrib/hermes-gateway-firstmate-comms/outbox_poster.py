@@ -592,7 +592,8 @@ def thread_name_for(payload: dict, home: Path) -> str:
         # so a tampered record still falls back to a fresh derivation.
         return public_topic_name(payload, state_thread_name(recorded_name, "none"), home, request_text,
                                  recorded.get("creating_title") or "")
-    return public_topic_name(payload, name, home, request_text, _title_for(payload))
+    return public_topic_name(payload, name, home, request_text,
+                             "" if recorded else _title_for(payload))
 
 
 def _context_for(payload: dict, home: Path | None) -> dict:
@@ -825,12 +826,36 @@ def ensure_topic_thread(
     if not name:
         return ""
     creator = create_thread or discord_create_thread
+    creating_title = _title_for(payload)
+    thread_state = payload.get("thread_state") if isinstance(payload.get("thread_state"), str) else ""
     try:
         receipt = creator(payload, name)
     except DiscordSendError as err:
         if err.api_error.get("code") != 160004:
             return ""
-        receipt = {"thread_id": str(payload.get("message_id") or "")}
+        thread_id = str(payload.get("message_id") or "")
+        if not _SNOWFLAKE.fullmatch(thread_id):
+            return ""
+        try:
+            request = urllib.request.Request(
+                f"{DISCORD_API_BASE}/channels/{thread_id}",
+                headers={"Authorization": f"Bot {_bot_token()}", "User-Agent": USER_AGENT},
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                existing = json.loads(response.read().decode("utf-8"))
+            if not isinstance(existing, dict) or str(existing.get("id") or "") != thread_id:
+                return thread_id
+            name = existing.get("name")
+            if not isinstance(name, str) or not name:
+                return thread_id
+            creating_title = state_thread_name(name, "none")
+            if public_topic_name(payload, creating_title, home,
+                                 _request_text_for(payload, home), creating_title) != creating_title:
+                return thread_id
+        except Exception:
+            return thread_id
+        thread_state = ""
+        receipt = {"thread_id": thread_id}
     except Exception:
         return ""
     thread_id = str((receipt or {}).get("thread_id") or "")
@@ -838,8 +863,7 @@ def ensure_topic_thread(
         return ""
     try:
         save_request_thread(payload, thread_id, home, topic_name=name,
-                            thread_state=(payload.get("thread_state") if isinstance(payload.get("thread_state"), str) else ""),
-                            creating_title=_title_for(payload))
+                            thread_state=thread_state, creating_title=creating_title)
     except Exception:
         return thread_id
     return thread_id
