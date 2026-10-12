@@ -248,10 +248,8 @@ newer_post() {
 
 # answer_option <stem> <answer>: the id of the one option a recorded answer
 # names, by a standalone option number or an option label as whole words.
-# Every reference counts, so an answer naming two options ("1 or 2", "North,
-# not South") names none. Prints nothing unless exactly one option is named.
 answer_option() {
-  local stem=$1 answer=$2 ids='' word id label prefix label_length
+  local stem=$1 answer=$2 ids='' word id label prefix
   local -a words
   answer=${answer%%" (Discord button:"*}
   [ -n "$answer" ] || return 0
@@ -264,12 +262,11 @@ answer_option() {
     | if length == 0 then empty else
         (map(.label | length) | max) as $longest
         | map(select((.label | length) == $longest))
-        | if length == 1 then .[0] | "\(.id)\t\(.label | length)" else empty end
+        | if length == 1 then .[0].id else empty end
       end' "$OUTBOX/$stem.progress.json" 2>/dev/null)
   if [ -n "$prefix" ]; then
-    IFS=$'\t' read -r id label_length <<< "$prefix"
-    ids="$id"$'\n'
-    answer=${answer:label_length}
+    printf '%s\n' "$prefix"
+    return 0
   fi
   read -r -a words <<< "$(printf '%s' "$answer" | LC_ALL=C tr -c '[:alnum:]' ' ')"
   for word in "${words[@]+"${words[@]}"}"; do
