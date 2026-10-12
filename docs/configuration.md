@@ -911,27 +911,26 @@ Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<
 Channel members can read a `custom_id` through the Discord API, so the key is never written into a label or the post text, and emit refuses a post that names the key or its task id.
 A decision post goes where every reply to its request goes: into the request's Discord thread when it has one, otherwise its channel.
 
-Only an author with a `<guild>:<channel>:<author>` allowlist rule can click: everyone else, including a confirm-rule author, gets an ephemeral "not authorised" and nothing is recorded.
+Only an author with a `<guild>:<channel>:<author>` allowlist rule can click: everyone else, including a confirm-rule author, gets an ephemeral "not authorised" and nothing is sent.
 A click is therefore never stronger than the same author's typed message.
-A click on an option records the answer through Firstmate's existing keyed decision path and nowhere else: `bin/fm-captain-hold.sh answers` for a captain call and `bin/fm-send.sh --resolve-key` for a worker's decision.
-The recorded provenance names who clicked (Discord name and id), when (UTC), the key, the option, and any confirmation.
-The click then sends one request through `bin/fm-ext-intake.sh --origin button` at that author's `standing` authority, so Firstmate wakes and acts on the recorded answer; its `decision` field repeats the key, option, decision text cut to its first 1000 characters, and the audit.
-If that request cannot be published, the answer still stands, the clicker is told Firstmate has not heard yet, and the same request is sent again on the next click or plugin sweep until intake accepts it.
-When `bin/fm-send.sh` reports the worker's copy durable but unconfirmed, the answer also stands and is never resent; the request marks it `delivery: unconfirmed` for Firstmate to follow up.
-A Discuss click on an open decision decides nothing: it sends one request so Firstmate picks the decision up in the thread, and a typed reply to the post, including a bare option number, keeps working exactly as before.
+A click records nothing itself: like a typed reply to the post, it files one request through `bin/fm-ext-intake.sh --origin button` at that author's `standing` authority, and Firstmate records the answer through its normal decision path, `bin/fm-captain-hold.sh answers` for a captain call and `bin/fm-send.sh --resolve-key` for a worker's decision.
+Single use, staleness, and races between channels therefore stay with that existing path; the bridge adds no locking and no second decision store.
+The request's `decision` field carries the key, the post's lifecycle, the option id and label, the decision text cut to its first 1000 characters, any confirmation, and the audit: who clicked (Discord name and id) and when (UTC).
+The clicked post's buttons go off at once and it reads `⏳ <option> sent by <user> <time> - waiting for Firstmate to record it`.
+If the request cannot be filed, nothing is sent, the clicker is told nothing was decided, and the post stays open for another click.
+A Discuss click on an open decision decides nothing and leaves the buttons on: it files one request so Firstmate picks the decision up in the thread, and a typed reply to the post, including a bare option number, keeps working exactly as before.
 
 An option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible needs a second click.
-The first click answers with an ephemeral `Confirm: <label>?` and a Confirm button, and nothing is recorded until that button is clicked; the recorded provenance then quotes the prompt.
+The first click answers with an ephemeral `Confirm: <label>?` and a Confirm button, and nothing is sent until that button is clicked; the request then carries the prompt, and Firstmate's record quotes it.
 Emit marks an option this way when the emitter declares `confirm`, and always when its label names such an action.
 A confirmed click from a standing-rule author is that author's explicit word for that one decision only, never standing authority, and merge authority stays where `AGENTS.md` puts it.
 
 Each post is bound to the lifecycle of its decision that was open when it was posted, so a captain call re-held or a worker key reopened for a new question is a different decision to it.
-After a decision is answered on any channel, its posts are disabled and edited to show the outcome, read from the same ledgers rather than from any step Firstmate must remember: `✅ <option> chosen by <user> <time>` names the clicker for a click and the captain for an answer recorded elsewhere that names exactly one option by number or label, `✅ Decided <time>` covers any other answer, including one naming several options, `Closed - no longer needed <time>` covers a decision closed with no captain answer or replaced by a later lifecycle, and `Replaced by a newer post <time>` covers an older post for the same decision.
-The answer text recorded elsewhere is never shown, and `<time>` is a Discord timestamp of when the bridge saw the outcome, so each reader sees it in their own time zone.
-A click, Discuss included, on a decided, superseded, replaced, or expired post is a no-op with an ephemeral notice.
-A double click records one answer, and so does a typed answer racing a click, because every click rechecks the ledgers under a per-decision lock and `bin/fm-send.sh --resolve-key` holds a per-key lock across its check, delivery, and closing record.
+When Firstmate records an answer on any channel, its posts are disabled and edited to show the outcome, read from the same ledgers rather than from any step Firstmate must remember: `✅ <option> chosen by <user> <time>` names the clicker when the recorded answer is the option that post's click sent, and the captain for any other recorded answer that names exactly one option by number or label; `✅ Decided <time>` covers any other answer, including one naming several options, `Closed - no longer needed <time>` covers a decision closed with no captain answer or replaced by a later lifecycle, and `Replaced by a newer post <time>` covers an older post for the same decision.
+The answer text recorded elsewhere is never shown, and `<time>` is a Discord timestamp, so each reader sees it in their own time zone.
+A click, Discuss included, on a sent, decided, superseded, replaced, or expired post files nothing and gets an ephemeral notice, and a double click files one request because the first click claims the post.
 The post's own records follow the retention window above, so its buttons expire with it.
-`bin/fm-ext-decision.sh`'s header owns the click checks, notices, and the post records, and the plugin edits a clicked post within one outbox cycle and sweeps for decisions closed elsewhere every 30 seconds.
+`bin/fm-ext-decision.sh`'s header owns the click checks, notices, and the post records; the plugin redraws a clicked post at once and sweeps for answers recorded elsewhere every 30 seconds.
 Labels and decision posts follow the same public-safety rule as every reply.
 The plugin posts buttons only while the gateway's Discord client routes their clicks, and otherwise posts the decision as plain text that the captain answers by replying to it; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#decision-buttons) owns that routing.
 

@@ -386,14 +386,17 @@ def _message_id(receipt: dict) -> str:
 
 
 class _temp_json:
-    def __init__(self, body: dict):
+    def __init__(self, body):
         self.body = body
         self.path = ""
+
+    def _text(self) -> str:
+        return json.dumps(self.body)
 
     def __enter__(self) -> str:
         fd, self.path = _mktemp()
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(self.body))
+            handle.write(self._text())
         return self.path
 
     def __exit__(self, *args) -> None:
@@ -402,6 +405,13 @@ class _temp_json:
                 os.unlink(self.path)
             except OSError:
                 pass
+
+
+class _temp_text(_temp_json):
+    """A private temp file holding plain text instead of JSON."""
+
+    def _text(self) -> str:
+        return str(self.body)
 
 
 def _mktemp() -> tuple[int, str]:
@@ -698,12 +708,17 @@ def _decision_cli() -> Path:
 
 
 def _unshown_settled_posts(home: Path | None = None) -> bool:
-    """True when some decision post is settled but Discord does not show it yet."""
+    """True when a decision post's sent or final line is newer than what
+    Discord was last shown for it."""
     outbox = state_dir(home or firstmate_home()) / "ext-outbox"
-    for note in outbox.glob("*.settled.json"):
-        stem = note.name[: -len(".settled.json")]
-        if not (outbox / f"{stem}.finalized").exists():
-            return True
+    for suffix in (".sent.json", ".settled.json"):
+        for note in outbox.glob("*" + suffix):
+            shown = outbox / (note.name[: -len(suffix)] + ".finalized")
+            try:
+                if not shown.exists() or note.stat().st_mtime >= shown.stat().st_mtime:
+                    return True
+            except OSError:
+                return True
     return False
 
 
@@ -712,19 +727,20 @@ def reconcile_decision_posts(
     full: bool = True,
     edit: Callable[[str, str, str, list], None] | None = None,
 ) -> list[str]:
-    """Show each settled decision post's outcome on Discord: replace its text
-    with the outcome line and disable its buttons. ``full`` also settles posts
-    whose decision closed on another channel, which reads Firstmate's ledgers,
-    so the watcher runs it on a slower cadence than the settled-only pass.
-    A permanent refusal (the message is gone) finalizes the post; anything
-    else is retried on a later pass. Returns the posts it finalized.
+    """Show each decision post's current line on Discord with its buttons off:
+    the sent line once a click filed its request, then the outcome once
+    Firstmate records the answer. ``full`` also settles posts whose decision
+    closed or was replaced, which reads Firstmate's ledgers, so the watcher
+    runs it on a slower cadence than the pass after a click. A permanent
+    refusal (the message is gone) counts as shown; anything else is retried on
+    a later pass. Returns the posts it updated.
     """
     home = home or firstmate_home()
     args = [str(_decision_cli()), "posts"] + ([] if full else ["--settled-only"])
     result = subprocess.run(args, check=False, env=_env_for(home), capture_output=True, text=True)
     if result.returncode != 0:
         return []
-    finalized = []
+    shown = []
     for line in result.stdout.splitlines():
         try:
             item = json.loads(line)
@@ -735,16 +751,17 @@ def reconcile_decision_posts(
                 continue
         except Exception:
             continue
-        done = subprocess.run(
-            [str(_decision_cli()), "finalized", "--post", item["post"]],
-            check=False,
-            env=_env_for(home),
-            capture_output=True,
-            text=True,
-        )
+        with _temp_text(item["content"]) as content_file:
+            done = subprocess.run(
+                [str(_decision_cli()), "finalized", "--post", item["post"], "--content-file", content_file],
+                check=False,
+                env=_env_for(home),
+                capture_output=True,
+                text=True,
+            )
         if done.returncode == 0:
-            finalized.append(item["post"])
-    return finalized
+            shown.append(item["post"])
+    return shown
 
 
 def discord_add_reaction(channel_id: str, message_id: str, emoji: str) -> None:

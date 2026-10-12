@@ -6,13 +6,14 @@
 #
 # Hermetic by default: no Discord network, no token, no gateway process. Clicks
 # go through the plugin's own click handler, which runs the real decision
-# script; answers land in the real keyed decision path (bin/fm-send.sh against
-# a stub tmux, and bin/fm-captain-hold.sh against a real tasks-axi backlog when
-# tasks-axi is installed); posts and edits go to local stand-ins for Discord's
-# REST edge. The last case routes synthetic Discord clicks through the installed
-# Hermes gateway's Discord adapter and its real discord.py client when that
-# Python is available (FM_TEST_HERMES_PYTHON, or the default Hermes install),
-# and skips with a printed reason otherwise.
+# script and files requests through the real intake; the tests then play
+# Firstmate's part and record those requests through the real keyed decision
+# path (bin/fm-send.sh against a stub tmux, and bin/fm-captain-hold.sh against a
+# real tasks-axi backlog when tasks-axi is installed); posts and edits go to
+# local stand-ins for Discord's REST edge. Case 10 routes synthetic Discord
+# clicks through the installed Hermes gateway's Discord adapter and its real
+# discord.py client when that Python is available (FM_TEST_HERMES_PYTHON, or
+# the default Hermes install), and skips with a printed reason otherwise.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -188,6 +189,36 @@ resolved_lines() {  # <home> <key-slug>
   grep -c "^resolved \[key=$2\]" "$1/state/$TASK.status" || true
 }
 
+# What Firstmate does with a button request, per the ext-respond skill: record
+# the option through the decision's own normal path, quoting the click's audit.
+record_as_firstmate() {  # <home> <inbox-record-json>
+  local home=$1 record=$2 key option id by author at audit task mode
+  key=$(jq -r '.decision.key' <<<"$record")
+  option=$(jq -r '.decision.option' <<<"$record")
+  id=$(jq -r '.decision.option_id' <<<"$record")
+  by=$(jq -r '.decision.by' <<<"$record")
+  author=$(jq -r '.decision.author' <<<"$record")
+  at=$(jq -r '.decision.at' <<<"$record")
+  audit="Discord button: option $id \"$option\" chosen by $by ($author) at $at for $key"
+  if [ "$(jq -r '.decision.confirmed' <<<"$record")" = true ]; then
+    audit="$audit, confirmed by clicking \"$(jq -r '.decision.confirm_prompt' <<<"$record")\""
+  fi
+  case "$key" in
+    hold:*)
+      task=${key#hold:}
+      mode=$(jq -r '.decision.mode // "done"' <<<"$record")
+      printf '%s\t%s\t%s\t%s\n' "$task" "$option" "$id. $option" "$mode" \
+        | home_env "$home" "$ROOT/bin/fm-captain-hold.sh" answers --source "$audit" >/dev/null \
+        || fail "fm-captain-hold.sh answers refused the button answer"
+      ;;
+    key:*)
+      task=${key#key:}
+      home_env "$home" "$ROOT/bin/fm-send.sh" "${task%%:*}" --resolve-key "${key##*:}" \
+        "Decision answer: $option ($audit)" >/dev/null 2>&1 || fail "fm-send refused the button answer"
+      ;;
+  esac
+}
+
 mkdir -p "$FIXTURES"
 cat > "$FIXTURES/fmdecide.py" <<'PY'
 """Click helpers and a local POST edge for the decision-button tests."""
@@ -316,10 +347,10 @@ PY
   pass "1 buttons carry the decision key and option ids, ride the last chunk, and post into the request's thread or channel"
 }
 
-# --- 2. a standing click answers a worker decision with an audit -----------
+# --- 2. a standing click files one request; Firstmate records it -----------
 
-test_2_standing_click_answers_a_worker_key_with_audit() {
-  local home out line record
+test_2_standing_click_files_one_request_for_a_worker_key() {
+  local home out record
   home="$TMP_ROOT/c2"
   setup_home "$home"
   open_request "$home"
@@ -327,36 +358,49 @@ test_2_standing_click_answers_a_worker_key_with_audit() {
   emit_decision "$home" 1 '{"key":"'"$KEY"'","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
   deliver "$home" "$POST"
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmd:$KEY:1" "$CAPTAIN" 880000000000000001)
-  assert_contains "$out" '"text": "Recorded: North. Firstmate has it."' "the captain's click was not recorded"
-  [ "$(resolved_lines "$home" pick)" = 1 ] || fail "one click must close the key exactly once"
-  line=$(grep '^resolved \[key=pick\]' "$home/state/$TASK.status")
-  assert_contains "$line" "North" "the resolved line must name the option"
-  grep -qF "Decision answer: North (Discord button: option 1 \"North\" chosen by Dana ($CAPTAIN) at 2026-10-11T12:00:00Z for $KEY)" \
-    "$home/state/$TASK.inbox/001.msg" || fail "the worker did not receive the audited answer"
-  [ "$(button_requests "$home")" = 1 ] || fail "the recorded click must wake Firstmate with exactly one request"
+  assert_contains "$out" '"text": "Sent: North. Firstmate will record it, and the post updates when it does."' \
+    "the captain's click was not sent"
+  [ "$(resolved_lines "$home" pick)" = 0 ] || fail "the plugin recorded the answer itself"
+  [ ! -d "$home/state/$TASK.inbox" ] || fail "the plugin delivered the answer to the worker itself"
+  [ "$(button_requests "$home")" = 1 ] || fail "one click must file exactly one request"
   record=$(button_request "$home" option)
-  printf '%s' "$record" | jq -e --arg key "$KEY" '
-    .authority == "standing" and .origin == "button"
-    and .decision.key == $key and .decision.option_id == 1 and .decision.option == "North"
-    and .decision.recorded_via == "fm-send.sh --resolve-key"
-    and .decision.by == "Dana" and .decision.at == "2026-10-11T12:00:00Z"
+  printf '%s' "$record" | jq -e --arg key "$KEY" --arg captain "$CAPTAIN" '
+    .authority == "standing" and .origin == "button" and .author == $captain
+    and .text == "Decision answer by button: North"
+    and .decision.key == $key and .decision.occurrence == "1"
+    and .decision.option_id == 1 and .decision.option == "North" and .decision.confirmed == false
+    and .decision.by == "Dana" and .decision.author == $captain and .decision.at == "2026-10-11T12:00:00Z"
     and (.decision.text | startswith("Which way"))' >/dev/null \
-    || fail "the request for Firstmate lost the key, option, audit, or authority: $record"
+    || fail "the request lost the key, option, decision text, audit, or authority: $record"
+  assert_grep "ext-request $(jq -r .slug <<<"$record")" "$home/state/.wake-queue" \
+    "the click request must wake Firstmate like any other request"
 
+  # The post's buttons go off at once with the sent line.
   out=$(reconcile "$home" False)
   printf '%s' "$out" | jq -e --arg key "$KEY" --arg msg "$POST" '
-    .message == $msg and .content == "✅ North chosen by Dana <t:1791720000:f>"
+    .message == $msg
+    and .content == "⏳ North sent by Dana <t:1791720000:f> - waiting for Firstmate to record it"
     and ([.components[].components[] | .disabled] | all)
     and (.components[0].components[0].custom_id == ("fmd:" + $key + ":1"))' >/dev/null \
-    || fail "the post must be edited to the outcome with its buttons disabled: $out"
+    || fail "a sent click must turn the post's buttons off with the sent line: $out"
+  [ -z "$(reconcile "$home" True)" ] || fail "an unchanged sent post was edited again"
+
+  # Firstmate records the request through its normal path; the post follows.
+  record_as_firstmate "$home" "$record"
+  [ "$(resolved_lines "$home" pick)" = 1 ] || fail "Firstmate's normal path did not record the answer"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720100 reconcile "$home" True)
+  printf '%s' "$out" | jq -e --arg msg "$POST" '
+    .message == $msg and .content == "✅ North chosen by Dana <t:1791720000:f>"
+    and ([.components[].components[] | .disabled] | all)' >/dev/null \
+    || fail "the post must show the recorded choice with its buttons off: $out"
   [ -z "$(reconcile "$home" True)" ] || fail "a post Discord already shows was edited again"
-  pass "2 a standing click answers a worker decision once through fm-send --resolve-key with who, when, key, and option, then disables the post"
+  pass "2 a standing click files one request with key, option, text, and audit, turns the buttons off, and shows the choice once Firstmate records it"
 }
 
-# --- 3. a standing click answers a captain call on the board ---------------
+# --- 3. a captain call: the click is a request; the board owns the answer ---
 
-test_3_standing_click_answers_a_captain_call() {
-  local home id out show fakebin
+test_3_captain_call_click_is_a_request_the_board_records() {
+  local home id out show fakebin record
   command -v tasks-axi >/dev/null 2>&1 || { echo "skip: 3 needs tasks-axi for the captain-call board"; return 0; }
   # tasks-axi and its runtime live outside the minimal test PATH.
   local BASE_PATH
@@ -379,18 +423,22 @@ test_3_standing_click_answers_a_captain_call() {
   emit_decision "$home" 1 '{"key":"hold:'"$id"'","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
   deliver "$home" "$POST"
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmd:hold:$id:2" "$CAPTAIN" 880000000000000002)
-  assert_contains "$out" "Recorded: South. Firstmate has it." "the click did not answer the captain call"
+  assert_contains "$out" "Sent: South." "the click on the captain call was not sent"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open "$id" >/dev/null \
+    || fail "the plugin closed the captain call itself"
+  record=$(button_request "$home" option)
+  printf '%s' "$record" | jq -e --arg key "hold:$id" '.decision.key == $key and .decision.mode == "done"
+    and (.decision.occurrence | endswith("#0"))' >/dev/null \
+    || fail "the request lost the call's key, close mode, or lifecycle: $record"
+  record_as_firstmate "$home" "$record"
   show=$(cd "$home" && tasks-axi show "$id" --full)
-  assert_contains "$show" "state: done" "the answered captain call must close"
-  assert_contains "$show" "Answer: South" "the captain call lost the chosen option"
-  assert_contains "$show" "Captain answered this call through Discord button: option 2" \
-    "the captain call lost the chosen option id"
+  assert_contains "$show" "state: done" "Firstmate's normal path did not close the call"
+  assert_contains "$show" "Answer: South" "the recorded call lost the chosen option"
   assert_contains "$show" "chosen by Dana ($CAPTAIN) at 2026-10-11T12:00:00Z for hold:$id" \
-    "the captain call lost who, when, and key"
-  button_request "$home" option | jq -e '.decision.recorded_via == "fm-captain-hold.sh answers"' >/dev/null \
-    || fail "the request for Firstmate must name the captain-call path"
+    "the recorded call lost who, when, and key"
   out=$(click "$home" "fmd:hold:$id:1" "$CAPTAIN" 880000000000000003)
-  assert_contains "$out" "Already decided" "a second click on an answered captain call must be a no-op"
+  assert_contains "$out" "Already sent" "a second click on a sent captain call must file nothing"
+  [ "$(button_requests "$home")" = 1 ] || fail "a second click filed another request"
 
   # A captain call answered on the board, not by button: the post reads the
   # recorded answer and names the option it chose.
@@ -430,15 +478,17 @@ test_3_standing_click_answers_a_captain_call() {
     "a post must not answer a later lifecycle of its captain call"
   home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open "$id-4" >/dev/null \
     || fail "a stale click closed the re-held captain call"
+  [ "$(button_requests "$home")" = 1 ] || fail "a stale click filed a request"
 
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
   printf '%s\n' "$out" | jq -se '
     (map({(.message): .content}) | add) as $shown
-    | $shown["700000000000000006"] == "✅ South chosen by the captain <t:1791720000:f>"
+    | $shown["700000000000000001"] == "✅ South chosen by Dana <t:1791720000:f>"
+      and $shown["700000000000000006"] == "✅ South chosen by the captain <t:1791720000:f>"
       and $shown["700000000000000007"] == "Closed - no longer needed <t:1791720000:f>"
       and $shown["700000000000000008"] == "Closed - no longer needed <t:1791720000:f>"' \
-    >/dev/null || fail "board answers, unanswered closes, and re-holds must each show their own outcome: $out"
-  pass "3 a standing click answers a held captain call with an audit; board answers, unanswered closes, and re-holds show their own outcome"
+    >/dev/null || fail "button, board, unanswered, and re-held calls must each show their own outcome: $out"
+  pass "3 a captain-call click files a request the board records; board answers, unanswered closes, and re-holds show their own outcome"
 }
 
 # --- 4. everyone else is not authorised and records nothing ----------------
@@ -454,7 +504,7 @@ test_4_others_are_not_authorised() {
   for who in "$MEMBER" "$STRANGER"; do
     for button in 1 d; do
       out=$(click "$home" "fmd:$KEY:$button" "$who" 880000000000000010)
-      assert_contains "$out" "Firstmate: not authorised to answer this decision. Nothing was recorded." \
+      assert_contains "$out" "Firstmate: not authorised to answer this decision. Nothing was sent." \
         "author $who must not be able to use button $button"
     done
   done
@@ -472,7 +522,8 @@ test_4_others_are_not_authorised() {
     || fail "the member's typed message fixture was refused"
   typed=$(jq -r 'select(.author == "'"$MEMBER"'") | .authority' "$home"/state/ext-inbox/*.json)
   [ "$typed" = confirm ] || fail "the member's typed message must carry confirm authority, got '$typed'"
-  printf '{"key":"%s","choice":"discuss","text":"t","by":"m","at":"now"}' "$KEY" > "$home/forged.json"
+  printf '{"key":"%s","occurrence":"1","choice":"discuss","text":"t","by":"m","author":"%s","at":"now"}' \
+    "$KEY" "$MEMBER" > "$home/forged.json"
   set +e
   home_env "$home" "$INTAKE" --request-id "discord:$GUILD:$CHANNEL:$CHANNEL:880000000000000014" \
     --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$CHANNEL" \
@@ -485,8 +536,8 @@ test_4_others_are_not_authorised() {
   [ "$(button_requests "$home")" = 0 ] || fail "intake wrote a confirm-authority button request"
 
   out=$(click "$home" "fmd:$KEY:1" "$CAPTAIN" 880000000000000015)
-  assert_contains "$out" "Recorded: North." "refusals must not use up the decision"
-  pass "4 confirm-rule and unlisted authors get not authorised and record nothing; a click is never stronger than typing"
+  assert_contains "$out" "Sent: North." "refusals must not use up the decision"
+  pass "4 confirm-rule and unlisted authors get not authorised and file nothing; a click is never stronger than typing"
 }
 
 # --- 5. high-risk options need a confirmation step --------------------------
@@ -519,20 +570,23 @@ test_5_high_risk_options_need_a_confirmation_step() {
   [ "$(button_requests "$home")" = 0 ] || fail "an unconfirmed high-risk click woke Firstmate"
 
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmc:$POST:2" "$CAPTAIN" 880000000000000022 880000000000000099)
-  assert_contains "$out" "Recorded: Deploy to prod. Firstmate has it." "the confirmation click was not recorded"
-  grep -qF 'confirmed by clicking "Confirm: Deploy to prod?"' "$home/state/$TASK.inbox/001.msg" \
-    || fail "the recorded answer must show its confirmation"
+  assert_contains "$out" "Sent: Deploy to prod." "the confirmation click was not sent"
+  [ "$(resolved_lines "$home" pick)" = 0 ] || fail "the plugin recorded the confirmed answer itself"
   record=$(button_request "$home" option)
   printf '%s' "$record" | jq -e '.decision.confirmed == true and .decision.confirm_prompt == "Confirm: Deploy to prod?"
-    and .text == "Decision answered by button: Deploy to prod (confirmed)"' >/dev/null \
-    || fail "the request must record the confirmation verbatim: $record"
-  pass "5 merge, prod deploy, deletion, money, and credential options need a confirmation click, and the record shows it"
+    and .decision.option == "Deploy to prod"
+    and .text == "Decision answer by button: Deploy to prod (confirmed)"' >/dev/null \
+    || fail "the request must carry the confirmation verbatim: $record"
+  record_as_firstmate "$home" "$record"
+  grep -qF 'confirmed by clicking "Confirm: Deploy to prod?"' "$home/state/$TASK.inbox/001.msg" \
+    || fail "the recorded answer must show its confirmation"
+  pass "5 merge, prod deploy, deletion, money, and credential options need a confirmation click before anything is sent, and the record shows it"
 }
 
 # --- 6. answered anywhere: no-ops with a notice, and the post shows it -----
 
 test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops() {
-  local home out pids n
+  local home out pids n record
   home="$TMP_ROOT/c6"
   setup_home "$home"
   open_request "$home"
@@ -540,7 +594,7 @@ test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops() {
   emit_decision "$home" 1 '{"key":"'"$KEY"'","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
   deliver "$home" "$POST"
 
-  # Double clicks: exactly one answer, every other click a no-op.
+  # Double clicks: exactly one request, every other click a no-op.
   pids=
   for n in 1 2 3; do
     FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmd:$KEY:1" "$CAPTAIN" "88000000000000003$n" > "$home/dup.$n" &
@@ -548,15 +602,15 @@ test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops() {
   done
   # shellcheck disable=SC2086  # one pid per word
   wait $pids
-  [ "$(resolved_lines "$home" pick)" = 1 ] || fail "double clicks answered the decision $(resolved_lines "$home" pick) times"
-  [ "$(grep -l 'Recorded: North' "$home"/dup.* | wc -l | tr -d ' ')" = 1 ] \
-    || fail "exactly one double click may report it was recorded"
-  [ "$(grep -l 'changed nothing' "$home"/dup.* | wc -l | tr -d ' ')" = 2 ] \
+  [ "$(button_requests "$home")" = 1 ] || fail "double clicks filed $(button_requests "$home") requests"
+  [ "$(grep -l 'Sent: North' "$home"/dup.* | wc -l | tr -d ' ')" = 1 ] \
+    || fail "exactly one double click may report it was sent"
+  [ "$(grep -l 'Already sent' "$home"/dup.* | wc -l | tr -d ' ')" = 2 ] \
     || fail "every other double click must be a no-op with a notice: $(cat "$home"/dup.*)"
-  [ "$(button_requests "$home")" = 1 ] || fail "double clicks woke Firstmate more than once"
+  record_as_firstmate "$home" "$(button_request "$home" option)"
 
-  # Answered on other channels: Firstmate relays the captain's typed reply to
-  # the worker through the real keyed path, and the post reads the ledger.
+  # Answered on other channels: Firstmate relays a typed reply through the real
+  # keyed path, and the post reads the ledger.
   printf 'needs-decision [key=typed]: typed\n' >> "$home/state/$TASK.status"
   emit_decision "$home" 2 '{"key":"key:'"$TASK"':typed","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
   deliver "$home" 700000000000000002
@@ -578,20 +632,14 @@ test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops() {
   deliver "$home" 700000000000000007
   home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key amb "1 or 2, whichever is faster" \
     >/dev/null 2>&1 || fail "fm-send could not relay the ambiguous answer"
-  # A typed answer racing a click on the same decision: exactly one lands.
-  printf 'needs-decision [key=race]: race\n' >> "$home/state/$TASK.status"
-  emit_decision "$home" 7 '{"key":"key:'"$TASK"':race","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
+  # A click sent North, but the captain typed South before Firstmate recorded
+  # the click: the post shows what Firstmate actually recorded.
+  printf 'needs-decision [key=change]: change\n' >> "$home/state/$TASK.status"
+  emit_decision "$home" 7 '{"key":"key:'"$TASK"':change","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
   deliver "$home" 700000000000000006
-  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key race "Typed race answer: South" \
-    >/dev/null 2>&1 &
-  pids=$!
-  FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmd:key:$TASK:race:1" "$CAPTAIN" 880000000000000043 \
-    700000000000000006 > "$home/race.click"
-  wait "$pids" || true
-  [ "$(resolved_lines "$home" race)" = 1 ] \
-    || fail "a typed answer and a click on one decision both landed: $(grep 'key=race' "$home/state/$TASK.status")"
-  [ "$(grep -l -e 'Typed race answer' -e "for key:$TASK:race" "$home/state/$TASK.inbox/"*.msg | wc -l | tr -d ' ')" = 1 ] \
-    || fail "the worker received two answers to one decision"
+  click "$home" "fmd:key:$TASK:change:1" "$CAPTAIN" 880000000000000043 700000000000000006 >/dev/null
+  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key change "South after all" \
+    >/dev/null 2>&1 || fail "fm-send could not relay the changed answer"
   # Superseded by the task's terminal outcome.
   printf 'needs-decision [key=late]: late\n' >> "$home/state/$TASK.status"
   emit_decision "$home" 5 '{"key":"key:'"$TASK"':late","options":[{"label":"North"}]}' >/dev/null
@@ -608,14 +656,15 @@ test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops() {
       and $shown["700000000000000003"] == "✅ South chosen by the captain <t:1791720000:f>"
       and $shown["700000000000000004"] == "✅ Decided <t:1791720000:f>"
       and $shown["700000000000000005"] == "Closed - no longer needed <t:1791720000:f>"
+      and $shown["700000000000000006"] == "✅ South chosen by the captain <t:1791720000:f>"
       and $shown["700000000000000007"] == "✅ Decided <t:1791720000:f>"
-      and ($shown["700000000000000006"] | startswith("✅ "))
       and all(.[]; [.components[].components[].disabled] | all)' >/dev/null \
     || fail "every answered or superseded post must be disabled and show its outcome from the ledger: $out"
   out=$(click "$home" "fmd:key:$TASK:typed:1" "$CAPTAIN" 880000000000000041 700000000000000002)
   assert_contains "$out" "Already decided: ✅ South chosen by the captain <t:1791720000:f> - this click changed nothing." \
     "a decision answered by typed reply must be a no-op with a notice"
-  pass "6 double clicks are idempotent, and a decision answered by button, typed reply, or terminal outcome is a no-op that the post shows"
+  [ "$(button_requests "$home")" = 2 ] || fail "a click on an answered or closed decision filed a request"
+  pass "6 double clicks file one request, and a decision answered by button, typed reply, or terminal outcome is a no-op that the post shows"
 }
 
 # --- 7. stale posts: replaced by a newer post, or expired -------------------
@@ -635,7 +684,7 @@ test_7_stale_posts_are_no_ops() {
     "a click on a replaced post must be a no-op with a notice"
   out=$(click "$home" "fmd:key:$TASK:other:1" "$CAPTAIN" 880000000000000052 700000000000000002)
   assert_contains "$out" "This decision post is no longer open" "a custom_id key that does not match the post must be a no-op"
-  [ "$(resolved_lines "$home" pick)" = 0 ] || fail "a stale click answered the decision"
+  [ "$(button_requests "$home")" = 0 ] || fail "a stale click filed a request"
 
   # A replacement that reorders the options: the click names its own option,
   # and the older post shows it was replaced instead of reading the same index.
@@ -645,8 +694,9 @@ test_7_stale_posts_are_no_ops() {
   emit_decision "$home" 4 '{"key":"key:'"$TASK"':swap","options":[{"label":"South"},{"label":"North"}]}' >/dev/null
   deliver "$home" 700000000000000011
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmd:key:$TASK:swap:1" "$CAPTAIN" 880000000000000054 700000000000000011)
-  assert_contains "$out" "Recorded: South." "the replacement post's option 1 must record its own label"
-  out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" False)
+  assert_contains "$out" "Sent: South." "the replacement post's option 1 must send its own label"
+  record_as_firstmate "$home" "$(button_request "$home" option)"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
   printf '%s\n' "$out" | jq -se '
     (map({(.message): .content}) | add) as $shown
     | $shown["700000000000000011"] == "✅ South chosen by Dana <t:1791720000:f>"
@@ -663,13 +713,13 @@ test_7_stale_posts_are_no_ops() {
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmd:key:$TASK:again:1" "$CAPTAIN" 880000000000000055 700000000000000012)
   assert_contains "$out" "Already decided: Closed - no longer needed <t:1791720000:f> - this click changed nothing." \
     "a post must not answer a later lifecycle of its worker key"
-  [ "$(resolved_lines "$home" again)" = 1 ] || fail "a stale click answered the reopened key"
+  [ "$(button_requests "$home")" = 1 ] || fail "a click on a reopened key's old post filed a request"
 
   FM_EXT_NOW_OVERRIDE=$(( $(date +%s) + 700000 )) home_env "$home" "$POLL" >/dev/null
   out=$(click "$home" "fmd:$KEY:2" "$CAPTAIN" 880000000000000053 700000000000000002)
   assert_contains "$out" "This decision post is no longer open - this click changed nothing." \
     "a click on an expired post must be a no-op with a notice"
-  [ "$(resolved_lines "$home" pick)" = 0 ] || fail "an expired click answered the decision"
+  [ "$(button_requests "$home")" = 1 ] || fail "a click on an expired post filed a request"
   pass "7 clicks on a replaced, reopened, mismatched, or expired post are no-ops with a notice, and replaced posts say so"
 }
 
@@ -692,6 +742,7 @@ test_8_discuss_and_typed_replies_stay_as_fallbacks() {
     and (.decision.text | endswith("Reply to this message with the number."))' >/dev/null \
     || fail "the Discuss request lost its decision context: $record"
   [ "$(resolved_lines "$home" pick)" = 0 ] || fail "Discuss decided something"
+  [ -z "$(reconcile "$home" True)" ] || fail "Discuss turned the post's buttons off"
 
   # Discuss is for open decisions only: a replaced or decided post is a no-op.
   emit_decision "$home" 2 '{"key":"'"$KEY"'","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
@@ -895,16 +946,18 @@ PY
     || fail "each click must be deferred ephemerally at once: $out"
   assert_contains "$out" "\"content\": \"Confirm: Merge it?\", \"components\": [{\"type\": 1, \"components\": [{\"type\": 2, \"style\": 4, \"disabled\": false, \"label\": \"Confirm\", \"custom_id\": \"fmc:$POST:2\"}]}], \"tts\": false, \"flags\": 64}" \
     "a merge click must answer with an ephemeral confirmation button"
-  assert_contains "$out" '"content": "Recorded: Merge it. Firstmate has it.", "tts": false, "flags": 64' \
-    "the confirmation click must be recorded and answered ephemerally"
-  [ "$(resolved_lines "$home" pick)" = 1 ] || fail "the routed click did not answer the decision exactly once"
-  grep -qF 'chosen by Dana' "$home/state/$TASK.inbox/001.msg" || fail "the routed click lost the clicker's name"
+  assert_contains "$out" '"content": "Sent: Merge it. Firstmate will record it, and the post updates when it does.", "tts": false, "flags": 64' \
+    "the confirmation click must be sent and answered ephemerally"
+  [ "$(resolved_lines "$home" pick)" = 0 ] || fail "the routed click recorded the answer itself"
+  [ "$(button_requests "$home")" = 1 ] || fail "the routed click did not file exactly one request"
+  button_request "$home" option | jq -e '.decision.confirmed == true and .decision.by == "Dana"' >/dev/null \
+    || fail "the routed request lost its confirmation or the clicker's name"
   pass "10 the real discord.py client routes decision clicks to the handler with ephemeral notices and a confirmation step"
 }
 
-# --- 11. a recorded answer always reaches Firstmate -------------------------
+# --- 11. a click that cannot be sent leaves nothing behind -------------------
 
-test_11_recorded_answer_notification_is_retried() {
+test_11_unsent_click_releases_its_claim() {
   local home out
   home="$TMP_ROOT/c11"
   setup_home "$home"
@@ -916,37 +969,21 @@ test_11_recorded_answer_notification_is_retried() {
   mv "$home/state/ext-inbox" "$home/state/ext-inbox.saved"
   : > "$home/state/ext-inbox"
   out=$(click "$home" "fmd:$KEY:2" "$CAPTAIN" 880000000000000071)
-  assert_contains "$out" "Recorded: South. Firstmate has not been told yet and keeps retrying; there is no need to click again." \
-    "a recorded answer whose request failed must say so, not that Firstmate has it"
-  [ "$(resolved_lines "$home" pick)" = 1 ] || fail "the answer must stand even though Firstmate was not told"
+  assert_contains "$out" "Firstmate could not send that click. Nothing was decided; try again, or reply to the post instead." \
+    "a click that could not be filed must say nothing was decided"
+  [ -z "$(reconcile "$home" False)" ] || fail "an unsent click turned the post's buttons off"
   rm -f "$home/state/ext-inbox"
   mv "$home/state/ext-inbox.saved" "$home/state/ext-inbox"
-  out=$(click "$home" "fmd:$KEY:1" "$CAPTAIN" 880000000000000072)
-  assert_contains "$out" "Firstmate has it now; this click changed nothing else." \
-    "a later click must retry only the request for the recorded answer"
-  [ "$(resolved_lines "$home" pick)" = 1 ] || fail "the retry answered the decision again"
-  button_request "$home" option | jq -e '.decision.option == "South"
-    and .request_id == "discord:'"$GUILD:$CHANNEL:$CHANNEL"':880000000000000071"' >/dev/null \
-    || fail "the retried request must be the original answer's request"
-
-  # The sweep retries on its own too.
-  printf 'needs-decision [key=again]: again\n' >> "$home/state/$TASK.status"
-  emit_decision "$home" 2 '{"key":"key:'"$TASK"':again","options":[{"label":"North"}]}' >/dev/null
-  deliver "$home" 700000000000000002
-  mv "$home/state/ext-inbox" "$home/state/ext-inbox.saved"
-  : > "$home/state/ext-inbox"
-  click "$home" "fmd:key:$TASK:again:1" "$CAPTAIN" 880000000000000073 700000000000000002 >/dev/null
-  rm -f "$home/state/ext-inbox"
-  mv "$home/state/ext-inbox.saved" "$home/state/ext-inbox"
-  reconcile "$home" True >/dev/null
-  [ "$(button_requests "$home")" = 2 ] || fail "the sweep did not deliver the pending request to Firstmate"
-  [ -z "$(ls "$home"/state/ext-outbox/*.notify.json 2>/dev/null)" ] || fail "a delivered request stayed pending"
-  pass "11 a recorded answer whose request failed says so, and a later click or the sweep delivers that same request"
+  out=$(click "$home" "fmd:$KEY:2" "$CAPTAIN" 880000000000000072)
+  assert_contains "$out" "Sent: South." "a click after an unsent one must be sent"
+  [ "$(button_requests "$home")" = 1 ] || fail "the retried click must file exactly one request"
+  [ "$(resolved_lines "$home" pick)" = 0 ] || fail "the plugin recorded the answer itself"
+  pass "11 a click that cannot be filed says nothing was decided and leaves the post open for another click"
 }
 
 test_1_buttons_carry_key_and_option_ids_in_the_thread
-test_2_standing_click_answers_a_worker_key_with_audit
-test_3_standing_click_answers_a_captain_call
+test_2_standing_click_files_one_request_for_a_worker_key
+test_3_captain_call_click_is_a_request_the_board_records
 test_4_others_are_not_authorised
 test_5_high_risk_options_need_a_confirmation_step
 test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops
@@ -954,4 +991,4 @@ test_7_stale_posts_are_no_ops
 test_8_discuss_and_typed_replies_stay_as_fallbacks
 test_9_emit_refuses_unsafe_or_closed_decisions
 test_10_real_discord_client_routes_clicks
-test_11_recorded_answer_notification_is_retried
+test_11_unsent_click_releases_its_claim

@@ -49,16 +49,21 @@ The emit header owns the file format, and the [decision buttons reference](../..
 - For a captain call that gates held work, set `"mode": "release"` so the answer lifts the hold instead of closing the task.
 - Never write the key or its task id into the post text or a label; only the button ids carry it.
 
-A click arrives as a request with `origin` `button` and `authority` `standing`; its `decision` field says what happened.
+A click arrives as a request with `origin` `button` and `authority` `standing`; the plugin recorded nothing, so you record it, exactly like a typed reply naming that option.
+Its `decision` field carries the key, the post's `occurrence`, the option, any confirmation, and the audit (`by`, `author`, `at`).
 
-1. `choice` `option`: the answer is already recorded through `decision.recorded_via`, with who, when, and any confirmation, and the worker has it; never answer the decision again.
-   Act on the outcome through the normal lifecycle, exactly as if the captain had typed that option, never as more.
-   When `decision.delivery` is `unconfirmed`, fm-send left the worker's copy durable but unconfirmed: never resend it; confirm it reached the worker through the normal recovery path, then close the key with the closing record fm-send names.
+1. `choice` `option`: first confirm the decision is still open and is the same lifecycle (`bin/fm-captain-hold.sh open <task-id> --identity` equals `occurrence` for `hold:`; the key is still open in the worker's status log for `key:`).
+   If it is not, record nothing and answer that it was already decided.
+   Otherwise record it through the decision's own path, naming the option by its label and quoting the audit:
+   - `hold:` - one keyed line `<task-id>\t<option>\t<option_id>. <option>\t<mode>` on stdin to `bin/fm-captain-hold.sh answers --source "Discord button: option <option_id> \"<option>\" chosen by <by> (<author>) at <at> for <key>"`.
+   - `key:` - `bin/fm-send.sh <task-id> --resolve-key <slug> "Decision answer: <option> (<the same audit>)"`.
+   When `confirmed` is true, append `, confirmed by clicking "<confirm_prompt>"` to the audit.
+   That record is what the post reads to show "✅ <option> chosen by <by>"; one naming no single option shows a plain "✅ Decided".
    A `confirmed` click is the clicker's explicit word for that one decision only, which is the confirmation a merge, prod deploy, deletion, money, or credential option needs; it is never standing authority, and merge authority otherwise stays where AGENTS.md puts it.
 2. `choice` `discuss`: nothing is decided; talk it through with the captain in the thread.
 3. Finish with an `answer` or `final`, as for any request.
 
-When you settle a decision that has a button post any other way, such as a typed numbered reply, record it through its own channel as usual and name the chosen option in the answer, by its number or label; the post then disables itself and shows that option as the captain's choice, and an answer naming no single option shows a plain "✅ Decided".
+When you settle a decision that has a button post any other way, such as a typed numbered reply, record it through its own channel as usual and name the chosen option in the answer, by its number or label; the post then disables itself and shows that option as the captain's choice.
 
 ## Acknowledge first, act, then follow up
 

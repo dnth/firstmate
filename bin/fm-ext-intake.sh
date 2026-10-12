@@ -56,9 +56,9 @@
 # at standing authority, so a click whose author holds only a confirm rule or
 # no rule exits 3 and writes nothing. --decision-file (button origin only) is
 # JSON {key, occurrence, choice, text, by, author, at} - choice "discuss", or
-# "option" with option_id, option, confirmed, and confirm_prompt when
-# confirmed - and is recorded as the request's "decision" field, with text cut
-# to its first 1000 characters.
+# "option" with option_id, option, confirmed, confirm_prompt when confirmed,
+# and a captain call's close mode - and is recorded as the request's "decision"
+# field, with text cut to its first 1000 characters.
 #
 # Idempotent: the same message id claims the existing offer and does not
 # append a second wake. If the wake cannot be appended, the offer marker is
@@ -252,7 +252,8 @@ if [ -n "$DECISION_FILE" ]; then
         or ((.option_id | type == "number" and . >= 1 and . == floor)
           and (.option | type == "string" and length >= 1 and length <= $label_max)
           and (.confirmed | type == "boolean")
-          and ((.confirm_prompt // "") | type == "string"))))
+          and ((.confirm_prompt // "") | type == "string")
+          and ((.mode // "done") | . == "done" or . == "release"))))
     | {key, occurrence, choice,
        text: (if (.text | length) > $text_max
               then (.text | .[0:$text_max]) + "…" else .text end),
@@ -260,6 +261,7 @@ if [ -n "$DECISION_FILE" ]; then
       + if .choice == "option"
         then {option_id, option, confirmed}
           + if has("confirm_prompt") then {confirm_prompt} else {} end
+          + if has("mode") then {mode} else {} end
         else {} end
   ' "$DECISION_FILE" 2>/dev/null) && [ -n "$DECISION_JSON" ] \
     || die "decision file must hold {key, occurrence, choice, text, by, author, at} and, for an option, option_id, option, confirmed"

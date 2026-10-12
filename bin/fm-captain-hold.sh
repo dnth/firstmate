@@ -2045,7 +2045,7 @@ EOF
 # What a closed captain call recorded (see the header): the newest record's
 # mode, then the captain's answer. Read-only.
 command_answered() {  # <task-id>
-  local id=${1:-} body decoded mode text answer=''
+  local id=${1:-} body decoded mode text answer='' data
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   case "$id" in
     ''|*[!A-Za-z0-9._-]*)
@@ -2054,7 +2054,17 @@ command_answered() {  # <task-id>
       ;;
   esac
   fm_tasks_axi_compatible || { printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2; exit 2; }
-  task_show "$id" || return 1
+  if ! task_show "$id"; then
+    # Only a row proven absent carries no record; any other read failure may
+    # hide one, so it is "cannot tell".
+    data=$(fm_backlog_data_absolute "$DATA") \
+      || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
+    if ! fm_backlog_row_probe "$data" "$id" && [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+      return 1
+    fi
+    printf 'fm-captain-hold: could not read the record of %s\n' "$id" >&2
+    exit 2
+  fi
   body=$(show_field "$TASK_SHOW_OUTPUT" body)
   body_has_resolution_record "$body" || return 1
   mode=$(recorded_resolution_mode "$body" || true)

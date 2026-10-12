@@ -500,9 +500,10 @@ fm_ext_allowlisted() {
 # board, or key:<task-id>:<slug> for a worker's keyed status decision. Each
 # button's Discord custom_id carries that key and a 1-based option id
 # (fmd:<key>:<n>, or fmd:<key>:d for Discuss). The decision itself lives only
-# in those ledgers; the bridge keeps just what a post needs to be found and
-# edited: the decision in the post's chunk-progress record, a settle note once
-# the post shows an outcome, and a finalized marker once Discord shows it.
+# in those ledgers, and only Firstmate records an answer there: a click files a
+# request like a typed reply. The bridge keeps just what a post needs to be
+# found and redrawn - the decision in the post's chunk-progress record, its sent
+# click, its final line, and what Discord shows (bin/fm-ext-decision.sh).
 
 # Most options one decision post carries: one Discord action row.
 FM_EXT_DECISION_MAX_OPTIONS=5
@@ -1848,7 +1849,7 @@ fm_ext_context_prune() {
 # so this can only ever remove the residue of work that already finished. A
 # request-wide thread record (<slug>.thread.json) is kept while any other JSON
 # record for its slug remains, then is pruned when its own age exceeds the window.
-# A decision post's settle note and finalized marker go the same way as its
+# A decision post's sent, settled, and finalized markers go the same way as its
 # chunk-progress record, so its buttons expire with it.
 fm_ext_outbox_prune() {
   local state=$1 dir now max_age file base stem mtime age
@@ -1872,7 +1873,7 @@ fm_ext_outbox_prune() {
       *.inflight) stem=${base%.inflight} ;;
       *.settled.json) stem=${base%.settled.json} ;;
       *.finalized) stem=${base%.finalized} ;;
-      *.notify.json) stem=${base%.notify.json} ;;
+      *.sent.json) stem=${base%.sent.json} ;;
       *) continue ;;
     esac
     if [ -e "$dir/$stem.json" ]; then

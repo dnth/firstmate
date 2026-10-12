@@ -8,11 +8,12 @@ Discord API but is never rendered in a label or the post text. The ephemeral
 confirmation button for a high-risk option is ``fmc:<post-id>:<n>``.
 
 A click runs ``bin/fm-ext-decision.sh click``, which owns every check and every
-notice - the decision post, the allowlist authority, staleness, the
-confirmation step, and recording through Firstmate's keyed decision path. This
-module only hands it the click, shows its notice ephemerally, and hooks the
-click route into the gateway's live Discord client. The outbox poster edits a
-post once that script reports its outcome.
+notice - the decision post, the allowlist authority, staleness, and the
+confirmation step - and files the click as a request through the same intake a
+typed reply uses. Nothing here records an answer; Firstmate does, through its
+normal decision path. This module only hands the script the click, shows its
+notice ephemerally, turns the post's buttons off at once after a sent click,
+and hooks the click route into the gateway's live Discord client.
 
 Hermes 0.20.x has no plugin hook for Discord component clicks, so the route is
 a discord.py ``DynamicItem`` registered on the Discord adapter's live client,
@@ -59,18 +60,20 @@ _STYLE_SECONDARY = 2
 _STYLE_DANGER = 4
 
 DISCUSS_LABEL = "Discuss"
-# bin/fm-ext-decision.sh exits 1 only when nothing was recorded, so this
-# notice may invite another try.
-REPLY_FAILED = "Firstmate could not record that click. Nothing was decided; try again, or reply to the post instead."
-# A click still recording when the wait ends may yet record its answer, so the
-# script is left to finish and the clicker is never invited to answer again.
+# bin/fm-ext-decision.sh exits 1 only when nothing was sent, so this notice may
+# invite another try.
+REPLY_FAILED = "Firstmate could not send that click. Nothing was decided; try again, or reply to the post instead."
+# A click still filing when the wait ends may yet file its request, so the
+# script is left to finish; a second click cannot file a second request.
 REPLY_PENDING = (
-    "Firstmate is still recording this click. Check the post in a minute; "
-    "clicking again cannot answer twice."
+    "Firstmate is still sending this click. Check the post in a minute; "
+    "clicking again cannot send it twice."
 )
 # How long a click waits for the script, inside Discord's 15-minute window
 # for following up on a deferred interaction.
 CLICK_WAIT_SECS = 600
+# The notice that starts a sent click, after which the post's buttons go off.
+SENT_PREFIX = "Sent: "
 
 _attached: weakref.ReferenceType | None = None
 _attach_lock = threading.Lock()
@@ -230,10 +233,24 @@ def click_item_class():
     return _item_class
 
 
+def _show_sent_posts() -> None:
+    """Redraw posts whose click was just sent, so their buttons go off now
+    rather than on the next outbox cycle. Best effort: the watcher retries."""
+    try:
+        try:
+            from . import outbox_poster
+        except ImportError:  # loaded from sys.path in hermetic tests
+            import outbox_poster
+        outbox_poster.reconcile_decision_posts(full=False)
+    except Exception:
+        logger.debug("firstmate-comms: decision post redraw deferred to the outbox watcher")
+
+
 async def respond_to_click(interaction: object, click_id: str) -> None:
     """Answer one click ephemerally: defer at once, because the checks run a
     local script, then follow up with the notice and, for an option that
-    needs it, the confirmation button.
+    needs it, the confirmation button. A sent click also turns the post's
+    buttons off.
     """
     import discord
 
@@ -246,6 +263,8 @@ async def respond_to_click(interaction: object, click_id: str) -> None:
         view.add_item(click_item_class()(verdict["confirm"], "Confirm"))
         kwargs["view"] = view
     await interaction.followup.send(verdict["text"], **kwargs)
+    if str(verdict.get("text") or "").startswith(SENT_PREFIX):
+        await asyncio.to_thread(_show_sent_posts)
 
 
 def _live_discord_adapter():
