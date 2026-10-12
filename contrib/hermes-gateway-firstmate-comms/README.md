@@ -65,6 +65,21 @@ The dedicated channel is off until you set it.
 Only the allowlist decides who may instruct Firstmate in that channel; anyone it refuses is ignored there.
 `DISCORD_REACTIONS=false` also stops the 👀 and ✅ Hermes adds to messages its general agent handles in this gateway profile.
 
+## Decision buttons
+
+When Firstmate asks the captain to settle a decision, its post can carry one button per numbered option, for example Approve / Hold, plus a Discuss button.
+The [decision buttons reference](../../docs/configuration.md#decision-buttons) owns the click workflow, sent and decided outcomes, notification recovery, fallbacks, confirmation, staleness, expiry, and authority boundaries.
+
+Buttons need no extra Discord permission or gateway setting beyond the ones above.
+After updating this plugin, restart the gateway service so it loads the click route.
+
+Hermes 0.20.x has no plugin hook for Discord component clicks, so the plugin registers a discord.py `DynamicItem` for the `fmd:` and `fmc:` custom ids on the Discord adapter's live client, found through the gateway runner's adapter registry the way Hermes's own platform actions find it.
+The outbox watcher re-registers it whenever the gateway reconnects with a new client, and logs one warning naming the Hermes version if a connected gateway cannot take it.
+A click is deferred ephemerally at once, then runs `bin/fm-ext-decision.sh click`, which owns every check and notice and files the request.
+The plugin then edits the post over Discord REST with mentions disabled: right after a sent click, and on a 30-second sweep once Firstmate records the answer.
+Until the route is registered on the current client, the poster sends a decision as plain text with no buttons, so a button is never shown that nothing would answer; the captain can still reply to it.
+[The decision button regression test](../../tests/fm-ext-decision.test.sh) covers posting, authorisation, sent requests, confirmation, staleness, double clicks, fallbacks, and post edits after Firstmate records an answer, and drives the installed Hermes gateway's real discord.py routing when that Python is available.
+
 ## How it works
 
 The plugin registers slash command `fm` and the `pre_gateway_dispatch` hook.

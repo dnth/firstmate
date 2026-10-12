@@ -208,7 +208,8 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-main-ci-watch.test.sh|fm-pr-check-handoff.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
-    fm-landing.test.sh|fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh|fm-ext-bridge.test.sh)
+    fm-landing.test.sh|fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh|fm-ext-bridge.test.sh|\
+    fm-ext-decision.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)

@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # Shared helpers for the sibling local-bridge Communication Officer
-# (fm-ext-intake.sh, fm-ext-emit.sh, fm-ext-link.sh, fm-ext-poll.sh, and the
-# bridge parts of fm-bootstrap.sh, fm-watch.sh, and fm-wake-drain.sh).
+# (fm-ext-intake.sh, fm-ext-emit.sh, fm-ext-decision.sh, fm-ext-link.sh,
+# fm-ext-poll.sh, and the bridge parts of fm-bootstrap.sh, fm-watch.sh, and
+# fm-wake-drain.sh).
 #
 # This file is sourced, never executed. It copies the private-artifact
 # publication pattern used by X mode without sourcing bin/fm-x-lib.sh and
@@ -490,6 +491,203 @@ EOF
 # fm_ext_authority; admission alone never implies standing authority.
 fm_ext_allowlisted() {
   fm_ext_authority "$@" >/dev/null
+}
+
+# --- decision buttons -------------------------------------------------------
+#
+# A decision post carries option buttons bound to one decision Firstmate
+# already tracks. Its key is hold:<task-id> for a captain call held on the
+# board, or key:<task-id>:<slug> for a worker's keyed status decision. Each
+# button's Discord custom_id carries that key and a 1-based option id
+# (fmd:<key>:<n>, or fmd:<key>:d for Discuss). The decision itself lives only
+# in those ledgers, and only Firstmate records an answer there: a click files a
+# request like a typed reply. The bridge keeps just what a post needs to be
+# found and redrawn - the decision in the post's chunk-progress record, its sent
+# click, its final line, and what Discord shows (bin/fm-ext-decision.sh).
+
+# Most options one decision post carries: one Discord action row.
+FM_EXT_DECISION_MAX_OPTIONS=5
+# Longest option label, which is Discord's own button label limit.
+FM_EXT_DECISION_LABEL_MAX=80
+# Longest decision text a click carries as context, in characters.
+# shellcheck disable=SC2034 # Read by the sourcing emit and intake scripts.
+FM_EXT_DECISION_TEXT_MAX=1000
+# Longest Discord component custom_id.
+# shellcheck disable=SC2034 # Read by the sourcing emit script.
+FM_EXT_DECISION_CUSTOM_ID_MAX=100
+# Option labels naming a merge, a deploy, a deletion, money, credentials, or
+# another destructive or irreversible action always need a second confirmation
+# click, whatever the emitter declared. Matched case-insensitively anywhere in
+# the label; an extra confirmation is harmless, a missing one is not.
+# shellcheck disable=SC2034 # Read by the sourcing emit script.
+FM_EXT_DECISION_CONFIRM_PATTERN='merge|deploy|prod|ship|release|publish|push|delete|deletion|remove|destroy|discard|drop|wipe|purge|erase|reset|revert|roll ?back|force|overwrite|tear ?down|revoke|rotate|kill|money|pay|charge|refund|purchase|buy|invoice|billing|budget|credential|secret|token|password|api ?key'
+
+_fm_ext_decision_part_valid() {
+  case "$1" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
+# fm_ext_decision_key_valid <key>: hold:<task-id> or key:<task-id>:<slug>,
+# each part a privacy-safe slug.
+fm_ext_decision_key_valid() {
+  local key=$1 rest
+  case "$key" in
+    hold:*)
+      _fm_ext_decision_part_valid "${key#hold:}"
+      ;;
+    key:*:*)
+      rest=${key#key:}
+      _fm_ext_decision_part_valid "${rest%%:*}" && _fm_ext_decision_part_valid "${rest#*:}"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_ext_decision_key_task <key>: print the task id a valid key names.
+fm_ext_decision_key_task() {
+  local key=$1 rest
+  fm_ext_decision_key_valid "$key" || return 1
+  case "$key" in
+    hold:*) printf '%s\n' "${key#hold:}" ;;
+    key:*) rest=${key#key:}; printf '%s\n' "${rest%%:*}" ;;
+  esac
+}
+
+# fm_ext_decision_key_occurrence <key>: print which lifecycle of the decision is
+# open right now, so a post can be bound to the one it asked about: a captain
+# call's `fm-captain-hold.sh open --identity` (hold-set stamp and answer count,
+# printed only while it is held), or the number of times a worker's key has
+# been opened in its status log (bin/fm-classify-lib.sh's
+# status_key_occurrence). Returns 1 when the decision is not open or its
+# lifecycle cannot be read.
+fm_ext_decision_key_occurrence() {
+  local key=$1 rest out
+  fm_ext_decision_key_valid "$key" || return 1
+  case "$key" in
+    hold:*)
+      out=$("$_FM_EXT_LIB_DIR/fm-captain-hold.sh" open "${key#hold:}" --identity 2>/dev/null) || return 1
+      ;;
+    key:*)
+      rest=${key#key:}
+      out=$(bash -c '. "$1" && status_key_occurrence "$2" "$3"' \
+        _ "$_FM_EXT_LIB_DIR/fm-classify-lib.sh" \
+        "$(fm_ext_state_dir)/${rest%%:*}.status" "${rest#*:}") || return 1
+      [ "$out" != 0 ] || return 1
+      ;;
+  esac
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# fm_ext_decision_key_outcome <key> [occurrence]: print "<state>\t<answer>" for
+# the decision right now, asking the authoritative ledgers rather than keeping
+# a copy - `fm-captain-hold.sh open` and `answered` for a captain call, and
+# bin/fm-classify-lib.sh's fold and resolved-answer reader for a worker's keyed
+# decision. With an occurrence from fm_ext_decision_key_occurrence, a later
+# lifecycle of the same key (a re-held call, a reopened key) reads as
+# superseded, so an old post never answers or shows a newer question. The
+# state is one of:
+#   open        still waiting for an answer
+#   decided     answered, on any channel; <answer> is what the ledger recorded
+#               (empty when it recorded no answer text)
+#   superseded  closed with no captain answer: by its task's terminal outcome,
+#               moved to a captain call, reconciled as moot, gone with its task,
+#               or replaced by a later lifecycle of the same key
+#   unknown     its state cannot be read
+# Returns 1 only for a malformed key.
+fm_ext_decision_key_outcome() {
+  local key=$1 occurrence=${2:-} rest task slug file rc out mode answer count current stamp
+  fm_ext_decision_key_valid "$key" || return 1
+  case "$key" in
+    hold:*)
+      task=${key#hold:}
+      current=$("$_FM_EXT_LIB_DIR/fm-captain-hold.sh" open "$task" --identity 2>/dev/null)
+      rc=$?
+      if [ "$rc" = 1 ]; then
+        "$_FM_EXT_LIB_DIR/fm-captain-hold.sh" open "$task" --distinguish-absent >/dev/null 2>&1
+        rc=$?
+      fi
+      case "$rc" in
+        0)
+          if [ -n "$occurrence" ] && [ "$current" != "$occurrence" ]; then
+            printf 'superseded\t\n'
+          else
+            printf 'open\t\n'
+          fi
+          ;;
+        1)
+          out=$("$_FM_EXT_LIB_DIR/fm-captain-hold.sh" answered "$task" 2>/dev/null)
+          rc=$?
+          case "$rc" in
+            0) ;;
+            1) printf 'superseded\t\n'; return 0 ;;
+            *) printf 'unknown\t\n'; return 0 ;;
+          esac
+          stamp=$(printf '%s\n' "$out" | sed -n '4p')
+          mode=${out%%$'\n'*}
+          out=${out#*$'\n'}
+          answer=${out%%$'\n'*}
+          out=${out#*$'\n'}
+          count=${out%%$'\n'*}
+          # The post's call was answered once more than the count it was
+          # posted at; any other count is a later lifecycle's record.
+          if [ "$mode" = reconciled ]; then
+            printf 'superseded\t\n'
+            return 0
+          fi
+          if [ -n "$occurrence" ]; then
+            [ -z "$stamp" ] || [ "$stamp" = "${occurrence%#*}" ] || { printf 'superseded\t\n'; return 0; }
+            case "${occurrence##*#}" in
+              ''|*[!0-9]*) printf 'superseded\t\n'; return 0 ;;
+            esac
+            [ "$count" = "$(( ${occurrence##*#} + 1 ))" ] || { printf 'superseded\t\n'; return 0; }
+          fi
+          printf 'decided\t%s\n' "$answer"
+          ;;
+        3) printf 'superseded\t\n' ;;
+        *) printf 'unknown\t\n' ;;
+      esac
+      return 0
+      ;;
+  esac
+  rest=${key#key:}
+  task=${rest%%:*}
+  slug=${rest#*:}
+  file="$(fm_ext_state_dir)/$task.status"
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    printf 'superseded\t\n'
+    return 0
+  fi
+  if ! { [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ]; }; then
+    printf 'unknown\t\n'
+    return 0
+  fi
+  if ! out=$(bash -c '
+    file=$2 slug=$3 occurrence=$4
+    . "$1" \
+    && current=$(status_key_occurrence "$file" "$slug") \
+    && if [ -n "$occurrence" ] && [ "$current" != "$occurrence" ]; then
+      printf "superseded\t"
+    else
+      case "$(status_key_closing_verb "$file" "$slug")" in
+        needs-decision|blocked) printf "open\t" ;;
+        resolved) printf "decided\t%s" "$(status_resolved_key_answer "$file" "$slug")" ;;
+        *) printf "superseded\t" ;;
+      esac
+    fi' _ "$_FM_EXT_LIB_DIR/fm-classify-lib.sh" "$file" "$slug" "$occurrence"); then
+    printf 'unknown\t\n'
+    return 0
+  fi
+  printf '%s\n' "$out"
+}
+
+# fm_ext_decision_key_state <key> [occurrence]: just the state word of the
+# outcome above.
+fm_ext_decision_key_state() {
+  local out
+  out=$(fm_ext_decision_key_outcome "$@") || return 1
+  printf '%s\n' "${out%%$'\t'*}"
 }
 
 # --- offer / context --------------------------------------------------------
@@ -1032,11 +1230,15 @@ fm_ext_split_thread() {
   '
 }
 
-# fm_ext_outbox_schema_valid <file>: payload has required fields and matching slug.
+# fm_ext_outbox_schema_valid <file>: payload has required fields and matching
+# slug. An optional decision carries its key, close mode, lifecycle, option
+# buttons, and the post text the buttons answer.
 fm_ext_outbox_schema_valid() {
   local file=$1
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  jq -e --argjson schema "$FM_EXT_SCHEMA_VERSION" '
+  jq -e --argjson schema "$FM_EXT_SCHEMA_VERSION" \
+    --argjson max_options "$FM_EXT_DECISION_MAX_OPTIONS" \
+    --argjson label_max "$FM_EXT_DECISION_LABEL_MAX" '
     .schema_version == $schema
     and (.request_id | type == "string" and startswith("discord:"))
     and (.slug | type == "string" and test("^[0-9a-f]{64}$"))
@@ -1049,6 +1251,18 @@ fm_ext_outbox_schema_valid() {
     and (.thread_id | type == "string" and test("^[0-9]+$"))
     and (.message_id | type == "string" and test("^[0-9]+$"))
     and (.text | type == "string")
+    and (if has("decision") then
+      (.decision | type == "object"
+        and (.key | type == "string" and test("^(hold|key):"))
+        and (.mode == "done" or .mode == "release")
+        and (.occurrence | type == "string" and length >= 1)
+        and (.text | type == "string")
+        and (.options | type == "array" and length >= 1 and length <= $max_options
+          and all(.[]; type == "object"
+            and (.id | type == "number")
+            and (.label | type == "string" and length >= 1 and length <= $label_max)
+            and (.confirm | type == "boolean"))))
+      else true end)
   ' "$file" >/dev/null 2>&1
 }
 
@@ -1639,6 +1853,8 @@ fm_ext_context_prune() {
 # so this can only ever remove the residue of work that already finished. A
 # request-wide thread record (<slug>.thread.json) is kept while any other JSON
 # record for its slug remains, then is pruned when its own age exceeds the window.
+# A decision post's sent, settled, and finalized markers go the same way as its
+# chunk-progress record, so its buttons expire with it.
 fm_ext_outbox_prune() {
   local state=$1 dir now max_age file base stem mtime age
   dir="$state/$FM_EXT_OUTBOX_DIRNAME"
@@ -1659,6 +1875,9 @@ fm_ext_outbox_prune() {
       *.thread.json) stem=${base%.thread.json} ;;
       *.posting) stem=${base%.posting} ;;
       *.inflight) stem=${base%.inflight} ;;
+      *.settled.json) stem=${base%.settled.json} ;;
+      *.finalized) stem=${base%.finalized} ;;
+      *.sent.json) stem=${base%.sent.json} ;;
       *) continue ;;
     esac
     if [ -e "$dir/$stem.json" ]; then

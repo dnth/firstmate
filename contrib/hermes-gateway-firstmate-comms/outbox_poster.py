@@ -30,6 +30,14 @@ request has no message to react to.
 Each chunk-progress record keeps the Discord ids Firstmate posted for its
 request, which is how ``firstmate_post_for`` recognises a reply to one of
 Firstmate's own messages.
+
+A payload carrying a ``decision`` posts its option buttons on its last chunk,
+but only while ``decisions.buttons_ready()`` says the gateway's Discord client
+routes the clicks; otherwise the decision posts as plain text that the captain
+can still answer by replying to it. Its chunk-progress record also keeps the
+decision, whether buttons were posted, and when, which is how a click finds
+its post. ``reconcile_decision_posts`` edits each settled decision post to its
+outcome line with its buttons disabled.
 """
 
 from __future__ import annotations
@@ -48,8 +56,10 @@ from pathlib import Path
 from typing import Callable
 
 try:
+    from . import decisions
     from .intake import dedicated_channel, firstmate_home, firstmate_root
 except ImportError:  # loaded from sys.path in hermetic tests
+    import decisions
     from intake import dedicated_channel, firstmate_home, firstmate_root
 
 SendFn = Callable[[dict], dict]
@@ -70,6 +80,9 @@ REACT_SEEN = "\U0001f440"  # eyes: the request was accepted
 REACT_DONE = "\u2705"  # check mark: the answer has posted
 REACT_FAILED = "\u26a0\ufe0f"  # warning: a reply could not be delivered
 _SNOWFLAKE = re.compile(r"^[0-9]+$")
+# How often the watcher sweeps decision posts for decisions closed on another
+# channel, which reads Firstmate's ledgers; click outcomes show within a cycle.
+DECISION_SWEEP_SECS = 30.0
 
 
 class DiscordSendError(Exception):
@@ -373,14 +386,17 @@ def _message_id(receipt: dict) -> str:
 
 
 class _temp_json:
-    def __init__(self, body: dict):
+    def __init__(self, body):
         self.body = body
         self.path = ""
+
+    def _text(self) -> str:
+        return json.dumps(self.body)
 
     def __enter__(self) -> str:
         fd, self.path = _mktemp()
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(self.body))
+            handle.write(self._text())
         return self.path
 
     def __exit__(self, *args) -> None:
@@ -389,6 +405,13 @@ class _temp_json:
                 os.unlink(self.path)
             except OSError:
                 pass
+
+
+class _temp_text(_temp_json):
+    """A private temp file holding plain text instead of JSON."""
+
+    def _text(self) -> str:
+        return str(self.body)
 
 
 def _mktemp() -> tuple[int, str]:
@@ -609,7 +632,13 @@ def discord_send(payload: dict) -> dict:
     if not token:
         raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
     channel = payload["thread_id"] or payload["channel_id"]
-    body = json.dumps({"content": payload["text"]}).encode("utf-8")
+    message = {"content": payload["text"]}
+    decision = payload.get("decision")
+    last_chunk = int(payload.get("chunk_index") or 0) + 1 >= int(payload.get("chunk_count") or 1)
+    buttons = isinstance(decision, dict) and last_chunk and decisions.buttons_ready()
+    if buttons:
+        message["components"] = decisions.components_for(decision)
+    body = json.dumps(message).encode("utf-8")
     request = urllib.request.Request(
         f"{DISCORD_API_BASE}/channels/{channel}/messages",
         data=body,
@@ -638,7 +667,101 @@ def discord_send(payload: dict) -> dict:
         "ok": True,
         "discord_message_id": str(data.get("id") or ""),
         "channel_id": str(data.get("channel_id") or channel),
+        "buttons": bool(buttons),
     }
+
+
+def discord_edit(channel_id: str, message_id: str, content: str, components: list) -> None:
+    """Replace one posted message's text and buttons over REST. Mentions are
+    never parsed, so a name in the outcome line cannot ping anyone. Raises
+    DiscordSendError on any failure.
+    """
+    token = _bot_token()
+    if not token:
+        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
+    if not (_SNOWFLAKE.fullmatch(channel_id or "") and _SNOWFLAKE.fullmatch(message_id or "")):
+        raise DiscordSendError("permanent", "edit target is not a Discord message id")
+    body = json.dumps(
+        {"content": content, "components": components, "allowed_mentions": {"parse": []}}
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}",
+        data=body,
+        method="PATCH",
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15):
+            pass
+    except urllib.error.HTTPError as err:
+        raise DiscordSendError(classify_http_code(err.code), f"discord HTTP {err.code}", err.code) from err
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+
+
+def _decision_cli() -> Path:
+    return firstmate_root() / "bin" / "fm-ext-decision.sh"
+
+
+def _unshown_settled_posts(home: Path | None = None) -> bool:
+    """True when a decision post's sent or final line is newer than what
+    Discord was last shown for it."""
+    outbox = state_dir(home or firstmate_home()) / "ext-outbox"
+    for suffix in (".sent.json", ".settled.json"):
+        for note in outbox.glob("*" + suffix):
+            shown = outbox / (note.name[: -len(suffix)] + ".finalized")
+            try:
+                if not shown.exists() or note.stat().st_mtime >= shown.stat().st_mtime:
+                    return True
+            except OSError:
+                return True
+    return False
+
+
+def reconcile_decision_posts(
+    home: Path | None = None,
+    full: bool = True,
+    edit: Callable[[str, str, str, list], None] | None = None,
+) -> list[str]:
+    """Show each decision post's current line on Discord with its buttons off:
+    the sent line once a click filed its request, then the outcome once
+    Firstmate records the answer. ``full`` also settles posts whose decision
+    closed or was replaced, which reads Firstmate's ledgers, so the watcher
+    runs it on a slower cadence than the pass after a click. A permanent
+    refusal (the message is gone) counts as shown; anything else is retried on
+    a later pass. Returns the posts it updated.
+    """
+    home = home or firstmate_home()
+    args = [str(_decision_cli()), "posts"] + ([] if full else ["--settled-only"])
+    result = subprocess.run(args, check=False, env=_env_for(home), capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    shown = []
+    for line in result.stdout.splitlines():
+        try:
+            item = json.loads(line)
+            components = decisions.components_for(item, disabled=True)
+            (edit or discord_edit)(item["channel_id"], item["message_id"], item["content"], components)
+        except DiscordSendError as err:
+            if err.outcome != "permanent":
+                continue
+        except Exception:
+            continue
+        with _temp_text(item["content"]) as content_file:
+            done = subprocess.run(
+                [str(_decision_cli()), "finalized", "--post", item["post"], "--content-file", content_file],
+                check=False,
+                env=_env_for(home),
+                capture_output=True,
+                text=True,
+            )
+        if done.returncode == 0:
+            shown.append(item["post"])
+    return shown
 
 
 def discord_add_reaction(channel_id: str, message_id: str, emoji: str) -> None:
@@ -909,6 +1032,9 @@ def deliver_one(
         "limit": split["limit"],
         "cap": split["cap"],
     }
+    if isinstance(payload.get("decision"), dict):
+        # The post record a click and a later edit find this decision by.
+        progress["decision"] = payload["decision"]
     if int(progress.get("total") or 0) != len(chunks):
         release_inflight(payload, home=home)
         return "mid-delivery"
@@ -950,6 +1076,9 @@ def deliver_one(
         progress["discord_message_ids"] = ids
         progress["posted_count"] = index + 1
         progress["inflight"] = None
+        if "decision" in progress and index + 1 == len(chunks):
+            progress["buttons"] = bool(receipt.get("buttons"))
+            progress["posted_at"] = time.time()
         write_progress(payload, progress, home)
     record_receipt(
         payload,
@@ -995,9 +1124,25 @@ def start_outbox_watcher(interval: float | None = None) -> None:
         wait = float(os.environ.get("FM_EXT_OUTBOX_POLL_SECS", "2"))
 
     def _loop() -> None:
+        last_full = 0.0
         while True:
             try:
+                decisions.ensure_click_route()
+            except Exception:
+                pass
+            try:
                 drain_outbox()
+            except Exception:
+                pass
+            # Clicks settle posts locally, so their edits follow within a
+            # cycle; posts closed on another channel need a ledger read and
+            # are swept on the slower cadence.
+            try:
+                full = time.monotonic() - last_full >= DECISION_SWEEP_SECS
+                if full:
+                    last_full = time.monotonic()
+                if full or _unshown_settled_posts():
+                    reconcile_decision_posts(full=full)
             except Exception:
                 pass
             time.sleep(wait)

@@ -381,6 +381,7 @@ The [local Communication Officer configuration reference](configuration.md#local
 
 The gateway plugin calls `bin/fm-ext-intake.sh --text-file`, never `dispatch_tool("terminal", ...)`, and never interpolates Discord text into a shell command.
 `/fm`, a message in the optional dedicated channel, and a reply to one of Firstmate's own posts all enter through that one intake, so its allowlist alone decides admission and authority on every path; the plugin only decides which Discord messages are meant for Firstmate.
+A click on one of Firstmate's decision buttons is checked by `bin/fm-ext-decision.sh` against that same allowlist at standing authority only and then files one request through the same intake, exactly like a typed reply; Firstmate records the answer through its existing keyed decision path, so a button never widens who can instruct Firstmate and the bridge keeps no second decision store.
 Intake owns durable request publication; the watcher owns notification, and the drain presents pending requests from the inbox independently of wake acknowledgement.
 The `ext-respond` skill drains that inbox, classifies each request, and emits `ack` / `answer` / `followup` / `final` payloads through `bin/fm-ext-emit.sh`.
 Spawned work is linked with `bin/fm-ext-link.sh` using `ext_request=`, not `x_request=`.
