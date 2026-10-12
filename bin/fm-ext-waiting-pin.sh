@@ -110,8 +110,8 @@ print(value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " "), en
 # with a title read from a later snapshot. Prints nothing for a call the report
 # does not carry.
 waiting_pin_due_title() {  # <due-rows> <id>
-  local rows=$1 want=$2 id review title ident
-  while IFS=$(printf '\t') read -r id review title ident; do
+  local rows=$1 want=$2 id title
+  while IFS=$(printf '\t') read -r id _ title _; do
     [ "$id" = "$want" ] || continue
     printf '%s' "$title"
     return 0
