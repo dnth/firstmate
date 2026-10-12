@@ -67,16 +67,12 @@ When you settle a decision that has a button post any other way, such as a typed
 
 ## Name the thread, then mark its state
 
-A top-level message request in the dedicated channel gets one topic thread on its message with the first reply.
-Name it and mark it through `bin/fm-ext-emit.sh`:
+Before composing a dedicated-channel reply, consult the [topic-thread contract](../../../docs/configuration.md#topic-threads-one-thread-per-request); the [emit header and help](../../../bin/fm-ext-emit.sh) own the title and state flags.
 
-- **Title the thread on the creating reply** - pass `--thread-title "<Project> · <2-5 word topic>"` (for example `Aceh · ingestion status`) on the first reply (`ack` for longer work, `answer` when it completes now).
-  One line, at most 60 characters; emit refuses over-long, multi-line, or unsafe titles instead of cutting them.
-  A title on a later generation is ignored: the thread keeps the name the first reply used, and renames happen only through the markers below.
-  With no title the thread takes the request's first line (Discord tokens stripped, at most 90 characters), so a title is worth writing whenever the request text is vague, long, or procedural.
-- **Mark needs-you when the reply asks the captain to decide** - pass `--thread-state needs-you` so the thread shows `❓ <name>`.
-- **Mark done with the terminal answer or final** - pass `--thread-state done` so the thread shows `✅ <name>`.
-- **Clear the marker when work resumes** - pass `--thread-state none` so the thread shows the bare name again.
+- **Title the creating reply** with `<Project> · <2-5 word topic>` (for example `Aceh · ingestion status`), especially when the request is vague, long, or procedural.
+- **Mark needs-you** when the reply asks the captain to decide.
+- **Mark done** with the terminal answer or final.
+- **Clear the marker** when work resumes.
 
 Titles are public: the same safety rules as reply text apply (no task ids, branch names, paths, hostnames, or secrets).
 

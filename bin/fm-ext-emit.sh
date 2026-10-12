@@ -9,8 +9,8 @@
 #
 # --thread-title names the request's topic thread ("<Project> · <topic>", one
 # line, at most 60 characters, screened like reply text) on the reply that
-# creates it; a title on a later generation is recorded but the thread keeps
-# the name the first reply used. Over-long, multi-line, or unsafe titles are
+# creates it; once the thread exists, later titles are recorded but do not
+# replace its name. Over-long, multi-line, or unsafe titles are
 # refused here instead of silently cut. --thread-state renames the existing
 # topic thread: needs-you prefixes "❓ ", done prefixes "✅ ", none removes the
 # prefix. Renames never block delivery; the poster applies them best effort.

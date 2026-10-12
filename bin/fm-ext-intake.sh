@@ -27,8 +27,8 @@
 # command interaction, "message" for an ordinary Discord message, which is the
 # only kind the gateway can add reactions to. The destination context also
 # carries a topic field with the Discord thread name when bin/fm-ext-topic.sh
-# returns one (Firstmate's title, else the request-text fallback, else the
-# label-plus-time last fallback); otherwise the field is omitted. A topic
+# returns one (the request-text fallback, else the label-plus-time last
+# fallback); otherwise the field is omitted. A topic
 # context also carries request_text, the request's own text, so the poster can
 # re-derive the name at validate time instead of trusting the stored string.
 # --reply-to-message-id marks a request that answers one of Firstmate's own

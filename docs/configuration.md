@@ -884,20 +884,22 @@ The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#dedicate
 
 A top-level message request in the configured dedicated channel creates a Discord thread on its message with its first reply, and every later `ack`/`answer`/`followup`/`final` for that request posts into the same thread, including work linked to it after the inbox is gone.
 Replies to Firstmate posts outside the dedicated channel keep their existing routing without creating a thread.
-Names follow a priority owned by [`bin/fm-ext-topic.sh`](../bin/fm-ext-topic.sh): Firstmate's title from the creating reply (`<Project> · <topic>`, one line, at most 60 characters, screened like reply text), else the first non-empty line of the request with Discord tokens stripped and cut to at most 90 characters on a word boundary ending in `…`, else one fixed public label (Aceh, InfoConnect, Firstmate, Question, or Firstmate request) plus the source message's MYT time as `HH:MM` derived from its Discord snowflake.
-The poster re-derives every name from the stored request text before it may reach Discord.
-A Firstmate title must pass its bounds and screening, a fallback name must equal the re-derived one, and legacy label-plus-time names still validate so in-flight requests keep working.
+Names prefer Firstmate's title from the reply that successfully creates the thread, then the request-text fallback, then a label-plus-time fallback; [`bin/fm-ext-topic.sh`](../bin/fm-ext-topic.sh) owns the exact derivation, bounds, and shared title screen.
+The poster validates names against the stored request text and creating title before creating or renaming a thread.
+Legacy label-plus-time names remain valid for the same source message when no valid creating title takes precedence, including contexts recorded before request text was retained.
 Anything else falls back to the fresh derivation.
+Once a thread exists, later titles do not replace its name; status changes preserve the original base name.
 A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
 The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name, only when the name changes and only for threads this request created.
 A rename failure, including a rate limit, is logged and never blocks or loses the reply.
 A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
 Slash commands are unchanged: `/fm` replies post to their originating thread (the channel itself for a top-level interaction) and never attempt thread creation.
 A thread-creation failure (such as missing permission) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
+On that existing-thread path, the poster fetches and validates the winning name before recording it for later marker changes; if that lookup or validation fails, replies still route to the existing thread but no new naming record is saved.
 Once any chunk has posted, retries keep that generation's original destination even if another generation subsequently creates the topic thread.
 Creating a topic thread never widens who the allowlist admits.
 The [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) owns the unchanged public-safety rules for reply text.
-The intake records the name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record (thread id, base name, last state) so every generation shares the same thread.
+The intake records the fallback name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record (thread id, current name including any marker, last state, creating title) so every generation shares the same thread.
 The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, marker, and unchanged-allowlist coverage.
 
 ### Delivery reactions

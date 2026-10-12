@@ -541,9 +541,9 @@ def public_topic_name(
 
     The request text (plus Firstmate's title when the creating payload
     carries one) goes through bin/fm-ext-topic.sh, and the stored name is
-    accepted only when it equals that fresh derivation or a legacy
-    label-plus-time name for the same message. Anything else falls back to
-    the fresh name, so a tampered stored string can never reach Discord.
+    accepted only when it equals that fresh derivation, or a legacy
+    label-plus-time name for the same message when no valid title takes
+    precedence. Anything else falls back to the fresh name.
     """
     with _temp_text(request_text) as text_file, _temp_text(title) as title_file, _temp_text(name) as stored_file:
         result = subprocess.run(

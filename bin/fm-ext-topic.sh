@@ -21,15 +21,16 @@
 # The request-text fallback uses the first non-empty line of the request with
 # Discord mention, role, channel, emoji, and timestamp tokens stripped,
 # whitespace collapsed, control characters dropped, cut to at most 90
-# characters on a word boundary ending in … when cut. The thread sits on the
+# characters ending in … when cut, preferring a word boundary but splitting
+# a first token that exceeds the limit. The thread sits on the
 # captain's own message, so the fallback shows nothing its audience cannot
 # already read. An empty-after-cleaning request falls back to the label-plus-
 # time name: one fixed public label (Aceh, InfoConnect, Firstmate, Question,
 # or Firstmate request) plus the source message's MYT time as HH:MM.
 # --validate-name checks --stored-file's name against the same priority order
 # re-derived from --text-file's request text (plus --title-file when given):
-# the fresh name, or a legacy label-plus-time name for this message. Anything
-# else falls back to the freshly derived name.
+# the fresh name, or a legacy label-plus-time name for this message when no
+# valid title takes precedence. Anything else uses the freshly derived name.
 set -u
 
 usage() {
