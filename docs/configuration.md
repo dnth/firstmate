@@ -897,11 +897,13 @@ A rename failure, including a rate limit, is logged and never blocks or loses th
 A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
 Slash commands are unchanged: `/fm` replies post to their originating thread (the channel itself for a top-level interaction) and never attempt thread creation.
 A thread-creation failure (such as missing permission) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
-On that existing-thread path, the poster fetches and validates the winning name before recording it for later marker changes; if that lookup or validation fails, replies still route to the existing thread but no new naming record is saved.
+On that existing-thread path, the poster fetches and validates the winning name before recording the thread as adopted for reply routing; adopted threads are never renamed or marked by either the top-level request or an in-thread request.
+If that lookup or validation fails, replies still route to the existing thread but no new naming record is saved.
 Once any chunk has posted, retries keep that generation's original destination even if another generation subsequently creates the topic thread.
 Creating a topic thread never widens who the allowlist admits.
 The [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) owns the unchanged public-safety rules for reply text.
-The intake records the fallback name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record (thread id, current name including any marker, last state, creating title) so every generation shares the same thread.
+The intake records the fallback name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record (thread id, current name including any marker, last state, creating title, optional `adopted` flag) so every generation shares the same thread.
+Firstmate-created threads and existing records without the adoption flag remain eligible for state changes.
 A marker applied from inside the thread updates that same record rather than writing a second one, so the next change on either path builds on the same name.
 The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, marker, and unchanged-allowlist coverage.
 

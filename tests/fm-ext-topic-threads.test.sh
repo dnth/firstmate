@@ -840,12 +840,16 @@ for winner in ("InfoConnect · winning title", "❓ InfoConnect · winning title
     with patch.object(poster.urllib.request, "urlopen", read_thread):
         assert poster.ensure_topic_thread(payload, {}, home, lost_create) == thread_id
     assert poster.load_request_topic(payload, home)["topic_name"] == winner
+    assert poster.load_request_topic(payload, home)["adopted"] is True
+    poster.save_request_thread(payload, thread_id, home)
+    assert poster.load_thread_record_by_id(thread_id, home)["adopted"] is True
     renames.clear()
-    for state, prefix in (("done", "✅ "), ("needs-you", "❓ "), ("none", "")):
+    for state in ("done", "needs-you", "none"):
         marked = dict(payload, thread_state=state)
         poster.maybe_rename_topic_thread(marked, thread_id, home,
             rename_thread=lambda tid, name: renames.append(name))
-        assert renames[-1] == prefix + poster.state_thread_name(winner, "none")
+        assert renames == []
+        assert poster.load_request_topic(payload, home)["topic_name"] == winner
     poster.request_progress_path(payload, home).unlink()
 PY
   then fail "existing threads must retain their original or winning names"
@@ -939,6 +943,8 @@ test_17_in_thread_requests_mark_their_thread() {
     "the creating reply must open the thread"
   assert_contains "$out" "thread-rename=777777777777777777/❓ InfoConnect · v0.5.11 status" \
     "the creating reply must mark the thread needs-you"
+  jq -e 'has("adopted") | not' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "a Firstmate-created thread must retain its unmarked record format"
 
   rid2="discord:${GUILD}:${CHANNEL}:777777777777777777:999999999999999999"
   slug2=$(intake_as "$home" "Yes" 999999999999999999 "777777777777777777" message)
@@ -1032,6 +1038,70 @@ PY
   pass "17 an in-thread request marks the state of the thread it arrived in"
 }
 
+test_18_adopted_threads_never_take_state_markers() {
+  local home slug rid2 slug2 out state generation
+  home="$TMP_ROOT/c18"
+  setup_home "$home"
+  slug=$(intake_as "$home" "InfoConnect v0.5.11 status" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Using your thread." \
+    "InfoConnect · v0.5.11 status" "needs-you" >/dev/null
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import io, json, os, sys
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+os.environ["DISCORD_BOT_TOKEN"] = "fixture"
+path = home / "state/ext-outbox" / (slug + ".answer.1.json")
+payload = json.loads(path.read_text())
+thread_id = payload["message_id"]
+name = "InfoConnect · v0.5.11 status"
+posted, renames = [], []
+def create(request, title):
+    raise poster.DiscordSendError("permanent", "already exists", 400, {"code": 160004})
+def fetch(request, **kwargs):
+    assert request.get_method() == "GET"
+    assert request.full_url.endswith("/channels/" + thread_id)
+    return io.BytesIO(json.dumps({"id": thread_id, "name": name}).encode())
+def send(request):
+    posted.append((request["thread_id"], request["text"]))
+    return {"ok": True, "discord_message_id": "900000000000000001"}
+with patch.object(poster.urllib.request, "urlopen", fetch):
+    assert poster.deliver_one(path, send=send, home=home, create_thread=create,
+        rename_thread=lambda tid, title: renames.append(title)) == "sent"
+assert posted == [(thread_id, "Using your thread.")]
+assert renames == []
+record = poster.load_request_topic(payload, home)
+assert record["adopted"] is True
+assert record["topic_name"] == name
+assert record["thread_state"] == ""
+assert (path.parent / (slug + ".answer.1.receipt.json")).is_file()
+PY
+  then fail "recovering a captain-made thread must route without renaming"
+  fi
+  rid2="discord:${GUILD}:${CHANNEL}:${MESSAGE}:999999999999999999"
+  slug2=$(intake_as "$home" "Yes" 999999999999999999 "$MESSAGE" message)
+  generation=1
+  for state in needs-you done none; do
+    emit_as "$home" "$rid2" followup "$generation" "In-thread reply." "" "$state" >/dev/null
+    emit_as "$home" "$RID" followup "$generation" "Top-level reply." "" "$state" >/dev/null
+    out=$(deliver "$home")
+    assert_contains "$out" "posted-to=$MESSAGE In-thread reply." "an adopted thread must deliver in-thread replies"
+    assert_contains "$out" "posted-to=$MESSAGE Top-level reply." "an adopted thread must deliver top-level replies"
+    [ "$(printf '%s\n' "$out" | grep -c '^thread-rename=')" = 0 ] \
+      || fail "neither path may mark an adopted thread: $out"
+    [ -f "$home/state/ext-outbox/$slug2.followup.$generation.receipt.json" ] \
+      || fail "an in-thread reply must retain its receipt"
+    [ -f "$home/state/ext-outbox/$slug.followup.$generation.receipt.json" ] \
+      || fail "a top-level reply must retain its receipt"
+    jq -e '.adopted == true and .topic_name == "InfoConnect · v0.5.11 status" and .thread_state == ""' \
+      "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+      || fail "state changes must leave the adopted thread record untouched"
+    generation=$((generation + 1))
+  done
+  pass "18 adopted threads deliver replies without taking state markers"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -1051,5 +1121,6 @@ test_14_legacy_titles_markers_and_long_tokens
 test_15_existing_threads_keep_the_winning_name
 test_16_shared_title_screen_and_nickname_mentions
 test_17_in_thread_requests_mark_their_thread
+test_18_adopted_threads_never_take_state_markers
 
 echo "all fm-ext-topic-threads tests passed"

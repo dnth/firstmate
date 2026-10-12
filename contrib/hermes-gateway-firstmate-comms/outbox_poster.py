@@ -482,6 +482,7 @@ def _read_thread_record(path: Path) -> dict:
             "topic_thread_id": thread_id,
             "topic_name": name if isinstance(name, str) else "",
             "thread_state": state if isinstance(state, str) else "",
+            "adopted": bool(data.get("adopted")),
             "creating_title": creating if isinstance(creating, str) else ""}
 
 
@@ -532,9 +533,7 @@ def load_thread_record_by_id(thread_id: str, home: Path) -> dict:
 
     A thread is renamed both by the request that created it and by a later
     request that arrived inside it, so the record is found by the thread it
-    names rather than by the request that is speaking. Only records this home
-    already wrote are read, so an unknown thread - a captain-made one, or a
-    non-dedicated channel or DM - resolves to nothing and is never renamed.
+    names rather than by the request that is speaking.
     """
     if not _SNOWFLAKE.fullmatch(str(thread_id or "")):
         return {}
@@ -552,7 +551,7 @@ def load_thread_record_by_id(thread_id: str, home: Path) -> dict:
 
 def save_request_thread(payload: dict, thread_id: str, home: Path,
                         topic_name: str = "", thread_state: str = "",
-                        creating_title: str = "") -> None:
+                        creating_title: str = "", adopted: bool = False) -> None:
     """Record this request's topic-thread id for every later generation.
 
     The record is the request-wide one beside its outbox payload. A rename
@@ -561,12 +560,12 @@ def save_request_thread(payload: dict, thread_id: str, home: Path,
     """
     save_thread_record(request_progress_path(payload, home), payload.get("request_id"),
                        thread_id, topic_name=topic_name, thread_state=thread_state,
-                       creating_title=creating_title)
+                       creating_title=creating_title, adopted=adopted)
 
 
 def save_thread_record(path: Path, request_id: object, thread_id: str,
                        topic_name: str = "", thread_state: str = "",
-                       creating_title: str = "") -> None:
+                       creating_title: str = "", adopted: bool = False) -> None:
     """Write one thread record atomically, preserving any prior unset field.
 
     A private state artifact beside the outbox, written with the same guards
@@ -583,13 +582,17 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
         prior_name = prior.get("topic_name") if isinstance(prior, dict) else ""
         prior_state = prior.get("thread_state") if isinstance(prior, dict) else ""
         prior_creating = prior.get("creating_title") if isinstance(prior, dict) else ""
+        adopted = adopted or (isinstance(prior, dict) and bool(prior.get("adopted")))
     except (OSError, ValueError):
         prior_request, prior_name, prior_state, prior_creating = "", "", "", ""
-    body = json.dumps({"request_id": request_id if request_id is not None else prior_request,
-                       "topic_thread_id": thread_id,
-                       "topic_name": topic_name or prior_name,
-                       "thread_state": thread_state or prior_state,
-                       "creating_title": creating_title or prior_creating})
+    record = {"request_id": request_id if request_id is not None else prior_request,
+              "topic_thread_id": thread_id,
+              "topic_name": topic_name or prior_name,
+              "thread_state": thread_state or prior_state,
+              "creating_title": creating_title or prior_creating}
+    if adopted:
+        record["adopted"] = True
+    body = json.dumps(record)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
     try:
@@ -801,11 +804,6 @@ def maybe_rename_topic_thread(
         if not base:
             return thread_id
     else:
-        # The request arrived inside a topic thread: it may only rename that
-        # thread, and only when this home created it, which is what having a
-        # record for the thread id proves. The base name and its last marker
-        # come from that record's own creating request, so the same name
-        # validation that guards a create also guards this rename.
         thread_id = thread_field
         recorded = load_thread_record_by_id(thread_id, home)
         if not recorded:
@@ -816,6 +814,8 @@ def maybe_rename_topic_thread(
         base = thread_name_for(creator, home)
         if not base:
             return thread_id
+    if recorded.get("adopted"):
+        return thread_id
     want = state_thread_name(base, state)
     if want is None:
         return thread_id
@@ -931,6 +931,7 @@ def ensure_topic_thread(
     creator = create_thread or discord_create_thread
     creating_title = _title_for(payload)
     thread_state = payload.get("thread_state") if isinstance(payload.get("thread_state"), str) else ""
+    adopted = False
     try:
         receipt = creator(payload, name)
     except DiscordSendError as err:
@@ -958,6 +959,7 @@ def ensure_topic_thread(
         except Exception:
             return thread_id
         thread_state = ""
+        adopted = True
         receipt = {"thread_id": thread_id}
     except Exception:
         return ""
@@ -966,7 +968,8 @@ def ensure_topic_thread(
         return ""
     try:
         save_request_thread(payload, thread_id, home, topic_name=name,
-                            thread_state=thread_state, creating_title=creating_title)
+                            thread_state=thread_state, creating_title=creating_title,
+                            adopted=adopted)
     except Exception:
         return thread_id
     return thread_id
