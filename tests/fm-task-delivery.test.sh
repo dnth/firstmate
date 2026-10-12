@@ -230,6 +230,89 @@ EOF2
   pass "remote secondmate launch and relaunch validate before endpoint access"
 }
 
+test_scout_relaunch_validates_brief_and_pending_note() {
+  local rec home proj fakebin wt out status source id=scout-relaunch
+  rec=$(make_home scout-relaunch)
+  IFS='|' read -r home proj fakebin <<EOF2
+$rec
+EOF2
+  wt="$TMP_ROOT/scout-relaunch/wt"
+  fm_git_worktree "$proj" "$wt" scout-relaunch-wt
+  write_brief "$home" "$id"
+  cp "$home/data/$id/brief.md" "$home/brief-before"
+  printf 'claude\n' > "$home/agent-command"
+  cat > "$home/state/$id.meta" <<EOF2
+window=firstmate:fm-$id
+endpoint_task_id=$id
+worktree=$wt
+project=$proj
+harness=claude
+kind=scout
+model=default
+effort=default
+EOF2
+  cp "$home/state/$id.meta" "$home/meta-before"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf 'fm-scout-relaunch\n' ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*) cat "$FM_HOME/agent-command" ;;
+      *pane_current_path*) printf '%s\n' "$FM_TEST_SCOUT_WT" ;;
+      *) printf 'firstmate\n' ;;
+    esac ;;
+  capture-pane) printf '> \n' ;;
+  send-keys)
+    printf '%s\n' "$*" >> "$FM_HOME/endpoint-writes"
+    case "$*" in *'/exit'*) printf 'zsh\n' > "$FM_HOME/agent-command" ;; esac ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/spawn" <<'SH'
+#!/usr/bin/env bash
+printf 'control_relaunch_tx=%s\n' "$FM_CONTROL_RELAUNCH_TX" >> "$FM_HOME/state/$1.meta"
+printf 'claude\n' > "$FM_HOME/agent-command"
+SH
+  chmod +x "$fakebin/spawn"
+  for source in brief note note-file; do
+    cp "$home/brief-before" "$home/data/$id/brief.md"
+    if [ "$source" = brief ]; then
+      printf '{TASK}\n' >> "$home/data/$id/brief.md"
+      set -- --note 'Concrete progress.'
+    elif [ "$source" = note ]; then
+      set -- --note 'Progress still has {TASK}.'
+    else
+      printf 'Progress still has {TASK}.\n' > "$home/input-note"
+      set -- --note-file "$home/input-note"
+    fi
+    cp "$home/data/$id/brief.md" "$home/expected-brief"
+    out=$(FM_HOME="$home" FM_TEST_SCOUT_WT="$wt" PATH="$fakebin:$PATH" \
+      "$ROOT/bin/fm-control.sh" "$id" relaunch "$@" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "scout relaunch accepted unresolved $source"
+    assert_contains "$out" 'still contains {TASK}' "scout relaunch failed to identify unresolved $source"
+    cmp -s "$home/expected-brief" "$home/data/$id/brief.md" || fail "refused scout relaunch modified its brief"
+    cmp -s "$home/meta-before" "$home/state/$id.meta" || fail "refused scout relaunch modified metadata"
+    [ "$(cat "$home/agent-command")" = claude ] || fail "refused scout relaunch stopped the agent"
+    assert_absent "$home/endpoint-writes" "refused scout relaunch sent endpoint input"
+    assert_absent "$home/state/$id.control-relaunch" "refused scout relaunch opened a transaction"
+    assert_absent "$home/state/$id.control-relaunch.note" "refused scout relaunch persisted a note"
+  done
+  cp "$home/brief-before" "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_TEST_SCOUT_WT="$wt" PATH="$fakebin:$PATH" \
+    FM_RESTART_SPAWN_CMD="$fakebin/spawn" FM_CONTROL_POLL=0.01 \
+    FM_CONTROL_EXIT_WAIT=0.1 FM_CONTROL_LAUNCH_WAIT=0.1 \
+    "$ROOT/bin/fm-control.sh" "$id" relaunch --note 'Concrete progress with {"ok":true}.' 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "filled scout relaunch failed: $out"
+  assert_contains "$out" "relaunched $id" "filled scout relaunch did not report success"
+  assert_contains "$(cat "$home/data/$id/brief.md")" 'Concrete progress with {"ok":true}.' "filled scout relaunch omitted its progress note"
+  assert_present "$home/endpoint-writes" "filled scout relaunch never reached its endpoint"
+  pass "scout relaunch validates existing instructions and both pending note forms before transitions"
+}
+
 test_spawn_allows_legacy_brief_until_completion_gate() {
   local rec home proj fakebin out
   rec=$(make_home legacy-brief)
@@ -879,6 +962,7 @@ test_spawn_refuses_unresolved_brief_placeholders
 test_scout_spawn_refuses_unresolved_task_placeholder
 test_secondmate_spawn_refuses_unresolved_charter_placeholder
 test_remote_secondmate_refuses_placeholder_before_endpoint_access
+test_scout_relaunch_validates_brief_and_pending_note
 test_spawn_allows_legacy_brief_until_completion_gate
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch

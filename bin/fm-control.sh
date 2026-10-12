@@ -908,6 +908,13 @@ do_relaunch() {
       ;;
   esac
 
+  if [ "$KIND" = scout ]; then
+    if grep -F '{TASK}' "$RELAUNCH_BRIEF" >/dev/null 2>&1 \
+       || [[ "$NOTE" == *'{TASK}'* ]]; then
+      die "scout brief or progress note still contains {TASK}; replace every scaffold placeholder before relaunch"
+    fi
+  fi
+
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else
