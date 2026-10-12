@@ -87,6 +87,9 @@ _SNOWFLAKE = re.compile(r"^[0-9]+$")
 # topic-thread record beside its payload is named "<slug>.thread.json".
 _SLUG = re.compile(r"^[0-9a-f]{64}$")
 _THREAD_RECORD_SUFFIX = ".thread.json"
+# This bot's own Discord user id, read once per process for the thread
+# ownership check a record without stored provenance needs.
+_BOT_USER_ID = ""
 # How often the watcher sweeps decision posts for decisions closed on another
 # channel, which reads Firstmate's ledgers; click outcomes show within a cycle.
 DECISION_SWEEP_SECS = 30.0
@@ -477,12 +480,17 @@ def _read_thread_record(path: Path) -> dict:
     name = data.get("topic_name") or ""
     state = data.get("thread_state") or ""
     creating = data.get("creating_title") or ""
+    creator = data.get("creator") or ""
+    if not creator and data.get("adopted"):
+        # Records written while adoption was a bare flag still say the thread
+        # was not ours to begin with.
+        creator = "adopted"
     return {"path": path,
             "request_id": request_id if isinstance(request_id, str) else "",
             "topic_thread_id": thread_id,
             "topic_name": name if isinstance(name, str) else "",
             "thread_state": state if isinstance(state, str) else "",
-            "adopted": bool(data.get("adopted")),
+            "creator": creator if isinstance(creator, str) else "",
             "creating_title": creating if isinstance(creating, str) else ""}
 
 
@@ -551,7 +559,7 @@ def load_thread_record_by_id(thread_id: str, home: Path) -> dict:
 
 def save_request_thread(payload: dict, thread_id: str, home: Path,
                         topic_name: str = "", thread_state: str = "",
-                        creating_title: str = "", adopted: bool = False) -> None:
+                        creating_title: str = "", creator: str = "") -> None:
     """Record this request's topic-thread id for every later generation.
 
     The record is the request-wide one beside its outbox payload. A rename
@@ -560,13 +568,18 @@ def save_request_thread(payload: dict, thread_id: str, home: Path,
     """
     save_thread_record(request_progress_path(payload, home), payload.get("request_id"),
                        thread_id, topic_name=topic_name, thread_state=thread_state,
-                       creating_title=creating_title, adopted=adopted)
+                       creating_title=creating_title, creator=creator)
 
 
 def save_thread_record(path: Path, request_id: object, thread_id: str,
                        topic_name: str = "", thread_state: str = "",
-                       creating_title: str = "", adopted: bool = False) -> None:
+                       creating_title: str = "", creator: str = "") -> None:
     """Write one thread record atomically, preserving any prior unset field.
+
+    ``creator`` is the provenance that authorises a later rename: ``firstmate``
+    when this home created the thread, ``adopted`` when an existing thread was
+    only reused for routing. It is kept once known, so a record never loses
+    the evidence that a rename decision depends on.
 
     A private state artifact beside the outbox, written with the same guards
     the shell publication helper enforces: a regular single-link file at mode
@@ -582,16 +595,19 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
         prior_name = prior.get("topic_name") if isinstance(prior, dict) else ""
         prior_state = prior.get("thread_state") if isinstance(prior, dict) else ""
         prior_creating = prior.get("creating_title") if isinstance(prior, dict) else ""
-        adopted = adopted or (isinstance(prior, dict) and bool(prior.get("adopted")))
+        prior_creator = prior.get("creator") if isinstance(prior, dict) else ""
+        if not prior_creator and isinstance(prior, dict) and prior.get("adopted"):
+            prior_creator = "adopted"
     except (OSError, ValueError):
-        prior_request, prior_name, prior_state, prior_creating = "", "", "", ""
+        prior_request, prior_name, prior_state, prior_creating, prior_creator = "", "", "", "", ""
     record = {"request_id": request_id if request_id is not None else prior_request,
               "topic_thread_id": thread_id,
               "topic_name": topic_name or prior_name,
               "thread_state": thread_state or prior_state,
               "creating_title": creating_title or prior_creating}
-    if adopted:
-        record["adopted"] = True
+    kept_creator = creator or (prior_creator if isinstance(prior_creator, str) else "")
+    if kept_creator:
+        record["creator"] = kept_creator
     body = json.dumps(record)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
@@ -771,22 +787,84 @@ def discord_rename_thread(thread_id: str, name: str) -> dict:
     return {"ok": True, "thread_id": thread_id}
 
 
+def _bot_user_id() -> str:
+    """This bot's own Discord user id, or "" when it cannot be read.
+
+    Cached for the process: the id never changes for a token, and an
+    ownership check must not pay a round trip per thread.
+    """
+    global _BOT_USER_ID
+    if _BOT_USER_ID:
+        return _BOT_USER_ID
+    token = _bot_token()
+    if not token:
+        return ""
+    request = urllib.request.Request(
+        f"{DISCORD_API_BASE}/users/@me",
+        headers={"Authorization": f"Bot {token}", "User-Agent": USER_AGENT},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    user_id = str(data.get("id") or "")
+    if not _SNOWFLAKE.fullmatch(user_id):
+        return ""
+    _BOT_USER_ID = user_id
+    return user_id
+
+
+def discord_thread_owner(thread_id: str) -> str:
+    """The Discord user id that created a thread, or "" when unproved.
+
+    Read-only and best effort. A missing token, an unusable id, a transport
+    or HTTP failure, or a reply without an owner all leave ownership unproved,
+    which a rename check reads as "not ours" and refuses to rename on.
+    """
+    token = _bot_token()
+    if not token or not _SNOWFLAKE.fullmatch(thread_id):
+        return ""
+    request = urllib.request.Request(
+        f"{DISCORD_API_BASE}/channels/{thread_id}",
+        headers={"Authorization": f"Bot {token}", "User-Agent": USER_AGENT},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    owner = str(data.get("owner_id") or "")
+    return owner if _SNOWFLAKE.fullmatch(owner) else ""
+
+
 def maybe_rename_topic_thread(
     payload: dict,
     thread_id: str,
     home: Path,
     rename_thread=None,
+    thread_owner=None,
 ) -> str:
     """Apply this generation's thread_state to its topic thread, best effort.
 
     The creating request renames the thread it created; a request that
     arrived inside a topic thread this home created in the dedicated channel
     renames that thread, resolved by its id so the base name and the last
-    applied marker come from the thread's own record. Only Firstmate-created
-    threads in the dedicated channel are touched, and only when the prefixed
-    name differs from the recorded one. Any failure - unknown state, no base
-    name, rate limit, transport error - is logged and leaves the reply
-    delivered; renaming never blocks or loses a reply.
+    applied marker come from the thread's own record.
+
+    A thread is renamed only with positive evidence that this home created it.
+    A record that says ``firstmate`` carries that evidence; one that says
+    ``adopted`` was only reused for routing and is never renamed or marked; a
+    record written before provenance was kept is renamed only when Discord
+    reports the bot itself as the thread owner, and anything unproved - an
+    unknown owner, another user's owner, or a failed lookup - leaves the name
+    alone and is logged. Any other failure - unknown state, no base name, rate
+    limit, transport error - is logged too and leaves the reply delivered;
+    renaming never blocks or loses a reply.
     """
     state = payload.get("thread_state")
     if state_prefix(state) is None:
@@ -814,8 +892,21 @@ def maybe_rename_topic_thread(
         base = thread_name_for(creator, home)
         if not base:
             return thread_id
-    if recorded.get("adopted"):
+    provenance = recorded.get("creator") or ""
+    if provenance == "adopted":
         return thread_id
+    if provenance != "firstmate":
+        owner = thread_owner or discord_thread_owner
+        try:
+            owner_id = owner(thread_id)
+        except Exception as err:
+            print(f"fm-ext-poster: thread owner lookup skipped: {err}", file=sys.stderr)
+            return thread_id
+        if not owner_id or owner_id != _bot_user_id():
+            print(f"fm-ext-poster: thread {thread_id} ownership unproved; leaving its name alone",
+                  file=sys.stderr)
+            return thread_id
+        provenance = "firstmate"
     want = state_thread_name(base, state)
     if want is None:
         return thread_id
@@ -829,7 +920,7 @@ def maybe_rename_topic_thread(
         return thread_id
     try:
         save_thread_record(recorded["path"], recorded.get("request_id"), thread_id,
-                           topic_name=want, thread_state=state,
+                           topic_name=want, thread_state=state, creator=provenance,
                            creating_title=recorded.get("creating_title") or "")
     except Exception as err:
         print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
@@ -931,7 +1022,9 @@ def ensure_topic_thread(
     creator = create_thread or discord_create_thread
     creating_title = _title_for(payload)
     thread_state = payload.get("thread_state") if isinstance(payload.get("thread_state"), str) else ""
-    adopted = False
+    # Provenance decides whether a later state change may rename this thread:
+    # this home created it, or it only adopted a thread that already existed.
+    creator_provenance = "firstmate"
     try:
         receipt = creator(payload, name)
     except DiscordSendError as err:
@@ -959,7 +1052,7 @@ def ensure_topic_thread(
         except Exception:
             return thread_id
         thread_state = ""
-        adopted = True
+        creator_provenance = "adopted"
         receipt = {"thread_id": thread_id}
     except Exception:
         return ""
@@ -969,7 +1062,7 @@ def ensure_topic_thread(
     try:
         save_request_thread(payload, thread_id, home, topic_name=name,
                             thread_state=thread_state, creating_title=creating_title,
-                            adopted=adopted)
+                            creator=creator_provenance)
     except Exception:
         return thread_id
     return thread_id
