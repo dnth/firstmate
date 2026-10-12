@@ -61,8 +61,9 @@
 # tasks-axi --archive-body). It closes a question with `tasks-axi done` - or,
 # with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
 # WORK item resumes without closing - and restores resolution-first body
-# ordering. A close-mode answer on a task with live worker metadata
-# (state/<id>.meta exists) is refused before anything is written: pass
+# ordering. A close-mode answer on an open task with live worker metadata
+# (state/<id>.meta is a regular, non-symlink file) is refused before the task
+# is changed: pass
 # `--release` to lift the hold so the work resumes, or `--close-live` to close
 # it deliberately, which records the same answered mode as a question close.
 # Question-shaped held items with no worker metadata close exactly as before.

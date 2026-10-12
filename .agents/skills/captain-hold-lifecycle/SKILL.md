@@ -27,7 +27,7 @@ Do not close a captain-held task merely because the originating investigation co
 Holding the work item the question gates is safe for exactly that reason: cleanup keeps such a row open with the finished work's deliverable recorded and returns it to the queue, so it still reads as the captain's own call.
 Only `answer` with the captain's words or an evidence-backed `reconcile close` may resolve it.
 
-Never close anything the captain owns without recording what he actually said: `bin/fm-captain-hold.sh answer` writes his exact words into the task and closes a question-shaped call, while `--release` frees a captain-gated work item to proceed; a close-mode answer on a task with live worker metadata is refused unless passed `--close-live`.
+Never close anything the captain owns without recording what he actually said: `bin/fm-captain-hold.sh answer` writes his exact words into the task and closes a question-shaped call, while `--release` frees a captain-gated work item to proceed; a close-mode answer on an open task with live worker metadata is refused unless passed `--close-live`.
 A merge approval uses that existing release path because approval permits the merge to proceed; cleanup closes the work only after it lands and records what shipped.
 Closing a held row at merge approval instead records completion before landing, so the backlog claims completion before the work actually ships.
 When the answer changes what a task must build, follow `validation-supervision`'s mid-run requirement rules and steer the worker with the captain's words.
