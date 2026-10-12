@@ -91,8 +91,8 @@ waiting_pin_now() {
 # therefore always read the full title here instead of reusing the listed
 # one; the renderer's 200-character call-line cap shortens it cleanly.
 # tasks-axi folds typed links (--report, --pr) into the stored title prose,
-# so strip those artifact suffixes plus the `(repo: ...)` tag here: no local
-# paths or PR URLs may reach the public pin. A final backstop drops any
+# so strip those artifact suffixes plus the `(repo: ...)` tag here: artifact
+# paths and links must not become decision text. A final backstop drops any
 # remaining path-like token. Fails when the read fails so the refresh defers
 # rather than publishing a leak or a false all-clear.
 waiting_pin_title() {
