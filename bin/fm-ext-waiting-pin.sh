@@ -83,20 +83,46 @@ waiting_pin_now() {
   printf '%s\n' "$now"
 }
 
+# waiting_pin_title <data> <id>: print the task's full title from an exact
+# `show --full` read, decoded and normalized to one pin line. The board
+# listing truncates long titles with a tool-generated helper (`...
+# (truncated, N chars total - use show <id> --full ...)`), which must never
+# reach the public pin: it leaks the task id and a command. Held calls
+# therefore always read the full title here instead of reusing the listed
+# one; the renderer's 200-character call-line cap shortens it cleanly. Fails
+# when the read fails so the refresh defers rather than publishing a leak or
+# a false all-clear.
+waiting_pin_title() {
+  local data=$1 id=$2 show_output raw
+  show_output=$(fm_backlog_row_show "$data" "$id" --full 2>/dev/null) || return 1
+  raw=$(printf '%s\n' "$show_output" | sed -n 's/^  title: //p' | head -1) || return 1
+  [ -n "$raw" ] || return 1
+  printf '%s' "$raw" | python3 -c '
+import json, sys
+s = sys.stdin.read()
+value = json.loads(s) if s.startswith(chr(34)) else s
+print(value.replace(chr(9), " "), end="")
+' || return 1
+}
+
 # waiting_pin_board <data>: print the message body lines from durable board
 # records only. Captain calls come from actionable open captain-hold annotations;
 # PR-ready URLs come from the recorded pr= metadata fm-pr-lib.sh owns.
 # Prints nothing when there is nothing waiting.
 waiting_pin_board() {
-  local data=$1 listing rows today
+  local data=$1 listing ids today id title
   today=$(date -u '+%Y-%m-%d') || return 1
   listing=$(FM_TASKS_AXI_TIMEOUT=10 fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked) || return 1
-  rows=$(axi_rows tasks "$listing" rows id title hold_kind hold_reason hold_until blocked state) || return 1
-  printf '%s\n' "$rows" | awk -F '\t' -v today="$today" '
-    ($7 == "queued" || $7 == "in_flight") && $3 == "captain" && $4 != "" && $4 != "null" && $4 != "-" && $6 == "no" &&
-      ($5 == "" || $5 == "null" || $5 == "-" || $5 <= today) {
-        print "CALL " $1 "\t" ($2 == "" ? $1 : $2)
-      }'
+  ids=$(axi_rows tasks "$listing" rows id hold_kind hold_reason hold_until blocked state | awk -F '\t' -v today="$today" '
+    ($6 == "queued" || $6 == "in_flight") && $2 == "captain" && $3 != "" && $3 != "null" && $3 != "-" && $5 == "no" &&
+      ($4 == "" || $4 == "null" || $4 == "-" || $4 <= today) {
+        print $1
+      }') || return 1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    title=$(waiting_pin_title "$data" "$id") || return 1
+    printf 'CALL %s\t%s\n' "$id" "$title"
+  done <<< "$ids"
 }
 
 # waiting_pin_prs <state>: print PR-ready URLs from recorded task metadata.
