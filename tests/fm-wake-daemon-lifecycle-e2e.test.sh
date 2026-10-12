@@ -604,6 +604,62 @@ test_stale_pane_transient_persistent_resume() {
   pass "lifecycle: stale pane transient self-handles, persistent escalates once and clears, resumed clears quietly"
 }
 
+test_backlog_reconciliation_reads_one_due_snapshot() (
+  local dir state task i out count
+  dir=$(make_supercase wd-due-snapshot)
+  state="$dir/state"
+  mkdir -p "$dir/hold-bin"
+  _FM_CLASSIFY_LIB_DIR="$dir/hold-bin"
+  export FM_TEST_DUE_ROWS="$dir/due.tsv" FM_TEST_DUE_READS="$dir/reads.log" FM_TEST_DUE_FAIL="$dir/fail"
+  cat > "$dir/hold-bin/fm-captain-hold.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$#" -eq 1 ] && [ "$1" = due ] || exit 2
+printf 'read\n' >> "$FM_TEST_DUE_READS"
+[ ! -e "$FM_TEST_DUE_FAIL" ] || exit 2
+cat "$FM_TEST_DUE_ROWS"
+printf 'live-1\t2026-08-15\tChanged choice\tnew#0\n' > "$FM_TEST_DUE_ROWS"
+SH
+  chmod +x "$dir/hold-bin/fm-captain-hold.sh"
+  : > "$dir/due.tsv"
+  : > "$dir/reads.log"
+  for i in $(seq 1 20); do
+    task=live-$i
+    printf '%s\t2026-08-15\tChoose %s\told#0\n' "$task" "$task" >> "$dir/due.tsv"
+    escalate_add "$state" "deliver $task" "$task" decision "$task" backlog 'old#0'
+  done
+  escalate_add "$state" 'retire old lifecycle' live-1 decision live-1 backlog 'previous#0'
+  escalate_add "$state" 'retire deferred call' deferred decision deferred backlog 'old#0'
+  escalate_add "$state" 'retire blocked call' blocked decision blocked backlog 'old#0'
+  escalate_add "$state" 'keep plain event'
+  out=$(escalate_buffer_reconcile "$state" "$state/.subsuper-escalations") || fail "reconcile backlog snapshot"
+  count=$(grep -c '^read$' "$dir/reads.log")
+  [ "$count" -eq 1 ] || fail "20 due advisories read $count board snapshots"
+  for i in $(seq 1 20); do
+    assert_contains "$out" "deliver live-$i" "batch snapshot omitted a current due call"
+  done
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" -eq 21 ] || fail "batch retained stale backlog advisories: $out"
+  assert_contains "$out" 'keep plain event' "batch snapshot dropped a plain event"
+  escalate_buffer_reconcile_inplace "$state" "$state/.subsuper-escalations" || fail "refresh snapshot in place"
+  [ "$(grep -c '^read$' "$dir/reads.log")" -eq 2 ] || fail "next reconciliation did not read exactly one fresh snapshot"
+  [ "$(cat "$state/.subsuper-escalations")" = 'keep plain event' ] || fail "next batch reused obsolete due identities"
+  escalate_buffer_reconcile_inplace "$state" "$state/.subsuper-escalations" || fail "reconcile plain events"
+  [ "$(grep -c '^read$' "$dir/reads.log")" -eq 2 ] || fail "plain events unnecessarily read the board"
+  : > "$state/.subsuper-escalations"
+  for i in $(seq 1 20); do
+    escalate_add "$state" "deliver live-$i" "live-$i" decision "live-$i" backlog 'old#0'
+  done
+  : > "$dir/fail"
+  out=$(escalate_buffer_reconcile "$state" "$state/.subsuper-escalations") || fail "reconcile failed snapshot"
+  [ "$(grep -c '^read$' "$dir/reads.log")" -eq 3 ] || fail "failed snapshot retried per row"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" -eq 20 ] || fail "failed snapshot did not preserve fail-open delivery"
+  rm "$dir/fail"
+  : > "$dir/due.tsv"
+  out=$(escalate_buffer_reconcile "$state" "$state/.subsuper-escalations") || fail "reconcile empty snapshot"
+  [ "$(grep -c '^read$' "$dir/reads.log")" -eq 4 ] || fail "empty snapshot reread per row"
+  [ -z "$out" ] || fail "successful empty snapshot retained obsolete due calls"
+  pass "backlog reconciliation shares one bounded snapshot and refreshes it for each batch"
+)
+
 # shellcheck disable=SC2030,SC2031 # the ( ) body is the subshell this fixture scopes its env to
 test_backlog_due_recovery_delivers_and_retires() (
   local dir state fakebin task marker out channel key endpoint ident before after
@@ -755,6 +811,8 @@ SH
 )
 
 test_over_cap_decision_batches_still_deliver || fail "capped decision batches failed"
+
+test_backlog_reconciliation_reads_one_due_snapshot || fail "backlog snapshot batching failed"
 
 test_backlog_due_recovery_delivers_and_retires || fail "backlog due recovery failed"
 

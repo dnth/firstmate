@@ -788,7 +788,11 @@ EOF
 #     paused nor captain-held.
 #   status / fleet / unknown - a plain captain-facing event is a fact, not a
 #     condition; it is never superseded by this predicate.
-fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
+fm_advisory_due_snapshot() {
+  FM_STATE_OVERRIDE="$1" fm_run_timed 20 "$_FM_CLASSIFY_LIB_DIR/fm-captain-hold.sh" due 2>/dev/null
+}
+
+fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident> [due-rows due-rc]
   local state=$1 task=$2 kind=$3 key=$4 endpoint=$5 ident=$6 f live_ident size
   local span span_line span_key verb resolve held due_rows
   f="$state/$task.status"
@@ -796,8 +800,12 @@ fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
     decision)
       case "$key" in ''|-) return 1 ;; esac
       if [ "$endpoint" = backlog ]; then
-        due_rows=$(FM_STATE_OVERRIDE="$state" fm_run_timed 20 "$_FM_CLASSIFY_LIB_DIR/fm-captain-hold.sh" \
-          due 2>/dev/null) || return 1
+        if [ "$#" -ge 7 ]; then
+          [ "${8:-0}" -eq 0 ] || return 1
+          due_rows=$7
+        else
+          due_rows=$(fm_advisory_due_snapshot "$state") || return 1
+        fi
         live_ident=$(printf '%s\n' "$due_rows" | awk -F '\t' -v task="$task" '$1 == task { print $4 }')
         [ -n "$live_ident" ] && [ "$live_ident" = "$ident" ] && return 1
         return 0

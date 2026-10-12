@@ -1210,11 +1210,15 @@ advisory_mark_flushed() {  # <state> <file>
 # holding no new captain action). Every drop is logged so the daemon log names
 # why a buffered item never reached the pane.
 escalate_buffer_reconcile() {  # <state> <buf>
-  local state=$1 buf=$2 line
+  local state=$1 buf=$2 line due_rows='' due_rc=0 due_read=0
   while IFS= read -r line || [ -n "$line" ]; do
     if _advisory_fields "$line"; then
+      if [ "$ADVISORY_KIND" = decision ] && [ "$ADVISORY_ENDPOINT" = backlog ] && [ "$due_read" -eq 0 ]; then
+        due_rows=$(fm_advisory_due_snapshot "$state") || due_rc=$?
+        due_read=1
+      fi
       if fm_advisory_superseded "$state" "$ADVISORY_TASK" "$ADVISORY_KIND" \
-          "$ADVISORY_KEY" "$ADVISORY_ENDPOINT" "$ADVISORY_IDENT"; then
+          "$ADVISORY_KEY" "$ADVISORY_ENDPOINT" "$ADVISORY_IDENT" "$due_rows" "$due_rc"; then
         log "advisory superseded before delivery (task=$ADVISORY_TASK kind=$ADVISORY_KIND key=$ADVISORY_KEY): $ADVISORY_PROSE"
         continue
       fi
