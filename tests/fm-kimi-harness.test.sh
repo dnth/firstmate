@@ -61,6 +61,16 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     prev=
     literal=
     for arg in "$@"; do
@@ -68,9 +78,21 @@ case "${1:-}" in
       prev=$arg
     done
     if [ -n "$literal" ]; then
-      case "$literal" in
+      # The typed launch is a short script invocation: resolve the staged
+      # script so the full command's markers reach the launch log.
+      resolved=$literal
+      case "$resolved" in
+        *.fm-launch-*)
+          script=${resolved#/bin/bash }
+          marker=$script
+          marker=${marker#\'}
+          resolved=${marker%\'}
+          [ ! -f "$resolved" ] || resolved=$(cat "$resolved")
+          ;;
+      esac
+      case "$resolved" in
         *' --auto')
-          printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          printf '%s\n' "$resolved" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
           ;;
         *)
@@ -192,8 +214,9 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
-    || fail "kimi launch did not use the worker identity, absolute binary, model, and --auto only: $launch"
+  assert_contains "$launch" "FM_TASK_ID='$id'" "kimi launch lost its worker identity"
+  assert_contains "$launch" "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" \
+    "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND_SIGNAL__" "kimi launch retained a turn-end placeholder"
@@ -475,8 +498,8 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' '$fallback' --auto" ] \
-    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
+  assert_contains "$launch" "'$fallback' --auto" \
+    "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
 

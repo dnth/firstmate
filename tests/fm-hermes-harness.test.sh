@@ -58,7 +58,19 @@ fire_hook() {
     | HERMES_HOME="$HERMES_HOME" bash "$hook"
 }
 submit_command() {
-  local command=$1
+  local command=$1 script marker
+  # The typed launch is a short staged-script invocation: resolve its
+  # content before classifying, so the TUI state machine sees the real
+  # harness command exactly as a pane would execute it.
+  case "$command" in
+    *.fm-launch-*)
+      script=${command#/bin/bash }
+      marker=$script
+      marker=${marker#\'}
+      script=${marker%\'}
+      [ ! -f "$script" ] || command=$(cat "$script")
+      ;;
+  esac
   printf '%s\n' "$command" >> "$FM_FAKE_COMMAND_LOG"
   case "$command" in
     *hermes*chat*--tui*) printf 'idle\n' > "$FM_FAKE_HERMES_TUI_STATE" ;;
@@ -105,6 +117,19 @@ case "${1:-}" in
   kill-window) rm -f "$FM_FAKE_WINDOW_STATE"; exit 0 ;;
   has-session|new-session|set-window-option) exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          # The probe is shell input, not TUI input: honor it and swallow
+          # it here so it never reaches the TUI state machine below.
+          exit 0
+          ;;
+      esac
+    done
     case " $* " in
       *' C-c '*) : > "$FM_FAKE_PENDING_COMMAND"; printf 'idle\n' > "$FM_FAKE_HERMES_TUI_STATE"; exit 0 ;;
     esac

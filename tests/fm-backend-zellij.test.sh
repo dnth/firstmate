@@ -522,6 +522,27 @@ test_create_task_no_restore_when_new_tab_was_already_active() {
 
 # --- capture / send_key / send_literal / current_path / kill -----------------
 
+test_launch_tail_checks_task_label() {
+  local dir fb out label
+  for label in fm-task fm-other; do
+    dir="$TMP_ROOT/launch-tail-$label"; mkdir -p "$dir/responses"
+    zellij_pane_response "$dir" 1 7 3
+    zellij_tab_response "$dir" 2 3 "$label"
+    printf 'owned pane tail\n' > "$dir/responses/3.out"
+    fb=$(make_zellij_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+      FM_ZELLIJ_SESSION_LIST=firstmate \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_pane_launch_tail zellij firstmate:7 5 fm-task' "$ROOT")
+    if [ "$label" = fm-task ]; then
+      assert_equals 'owned pane tail' "$out" "owned diagnostic capture lost the pane tail"
+    else
+      assert_contains "$out" 'is unreadable' "reused pane diagnostic did not refuse"
+      assert_not_contains "$(cat "$dir/log")" $'\x1f''dump-screen' "diagnostic captured another task's pane"
+    fi
+  done
+  pass "launch tail captures only the task-owned Zellij pane"
+}
+
 test_capture_small_reads_use_viewport_and_trim() {
   local dir fb out
   dir="$TMP_ROOT/capture"; mkdir -p "$dir/responses"
@@ -1228,6 +1249,7 @@ test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_restores_previously_active_tab
 test_create_task_no_restore_when_new_tab_was_already_active
+test_launch_tail_checks_task_label
 test_capture_small_reads_use_viewport_and_trim
 test_capture_large_reads_use_full_scrollback_and_trim
 test_capture_fails_when_pane_absent

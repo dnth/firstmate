@@ -55,6 +55,27 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
+    for a in "$@"; do
+      case "$a" in
+        *.fm-launch-*)
+          script=${a#/bin/bash }
+          marker=$script
+          marker=${marker#\'}
+          script=${marker%\'}
+          [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_SEND_LOG"
+          ;;
+      esac
+    done
     [ -z "${FM_FAKE_SEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
     exit 0
     ;;

@@ -27,6 +27,36 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
 fi
+# Honor the spawn prove-execution probe: a ready terminal runs it.
+for a in "$@"; do
+  case "$a" in
+    touch\ */.fm-launch-probe.*)
+      marker=${a#touch }
+      marker=${marker#\'}
+      marker=${marker%\'}
+      : > "$marker"
+      ;;
+  esac
+done
+# Honor the spawn prove-execution probe and record staged launch content,
+# so assertions on the full harness command keep working.
+for a in "$@"; do
+  case "$a" in
+    touch\ */.fm-launch-probe.*)
+      marker=${a#touch }
+      marker=${marker#\'}
+      marker=${marker%\'}
+      : > "$marker"
+      ;;
+    *.fm-launch-*)
+      script=${a#/bin/bash }
+      marker=$script
+      marker=${marker#\'}
+      script=${marker%\'}
+      [ ! -f "$script" ] || { printf 'orca'; for b in "$@" staged-content; do printf '\x1f%s' "$b"; done; printf '\n'; cat "$script"; printf '\n'; } >> "$LOG"
+      ;;
+  esac
+done
 n=$next
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
@@ -503,7 +533,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
-  assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
+  assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false exec claude --dangerously-skip-permissions" \
     "spawn did not send the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"

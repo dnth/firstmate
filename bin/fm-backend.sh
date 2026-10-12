@@ -54,6 +54,8 @@ FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-pane-launch-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-pane-launch-lib.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-omp-process-lib.sh"
 

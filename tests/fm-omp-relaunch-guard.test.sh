@@ -59,11 +59,30 @@ case "${1:-}" in
     exit 0 ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          case "$a" in
+            *.fm-launch-*)
+              script=${a#/bin/bash }
+              marker=$script
+              marker=${marker#\'}
+              script=${marker%\'}
+              [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_LAUNCH_LOG"
+              ;;
+          esac
         fi
         prev=$a
       done

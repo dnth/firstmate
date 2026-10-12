@@ -44,6 +44,12 @@ export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
 # ~4s there); 240s keeps the suite's publication proof bounded while leaving
 # production's 60s default untouched.
 export FM_TREEHOUSE_READY_POLLS=240
+# The nested Treehouse shell publishes its ready file before execing its
+# interactive shell, so the spawn prove-execution re-prove after the
+# handoff needs the same slow-startup allowance on a loaded runner: 120
+# polls at the default 0.5s interval (60s) while leaving production 10s
+# default untouched. A genuinely blocked nested shell still refuses.
+export FM_PANE_LAUNCH_PROBE_POLLS=120
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper

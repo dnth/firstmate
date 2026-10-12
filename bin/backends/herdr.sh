@@ -2805,6 +2805,19 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
+# Whether Herdr itself reports a live OMP agent in the pane (identity AND
+# status, not just any registered agent). Used by spawn-time doorbell
+# diagnostics to name the OMP setup bypass only when OMP was actually
+# observed; a live non-OMP agent must not trigger the OMP setup hint.
+fm_backend_herdr_omp_observed() {  # <session> <pane>
+  local identity agent status
+  identity=$(fm_backend_herdr_agent_identity_raw "$1" "$2" 2>/dev/null) || return 1
+  agent=${identity%%$'\t'*}
+  status=${identity#*$'\t'}
+  [ "$agent" = omp ] || return 1
+  case "$status" in working|idle|done|blocked) return 0 ;; *) return 1 ;; esac
+}
+
 fm_backend_herdr_submit_content_matches() {  # <content> <text>
   local content=$1 text=$2
   [ -n "$text" ] || return 1

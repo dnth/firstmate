@@ -21,6 +21,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+resolve_staged_omp_launch() { # <typed invocation> -> prints staged script content
+  local invocation=$1 script quote
+  quote=$(printf '\x27')
+  case "$invocation" in
+    "/bin/bash "*"$quote") : ;;
+    *) fail "expected a staged launch invocation" ;;
+  esac
+  script=${invocation#/bin/bash }
+  script=${script#"$quote"}
+  script=${script%"$quote"}
+  [ -f "$script" ] || fail "staged launch script is missing"
+  cat "$script"
+}
+
 setup_case() { # <name>
   rm -rf "/tmp/fm-$TASK_ID"
   CASE="$TMP_ROOT/$1"
@@ -144,6 +158,16 @@ case "$cmd" in
     esac
     ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     args=("$@")
     for ((i=0; i<${#args[@]}; i++)); do
       if [ "${args[$i]}" = -l ] && [ $((i + 1)) -lt ${#args[@]} ]; then
@@ -269,7 +293,22 @@ case "$cmd $sub" in
     printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}'
     ;;
   "pane run")
-    printf '%s\n' "${4:-}" > "$FM_TEST_LAUNCH_LOG"
+    # Honor the spawn prove-execution probe: a ready pane runs it, leaves no
+    # agent trace, and never publishes acknowledgement for it.
+    case "${4:-}" in
+      touch\ */.fm-launch-probe.*)
+        _probe_marker=${4#touch }
+        _probe_marker=${_probe_marker#\'}
+        _probe_marker=${_probe_marker%\'}
+        : > "$_probe_marker"
+        ;;
+      *)
+        printf '%s\n' "${4:-}" > "$FM_TEST_LAUNCH_LOG"
+        ;;
+    esac
+    case "${4:-}" in
+      touch\ */.fm-launch-probe.*) : ;;
+      *)
     if [ "${FM_TEST_BROKEN_ACK:-0}" = 1 ]; then
       broken=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
       mkdir -p "$FM_TEST_HOME/state/omp-sessions"
@@ -302,6 +341,8 @@ case "$cmd $sub" in
       : > "$FM_TEST_OMP_DOORBELL_READY"
       printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
     fi
+      ;;
+    esac
     ;;
   "pane send-text")
     printf '%s\n' "${4:-}" > "$FM_TEST_LAUNCH_LOG"
@@ -477,13 +518,14 @@ EOF_META
 }
 
 test_herdr_launch_exact_resume_recovery_and_abort() {
-  local out selected before token_file launch
+  local out selected before token_file launch launch_invocation
   setup_case herdr-launch
 
   out=$(run_spawn_herdr 2>&1) || fail "fresh OMP Herdr secondmate spawn failed: $out"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "/bin/bash -c" \
-    "OMP Herdr secondmate launch did not use its Bash-owned command wrapper"
+  launch_invocation=$(cat "$LAUNCH_LOG")
+  launch=$(resolve_staged_omp_launch "$launch_invocation")
+  assert_contains "$launch_invocation" "/bin/bash '" \
+    "OMP Herdr secondmate launch did not stage its Bash-owned script invocation"
   # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
   assert_not_contains "$launch" '${PATH:+' \
     "OMP Herdr secondmate launch exposed POSIX parameter expansion to the pane shell"
@@ -498,7 +540,7 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
   rm -f "$WINDOW_FLAG" "$HOME_DIR/state/.omp-primary-extension-loaded" "$HOME_DIR/state/.lock"
   : > "$LAUNCH_LOG"
   out=$(FM_TEST_STATE_MODE=missing run_spawn_herdr 2>&1) || fail "OMP Herdr secondmate exact resume failed: $out"
-  launch=$(cat "$LAUNCH_LOG")
+  launch=$(resolve_staged_omp_launch "$(cat "$LAUNCH_LOG")")
   assert_contains "$launch" "--resume" \
     "OMP Herdr secondmate recovery did not request session resume"
   assert_contains "$launch" "$selected" \
@@ -512,7 +554,7 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
     FM_OMP_AUTH_BROKER_URL=http://127.0.0.1:8765 \
     FM_OMP_AUTH_BROKER_TOKEN_FILE="$token_file" 2>&1) \
     || fail "OMP Herdr secondmate broker launch failed: $out"
-  launch=$(cat "$LAUNCH_LOG")
+  launch=$(resolve_staged_omp_launch "$(cat "$LAUNCH_LOG")")
   assert_contains "$launch" "OMP_AUTH_BROKER_URL=" \
     "OMP secondmate agent launch did not receive the pod-loopback broker URL"
   assert_contains "$launch" "http://127.0.0.1:8765" \
@@ -572,11 +614,12 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
 }
 
 test_launch_and_exact_resume() {
-  local out selected nested before after launch first_turn
+  local out selected nested before after launch launch_invocation first_turn
   setup_case launch
 
   out=$(run_spawn -- --prewalk-into 'test/finish:xhigh' 2>&1) || fail "fresh OMP secondmate spawn failed: $out"
-  launch=$(cat "$LAUNCH_LOG")
+  launch_invocation=$(cat "$LAUNCH_LOG")
+  launch=$(resolve_staged_omp_launch "$launch_invocation")
   first_turn="$CASE/first-turn"
   FM_TEST_REQUIRE_SETUP_BYPASS=1 FM_TEST_OMP_FIRST_TURN="$first_turn" \
     PATH="$FAKEBIN:$BASE_PATH" bash -c "$launch" \
@@ -585,17 +628,17 @@ test_launch_and_exact_resume() {
     || fail "executable OMP fixture did not reach its first turn with setup bypassed"
   assert_contains "$launch" "FM_OMP_SESSION_POINTER=" "OMP launch did not bind the home-owned session pointer"
   assert_contains "$launch" "$HOME_DIR/state/.omp-session" "OMP launch did not retain the home-owned session pointer path"
-  assert_contains "$launch" "/bin/bash -c" \
-    "OMP launch did not use its Bash-owned command wrapper"
+  assert_contains "$launch_invocation" "/bin/bash '" \
+    "OMP launch did not stage its Bash-owned script invocation"
   # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
   assert_not_contains "$launch" '${PATH:+' \
     "OMP launch exposed POSIX parameter expansion to the pane shell"
   assert_not_contains "$launch" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
     "OMP launch routed the selected executable through Bun"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--session-dir" "OMP launch did not preserve its durable session directory"
-  assert_contains "$(cat "$LAUNCH_LOG")" "$HOME_DIR/state/omp-sessions" "OMP launch did not retain its durable session directory"
-  assert_contains "$(cat "$LAUNCH_LOG")" "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "OMP launch did not preserve its exact adapter"
-  assert_not_contains "$(cat "$LAUNCH_LOG")" '__OMP' "OMP launch retained an unsubstituted template placeholder"
+  assert_contains "$launch" "--session-dir" "OMP launch did not preserve its durable session directory"
+  assert_contains "$launch" "$HOME_DIR/state/omp-sessions" "OMP launch did not retain its durable session directory"
+  assert_contains "$launch" "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "OMP launch did not preserve its exact adapter"
+  assert_not_contains "$launch" '__OMP' "OMP launch retained an unsubstituted template placeholder"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'harness=omp' "OMP identity was not recorded exactly"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'model=test/model' "OMP model pin was not recorded"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'effort=low' "OMP thinking pin was not recorded"
@@ -613,14 +656,14 @@ test_launch_and_exact_resume() {
   rm -f "$WINDOW_FLAG" "$HOME_DIR/state/.omp-primary-extension-loaded" "$HOME_DIR/state/.lock"
   : > "$LAUNCH_LOG"
   out=$(run_spawn 2>&1) || fail "OMP secondmate exact resume failed: $out"
-  launch=$(cat "$LAUNCH_LOG")
+  launch=$(resolve_staged_omp_launch "$(cat "$LAUNCH_LOG")")
   assert_contains "$launch" "--resume" "OMP recovery did not request session resume"
   assert_contains "$launch" "$selected" "OMP recovery did not resume the manifest-bound exact session"
   assert_contains "$launch" "--prewalk" \
     "OMP secondmate recovery did not restore native Prewalk"
   assert_contains "$launch" "test/finish:xhigh" \
     "OMP secondmate recovery did not restore its recorded native Prewalk target"
-  assert_not_contains "$(cat "$LAUNCH_LOG")" 'zzz-later.jsonl' "OMP recovery selected a lexically last session instead of the exact pointer"
+  assert_not_contains "$launch" 'zzz-later.jsonl' "OMP recovery selected a lexically last session instead of the exact pointer"
 
   rm -f "$WINDOW_FLAG" "$HOME_DIR/state/.omp-primary-extension-loaded" "$HOME_DIR/state/.lock"
   mkdir -p "$HOME_DIR/state/omp-sessions/nested"
@@ -641,7 +684,7 @@ test_launch_and_exact_resume() {
 }
 
 test_failed_bind_retires_generation_artifacts() {
-  local out retained launch dead_pid dead_version backend pointer_state runner orphan real_mv pointer_tmp
+  local out retained launch launch_invocation dead_pid dead_version backend pointer_state runner orphan real_mv pointer_tmp
   setup_case broken-bind
 
   # The aborted generation leaves every artifact the next launch's entry
@@ -676,8 +719,9 @@ test_failed_bind_retires_generation_artifacts() {
         || fail "$backend cleanup did not repair the $pointer_state session pointer"
       [ "$(cat "$orphan")" = '{"type":"session"}' ] || fail "$backend cleanup changed the saved session"
       out=$("$runner" 2>&1) || fail "$backend orphan-session relaunch was refused: $out"
-      assert_contains "$(cat "$LAUNCH_LOG")" "--resume" "$backend relaunch did not request a resume"
-      assert_contains "$(cat "$LAUNCH_LOG")" "$orphan" "$backend relaunch omitted the repaired session binding"
+      launch=$(resolve_staged_omp_launch "$(cat "$LAUNCH_LOG")")
+      assert_contains "$launch" "--resume" "$backend relaunch did not request a resume"
+      assert_contains "$launch" "$orphan" "$backend relaunch omitted the repaired session binding"
       retained=$(cat "$HOME_DIR/state/.omp-session")
       rm -f "$WINDOW_FLAG" "$HOME_DIR/state/.lock" "$HOME_DIR/state/.omp-primary-extension-loaded"
       out=$("$runner" FM_TEST_BROKEN_ACK=1 "FM_TEST_ORPHAN_POINTER=$pointer_state" 2>&1) \
@@ -766,7 +810,7 @@ SH
   assert_absent "$MAIN_STATE/$TASK_ID.omp-doorbell-ready" "failed relaunch left a stale doorbell marker"
 
   out=$(run_spawn 2>&1) || fail "OMP secondmate launch after a failed retained-session bind was refused: $out"
-  launch=$(cat "$LAUNCH_LOG")
+  launch=$(resolve_staged_omp_launch "$(cat "$LAUNCH_LOG")")
   assert_contains "$launch" "--resume" "recovered launch did not resume the retained session"
   assert_contains "$launch" "$retained" "recovered launch did not name the retained session file"
   pass "a failed OMP secondmate bind retires its generation artifacts, preserves the retained session, and accepts the next launch"
@@ -908,7 +952,7 @@ test_duplicate_recovery_states() {
 }
 
 test_slept_generation_relaunch_retires_markers() {
-  local out dead_pid retained version
+  local out dead_pid retained version launch launch_invocation
 
   # A generation that ran turns and then lost its endpoint leaves its own
   # runtime artifacts behind: the adapter file, readiness, turn-start and
@@ -941,7 +985,8 @@ test_slept_generation_relaunch_retires_markers() {
     "slept-generation relaunch left the prior turn-start marker"
   assert_absent "$MAIN_STATE/$TASK_ID.omp-doorbell-ready.requests/request.1" \
     "slept-generation relaunch left the prior request receipts"
-  assert_contains "$(cat "$LAUNCH_LOG")" "$retained" \
+  launch=$(resolve_staged_omp_launch "$(cat "$LAUNCH_LOG")")
+  assert_contains "$launch" "$retained" \
     "slept-generation relaunch did not resume the retained session"
 
   # The same prior artifacts remain refusal evidence when their paths are

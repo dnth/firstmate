@@ -57,6 +57,20 @@ publish_omp_ack() { # <pane> <launch>
   local pane=$1 launch=$2 cwd session version normalized_launch
   local broken_pid doorbell turn_started
   [ -n "$OMP_ACK_PID" ] && [ -n "$OMP_BUN" ] && [ -n "$OMP_BIN" ] || return 0
+  # The typed launch may be a short staged-script invocation: resolve its
+  # content before classifying, so acknowledgement sees the real launch
+  # exactly as the pane would execute it. Probe input never reaches here
+  # as a launch (it carries no session pointer), so agent state is
+  # untouched by probes.
+  case "$launch" in
+    *.fm-launch-*)
+      _ack_script=${launch#/bin/bash }
+      _ack_marker=$_ack_script
+      _ack_marker=${_ack_marker#\'}
+      _ack_script=${_ack_marker%\'}
+      [ ! -f "$_ack_script" ] || launch=$(cat "$_ack_script")
+      ;;
+  esac
   case "$launch" in
     *FM_OMP_SESSION_POINTER=*)
       cwd=$(jq_state -r --arg p "$pane" '.tabs[] | select(.pane_id == $p) | .cwd // empty')
@@ -184,9 +198,33 @@ case "${1:-} ${2:-}" in
   "pane run")
     [ ! -f "$SEND_FAIL" ] || exit 1
     pane=${3:-}; launch=${4:-}
-    jq_state --arg p "$pane" --arg text "$launch" \
-      '.typed[$p] = true | .launch[$p] = $text | .working[$p] = true' | save
-    publish_omp_ack "$pane" "$launch"
+    # Honor the spawn prove-execution probe: a ready pane runs it, leaves no
+    # agent trace, and never publishes acknowledgement for it.
+    case "$launch" in
+      touch\ */.fm-launch-probe.*)
+        marker=${launch#touch }
+        marker=${marker#\'}
+        marker=${marker%\'}
+        : > "$marker"
+        jq_state --arg p "$pane" '.typed[$p] = true' | save
+        ;;
+      *)
+        resolved=$launch
+        case "$resolved" in
+          "/bin/bash "*)
+            _staged=${resolved#/bin/bash }
+            _staged=${_staged#\'}
+            _staged=${_staged%\'}
+            [ ! -f "$_staged" ] || resolved=$(cat "$_staged")
+            ;;
+        esac
+        jq_state --arg p "$pane" --arg text "$resolved" \
+          '.typed[$p] = true | .launch[$p] = $text | .working[$p] = true' | save
+        printf '%s\n' "pane run $pane $resolved" >> "$LOG"
+        launch=$resolved
+        publish_omp_ack "$pane" "$launch"
+        ;;
+    esac
     ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1

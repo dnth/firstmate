@@ -204,6 +204,16 @@ case "$cmd" in
     esac
     exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=${a#touch }
+          marker=${marker#\'}
+          marker=${marker%\'}
+          : > "$marker"
+          ;;
+      esac
+    done
     target=""
     prev=""
     for a in "$@"; do [ "$prev" = "-t" ] && target=$a; prev=$a; done
@@ -216,6 +226,14 @@ case "$cmd" in
         case "$a" in
           -*|"$target") ;;
           /exit) exit_sent=1; printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          *.fm-launch-*)
+            printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+            script=${a#/bin/bash }
+            marker=$script
+            marker=${marker#\'}
+            script=${marker%\'}
+            [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_LAUNCH_LOG"
+            ;;
           *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
         esac
       done

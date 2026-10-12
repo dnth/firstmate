@@ -429,12 +429,23 @@ test_propagate_lib() {
 # ===========================================================================
 
 # A tmux stub that accepts every subcommand and prints nothing, so no window
-# pre-exists and the spawn proceeds to write its meta. Echoes the fakebin dir.
+# pre-exists and the spawn proceeds to write its meta. Honors the spawn
+# prove-execution probe (a ready pane runs it). Echoes the fakebin dir.
 make_noop_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    touch\ */.fm-launch-probe.*)
+      marker=${a#touch }
+      marker=${marker#\'}
+      marker=${marker%\'}
+      : > "$marker"
+      ;;
+  esac
+done
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -623,12 +634,32 @@ case "${1:-}" in
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
+      # The probe proves the pane executes commands: honor it so spawns
+      # proceed (no FM_FAKE_PROBE_SWALLOW support needed here).
       for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
+        case "$a" in
+          touch\ */.fm-launch-probe.*)
+            marker=${a#touch }
+            marker=${marker#\'}
+            marker=${marker%\'}
+            : > "$marker"
+            ;;
+        esac
+      done
+      # The typed launch is a short script invocation: log the invocation
+      # line plus the staged script's content, so assertions on the full
+      # command keep working.
+      for a in "$@"; do
+        case "$a" in
+          *.fm-launch-*)
+            printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+            script=${a#/bin/bash }
+            marker=$script
+            marker=${marker#\'}
+            script=${marker%\'}
+            [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_LAUNCH_LOG"
+            ;;
+        esac
       done
     fi
     exit 0
@@ -927,7 +958,7 @@ test_spawn_secondmate_harness_model_token() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-token: meta model not opus (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "model-token: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus'" \
+  assert_contains "$launch" "exec claude --dangerously-skip-permissions --model 'opus'" \
     "model-token: launch did not carry --model opus"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
   pass "C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta"
@@ -949,7 +980,7 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
   [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'high'" \
+  assert_contains "$launch" "exec claude --dangerously-skip-permissions --model 'opus' --effort 'high'" \
     "model-effort-tokens: launch did not carry both --model opus and --effort high"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
 }
@@ -1014,7 +1045,7 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
   [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "exec codex --dangerously-bypass-approvals-and-sandbox" \
     "explicit-harness-no-tokens: launch did not use codex"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "model_reasoning_effort" \
@@ -1067,7 +1098,10 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
 "$ROOT/bin/fm-guard.sh"
 SH
     chmod +x "$fakebin/$harness"
-    launch=$(cat "$launchlog")
+    # The log holds the probe line, the short script invocation, and the
+    # staged script content: execute the staged command (last line), which is
+    # what the pane would run.
+    launch=$(tail -1 "$launchlog")
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
     case "$harness" in
       codex)
@@ -1188,7 +1222,7 @@ EOF
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" harness)" = devin ] || fail "devin scout did not launch on Devin"
   out=$(cat "$launchlog")
-  assert_contains "$out" "devin --permission-mode dangerous" "devin scout launch command missing dangerous mode"
+  assert_contains "$out" "exec devin --permission-mode dangerous" "devin scout launch command missing dangerous mode"
   assert_contains "$out" "--model 'family-high'" "devin model-effort composition was not applied"
   assert_not_contains "$out" "--effort" "devin launch should compose effort into model"
   assert_not_contains "$out" "/handoff" "devin launch must never carry the Cloud Devin handoff command"

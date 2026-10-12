@@ -328,6 +328,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-pane-launch-lib.sh
+. "$SCRIPT_DIR/fm-pane-launch-lib.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "$SCRIPT_DIR/fm-omp-process-lib.sh"
 # shellcheck source=bin/fm-pool-lib.sh
@@ -1623,6 +1625,15 @@ fi
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
+  # Every template starts with exec at its executable: the full launch is
+  # staged to a private script typed as /bin/bash <script>, and exec keeps
+  # the pane foreground's process shape identical to a directly typed launch
+  # (an extra bash parent reads as no agent running to the liveness
+  # classifiers). exec sits at the executable - not as a prefix on the
+  # assembled LAUNCH, which starts with env assignments - because only here
+  # is the executable syntactically first. Later env prefixes (harness
+  # markers, OMP_SKIP_SETUP, FM_TASK_ID) stay prefixes: VAR=val exec cmd
+  # carries them through the replacement (verified live on tmux).
   case "$harness" in
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
     # predicted-next-prompt ghost text, which renders as dim/faint text inside an
@@ -1633,29 +1644,29 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false exec claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'exec codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"__TURNEND_SIGNAL__ __STATE__ __TASK_ID__ __SPAWN_GEN__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'exec codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"__TURNEND_SIGNAL__ __STATE__ __TASK_ID__ __SPAWN_GEN__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' exec opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
       if [ "$kind" = secondmate ]; then
-        printf '%s%s' "$harness" ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s%s' "exec $harness" ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s%s' "$harness" ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s%s' "exec $harness" ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     omp)
       if [ "$kind" = secondmate ]; then
         # The explicit path is the exact same tracked file native project discovery sees.
         # OMP 17.1.8's discoverExtensionPaths path-resolves and deduplicates before loading, so this guarantees the integration without registering it twice.
-        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ __OMPMESSAGE__'
+        printf '%s' '__OMPENV__exec __OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ __OMPMESSAGE__'
       else
-        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ __OMPMESSAGE__'
+        printf '%s' '__OMPENV__exec __OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ __OMPMESSAGE__'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1665,17 +1676,17 @@ launch_template() {
     # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    grok) printf '%s' 'exec grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
-    kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    kimi) printf '%s' 'exec __KIMIBIN__ __MODELFLAG__--auto' ;;
     # Devin CLI launches stay local: never -p, never --sandbox, and never a
     # /handoff in the launch command. Cloud Devin /handoff is a mid-task typed
     # command firstmate sends through fm-send on an explicit captain request
     # for a live devin crew - it is not a spawn flag (harness-adapters skill).
-    devin) printf '%s' 'devin --permission-mode dangerous --config __DEVINCONFIG__ __MODELFLAG____EFFORTFLAG__--prompt-file __BRIEF__' ;;
+    devin) printf '%s' 'exec devin --permission-mode dangerous --config __DEVINCONFIG__ __MODELFLAG____EFFORTFLAG__--prompt-file __BRIEF__' ;;
     # Hermes v0.20.0's modern TUI is launched bare and receives the brief only
     # after its structural composer-ready gate below. The CLI --reasoning flag
     # is retained for forward compatibility, while the same launch gate also
@@ -1684,7 +1695,7 @@ launch_template() {
     # because it disables rules, plugins, and lifecycle supervision.
     hermes)
       [ "$kind" != secondmate ] || return 1
-      printf '%s' '__HERMESBIN__ chat --tui --in __HERMESWORKTREE__ --no-restore-cwd --provider openai-codex __MODELFLAG____EFFORTFLAG____HERMESRESUMEFLAG__--accept-hooks --yolo --pass-session-id'
+      printf '%s' 'exec __HERMESBIN__ chat --tui --in __HERMESWORKTREE__ --no-restore-cwd --provider openai-codex __MODELFLAG____EFFORTFLAG____HERMESRESUMEFLAG__--accept-hooks --yolo --pass-session-id'
       ;;
     *) return 1 ;;
   esac
@@ -1833,7 +1844,7 @@ raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target ind
   local command_p=$1 assignment_count=$2 target_index=$3 lookup_path execution_path path_entry entry target target_quoted index
   shift 3
   local -a words=("$@") lookup_entries
-  RAW_LAUNCH_NORMALIZED=/usr/bin/env
+  RAW_LAUNCH_NORMALIZED='exec /usr/bin/env'
   for ((index = 0; index < assignment_count; index++)); do
     RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
   done
@@ -4101,6 +4112,7 @@ EOF
 esac
 [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=endpoint
 RAW_LAUNCH_ABORT_LEASE=0
+SPAWN_TYPED_TREEHOUSE=0
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -4112,6 +4124,47 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
+# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
+# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
+# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
+# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# Created here - before the first pane-typed byte - so the prove-execution
+# probe's marker dir already exists when the pane is proven.
+TASK_TMP="/tmp/fm-$ID"
+if [ -L "$TASK_TMP" ]; then
+  echo "error: task temp root must not be a symlink: $TASK_TMP" >&2
+  exit 1
+fi
+if [ ! -e "$TASK_TMP" ]; then
+  mkdir -m 700 -- "$TASK_TMP" || {
+    echo "error: could not create task temp root: $TASK_TMP" >&2
+    exit 1
+  }
+fi
+fm_pane_launch_trusted_dir "$TASK_TMP" || {
+  echo "error: task temp root must be owned by the current user and not group/other-writable: $TASK_TMP" >&2
+  exit 1
+}
+task_tmp_dirs=("$TASK_TMP/gotmp")
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+  task_tmp_dirs+=("$TASK_TMP/omp-sessions")
+fi
+for task_tmp_dir in "${task_tmp_dirs[@]}"; do
+  if [ -L "$task_tmp_dir" ] || { [ -e "$task_tmp_dir" ] && [ ! -d "$task_tmp_dir" ]; }; then
+    echo "error: task temp path must be a non-symlink directory: $task_tmp_dir" >&2
+    exit 1
+  fi
+done
+mkdir -p "$TASK_TMP/gotmp"
+TASK_TMP=$(cd "$TASK_TMP" && pwd -P) || {
+  echo "error: could not resolve task temp root: $TASK_TMP" >&2
+  exit 1
+}
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+  OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
+  mkdir -p "$OMP_SESSION_DIR"
+fi
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -4121,6 +4174,24 @@ spawn_send_text_line() {  # <target> <text>
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
   esac
 }
+# Prove the pane executes shell commands before the first pane-typed byte.
+# Defined beside the other spawn_send_* primitives because the early probe
+# below runs long before the launch-staging block at the end of this script.
+spawn_probe_launch_execution() {  # <target> <label>
+  local target=$1 label=$2 tail
+  if ! fm_pane_launch_prove_execution "$BACKEND" "$target" "$TASK_TMP" spawn_send_text_line "$label"; then
+    tail=$(fm_pane_launch_tail "$BACKEND" "$target" 15 "$label")
+    # The state dir may not exist yet this early (it is created with the
+    # turn-end markers below), so the status append must not fail the
+    # refusal when the dir is absent; the stderr diagnostic always lands.
+    if [ -d "$STATE" ]; then
+      printf 'failed: launch pane %s is not executing shell commands; refusing to type the %s launch into an unknown prompt; pane tail:\n%s\n' "$target" "$HARNESS" "$tail" >> "$STATE/$ID.status"
+    fi
+    echo "error: launch pane $target is not executing shell commands; refusing to type the $HARNESS launch into an unknown prompt; pane tail: $tail" >&2
+    exit 1
+  fi
+}
+
 spawn_current_path() {  # <target>
   case "$BACKEND" in
     tmux) fm_backend_tmux_current_path "$1" ;;
@@ -4138,7 +4209,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     exit 1
   fi
   # A proven-gone endpoint was recreated in the recorded worktree by its arm
-  # above; there is no live pane to probe, and none is needed.
+  # above; its first typed byte is the launch below, guarded by the same
+  # prove step as a fresh pane. A live endpoint keeps its ownership and idle
+  # refusals first: probing a harness-owned pane would inject input into the
+  # running agent, so those refusals stay before any probe.
   if [ "$RELAUNCH_ENDPOINT_GONE" -ne 1 ]; then
     case "$BACKEND" in
       tmux)
@@ -4150,6 +4224,20 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
       zellij|cmux)
         echo "error: backend=$BACKEND relaunch cwd verification would inject a probe into the existing harness; refusing to relaunch an unverified endpoint" >&2
         exit 1
+        ;;
+    esac
+    # The accepted endpoint is a bare shell (a live harness was refused
+    # above), but a bare shell can still sit behind an unread rc prompt
+    # that passes the process-shape idle proof while swallowing input.
+    # Prove execution before the first typed byte (the herdr cd below,
+    # or GOTMPDIR export and launch). Active-harness refusals stay first,
+    # and the probe itself never fires into a non-idle pane: herdr checks
+    # idle shape first (tmux already did above), so a busy foreground is
+    # refused without typing anything into it.
+    case "$BACKEND" in
+      tmux) spawn_probe_launch_execution "$T" "$W" ;;
+      herdr)
+        spawn_probe_launch_execution "$T" "$W"
         ;;
     esac
     relaunch_worktree_real=$(real_path_or_raw "$WT")
@@ -4305,6 +4393,21 @@ hermes_wait_for_reasoning() {  # <effort>
   return 1
 }
 
+# Prove the pane executes shell commands before the first pane-typed byte
+# below (treehouse get, GOTMPDIR export, or the launch itself). A
+# shell-startup prompt eats the first byte of whatever is typed first: proving
+# only before the launch lets an earlier setup line dismiss the prompt, pass
+# the probe against a shell that never proved its first byte, and launch with
+# that setup line corrupted. Retained idle relaunch shells were proven above,
+# after the live-agent refusal. A proven-gone endpoint was
+# recreated above as a fresh pane, so it is proven here with the fresh path
+# before its first typed byte (the GOTMPDIR export below - not the launch).
+# Covers
+# secondmates (a fresh secondmate pane is the same blind-typing shape) and
+# orca terminals (orca terminal send types shell input the same way).
+if [ "$RELAUNCH" -eq 0 ] || [ "$RELAUNCH_ENDPOINT_GONE" -eq 1 ]; then
+  spawn_probe_launch_execution "$T" "$W"
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ] \
   && [ "$TREEHOUSE_WORKTREE_READY" != 1 ]; then
@@ -4430,6 +4533,9 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
     fi
     SPAWN_SLOT_CLAIMED=1
   fi
+  # The pane-typed acquisition above replaced the proven parent shell with a
+  # fresh nested Treehouse shell that sources rc files anew: re-prove below.
+  SPAWN_TYPED_TREEHOUSE=1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
@@ -4459,35 +4565,9 @@ if [ "$HARNESS" = claude ] && [ "${IS_SANDBOX:-}" = 1 ]; then
   }
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-if [ -L "$TASK_TMP" ]; then
-  echo "error: task temp root must not be a symlink: $TASK_TMP" >&2
-  exit 1
-fi
-task_tmp_dirs=("$TASK_TMP/gotmp")
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
-  task_tmp_dirs+=("$TASK_TMP/omp-sessions")
-fi
-for task_tmp_dir in "${task_tmp_dirs[@]}"; do
-  if [ -L "$task_tmp_dir" ] || { [ -e "$task_tmp_dir" ] && [ ! -d "$task_tmp_dir" ]; }; then
-    echo "error: task temp path must be a non-symlink directory: $task_tmp_dir" >&2
-    exit 1
-  fi
-done
-mkdir -p "$TASK_TMP/gotmp"
-TASK_TMP=$(cd "$TASK_TMP" && pwd -P) || {
-  echo "error: could not resolve task temp root: $TASK_TMP" >&2
-  exit 1
-}
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
-  OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
-  mkdir -p "$OMP_SESSION_DIR"
-fi
+# (Moved above: the per-task temp root is created right after endpoint
+# creation, before the first pane-typed byte, so the prove-execution probe's
+# marker dir already exists.)
 
 # Per-copy pre-push guard (bin/fm-prepush-guard.sh owns the contract): every
 # ship and scout working copy gets a private hooks dir under its task temp
@@ -5244,6 +5324,14 @@ else
   fi
   LAUNCH="FM_TASK_ID=$sq_task_id FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= $LAUNCH"
 fi
+# A pane-typed Treehouse acquisition replaced the proven parent shell with a
+# fresh nested shell after the early probe: re-prove execution before the
+# first nested-shell byte (GOTMPDIR export or the launch itself). A nested rc
+# that blocks on a key prompt would otherwise sacrifice that byte the same
+# way the parent rc could.
+if [ "$SPAWN_TYPED_TREEHOUSE" -eq 1 ]; then
+  spawn_probe_launch_execution "$T" "$W"
+fi
 # tmux-like backends configure the persistent pane shell before launch. Herdr
 # instead binds both values to the one atomic `pane run` command: acceptance of
 # a separate setup command would not prove that the shell executed it.
@@ -5281,9 +5369,11 @@ fi
 sleep 0.3
 [ "$BACKEND" != herdr ] || LAUNCH="$HERDR_LAUNCH_ENV$LAUNCH"
 [ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
-if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ]; then
-  LAUNCH="/bin/bash -c $(shell_quote "$LAUNCH")"
-fi
+# The full launch is staged to a private script and typed as a short
+# /bin/bash invocation below, so no shell-quoted wrapper is needed here.
+# exec already sits at each template's executable (launch_template), which is
+# the only point where the executable is syntactically first: prefixing exec
+# onto the assembled LAUNCH would yield "exec VAR=..." and fail.
 if [ "$HARNESS" = omp ] && [ "$RELAUNCH" -eq 1 ]; then
   # Generation reconciliation: every request.* receipt under the doorbell
   # requests dir was written for the PRIOR incarnation's doorbell. The
@@ -5310,13 +5400,45 @@ if [ "$HARNESS" = omp ] && [ "$RELAUNCH" -eq 1 ]; then
     done
   fi
 fi
+# (spawn_probe_launch_execution is defined beside the spawn_send_* primitives
+# above, since the early prove-execution call runs long before this block.)
+# Stage the full launch as a private 0700 script and type only its short
+# /bin/bash invocation. A directly typed 1.2-1.6 KB OMP launch exceeds
+# macOS's 1024-byte canonical-mode line limit whenever it lands before the
+# line editor is up, and the tail (with its submitting Enter) is discarded.
+# The pane shell never parses the command itself, so a fish pane cannot
+# misread the POSIX assignments every launch carries. The script's final
+# agent command uses exec, so no bash parent survives and the foreground
+# process shape stays identical to a typed launch.
+spawn_write_launch_script() {  # <command> -> prints typed line
+  local script typed
+  script=$(fm_pane_launch_write_script "$TASK_TMP" "$1") || {
+    echo "error: launch script could not be staged privately for $W" >&2
+    exit 1
+  }
+  chmod 700 "$script" || {
+    echo "error: launch script could not be secured for $W" >&2
+    exit 1
+  }
+  case "$script" in "$TASK_TMP"/*) ;; *) echo "error: launch script escaped the task temp dir for $W" >&2; exit 1 ;; esac
+  typed=$(fm_pane_launch_typed_line "$script") || {
+    echo "error: launch script path is not safely typable for $W" >&2
+    exit 1
+  }
+  [ "${#typed}" -le 512 ] || {
+    echo "error: typed launch line exceeds the 512-byte pane-typing bound for $W" >&2
+    exit 1
+  }
+  printf '%s' "$typed"
+}
+LAUNCH_TYPED=$(spawn_write_launch_script "$LAUNCH") || exit 1
 if [ "$BACKEND" = herdr ]; then
-  spawn_send_text_line "$T" "$LAUNCH" || {
+  spawn_send_text_line "$T" "$LAUNCH_TYPED" || {
     echo "error: Herdr launch pane did not reach a proven idle shell; refusing to submit $HARNESS" >&2
     exit 1
   }
 else
-  spawn_send_literal "$T" "$LAUNCH"
+  spawn_send_literal "$T" "$LAUNCH_TYPED"
   sleep 0.3
   spawn_send_key "$T" Enter
 fi
@@ -5342,8 +5464,21 @@ if [ "$HARNESS" = omp ] && [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ]; then
     if [ -f "$OMP_DOORBELL_FAILED" ]; then
       OMP_DOORBELL_DETAIL="doorbell activation failed: $(head -n 1 "$OMP_DOORBELL_FAILED" 2>/dev/null || printf 'unreadable journal') (journal: $OMP_DOORBELL_FAILED)"
     fi
-    printf 'failed: OMP inbox doorbell marker %s never appeared; %s\n' "$OMP_DOORBELL_READY" "$OMP_DOORBELL_DETAIL" >> "$STATE/$ID.status"
-    echo "error: OMP inbox doorbell marker $OMP_DOORBELL_READY never appeared; $OMP_DOORBELL_DETAIL; OMP_SKIP_SETUP=1 may not have been honored and an interactive setup wizard may be blocking; cleaning the owned launch" >&2
+    # Name the setup bypass only when an OMP process was actually observed in
+    # the pane: successful probe and submission do not prove OMP started or
+    # stayed alive. Without observed OMP identity, include the pane tail
+    # without speculating about a setup wizard.
+    OMP_DOORBELL_TAIL=$(fm_pane_launch_tail "$BACKEND" "$T" 15 "$W")
+    # Name the setup bypass only on OMP-specific observed identity (not
+    # any live agent): see fm_pane_launch_omp_observed in
+    # bin/fm-pane-launch-lib.sh. A live non-OMP agent must not trigger
+    # the OMP setup hint.
+    OMP_SETUP_HINT=
+    if fm_pane_launch_omp_observed "$BACKEND" "$T" "$STATE/$ID.meta" 2>/dev/null; then
+      OMP_SETUP_HINT="; OMP_SKIP_SETUP=1 may not have been honored and an interactive setup wizard may be blocking"
+    fi
+    printf 'failed: OMP inbox doorbell marker %s never appeared; %s%s; pane %s tail:\n%s\n' "$OMP_DOORBELL_READY" "$OMP_DOORBELL_DETAIL" "$OMP_SETUP_HINT" "$T" "$OMP_DOORBELL_TAIL" >> "$STATE/$ID.status"
+    echo "error: OMP inbox doorbell marker $OMP_DOORBELL_READY never appeared; $OMP_DOORBELL_DETAIL$OMP_SETUP_HINT; pane $T tail: $OMP_DOORBELL_TAIL; cleaning the owned launch" >&2
     exit 1
   fi
   if [ "$KIND" = secondmate ]; then
@@ -5397,8 +5532,9 @@ if [ "$HARNESS" = omp ] && [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ]; then
       sleep "$OMP_ACK_INTERVAL"
     done
     if [ "$OMP_ACKED" -ne 1 ]; then
-      printf 'failed: OMP secondmate primary integration and durable session did not bind to its live session lock\n' >> "$STATE/$ID.status"
-      echo "error: OMP secondmate primary integration and durable session did not bind to its live session lock; OMP_SKIP_SETUP=1 may not have been honored and an interactive setup wizard may be blocking; stopping only the owned endpoint and preserving the persistent home" >&2
+      OMP_SECONDMATE_TAIL=$(fm_pane_launch_tail "$BACKEND" "$T" 15 "$W")
+      printf 'failed: OMP secondmate primary integration and durable session did not bind to its live session lock; pane %s tail:\n%s\n' "$T" "$OMP_SECONDMATE_TAIL" >> "$STATE/$ID.status"
+      echo "error: OMP secondmate primary integration and durable session did not bind to its live session lock; pane $T tail: $OMP_SECONDMATE_TAIL; stopping only the owned endpoint and preserving the persistent home" >&2
       exit 1
     fi
   else
