@@ -1,7 +1,7 @@
 """Local outbox poster for the Communication Officer gateway plugin.
 
-Posts pending ``state/ext-outbox`` payloads to the Discord destination stored
-in each payload and records receipts through ``bin/fm-ext-outbox.sh``.
+Posts pending ``state/ext-outbox`` payloads to the request's Discord destination
+and records receipts through ``bin/fm-ext-outbox.sh``.
 The topic-thread routing contract is owned by docs/configuration.md under
 "Topic threads (one thread per request)"; bin/fm-ext-topic.sh owns the fixed
 public labels and source-message MYT time used for names.
