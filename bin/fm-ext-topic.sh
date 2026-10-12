@@ -2,10 +2,13 @@
 # Derive one public-safe Discord thread name for a Communication Officer request.
 #
 # Usage:
+#   fm-ext-topic.sh --check-title --title-file <path>
 #   fm-ext-topic.sh --text-file <path> --origin slash|message
 #     --thread-id <id> --channel-id <id> --message-id <id>
 #     [--title-file <path>] [--validate-name --stored-file <path>]
 #
+# --check-title prints the cleaned title or fails when its bounds or safety
+# screen rejects it; destination and request arguments are not required.
 # Naming, in priority order: Firstmate's title, the request-text fallback, the
 # label-plus-time last fallback. Admission and authority stay owned by
 # bin/fm-ext-intake.sh; docs/configuration.md owns the contract.
@@ -30,7 +33,7 @@
 set -u
 
 usage() {
-  echo "usage: fm-ext-topic.sh --text-file <path> --origin slash|message --thread-id <id> --channel-id <id> --message-id <id> [--title-file <path>] [--validate-name --stored-file <path>]" >&2
+  echo "usage: fm-ext-topic.sh --check-title --title-file <path> | --text-file <path> --origin slash|message --thread-id <id> --channel-id <id> --message-id <id> [--title-file <path>] [--validate-name --stored-file <path>]" >&2
 }
 
 help() {
@@ -45,6 +48,7 @@ THREAD_ID=
 CHANNEL_ID=
 MESSAGE_ID=
 VALIDATE=0
+CHECK_TITLE=0
 TITLE_FILE=
 STORED_FILE=
 
@@ -61,6 +65,7 @@ while [ "$#" -gt 0 ]; do
     --channel-id) shift; CHANNEL_ID=${1:-} ;;
     --message-id) shift; MESSAGE_ID=${1:-} ;;
     --validate-name) VALIDATE=1 ;;
+    --check-title) CHECK_TITLE=1 ;;
     --stored-file) shift; STORED_FILE=${1:-} ;;
     --title-file) shift; TITLE_FILE=${1:-} ;;
     --help|-h) help; exit 0 ;;
@@ -69,30 +74,33 @@ while [ "$#" -gt 0 ]; do
   shift || true
 done
 
-[ -n "$TEXT_FILE" ] || { usage; exit 2; }
-[ -n "$ORIGIN" ] || { usage; exit 2; }
-[ -n "$THREAD_ID" ] || { usage; exit 2; }
-[ -n "$CHANNEL_ID" ] || { usage; exit 2; }
-case "$MESSAGE_ID" in
-  ''|*[!0-9]*) die "message id must be a Discord id" ;;
-esac
+TEXT=
+if [ "$CHECK_TITLE" = 0 ]; then
+  [ -n "$TEXT_FILE" ] || { usage; exit 2; }
+  [ -n "$ORIGIN" ] || { usage; exit 2; }
+  [ -n "$THREAD_ID" ] || { usage; exit 2; }
+  [ -n "$CHANNEL_ID" ] || { usage; exit 2; }
+  case "$MESSAGE_ID" in
+    ''|*[!0-9]*) die "message id must be a Discord id" ;;
+  esac
 
-case "$ORIGIN" in
-  slash|message) ;;
-  *) die "origin must be slash or message" ;;
-esac
+  case "$ORIGIN" in
+    slash|message) ;;
+    *) die "origin must be slash or message" ;;
+  esac
 
-# A request that already arrived inside a thread stays in that thread: there is
-# nothing to name, so print nothing and succeed.
-if [ "$ORIGIN" != message ] || [ "$THREAD_ID" != "$CHANNEL_ID" ]; then
-  exit 0
-fi
+  # A request that already arrived inside a thread stays in that thread: there is
+  # nothing to name, so print nothing and succeed.
+  if [ "$ORIGIN" != message ] || [ "$THREAD_ID" != "$CHANNEL_ID" ]; then
+    exit 0
+  fi
 
-if [ "$TEXT_FILE" = '-' ]; then
-  TEXT=$(cat)
-else
-  [ -f "$TEXT_FILE" ] && [ ! -L "$TEXT_FILE" ] || die "text file not found: $TEXT_FILE"
-  TEXT=$(cat -- "$TEXT_FILE")
+  if [ "$TEXT_FILE" = '-' ]; then
+    TEXT=$(cat)
+  else
+    [ -f "$TEXT_FILE" ] && [ ! -L "$TEXT_FILE" ] || die "text file not found: $TEXT_FILE"
+    TEXT=$(cat -- "$TEXT_FILE")
+  fi
 fi
 
 TITLE_TEXT=
@@ -120,7 +128,7 @@ fi
 
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 FM_HOME=${FM_HOME:-$FM_ROOT}
-python3 - "$FM_ROOT" "$FM_HOME" "$CHANNEL_ID" "$MESSAGE_ID" "$VALIDATE" 3<<< "$TEXT" 4<<< "$TITLE_TEXT" 5<<< "$STORED" <<'PY'
+python3 - "$FM_ROOT" "$FM_HOME" "$CHANNEL_ID" "${MESSAGE_ID:-0}" "$VALIDATE" "$CHECK_TITLE" 3<<< "$TEXT" 4<<< "$TITLE_TEXT" 5<<< "$STORED" <<'PY'
 import os
 import re
 import sys
@@ -128,7 +136,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / "contrib/hermes-gateway-firstmate-comms"))
 from intake import dedicated_channel
-if dedicated_channel(Path(sys.argv[2])) != sys.argv[3]:
+if sys.argv[6] != "1" and dedicated_channel(Path(sys.argv[2])) != sys.argv[3]:
     sys.exit(0)
 text = os.fdopen(3).read()
 title_raw = os.fdopen(4).read()
@@ -137,15 +145,15 @@ clock = datetime.fromtimestamp(message_ms / 1000, timezone(timedelta(hours=8))).
 labels = {"aceh": "Aceh", "infoconnect": "InfoConnect", "firstmate": "Firstmate", "question": "Question"}
 fallback = "Firstmate request"
 
-TOKEN_RE = re.compile(r"<@&?\d+>|<#[^>]*>|<a?:[A-Za-z0-9_~:-]+:\d+>|<t:[^>]*>")
+TOKEN_RE = re.compile(r"<@[!&]?\d+>|<#[^>]*>|<a?:[A-Za-z0-9_~:-]+:\d+>|<t:[^>]*>")
 # Firstmate's title shares reply text's public-safety screen: nothing like an
 # internal identifier, path, hostname, or secret may reach the thread name.
 UNSAFE_RE = re.compile(
     r"(?:"
     r"\bfm-[a-z0-9]+(?:-[a-z0-9]+)*\b"  # task ids such as fm-ship-login
     r"|\bhold:[^\s]*|\bkey:[^\s]*|\bfmd:[^\s]*"  # decision keys
-    r"|(?:^|\s)(?:/[A-Za-z0-9_.-]+)+(?:\s|$)"  # absolute paths
-    r"|(?:^|\s)\./\S+|(?:^|\s)~\S+"  # relative and home paths
+    r"|(?<!\w)(?:/[A-Za-z0-9_.-]+)+"  # absolute paths
+    r"|(?<!\w)\./\S+|(?<!\w)~\S+"  # relative and home paths
     r"|\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]+(?:\.[a-z]+)*\b"  # hostnames
     r"|\b(?:token|secret|password|api[_-]?key|bearer)\b\s*[:=]\s*\S+"  # secrets
     r"|(?:^|\s)[A-Za-z0-9_+/]{32,}={0,2}(?:\s|$)"  # token-shaped blobs
@@ -201,6 +209,13 @@ def derive():
     label = next((label for word, label in labels.items() if word in words), fallback)
     return label + " " + clock
 
+
+if sys.argv[6] == "1":
+    title = clean_title(title_raw)
+    if not title:
+        sys.exit(2)
+    print(title)
+    sys.exit(0)
 
 fresh = derive()
 if sys.argv[5] == "1":

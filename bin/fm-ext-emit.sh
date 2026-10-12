@@ -75,7 +75,6 @@ TEXT_FILE=
 DECISION_FILE=
 THREAD_TITLE=
 THREAD_STATE=
-THREAD_TITLE_MAX=60
 
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
@@ -106,20 +105,8 @@ fm_ext_request_id_valid "$REQUEST_ID" || die "unsafe request_id: $REQUEST_ID"
 fm_ext_reply_kind_valid "$KIND" || die "reply kind must be ack, answer, followup, or final"
 fm_ext_generation_valid "$GENERATION" || die "generation must be a positive integer"
 if [ -n "$THREAD_TITLE" ]; then
-  case "$THREAD_TITLE" in
-    *$'\n'*|*$'\r'*) die "thread title must be one line" ;;
-  esac
-  TITLE_CLEAN=$(printf '%s' "$THREAD_TITLE" | tr -d '\000-\010\013\014\016-\037\177') || die "could not read the thread title" 1
-  TITLE_CLEAN=$(printf '%s' "$TITLE_CLEAN" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//') || die "could not read the thread title" 1
-  [ -n "$TITLE_CLEAN" ] || die "thread title is empty"
-  [ "${#TITLE_CLEAN}" -le "$THREAD_TITLE_MAX" ] || die "thread title is longer than $THREAD_TITLE_MAX characters; shorten it instead"
-  case "$TITLE_CLEAN" in
-    *fm-*) die "thread title must not name a task id" ;;
-  esac
-  if printf '%s' "$TITLE_CLEAN" | grep -qiE -e 'hold:[^[:space:]]' -e 'key:[^[:space:]]' -e 'fmd:[^[:space:]]'     -e '(^|[[:space:]])(/[A-Za-z0-9_.-]+)+([[:space:]]|$)' -e '(^|[[:space:]])\./[^[:space:]]' -e '(^|[[:space:]])~[^[:space:]]'     -e '\b[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]+(\.[a-z]+)*\b'     -e '\b(token|secret|password|api[_-]?key|bearer)\b[[:space:]]*[:=][[:space:]]*[^[:space:]]+'     -e '(^|[[:space:]])[A-Za-z0-9_+/]{32,}={0,2}([[:space:]]|$)'; then
-    die "thread title must not carry an identifier, path, hostname, or secret"
-  fi
-  THREAD_TITLE="$TITLE_CLEAN"
+  THREAD_TITLE=$(printf '%s' "$THREAD_TITLE" | bash "$SCRIPT_DIR/fm-ext-topic.sh" --check-title --title-file -) \
+    || die "thread title failed the shared bounds or safety check"
 fi
 case "${THREAD_STATE:-}" in
   ''|needs-you|done|none) ;;

@@ -853,6 +853,70 @@ PY
   pass "15 existing threads keep the winning name"
 }
 
+test_16_shared_title_screen_and_nickname_mentions() {
+  local home slug
+  home="$TMP_ROOT/c16"
+  setup_home "$home"
+  slug=$(intake_as "$home" "<@!80351110224678912> release status" "$MESSAGE" "$CHANNEL" message)
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import io, json, os, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
+assert context["topic"] == "release status"
+assert poster.thread_name_for(context, home) == "release status"
+root = poster.firstmate_root()
+reply = home / "reply.txt"
+reply.write_text("Noted.")
+os.environ["DISCORD_BOT_TOKEN"] = "fixture"
+expected = "release status"
+def respond(request, **kwargs):
+    assert json.loads(request.data)["name"] == expected
+    return io.BytesIO(b'{"id":"777777777777777777"}')
+bad_titles = ("Firstmate · inspect /srv/private:", "Firstmate · inspect (/srv/private)",
+              'Firstmate · inspect "/srv/private"', "Firstmate · inspect [./private]",
+              "Firstmate · inspect (~/.secret)", "T" * 61, "Firstmate\nprivate",
+              "Firstmate · secret=hidden", "!!! ???")
+for generation, title in enumerate(bad_titles, 1):
+    checked = subprocess.run(["bash", str(root / "bin/fm-ext-topic.sh"),
+        "--check-title", "--title-file", "-"], input=title, capture_output=True, text=True)
+    assert checked.returncode != 0 and not checked.stdout, title
+    emitted = subprocess.run(["bash", str(root / "bin/fm-ext-emit.sh"),
+        "--request-id", context["request_id"], "--kind", "answer", "--generation", str(generation),
+        "--text-file", str(reply), "--thread-title", title], capture_output=True, text=True)
+    assert emitted.returncode != 0, title
+    assert not (home / "state/ext-outbox" / f"{slug}.answer.{generation}.json").exists()
+    payload = dict(context, thread_title=title)
+    assert poster.thread_name_for(payload, home) == "release status", title
+    with patch.object(poster.urllib.request, "urlopen", respond):
+        assert poster.discord_create_thread(payload, title)["thread_id"] == "777777777777777777"
+    poster.save_request_thread(payload, "777777777777777777", home,
+        topic_name=title, creating_title=title)
+    renames = []
+    poster.maybe_rename_topic_thread(dict(payload, thread_state="done"), "777777777777777777", home,
+        rename_thread=lambda tid, name: renames.append(name))
+    assert renames == ["✅ release status"], title
+    poster.request_progress_path(payload, home).unlink()
+title = "  Firstmate · release status  "
+checked = subprocess.run(["bash", str(root / "bin/fm-ext-topic.sh"),
+    "--check-title", "--title-file", "-"], input=title, capture_output=True, text=True, check=True)
+expected = checked.stdout.strip()
+subprocess.run(["bash", str(root / "bin/fm-ext-emit.sh"), "--request-id", context["request_id"],
+    "--kind", "answer", "--generation", "99", "--text-file", str(reply), "--thread-title", title],
+    capture_output=True, text=True, check=True)
+emitted = json.loads((home / "state/ext-outbox" / f"{slug}.answer.99.json").read_text())
+assert emitted["thread_title"] == expected == "Firstmate · release status"
+assert poster.thread_name_for(emitted, home) == expected
+with patch.object(poster.urllib.request, "urlopen", respond):
+    assert poster.discord_create_thread(emitted, expected)["thread_id"] == "777777777777777777"
+PY
+  then fail "the shared title screen and nickname mention stripping must agree"
+  fi
+  pass "16 emit and poster share title validation and strip nickname mentions"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -870,5 +934,6 @@ test_12_title_creates_and_states_rename
 test_13_rename_never_blocks_and_never_leaves_home
 test_14_legacy_titles_markers_and_long_tokens
 test_15_existing_threads_keep_the_winning_name
+test_16_shared_title_screen_and_nickname_mentions
 
 echo "all fm-ext-topic-threads tests passed"
