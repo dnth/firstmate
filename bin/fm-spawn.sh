@@ -3276,14 +3276,6 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-# Scaffold fill guard, checked before any endpoint exists.
-# fm-brief.sh scaffolds ship, scout, and secondmate briefs with a {TASK} fill
-# site; a spawn that still carries it would launch a worker with no task.
-if grep -F '{TASK}' "$BRIEF" >/dev/null 2>&1; then
-  echo "error: $KIND brief still contains {TASK}; replace every scaffold placeholder before spawn" >&2
-  exit 1
-fi
-
 # Orchestration opt-in is explicit task data, never a keyword scan of prose:
 # fm-brief.sh --orchestrate records a front-matter marker `orchestration: enabled`
 # at the very top of the generated brief, and a ship task launched with
@@ -3318,6 +3310,13 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
     *) echo 0 ;;
   esac
 }
+
+# Scaffold fill guard, checked before any endpoint exists.
+# Secondmates also validate their effective charter before home preparation.
+if grep -F '{TASK}' "$BRIEF" >/dev/null 2>&1; then
+  echo "error: $KIND brief still contains {TASK}; replace every scaffold placeholder before spawn" >&2
+  exit 1
+fi
 
 # Brief/spawn delivery agreement, checked before any endpoint exists.
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"

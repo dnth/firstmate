@@ -900,7 +900,6 @@ do_relaunch() {
     secondmate)
       # The charter in the secondmate's own home is its instruction source and
       # stays untouched.
-      secondmate_spawn_brief "$WT" "$DATA/$ID/brief.md" >/dev/null || exit 1
       RELAUNCH_BRIEF=
       ;;
     *)
@@ -921,6 +920,9 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  if [ "$KIND" = secondmate ]; then
+    secondmate_spawn_brief "$WT" "$DATA/$ID/brief.md" >/dev/null || exit 1
+  fi
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
