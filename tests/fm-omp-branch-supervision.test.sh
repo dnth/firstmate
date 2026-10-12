@@ -737,7 +737,10 @@ for (const step of scenario.steps) {
     const turnEnd = handlers.get("turn_end");
     const startedAt = Date.now();
     const ctx = { sessionManager: new sdk.SessionManager() };
-    const returned = turnEnd?.({}, ctx);
+    const reply = step.completed_reply ? { role: "assistant", content: step.completed_reply, timestamp: Date.now() } : undefined;
+    const returned = turnEnd?.({ message: reply }, ctx);
+    // OMP may persist message_end only after turn_end handlers return.
+    if (reply) sdk.SessionManager.mainEntries.push({ type: "message", message: reply });
     if (returned instanceof Promise) {
       const timeout = new Promise((resolve) => setTimeout(() => resolve("timeout"), step.turn_end_timeout_ms ?? 1000));
       const outcome = await Promise.race([returned.then(() => "settled"), timeout]);
@@ -1075,7 +1078,7 @@ test_turn_end_mirror_lands_before_a_later_wake() {
       { "role": "assistant", "text": "main: first acknowledged" },
       { "role": "user", "text": "captain: ship the second item" }
     ] },
-    { "turn_end": true, "turn_end_timeout_ms": 2000 },
+    { "turn_end": true, "turn_end_timeout_ms": 2000, "completed_reply": "main: second acknowledged" },
     { "wake": "signal: task-a",
       "prompt": [
         { "report": { "task": "task-a", "verdict": "routine", "summary": "saw the mirror" } }
@@ -1094,11 +1097,35 @@ JSON
 
   assert_contains "$out" '"accepted":true' "the wake after turn_end was not accepted: $out"
   assert_contains "$out" '"rejected":""' "the wake after turn_end did not settle: $out"
-  assert_contains "$out" '"promptMirrorSends":[["[captain] captain: ship the first item","[main] main: first acknowledged","[captain] captain: ship the second item"]]' \
+  assert_contains "$out" '"promptMirrorSends":[["[captain] captain: ship the first item","[main] main: first acknowledged","[captain] captain: ship the second item","[main] main: second acknowledged"]]' \
     "the mirror batch was not visible in order at the later wake prompt entry: $out"
   assert_equals '{"file":"'"$state"'/main.session.jsonl","index":3}' "$(cat "$state/.branch-mirror-cursor")" \
     "the mirror cursor did not advance to the flushed batch"
   pass "mirrored dialog from a turn reaches the branch before a later wake"
+}
+
+# Opt-in real-SDK event timing check; the provider is local and uses no credentials.
+test_turn_end_dialog_with_real_sdk() {
+  local fixture package_dir node_modules
+  package_dir=${FM_OMP_PACKAGE_DIR:-}
+  if [ -z "$package_dir" ]; then
+    echo "skip: set FM_OMP_PACKAGE_DIR for the real-SDK dialog regression"
+    return 0
+  fi
+  command -v bun >/dev/null 2>&1 || fail "bun is required for the real-SDK dialog regression"
+  [ -f "$package_dir/package.json" ] || fail "OMP SDK package is missing: $package_dir"
+  fixture="$TMP_ROOT/turnend-sdk"
+  mkdir -p "$fixture/.omp/extensions/lib" "$fixture/state" "$fixture/config"
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$fixture/.omp/extensions/"
+  cp "$ROOT/.omp/extensions/lib/"{fm-branch-dispatch,fm-async-exec,fm-branch-model-picker}.ts "$fixture/.omp/extensions/lib/"
+  cp "$ROOT/tests/fm-omp-branch-dialog-sdk.mjs" "$fixture/driver.mjs"
+  node_modules=$(cd "$package_dir/../.." && pwd)
+  ln -s "$node_modules" "$fixture/node_modules"
+  env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    PI_CODING_AGENT_DIR="$fixture/agent" FM_OMP_PACKAGE_DIR="$package_dir" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    bun "$fixture/driver.mjs" || fail "real-SDK completed reply regression failed"
 }
 
 # A mid-flush mirror failure keeps the cursor put: the first send lands, the
@@ -2124,3 +2151,5 @@ test_turn_end_returns_without_waiting_for_a_busy_chain
 test_turn_end_mirror_lands_before_a_later_wake
 test_turn_end_mirror_failure_holds_the_cursor
 test_turn_end_batch_drops_on_generation_change_or_lock_loss
+
+test_turn_end_dialog_with_real_sdk

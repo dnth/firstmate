@@ -423,6 +423,8 @@ type ReadonlyEntries = {
 type MirrorCollectionState = {
   collectAnchor: MirrorCursor | null;
   pendingCursor: MirrorCursor | null;
+  // Completed replies captured from turn_end before OMP persists them.
+  unpersistedReplies: Set<number>;
   // Set at every main session boundary (session_start, session_switch), where
   // the branch conversation is replaced too (createBranch). The durable cursor
   // records what the PREVIOUS branch conversation already received, so the
@@ -434,7 +436,7 @@ type MirrorCollectionState = {
   reanchor: boolean;
 };
 
-function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCollectionState): MirrorItem[] {
+function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCollectionState, completedReply?: { role?: string; content?: unknown; timestamp: number }): MirrorItem[] {
   const file = sessionManager.getSessionFile() ?? "";
   const entries = sessionManager.getEntries();
   const anchor = collection.collectAnchor ?? readMirrorCursor();
@@ -443,13 +445,27 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
   const items: MirrorItem[] = [];
   for (const entry of entries.slice(start)) {
     if (entry.type !== "message") continue;
-    const message = (entry as { message?: { role?: string; content?: unknown } }).message;
+    const message = (entry as { message?: { role?: string; content?: unknown; timestamp?: number } }).message;
     if (!message) continue;
+    if (message.role === "assistant" && typeof message.timestamp === "number" && collection.unpersistedReplies.delete(message.timestamp)) continue;
     if (message.role !== "user" && message.role !== "assistant") continue;
     const text = textOfContent(message.content).trim();
     if (!text) continue;
     if (message.role === "user" && isOperationalUserText(text)) continue;
     items.push({ tag: message.role === "user" ? "captain" : "main", text: capMirrorText(text) });
+  }
+  // The event owns the completed reply even when message_end persistence is
+  // still pending. OMP preserves its message timestamp through persistence.
+  // Keep the cursor on real entries; suppress this same reply
+  // when a later snapshot first observes its persisted entry.
+  if (completedReply?.role === "assistant" && !entries.some((entry) =>
+    entry.type === "message" && (entry as { message?: { role?: string; timestamp?: number } }).message?.role === "assistant" &&
+      (entry as { message?: { timestamp?: number } }).message?.timestamp === completedReply.timestamp)) {
+    const text = textOfContent(completedReply.content).trim();
+    if (text && !collection.unpersistedReplies.has(completedReply.timestamp)) {
+      items.push({ tag: "main", text: capMirrorText(text) });
+      collection.unpersistedReplies.add(completedReply.timestamp);
+    }
   }
   collection.collectAnchor = { file, index: entries.length };
   collection.pendingCursor = collection.collectAnchor;
@@ -537,7 +553,7 @@ export default function (pi: ExtensionAPI) {
   // The first branch conversation of a process is new (see
   // branchSessionGeneration), so its first collection re-anchors too, even if
   // this instance never sees a session_start of its own.
-  const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null, reanchor: true };
+  const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null, unpersistedReplies: new Set(), reanchor: true };
   // Main's own current model and its live registry, tracked from the contexts
   // OMP already hands this extension, because createBranch runs at wake time
   // with no context of its own. mainModel is what "follow main" applies;
@@ -1552,9 +1568,10 @@ ${context.command}
   // flushMirror after the complete batch reaches the branch. A generation
   // change or lost ownership drops the batch, and the chain containment
   // below swallows the drop so no rejection escapes the handler.
-  pi.on?.("turn_end", (_event, ctx) => {
+  pi.on?.("turn_end", (event, ctx) => {
     rememberMainContext(ctx);
     const turnGeneration = generation;
+    const completedReply = event.message;
     let snapshotFile: string;
     let snapshotEntries: Array<{ type: string }>;
     try {
@@ -1576,7 +1593,7 @@ ${context.command}
         if (turnGeneration !== generation) return;
         let items: MirrorItem[];
         try {
-          items = collectMainDialog(snapshotManager, mirrorCollection);
+          items = collectMainDialog(snapshotManager, mirrorCollection, completedReply);
         } catch {
           return;
         }
@@ -1614,6 +1631,7 @@ ${context.command}
     redeliveryAttempted.clear();
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
+    mirrorCollection.unpersistedReplies.clear();
     mirrorCollection.reanchor = true;
     // The previous generation's branch conversation is never reopened; drop the
     // live handle so nothing queued after this boundary can reuse it. In-flight
@@ -1659,6 +1677,7 @@ ${context.command}
     pendingMirror.length = 0;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
+    mirrorCollection.unpersistedReplies.clear();
     mirrorCollection.reanchor = true;
     const stale = branch;
     branch = null;
