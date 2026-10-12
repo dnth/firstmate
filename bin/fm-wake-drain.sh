@@ -392,8 +392,8 @@ print_open_decisions_section() {
   if [ -n "$due" ]; then
     while IFS=$(printf '\t') read -r task review title; do
       [ -n "$task" ] || continue
-      open="$open
-$task	$task	needs-decision	${title:-captain call} (due for review since $review)"
+      open=$(printf '%s\n%s\t%s\t%s\t%s' "$open" "$task" "$task" \
+        needs-decision "${title:-captain call} (due for review since $review)")
     done <<EOF
 $due
 EOF

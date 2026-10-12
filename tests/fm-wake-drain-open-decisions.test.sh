@@ -236,11 +236,12 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 }
 
 test_board_only_due_call_surfaces_without_status_logs() {
-  local dir state out
+  local dir state out err mode channel task key endpoint ident extra
   command -v tasks-axi >/dev/null 2>&1 || { pass "tasks-axi absent; board-only due test skipped"; return 0; }
   dir=$(make_case board-only-due)
   state="$dir/state"
   out="$dir/drain.out"
+  err="$dir/drain.err"
   # No status log exists at all: the only record of this call is the board.
   mkdir -p "$dir/data" "$dir/config"
   cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
@@ -248,16 +249,26 @@ test_board_only_due_call_surfaces_without_status_logs() {
   (cd "$dir" && tasks-axi add board-only "Board only choice" --kind captain --repo sample >/dev/null) \
     || fail "could not create the board-only fixture"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
-    FM_CONFIG_OVERRIDE="$dir/config" FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z FM_CAPTAIN_HOLD_REVIEW_DAYS=14 \
     "$ROOT/bin/fm-captain-hold.sh" hold board-only --reason "board only pending" >/dev/null \
     || fail "could not hold the board-only fixture"
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
-    FM_CONFIG_OVERRIDE="$dir/config" "$DRAIN" > "$out" || fail "drain failed with no status logs"
+  for mode in empty queued; do
+    if [ "$mode" = queued ]; then
+      append_wake "$state" check unrelated 'unrelated check' || fail "could not queue an unrelated wake"
+    fi
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+      FM_CONFIG_OVERRIDE="$dir/config" FM_CAPTAIN_HOLD_TODAY=2026-08-16 \
+      FM_WAKE_DRAIN_DECISION_REVISIONS=1 "$DRAIN" > "$out" 2> "$err" \
+      || fail "$mode drain failed with no status logs"
 
-  grep -F 'OPEN DECISIONS' "$out" >/dev/null \
-    || fail "a board-only due call printed no OPEN DECISIONS section: $(cat "$out")"
-  grep -F 'board-only' "$out" | grep -F 'due for review' >/dev/null \
-    || fail "a board-only due call was not marked due in OPEN DECISIONS: $(cat "$out")"
+    grep -Fx 'board-only [key=board-only] needs-decision: Board only choice (due for review since 2026-08-15)' "$out" >/dev/null \
+      || fail "$mode drain did not preserve the due row task/key/verb/note fields: $(cat "$out")"
+    IFS=$(printf '\t') read -r channel task key endpoint ident extra < <(grep '^DECISION_REVISION' "$err") \
+      || fail "$mode drain emitted no decision revision"
+    [ "$channel" = DECISION_REVISION ] && [ "$task" = board-only ] && [ "$key" = board-only ] \
+      && [ "$endpoint" = - ] && [ "$ident" = - ] && [ -z "$extra" ] \
+      || fail "$mode drain emitted malformed decision revision fields: $(cat "$err")"
+  done
   pass "a board-only past-due call surfaces in OPEN DECISIONS with no status logs"
 }
 
