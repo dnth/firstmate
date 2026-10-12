@@ -416,10 +416,9 @@ type ReadonlyEntries = {
 };
 
 // Volatile mirror-collection state. Instance-scoped and cleared at the
-// process boundary, so a fresh extension instance
-// reconstructs EXCLUSIVELY from the durable cursor: dialog collected but not
-// yet delivered re-mirrors rather than dropping (the durable cursor advances
-// only in flushMirror after delivery).
+// process boundary. A fresh branch re-anchors to the current main session's
+// start rather than inheriting the previous branch's delivered frontier, so
+// dialog collected but not yet delivered re-mirrors rather than dropping.
 type MirrorCollectionState = {
   collectAnchor: MirrorCursor | null;
   pendingCursor: MirrorCursor | null;
