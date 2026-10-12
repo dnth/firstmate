@@ -117,7 +117,7 @@ waiting_pin_board() {
       ($4 == "" || $4 == "null" || $4 == "-" || $4 <= today) {
         print $1
       }') || return 1
-  due_ids=$(fm_run_timed 10 "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null | cut -f1) || due_ids=
+  due_ids=$(fm_run_timed 20 "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null | cut -f1) || due_ids=
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     title=$(waiting_pin_title "$data" "$id") || return 1
@@ -206,7 +206,9 @@ for index, line in enumerate(lines):
     elif line == "PRs ready for your merge word:":
         in_calls = False
     elif in_calls and line.startswith("- ") and len(line) > 200:
-        lines[index] = line[:199] + "…"
+        marker = " (due for review)" if line.endswith(" (due for review)") else ""
+        title = line[:-len(marker)] if marker else line
+        lines[index] = title[:199 - len(marker)] + "…" + marker
 text = "\n".join(lines)
 if len(text) > 2000:
     suffix = "\n… More waiting items omitted; check the board for the full list."

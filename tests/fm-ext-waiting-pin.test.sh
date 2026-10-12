@@ -911,11 +911,11 @@ SH
 import json, pathlib, subprocess, sys, time
 home = pathlib.Path(sys.argv[1])
 start = time.monotonic()
-result = subprocess.run([sys.argv[2], "refresh"], capture_output=True, text=True, timeout=20)
+result = subprocess.run([sys.argv[2], "refresh"], capture_output=True, text=True, timeout=30)
 assert result.returncode == 0, result.stderr
 assert "refreshed" in result.stdout, result.stdout + result.stderr
 assert (home / "due-started").exists(), "the due subprocess never reached the blocked read"
-assert time.monotonic() - start < 20, "refresh did not honor the due bound"
+assert 20 <= time.monotonic() - start < 30, "refresh did not honor the due bound"
 box = home / "state/ext-outbox"
 payloads = list(box.glob("waiting-pin.*.json"))
 assert len(payloads) == 1, payloads
@@ -927,7 +927,25 @@ PYTEST
   pass "19 a due timeout leaves calls visible without marking and releases the publication claim"
 }
 
+test_20_long_overdue_title_keeps_marker() {
+  local home title out line
+  home="$TMP_ROOT/c20"
+  setup_home "$home"
+  title=$(python3 -c 'print("T" * 220)')
+  hold_call "$home" long-overdue "$title" pending
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n' > "$home/body.txt"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi update long-overdue --body-file "$home/body.txt" >/dev/null) \
+    || fail "long overdue body must be recorded"
+  out=$(home_env "$home" env FM_CAPTAIN_HOLD_TODAY=2026-08-16 "$REFRESH" content) \
+    || fail "long overdue call must render"
+  line=$(printf '%s\n' "$out" | grep '^- ')
+  assert_contains "$line" '… (due for review)' "the cap must preserve the overdue marker"
+  [ "${#line}" -eq 200 ] || fail "the overdue call must respect the 200-character cap"
+  pass "20 long overdue titles retain their marker inside the call-line cap"
+}
+
 test_19_due_timeout_keeps_calls_visible_and_releases_claim
+test_20_long_overdue_title_keeps_marker
 
 test_1b_long_titles_render_cleanly_without_ids_or_commands
 test_1c_multiline_titles_remain_single_decisions
