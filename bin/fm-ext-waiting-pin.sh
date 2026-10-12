@@ -101,7 +101,7 @@ waiting_pin_title() {
 import json, sys
 s = sys.stdin.read()
 value = json.loads(s) if s.startswith(chr(34)) else s
-print(value.replace(chr(9), " "), end="")
+print(value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " "), end="")
 ' || return 1
 }
 
