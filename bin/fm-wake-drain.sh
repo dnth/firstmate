@@ -358,7 +358,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open due bound task key verb note review title line row_origin item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open due bound task key verb note review title due_marker line row_origin item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
   local revisions='' s_task s_endpoint s_ident d_endpoint d_ident emit_revisions=false
 
@@ -385,32 +385,46 @@ print_open_decisions_section() {
   # Backlog-backed due calls join this same surface: a live captain-held task
   # past its review-by date renders as its own open line even when no status
   # log holds the key open, so board-only holds never stay silent. The fold
-  # above owns status-log truth; this append only adds backlog-due rows.
+  # above owns status-log truth; this append only adds backlog-due rows. The
+  # read is bounded so a slow or wedged backlog read degrades to no due rows
+  # instead of stalling every wake-handling turn.
   bound=${FM_DUE_REVIEW_TIMEOUT:-20}
   case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
   due=$(fm_run_timed "$bound" "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null) || due=
-  open=$(printf '%s\n' "$open" | awk 'NF { printf "status\t%s\n", $0 }') || return 1
+  # Every row below is "origin TAB task TAB key TAB verb TAB marker TAB note":
+  # a status-log row carries the clear-marker sentinel "-", a backlog-due row
+  # carries its due-for-review marker (with its own leading separator space)
+  # there, and the note stays the LAST field so a note that holds tabs itself is
+  # never split. The fold's own rows are "task TAB key TAB verb TAB note", so
+  # the note is rebuilt intact behind the marker field.
+  open=$(printf '%s\n' "$open" | awk -F'\t' 'NF {
+    note=$4; for (i=5; i<=NF; i++) note=note "\t" $i
+    printf "status\t%s\t%s\t%s\t-\t%s\n", $1, $2, $3, note
+  }') || return 1
   if [ -n "$due" ]; then
     while IFS=$(printf '\t') read -r task review title; do
       [ -n "$task" ] || continue
-      open=$(printf '%s\nbacklog\t%s\t%s\t%s\t%s' "$open" "$task" "$task" \
-        needs-decision "${title:-captain call} (due for review since $review)")
+      open=$(printf '%s\nbacklog\t%s\t%s\t%s\t%s\t%s' "$open" "$task" "$task" \
+        needs-decision " (due for review since $review)" "${title:-captain call}")
     done <<EOF
 $due
 EOF
   fi
   [ -n "$open" ] || return 0
 
-  while IFS=$(printf '\t') read -r row_origin task key verb note; do
+  while IFS=$(printf '\t') read -r row_origin task key verb due_marker note; do
     [ -n "$task" ] || continue
+    case "$due_marker" in -) due_marker='' ;; esac
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
+    line="$line $verb: "
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
-    # allowance passed down is one short of the cap.
-    fm_cap_line_var "$line" $((item_bytes - 1))
-    line=$FM_LINE_CAP_LINE
+    # allowance passed down is one short of the cap. A due row's marker is the
+    # whole reason that row is listed, so the cut is applied to the title alone
+    # and the marker is appended whole after it.
+    fm_cap_line_var "$line$note" $((item_bytes - 1 - ${#due_marker}))
+    line="$FM_LINE_CAP_LINE$due_marker"
     bytes=$(( ${#line} + 1 ))
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
       omitted=$((omitted + 1))
