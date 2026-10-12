@@ -5,6 +5,15 @@
 #   fm-ext-emit.sh --request-id discord:<guild>:<channel>:<thread>:<message>
 #     --kind ack|answer|followup|final --generation <n>
 #     (--text-file <path> | --text-file -) [--decision-file <path>]
+#     [--thread-title <text>] [--thread-state needs-you|done|none]
+#
+# --thread-title names the request's topic thread ("<Project> · <topic>", one
+# line, at most 60 characters, screened like reply text) on the reply that
+# creates it; once the thread exists, later titles are recorded but do not
+# replace its name. Over-long, multi-line, or unsafe titles are
+# refused here instead of silently cut. --thread-state renames the existing
+# topic thread: needs-you prefixes "❓ ", done prefixes "✅ ", none removes the
+# prefix. Renames never block delivery; the poster applies them best effort.
 #
 # Writes state/ext-outbox/<slug>.<kind>.<generation>.json once. Re-emitting the
 # same identity is a no-op success. A posting marker without a receipt is
@@ -49,6 +58,7 @@ usage() {
 usage: fm-ext-emit.sh --request-id discord:<guild>:<channel>:<thread>:<message>
          --kind ack|answer|followup|final --generation <n>
          (--text-file <path> | --text-file -) [--decision-file <path>]
+         [--thread-title <text>] [--thread-state needs-you|done|none]
 EOF
 }
 
@@ -63,6 +73,8 @@ KIND=
 GENERATION=
 TEXT_FILE=
 DECISION_FILE=
+THREAD_TITLE=
+THREAD_STATE=
 
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
@@ -76,6 +88,8 @@ while [ "$#" -gt 0 ]; do
     --generation) shift; GENERATION=${1:-} ;;
     --text-file) shift; TEXT_FILE=${1:-} ;;
     --decision-file) shift; DECISION_FILE=${1:-} ;;
+    --thread-title) shift; THREAD_TITLE=${1:-} ;;
+    --thread-state) shift; THREAD_STATE=${1:-} ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -90,6 +104,14 @@ done
 fm_ext_request_id_valid "$REQUEST_ID" || die "unsafe request_id: $REQUEST_ID"
 fm_ext_reply_kind_valid "$KIND" || die "reply kind must be ack, answer, followup, or final"
 fm_ext_generation_valid "$GENERATION" || die "generation must be a positive integer"
+if [ -n "$THREAD_TITLE" ]; then
+  THREAD_TITLE=$(printf '%s' "$THREAD_TITLE" | bash "$SCRIPT_DIR/fm-ext-topic.sh" --check-title --title-file -) \
+    || die "thread title failed the shared bounds or safety check"
+fi
+case "${THREAD_STATE:-}" in
+  ''|needs-you|done|none) ;;
+  *) die "thread state must be needs-you, done, or none" ;;
+esac
 if [ -n "$DECISION_FILE" ]; then
   case "$KIND" in
     answer|followup|final) ;;
@@ -231,6 +253,8 @@ OUTBOX_JSON=$(jq -cn \
   --arg message_id "$MESSAGE" \
   --arg origin "$ORIGIN" \
   --arg text "$TEXT" \
+  --arg thread_title "$THREAD_TITLE" \
+  --arg thread_state "$THREAD_STATE" \
   --argjson decision "$DECISION_JSON" \
   --argjson recorded_at "$NOW" \
   '{schema_version:$schema_version, request_id:$request_id, slug:$slug,
@@ -238,6 +262,8 @@ OUTBOX_JSON=$(jq -cn \
     guild_id:$guild_id, channel_id:$channel_id, thread_id:$thread_id,
     message_id:$message_id, origin:$origin, text:$text,
     recorded_at:$recorded_at}
+   + if $thread_title == "" then {} else {thread_title:$thread_title} end
+   + if $thread_state == "" then {} else {thread_state:$thread_state} end
    + if $decision == null then {} else {decision:$decision} end') \
   || die "could not build the outbox payload" 1
 

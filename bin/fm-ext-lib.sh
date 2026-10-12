@@ -1251,6 +1251,8 @@ fm_ext_outbox_schema_valid() {
     and (.thread_id | type == "string" and test("^[0-9]+$"))
     and (.message_id | type == "string" and test("^[0-9]+$"))
     and (.text | type == "string")
+    and (if has("thread_title") then (.thread_title | type == "string" and length >= 1 and length <= 60) else true end)
+    and (if has("thread_state") then (.thread_state == "needs-you" or .thread_state == "done" or .thread_state == "none") else true end)
     and (if has("decision") then
       (.decision | type == "object"
         and (.key | type == "string" and test("^(hold|key):"))

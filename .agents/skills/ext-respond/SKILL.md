@@ -65,6 +65,17 @@ Its `decision` field carries the key, the post's `occurrence`, the option, any c
 
 When you settle a decision that has a button post any other way, such as a typed numbered reply, record it through its own channel as usual and name the chosen option in the answer, by its number or label; the post then disables itself and shows that option as the captain's choice.
 
+## Name the thread, then mark its state
+
+Before composing a dedicated-channel reply, consult the [topic-thread contract](../../../docs/configuration.md#topic-threads-one-thread-per-request); the [emit header and help](../../../bin/fm-ext-emit.sh) own the title and state flags.
+
+- **Title the creating reply** with `<Project> · <2-5 word topic>` (for example `Aceh · ingestion status`), especially when the request is vague, long, or procedural.
+- **Mark needs-you** when the reply asks the captain to decide.
+- **Mark done** with the terminal answer or final.
+- **Clear the marker** when work resumes.
+
+Titles are public: the same safety rules as reply text apply (no task ids, branch names, paths, hostnames, or secrets).
+
 ## Acknowledge first, act, then follow up
 
 - **Work that completes now** - emit **one** `answer` reporting the outcome.

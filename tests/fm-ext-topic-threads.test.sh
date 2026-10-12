@@ -81,6 +81,25 @@ slug_of() {
     || printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
 }
 
+emit_as() {
+  local home=$1 rid=$2 kind=$3 generation=$4 text=$5 title=$6 state=$7 textfile
+  textfile="$home/emit-$generation-$kind.txt"
+  write_text "$textfile" "$text"
+  if [ -n "$title" ] && [ -n "$state" ]; then
+    home_env "$home" "$EMIT" --request-id "$rid" --kind "$kind" --generation "$generation" \
+      --text-file "$textfile" --thread-title "$title" --thread-state "$state"
+  elif [ -n "$title" ]; then
+    home_env "$home" "$EMIT" --request-id "$rid" --kind "$kind" --generation "$generation" \
+      --text-file "$textfile" --thread-title "$title"
+  elif [ -n "$state" ]; then
+    home_env "$home" "$EMIT" --request-id "$rid" --kind "$kind" --generation "$generation" \
+      --text-file "$textfile" --thread-state "$state"
+  else
+    home_env "$home" "$EMIT" --request-id "$rid" --kind "$kind" --generation "$generation" \
+      --text-file "$textfile"
+  fi
+}
+
 deliver() {
   local home=$1
   shift
@@ -105,10 +124,16 @@ posted = []
 def send(payload):
     posted.append({"thread": payload["thread_id"], "text": payload["text"]})
     return {"ok": True, "discord_message_id": "9%09d" % len(posted)}
-results = outbox_poster.drain_outbox(send=send, home=home, create_thread=fake_create)
+renames = []
+def fake_rename(thread_id, name):
+    renames.append({"rename": [thread_id, name]})
+    return {"ok": True, "thread_id": thread_id}
+results = outbox_poster.drain_outbox(send=send, home=home, create_thread=fake_create, rename_thread=fake_rename)
 print("results=" + ",".join(sorted(results)))
 for entry in sends:
     print("thread-create=%s" % "/".join(entry["create"]))
+for entry in renames:
+    print("thread-rename=%s" % "/".join(entry["rename"]))
 for entry in posted:
     print("posted-to=%s %s" % (entry["thread"], entry["text"]))
 PY
@@ -125,8 +150,10 @@ test_1_top_level_replies_share_one_thread() {
   home="$TMP_ROOT/c1"
   setup_home "$home"
   slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
-  [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "$(expected_topic "$MESSAGE")" ] \
-    || fail "the destination context must carry the public-safe topic name"
+  [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "ship the login fix" ] \
+    || fail "the destination context must carry the request-text topic name"
+  [ "$(jq -r '.request_text' "$home/state/ext-context/$slug.json")" = "ship the login fix" ] \
+    || fail "the destination context must carry the request text for re-derivation"
   write_text "$home/ack.txt" "On it."
   write_text "$home/ans.txt" "All shipshape."
   write_text "$home/fol.txt" "Halfway there."
@@ -140,7 +167,7 @@ test_1_top_level_replies_share_one_thread() {
   home_env "$home" "$EMIT" --request-id "$RID" --kind final --generation 1 \
     --text-file "$home/fin.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
-  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/$(expected_topic "$MESSAGE")" \
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/ship the login fix" \
     "the first reply must create one thread on the request message"
   creates=$(printf '%s\n' "$out" | grep -c '^thread-create=')
   [ "$creates" = 1 ] || fail "one request must create exactly one thread, got $creates"
@@ -220,7 +247,7 @@ test_3_thread_failure_falls_back_without_loss() {
   home_env "$home" "$EMIT" --request-id "$RID" --kind final --generation 1 \
     --text-file "$home/fin.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
-  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/$(expected_topic "$MESSAGE")" \
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/ship the docs fix" \
     "a later generation must retry the thread create"
   assert_contains "$out" "posted-to=777777777777777777 Done for real." \
     "the retried reply must post into the new thread"
@@ -229,9 +256,10 @@ test_3_thread_failure_falls_back_without_loss() {
   pass "3 a thread-create failure falls back without losing the reply"
 }
 
-# --- 4. topic names stay bounded and public-safe; threads admit nobody ------
+# --- 4. request-text names stay bounded; threads admit nobody ---------------
 #
-# Thread names keep the bounded sanitized form, and a thread message from an
+# Thread names use the request's first line with Discord tokens stripped and
+# cut to 90 characters on a word boundary, and a thread message from an
 # author the allowlist refuses is still ignored: the thread never widens who
 # may instruct Firstmate.
 
@@ -239,20 +267,24 @@ test_4_topic_names_bounded_and_threads_admit_nobody() {
   local home slug topic out
   home="$TMP_ROOT/c4"
   setup_home "$home"
-  slug=$(intake_as "$home" "Fix login BUG #42: see /home/u/secret TOKEN=abc host-1.2.3.4!!!   " "$MESSAGE" "$CHANNEL" message)
+  slug=$(intake_as "$home" "where are we on ic release?" "$MESSAGE" "$CHANNEL" message)
   topic=$(jq -r '.topic' "$home/state/ext-context/$slug.json")
-  [ "$topic" = "$(expected_topic "$MESSAGE")" ] \
-    || fail "only a fixed label and source time may appear, got $topic"
-  slug=$(intake_as "$home" "please approve release plan" 555555555555555556 "$CHANNEL" message)
+  [ "$topic" = "where are we on ic release?" ] \
+    || fail "the first line must name the thread, got $topic"
+  slug=$(intake_as "$home" "<@111111111111111111> status <#222222222222222222> <:wave:333> please" 555555555555555556 "$CHANNEL" message)
   topic=$(jq -r '.topic' "$home/state/ext-context/$slug.json")
-  [ "$topic" = "$(expected_topic 555555555555555556)" ] \
-    || fail "a private phrase must yield exactly the fixed fallback and source time, got $topic"
-  slug=$(intake_as "$home" "$(printf 'w%.0s' $(seq 1 200))" 555555555555555557 "$CHANNEL" message)
-  [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "$(expected_topic 555555555555555557)" ] \
-    || fail "a request with no label match must fall back"
+  [ "$topic" = "status please" ] \
+    || fail "mention, channel, and emoji tokens must be stripped, got $topic"
+  slug=$(intake_as "$home" "$(printf 'word %.0s' $(seq 1 60))" 555555555555555557 "$CHANNEL" message)
+  topic=$(jq -r '.topic' "$home/state/ext-context/$slug.json")
+  [ "${#topic}" -le 90 ] || fail "a long first line must be cut to 90 characters, got ${#topic}"
+  case "$topic" in
+    *…) ;;
+    *) fail "a cut name must end in …, got $topic" ;;
+  esac
   slug=$(intake_as "$home" "!!! ???" 555555555555555558 "$CHANNEL" message)
   [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "$(expected_topic 555555555555555558)" ] \
-    || fail "punctuation alone must fall back"
+    || fail "punctuation alone must fall back to label plus time"
   out=$(GUILD="$GUILD" CHANNEL="$CHANNEL" THREAD="$THREAD" AUTHOR="$DENIED" \
     PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$ROOT" <<'PY'
 import os, sys
@@ -282,7 +314,7 @@ PY
   assert_contains "$out" "action=skip" "a refused thread message must stay withheld from the general agent"
   assert_contains "$out" "inbox=4" "earlier requests stay; only the refused message must add nothing"
   assert_contains "$out" "refused=False" "a refused thread message must record no request: the thread never widens the allowlist"
-  pass "4 topic names stay bounded and public-safe; threads admit nobody"
+  pass "4 request-text names stay bounded; threads admit nobody"
 }
 
 test_5_thread_record_expires_with_retention() {
@@ -294,7 +326,7 @@ test_5_thread_record_expires_with_retention() {
   home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
     --text-file "$home/ans.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
-  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/$(expected_topic "$MESSAGE")" \
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/ship the login fix" \
     "the reply must create the thread first"
   [ -f "$home/state/ext-outbox/$slug.thread.json" ] \
     || fail "the thread id must be recorded request-wide"
@@ -322,22 +354,22 @@ test_5_thread_record_expires_with_retention() {
   pass "5 the thread record expires with retention"
 }
 
-test_6_sensitive_tokens_never_name_threads() {
-  local home slug text out message=700000000000000000
-  for text in ship-login-fix password=please-approve-release-plan 'fix1 login/fix login\fix login_fix login.fix login:fix login@fix'; do
+test_6_tampered_names_fall_back_and_titles_are_screened() {
+  local home slug out message=700000000000000000 text
+  for text in "ship the login fix" "where are we on ic release?"; do
     message=$((message + 1))
     home="$TMP_ROOT/c6-$message"
     setup_home "$home"
     slug=$(intake_as "$home" "$text" "$message" "$CHANNEL" message)
-    [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "$(expected_topic "$message")" ] \
-      || fail "sensitive tokens must yield the neutral topic"
+    [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "$text" ] \
+      || fail "the request text must name the thread"
     write_text "$home/ans.txt" "Noted."
     home_env "$home" "$EMIT" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${message}" \
       --kind answer --generation 1 --text-file "$home/ans.txt" >/dev/null
     out=$(deliver "$home")
-    assert_contains "$out" "thread-create=$CHANNEL/$message/$(expected_topic "$message")" \
-      "sensitive request tokens must not reach the creator"
-    if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$text" "$(expected_topic "$message")" <<'PY'
+    assert_contains "$out" "thread-create=$CHANNEL/$message/$text" \
+      "the request text must reach the creator"
+    if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$text" <<'PY'
 import io, json, os, sys
 from pathlib import Path
 from unittest.mock import patch
@@ -345,20 +377,36 @@ import outbox_poster as poster
 home, slug, text = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 context_path = home / "state/ext-context" / (slug + ".json")
 payload = json.loads(context_path.read_text())
-payload["topic"] = "fm " + text
+payload["topic"] = "tampered thread name"
 context_path.write_text(json.dumps(payload))
-assert poster.thread_name_for(payload, home) == sys.argv[4]
+assert poster.thread_name_for(payload, home) == text
 os.environ["DISCORD_BOT_TOKEN"] = "fixture"
 def respond(request, **kwargs):
-    assert json.loads(request.data)["name"] == sys.argv[4]
+    assert json.loads(request.data)["name"] == text
     return io.BytesIO(b'{"id":"777777777777777777"}')
 with patch.object(poster.urllib.request, "urlopen", respond):
-    assert poster.discord_create_thread(payload, text)["thread_id"] == "777777777777777777"
+    assert poster.discord_create_thread(payload, "tampered thread name")["thread_id"] == "777777777777777777"
 PY
-then fail "poster and API must enforce fixed-label safety"
+then fail "a tampered stored name must fall back to the re-derived one"
 fi
   done
-  pass "6 sensitive tokens never name threads"
+  # Firstmate's title is screened at emit: unsafe titles never reach a payload.
+  home="$TMP_ROOT/c6-title"
+  setup_home "$home"
+  slug=$(intake_as "$home" "ship the login fix" "$message" "$CHANNEL" message)
+  write_text "$home/ans.txt" "Noted."
+  for bad in "fix fm-ship-login now" "see host.example.com here" "check /home/u/x now"; do
+    if home_env "$home" "$EMIT" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${message}" \
+      --kind answer --generation 9 --text-file "$home/ans.txt" --thread-title "$bad" >/dev/null 2>&1; then
+      fail "an unsafe title must be refused by emit: $bad"
+    fi
+  done
+  if home_env "$home" "$EMIT" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${message}" \
+    --kind answer --generation 9 --text-file "$home/ans.txt" \
+    --thread-title "$(printf 'T%.0s' $(seq 1 61))" >/dev/null 2>&1; then
+    fail "an over-long title must be refused by emit"
+  fi
+  pass "6 tampered names fall back and titles are screened"
 }
 
 test_7_resumed_chunks_keep_their_destination() {
@@ -468,6 +516,8 @@ created = False
 posted = []
 def respond(request, **kwargs):
     global created
+    if request.get_method() == "GET":
+        return io.BytesIO(json.dumps({"id": payload["message_id"], "name": "ship login fix"}).encode())
     barrier.wait(timeout=30)
     with lock:
         if created:
@@ -545,22 +595,326 @@ fi
   pass "10 outside-channel replies keep their route"
 }
 
-test_11_fixed_labels_and_message_time() {
-  local home out clock
+test_11_titles_win_and_empty_falls_back_to_label_time() {
+  local home out clock stored
   home="$TMP_ROOT/c11"
   setup_home "$home"
+  write_text "$home/req.txt" "where are we on ic release?"
+  write_text "$home/title.txt" "Aceh · ingestion status"
+  out=$(home_env "$home" "$ROOT/bin/fm-ext-topic.sh" \
+    --text-file "$home/req.txt" --origin message --thread-id "$CHANNEL" --channel-id "$CHANNEL" \
+    --message-id "$MESSAGE" --title-file "$home/title.txt")
+  [ "$out" = "Aceh · ingestion status" ] || fail "a valid title must win over the request text, got $out"
+  write_text "$home/bad.txt" "fix fm-ship-login now"
+  out=$(home_env "$home" "$ROOT/bin/fm-ext-topic.sh" \
+    --text-file "$home/req.txt" --origin message --thread-id "$CHANNEL" --channel-id "$CHANNEL" \
+    --message-id "$MESSAGE" --title-file "$home/bad.txt")
+  [ "$out" = "where are we on ic release?" ] || fail "an unsafe title must fall through to the request text, got $out"
+  printf '   \n  \n' > "$home/empty.txt"
+  out=$(home_env "$home" "$ROOT/bin/fm-ext-topic.sh" \
+    --text-file "$home/empty.txt" --origin message --thread-id "$CHANNEL" --channel-id "$CHANNEL" \
+    --message-id "$MESSAGE")
   clock=$(expected_topic "$MESSAGE")
-  clock=${clock#Firstmate request }
-  for label in Aceh InfoConnect Firstmate Question; do
-    out=$(printf '%s' "$label private release plan" | home_env "$home" "$ROOT/bin/fm-ext-topic.sh" \
-      --text-file - --origin message --thread-id "$CHANNEL" --channel-id "$CHANNEL" --message-id "$MESSAGE")
-    [ "$out" = "$label $clock" ] || fail "matching must select exactly a fixed label and message time"
-  done
+  [ "$out" = "$clock" ] || fail "an empty request must fall back to label plus time, got $out"
+  write_text "$home/stored.txt" "Aceh · ingestion status"
+  out=$(home_env "$home" "$ROOT/bin/fm-ext-topic.sh" \
+    --text-file "$home/req.txt" --origin message --thread-id "$CHANNEL" --channel-id "$CHANNEL" \
+    --message-id "$MESSAGE" --title-file "$home/title.txt" --validate-name --stored-file "$home/stored.txt")
+  [ "$out" = "Aceh · ingestion status" ] || fail "a valid stored title must validate, got $out"
+  write_text "$home/tampered.txt" "tampered name"
+  out=$(home_env "$home" "$ROOT/bin/fm-ext-topic.sh" \
+    --text-file "$home/req.txt" --origin message --thread-id "$CHANNEL" --channel-id "$CHANNEL" \
+    --message-id "$MESSAGE" --title-file "$home/title.txt" --validate-name --stored-file "$home/tampered.txt")
+  [ "$out" = "Aceh · ingestion status" ] || fail "a tampered stored name must fall back, got $out"
+  stored=$(expected_topic "$MESSAGE")
+  write_text "$home/legacy.txt" "$stored"
+  out=$(home_env "$home" "$ROOT/bin/fm-ext-topic.sh" \
+    --text-file "$home/req.txt" --origin message --thread-id "$CHANNEL" --channel-id "$CHANNEL" \
+    --message-id "$MESSAGE" --validate-name --stored-file "$home/legacy.txt")
+  [ "$out" = "$stored" ] || fail "a legacy label-plus-time name must still validate, got $out"
   rm "$home/config/ext-channel"
   out=$(printf 'Aceh' | home_env "$home" "$ROOT/bin/fm-ext-topic.sh" \
     --text-file - --origin message --thread-id "$CHANNEL" --channel-id "$CHANNEL" --message-id "$MESSAGE")
   [ -z "$out" ] || fail "an unconfigured dedicated channel must create no topic"
-  pass "11 fixed labels use the source message MYT time"
+  pass "11 titles win and empty requests fall back to label plus time"
+}
+
+test_12_title_creates_and_states_rename() {
+  local home slug out
+  home="$TMP_ROOT/c12"
+  setup_home "$home"
+  slug=$(intake_as "$home" "where are we on ic release?" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "The release is green." "Aceh · ingestion status" "" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/Aceh · ingestion status" \
+    "a first reply with a title must create the thread with exactly that name"
+  emit_as "$home" "$RID" followup 2 "Waiting on your call." "" "needs-you" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · ingestion status" \
+    "needs-you must prefix the existing thread"
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
+    || fail "a state change must not create a second thread: $out"
+  emit_as "$home" "$RID" followup 3 "Still waiting." "" "needs-you" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-rename=')" = 0 ] \
+    || fail "an unchanged name must make no rename call: $out"
+  emit_as "$home" "$RID" final 4 "Landed." "" "done" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · ingestion status" \
+    "done must swap the marker"
+  emit_as "$home" "$RID" followup 5 "Reopened." "" "none" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · ingestion status" \
+    "none must restore the bare name"
+  emit_as "$home" "$RID" followup 6 "Late title." "InfoConnect · other" "" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
+    || fail "a later title must not create a second thread: $out"
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-rename=')" = 0 ] \
+    || fail "a later title without a state must not rename: $out"
+  pass "12 a title creates the thread and states rename it"
+}
+
+test_13_rename_never_blocks_and_never_leaves_home() {
+  local home slug out
+  home="$TMP_ROOT/c13"
+  setup_home "$home"
+  slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "On it." "" "needs-you" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","fail":true}')
+  assert_contains "$out" "results=sent" "a failed create with a state must still deliver the reply"
+  assert_contains "$out" "posted-to=$CHANNEL On it." "the fallback must post in place"
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-rename=')" = 0 ] \
+    || fail "no thread means no rename: $out"
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
+base = {"request_id": context["request_id"], "slug": slug, "origin": "message",
+        "channel_id": context["channel_id"], "thread_id": context["thread_id"],
+        "message_id": context["message_id"], "thread_state": "done"}
+calls = []
+def boom(thread_id, name):
+    calls.append(name)
+    raise RuntimeError("discord 429 rate limited")
+poster.save_request_thread(base, "777777777777777777", home, topic_name="ship the login fix")
+assert poster.maybe_rename_topic_thread(base, "777777777777777777", home, rename_thread=boom) == "777777777777777777"
+assert calls == ["✅ ship the login fix"]
+slash = dict(base, origin="slash")
+calls.clear()
+assert poster.maybe_rename_topic_thread(slash, "777777777777777777", home, rename_thread=boom) == "777777777777777777"
+assert calls == []
+foreign = dict(base, thread_id="999999999999999999")
+assert poster.maybe_rename_topic_thread(foreign, "999999999999999999", home, rename_thread=boom) == "999999999999999999"
+assert calls == []
+inthread = dict(base, thread_id="333333333333333333")
+assert poster.maybe_rename_topic_thread(inthread, "333333333333333333", home, rename_thread=boom) == "333333333333333333"
+assert calls == []
+PY
+then fail "rename failures must be swallowed and foreign threads never renamed"
+fi
+  pass "13 renames never block delivery and never leave their thread"
+}
+
+
+test_14_legacy_titles_markers_and_long_tokens() {
+  local home slug legacy
+  home="$TMP_ROOT/c14"
+  setup_home "$home"
+  slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
+  legacy=$(expected_topic "$MESSAGE")
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$legacy" <<'PY'
+import io, json, os, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+home, slug, legacy = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+context_path = home / "state/ext-context" / (slug + ".json")
+context = json.loads(context_path.read_text())
+context["topic"] = legacy
+payload = dict(context, thread_title="Aceh · ingestion status")
+context["request_text"] = "!!! ???"
+context_path.write_text(json.dumps(context))
+assert poster.thread_name_for(payload, home) == payload["thread_title"]
+assert poster.public_topic_name(payload, legacy, home, "!!! ???", payload["thread_title"]) == payload["thread_title"]
+os.environ["DISCORD_BOT_TOKEN"] = "fixture"
+expected = payload["thread_title"]
+def respond(request, **kwargs):
+    assert json.loads(request.data)["name"] == expected
+    return io.BytesIO(b'{"id":"777777777777777777"}')
+with patch.object(poster.urllib.request, "urlopen", respond):
+    assert poster.discord_create_thread(payload, legacy)["thread_id"] == "777777777777777777"
+payload.pop("thread_title")
+(home / "state/ext-inbox" / (slug + ".json")).unlink()
+for text in (None, "ship the login fix"):
+    if text is None:
+        context.pop("request_text")
+    else:
+        context["request_text"] = text
+    context_path.write_text(json.dumps(context))
+    expected = legacy
+    assert poster.thread_name_for(payload, home) == legacy
+    with patch.object(poster.urllib.request, "urlopen", respond):
+        assert poster.discord_create_thread(payload, legacy)["thread_id"] == "777777777777777777"
+    attempts = []
+    def create(request, name):
+        attempts.append(name)
+        if len(attempts) == 1:
+            raise RuntimeError("retry later")
+        return {"thread_id": "777777777777777777"}
+    assert poster.ensure_topic_thread(payload, {}, home, create) == ""
+    assert poster.ensure_topic_thread(payload, {}, home, create) == "777777777777777777"
+    assert attempts == [legacy, legacy]
+    renames = []
+    for state, prefix in (("needs-you", "❓ "), ("done", "✅ "), ("none", "")):
+        marked = dict(payload, thread_state=state)
+        assert poster.maybe_rename_topic_thread(marked, "777777777777777777", home,
+            rename_thread=lambda tid, name: renames.append(name)) == "777777777777777777"
+        assert renames[-1] == prefix + legacy
+        assert poster.thread_name_for(marked, home) == legacy
+    poster.request_progress_path(payload, home).unlink()
+for text in ("x" * 91, "x" * 89 + " next", "first " + "x" * 90):
+    text_path = home / "long.txt"
+    text_path.write_text(text)
+    result = subprocess.run([str(poster.firstmate_root() / "bin/fm-ext-topic.sh"),
+        "--text-file", str(text_path), "--origin", "message", "--thread-id", payload["thread_id"],
+        "--channel-id", payload["channel_id"], "--message-id", payload["message_id"]],
+        capture_output=True, text=True, check=True)
+    name = result.stdout.strip()
+    assert len(name) <= 90 and name.endswith("…"), name
+    if text.startswith("first "):
+        assert name == "first…"
+PY
+  then fail "legacy names, title precedence, marker stability, and length must hold"
+  fi
+  pass "14 legacy titles and markers stay stable and long tokens fit"
+}
+
+test_15_existing_threads_keep_the_winning_name() {
+  local home slug legacy
+  home="$TMP_ROOT/c15"
+  setup_home "$home"
+  slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
+  legacy=$(expected_topic "$MESSAGE")
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$legacy" <<'PY'
+import io, json, os, sys
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+home, slug, legacy = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+context_path = home / "state/ext-context" / (slug + ".json")
+context = json.loads(context_path.read_text())
+context["topic"] = legacy
+context.pop("request_text")
+context_path.write_text(json.dumps(context))
+payload = dict(context, thread_title="Aceh · later title", thread_state="done")
+thread_id = payload["message_id"]
+poster.save_request_thread(payload, thread_id, home)
+renames = []
+assert poster.thread_name_for(payload, home) == legacy
+poster.maybe_rename_topic_thread(payload, thread_id, home,
+    rename_thread=lambda tid, name: renames.append(name))
+assert renames == ["✅ " + legacy]
+poster.request_progress_path(payload, home).unlink()
+context["request_text"] = "ship the login fix"
+context["topic"] = context["request_text"]
+context_path.write_text(json.dumps(context))
+os.environ["DISCORD_BOT_TOKEN"] = "fixture"
+def lost_create(request, name):
+    assert name == payload["thread_title"]
+    raise poster.DiscordSendError("permanent", "already exists", 400, {"code": 160004})
+with patch.object(poster.urllib.request, "urlopen", side_effect=OSError("offline")):
+    assert poster.ensure_topic_thread(payload, {}, home, lost_create) == thread_id
+assert not poster.load_request_topic(payload, home)
+renames.clear()
+poster.maybe_rename_topic_thread(payload, thread_id, home,
+    rename_thread=lambda tid, name: renames.append(name))
+assert renames == []
+for winner in ("InfoConnect · winning title", "❓ InfoConnect · winning title", "ship the login fix"):
+    def read_thread(request, **kwargs):
+        assert request.get_method() == "GET"
+        assert request.full_url.endswith("/channels/" + thread_id)
+        return io.BytesIO(json.dumps({"id": thread_id, "name": winner}).encode())
+    with patch.object(poster.urllib.request, "urlopen", read_thread):
+        assert poster.ensure_topic_thread(payload, {}, home, lost_create) == thread_id
+    assert poster.load_request_topic(payload, home)["topic_name"] == winner
+    renames.clear()
+    for state, prefix in (("done", "✅ "), ("needs-you", "❓ "), ("none", "")):
+        marked = dict(payload, thread_state=state)
+        poster.maybe_rename_topic_thread(marked, thread_id, home,
+            rename_thread=lambda tid, name: renames.append(name))
+        assert renames[-1] == prefix + poster.state_thread_name(winner, "none")
+    poster.request_progress_path(payload, home).unlink()
+PY
+  then fail "existing threads must retain their original or winning names"
+  fi
+  pass "15 existing threads keep the winning name"
+}
+
+test_16_shared_title_screen_and_nickname_mentions() {
+  local home slug
+  home="$TMP_ROOT/c16"
+  setup_home "$home"
+  slug=$(intake_as "$home" "<@!80351110224678912> release status" "$MESSAGE" "$CHANNEL" message)
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import io, json, os, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
+assert context["topic"] == "release status"
+assert poster.thread_name_for(context, home) == "release status"
+root = poster.firstmate_root()
+reply = home / "reply.txt"
+reply.write_text("Noted.")
+os.environ["DISCORD_BOT_TOKEN"] = "fixture"
+expected = "release status"
+def respond(request, **kwargs):
+    assert json.loads(request.data)["name"] == expected
+    return io.BytesIO(b'{"id":"777777777777777777"}')
+bad_titles = ("Firstmate · inspect /srv/private:", "Firstmate · inspect (/srv/private)",
+              'Firstmate · inspect "/srv/private"', "Firstmate · inspect [./private]",
+              "Firstmate · inspect (~/.secret)", "T" * 61, "Firstmate\nprivate",
+              "Firstmate · secret=hidden", "!!! ???")
+for generation, title in enumerate(bad_titles, 1):
+    checked = subprocess.run(["bash", str(root / "bin/fm-ext-topic.sh"),
+        "--check-title", "--title-file", "-"], input=title, capture_output=True, text=True)
+    assert checked.returncode != 0 and not checked.stdout, title
+    emitted = subprocess.run(["bash", str(root / "bin/fm-ext-emit.sh"),
+        "--request-id", context["request_id"], "--kind", "answer", "--generation", str(generation),
+        "--text-file", str(reply), "--thread-title", title], capture_output=True, text=True)
+    assert emitted.returncode != 0, title
+    assert not (home / "state/ext-outbox" / f"{slug}.answer.{generation}.json").exists()
+    payload = dict(context, thread_title=title)
+    assert poster.thread_name_for(payload, home) == "release status", title
+    with patch.object(poster.urllib.request, "urlopen", respond):
+        assert poster.discord_create_thread(payload, title)["thread_id"] == "777777777777777777"
+    poster.save_request_thread(payload, "777777777777777777", home,
+        topic_name=title, creating_title=title)
+    renames = []
+    poster.maybe_rename_topic_thread(dict(payload, thread_state="done"), "777777777777777777", home,
+        rename_thread=lambda tid, name: renames.append(name))
+    assert renames == ["✅ release status"], title
+    poster.request_progress_path(payload, home).unlink()
+title = "  Firstmate · release status  "
+checked = subprocess.run(["bash", str(root / "bin/fm-ext-topic.sh"),
+    "--check-title", "--title-file", "-"], input=title, capture_output=True, text=True, check=True)
+expected = checked.stdout.strip()
+subprocess.run(["bash", str(root / "bin/fm-ext-emit.sh"), "--request-id", context["request_id"],
+    "--kind", "answer", "--generation", "99", "--text-file", str(reply), "--thread-title", title],
+    capture_output=True, text=True, check=True)
+emitted = json.loads((home / "state/ext-outbox" / f"{slug}.answer.99.json").read_text())
+assert emitted["thread_title"] == expected == "Firstmate · release status"
+assert poster.thread_name_for(emitted, home) == expected
+with patch.object(poster.urllib.request, "urlopen", respond):
+    assert poster.discord_create_thread(emitted, expected)["thread_id"] == "777777777777777777"
+PY
+  then fail "the shared title screen and nickname mention stripping must agree"
+  fi
+  pass "16 emit and poster share title validation and strip nickname mentions"
 }
 
 test_1_top_level_replies_share_one_thread
@@ -569,12 +923,17 @@ test_3_thread_failure_falls_back_without_loss
 test_4_topic_names_bounded_and_threads_admit_nobody
 test_5_thread_record_expires_with_retention
 
-test_6_sensitive_tokens_never_name_threads
+test_6_tampered_names_fall_back_and_titles_are_screened
 test_7_resumed_chunks_keep_their_destination
 test_8_pending_skips_thread_records
 
 test_9_concurrent_generations_reuse_existing_thread
 test_10_outside_channel_keeps_its_route
-test_11_fixed_labels_and_message_time
+test_11_titles_win_and_empty_falls_back_to_label_time
+test_12_title_creates_and_states_rename
+test_13_rename_never_blocks_and_never_leaves_home
+test_14_legacy_titles_markers_and_long_tokens
+test_15_existing_threads_keep_the_winning_name
+test_16_shared_title_screen_and_nickname_mentions
 
 echo "all fm-ext-topic-threads tests passed"
