@@ -217,7 +217,7 @@ sent_text() {  # <stem>
 post_content() {
   if settled "$1"; then
     settle_text "$1"
-  elif sent "$1"; then
+  elif sent "$1" && request_published "$(sent_field "$1" '.request_id')"; then
     sent_text "$1"
   fi
 }
@@ -253,6 +253,7 @@ newer_post() {
 answer_option() {
   local stem=$1 answer=$2 ids='' word id label
   local -a words
+  answer=${answer%%" (Discord button:"*}
   [ -n "$answer" ] || return 0
   read -r -a words <<< "$(printf '%s' "$answer" | LC_ALL=C tr -c '[:alnum:]' ' ')"
   for word in "${words[@]+"${words[@]}"}"; do
@@ -331,21 +332,43 @@ settle_if_closed() {
 # filed from the thread the post lives in so Firstmate answers it there, like
 # a typed message in that thread. The request id is fixed by its caller, so
 # sending it again files nothing new.
-send_request() {
-  local stem=$1 message=$2 dir rc request rest guild channel thread
-  request=$(post_field "$stem" '.request_id')
+request_published() {
+  [ -n "$1" ] && [ -f "$(fm_ext_inbox_dir)/$(fm_ext_request_slug "$1").json" ]
+}
+
+request_id() {
+  local request rest guild channel thread
+  request=$(post_field "$1" '.request_id')
   rest=${request#discord:}
   guild=${rest%%:*}
   rest=${rest#*:}
   channel=${rest%%:*}
-  thread=$(post_thread "$stem") || return 1
+  thread=$(post_thread "$1") || return 1
+  printf 'discord:%s:%s:%s:%s\n' "$guild" "$channel" "$thread" "$2"
+}
+
+send_request() {
+  local stem=$1 message=$2 dir rc request rest guild channel thread inbox author=$AUTHOR text=$3 decision=$4
+  request=$(request_id "$stem" "$message") || return 1
+  rest=${request#discord:}
+  guild=${rest%%:*}
+  rest=${rest#*:}
+  channel=${rest%%:*}
+  rest=${rest#*:}
+  thread=${rest%%:*}
+  inbox="$(fm_ext_inbox_dir)/$(fm_ext_request_slug "$request").json"
+  if [ -f "$inbox" ]; then
+    author=$(jq -r '.author' "$inbox") || return 1
+    text=$(jq -r '.text' "$inbox") || return 1
+    decision=$(jq -c '.decision' "$inbox") || return 1
+  fi
   dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-ext-decision.XXXXXX") || return 1
-  printf '%s\n' "$3" > "$dir/text"
-  printf '%s\n' "$4" > "$dir/decision.json"
+  printf '%s\n' "$text" > "$dir/text"
+  printf '%s\n' "$decision" > "$dir/decision.json"
   "$SCRIPT_DIR/fm-ext-intake.sh" \
-    --request-id "discord:$guild:$channel:$thread:$message" \
+    --request-id "$request" \
     --guild-id "$guild" --channel-id "$channel" --thread-id "$thread" \
-    --message-id "$message" --author "$AUTHOR" --secret-file "$SECRET_FILE" \
+    --message-id "$message" --author "$author" --secret-file "$SECRET_FILE" \
     --text-file "$dir/text" --origin button --decision-file "$dir/decision.json" >/dev/null 2>&1
   rc=$?
   rm -rf -- "$dir"
@@ -410,6 +433,13 @@ command_click() {
     notice 4 "Already decided: $(settle_text "$stem") - this click changed nothing."
   fi
   if sent "$stem"; then
+    request=$(sent_field "$stem" '.request_id')
+    if request_published "$request" && ! fm_ext_private_artifact_file_valid "$(fm_ext_context_dir)" "$(fm_ext_request_slug "$request").offered.json" 600; then
+      if send_request "$stem" "${request##*:}" '' '{}'; then
+        notice 0 "Sent: $(sent_field "$stem" '.option'). Firstmate will record it, and the post updates when it does."
+      fi
+      notice 0 "Sent: $(sent_field "$stem" '.option'). The request is filed, but notification needs recovery; retry this click to notify Firstmate."
+    fi
     notice 4 "Already sent: $(sent_text "$stem"). This click changed nothing."
   fi
   settle_if_closed "$stem"
@@ -433,7 +463,12 @@ command_click() {
     # Keyed by the post, so a repeat click files nothing new.
     send_request "$stem" "$POST_ID" \
       "Discuss requested on a decision post: talk it through before anything is decided." \
-      "$choice_json" || die "could not send the Discuss request; nothing was decided" 1
+      "$choice_json" || {
+        if request_published "$(request_id "$stem" "$POST_ID")"; then
+          notice 0 "Discuss request filed, but notification needs recovery; retry Discuss to notify Firstmate. Nothing was decided."
+        fi
+        die "could not send the Discuss request; nothing was decided" 1
+      }
     notice 0 "Firstmate will pick this up in the thread. Nothing was decided."
   fi
 
@@ -448,10 +483,10 @@ command_click() {
   # One click per post: the claim is the double-click guard, and it is released
   # again if the request cannot be filed, so nothing is ever claimed unsent.
   jq -cn --argjson option_id "$OPTION" --arg option "$label" --arg by "$name" --arg author "$AUTHOR" \
-    --arg interaction "$INTERACTION_ID" --argjson at "$NOW" \
+    --arg interaction "$INTERACTION_ID" --arg request_id "$(request_id "$stem" "$INTERACTION_ID")" --argjson at "$NOW" \
     --argjson confirmed "$([ "$confirmed" = 1 ] && echo true || echo false)" \
     '{option_id:$option_id, option:$option, by:$by, author:$author, interaction:$interaction,
-      at:$at, confirmed:$confirmed}' \
+      at:$at, confirmed:$confirmed, request_id:$request_id}' \
     | fm_ext_private_artifact_publish_stdin_once "$OUTBOX" "$stem.sent.json" 600
   rc=$?
   case "$rc" in
@@ -474,6 +509,9 @@ command_click() {
     text="Decision answer by button: $label"
   fi
   if [ -z "$choice_json" ] || ! send_request "$stem" "$INTERACTION_ID" "$text" "$choice_json"; then
+    if request_published "$(sent_field "$stem" '.request_id')"; then
+      notice 0 "Sent: $label. The request is filed, but notification needs recovery; retry this click to notify Firstmate."
+    fi
     fm_ext_private_artifact_remove "$OUTBOX" "$stem.sent.json" 600 || true
     die "could not send the click to Firstmate; nothing was sent" 1
   fi

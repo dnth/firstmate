@@ -506,13 +506,22 @@ test_3_captain_call_click_is_a_request_the_board_records() {
   home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open "$id-5" >/dev/null \
     || fail "the queued request closed the re-held captain call"
 
+  (cd "$home" && tasks-axi add "$id-6" "Pick a sixth route" --kind captain --repo sample >/dev/null) || fail "could not create the sixth call"
+  FM_CAPTAIN_HOLD_NOW=2026-10-11T10:00:00Z home_env "$home" "$ROOT/bin/fm-captain-hold.sh" hold "$id-6" --reason "route pending" --repo sample >/dev/null || fail "could not hold the sixth call"
+  emit_decision "$home" 6 '{"key":"hold:'"$id"'-6","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
+  deliver "$home" 700000000000000010
+  printf 'South\n' > "$home/answer.txt"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" answer "$id-6" --decision-file "$home/answer.txt" --release >/dev/null || fail "could not release the sixth call"
+  FM_CAPTAIN_HOLD_NOW=2026-10-11T11:00:00Z home_env "$home" "$ROOT/bin/fm-captain-hold.sh" hold "$id-6" --reason "new question" --repo sample >/dev/null || fail "could not re-hold the sixth call"
+  (cd "$home" && tasks-axi 'done' "$id-6" >/dev/null) || fail "could not close the sixth call without answering"
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
   printf '%s\n' "$out" | jq -se '
     (map({(.message): .content}) | add) as $shown
     | $shown["700000000000000001"] == "✅ South chosen by Dana <t:1791720000:f>"
       and $shown["700000000000000006"] == "✅ South chosen by the captain <t:1791720000:f>"
       and $shown["700000000000000007"] == "Closed - no longer needed <t:1791720000:f>"
-      and $shown["700000000000000008"] == "Closed - no longer needed <t:1791720000:f>"' \
+      and $shown["700000000000000008"] == "Closed - no longer needed <t:1791720000:f>"
+      and $shown["700000000000000010"] == "Closed - no longer needed <t:1791720000:f>"' \
     >/dev/null || fail "button, board, unanswered, and re-held calls must each show their own outcome: $out"
   pass "3 a captain-call click files a request the board records; board answers, unanswered closes, and re-holds show their own outcome"
 }
@@ -1074,6 +1083,69 @@ PY
   pass "12 a decision post in a request's topic thread takes clicks there, files them there, and is edited there"
 }
 
+test_13_published_requests_retry_the_original_identity() {
+  local home choice option interaction out record original request stem
+  for choice in option discuss; do
+    home="$TMP_ROOT/c13-$choice"
+    setup_home "$home"
+    open_request "$home"
+    open_key "$home" pick
+    emit_decision "$home" 1 '{"key":"'"$KEY"'","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
+    deliver "$home" "$POST"
+    mv "$home/state/ext-context" "$home/state/ext-context.saved"
+    : > "$home/state/ext-context"
+    option=2
+    [ "$choice" != discuss ] || option=d
+    interaction=880000000000000091
+    out=$(click "$home" "fmd:$KEY:$option" "$CAPTAIN" "$interaction")
+    assert_contains "$out" "notification needs recovery" "a published request must not be reported unsent"
+    original=$(button_request "$home" "$choice") || fail "intake did not publish before context failed"
+    request=$(jq -r '.request_id' <<<"$original")
+    if [ "$choice" = option ]; then
+      stem=$(basename "$(ls "$home"/state/ext-outbox/*.sent.json)" .sent.json)
+      [ "$(jq -r '.request_id' "$home/state/ext-outbox/$stem.sent.json")" = "$request" ] || fail "the claim lost its request identity"
+      out=$(reconcile "$home" False)
+      assert_contains "$out" "South sent by Dana" "a published request must keep the post showing sent"
+      option=1
+    fi
+    out=$(click "$home" "fmd:$KEY:$option" "$CAPTAIN" 880000000000000092 "$POST" Other)
+    assert_contains "$out" "notification needs recovery" "a failed retry must preserve its durable request"
+    [ "$(button_requests "$home")" = 1 ] || fail "retry filed a second request"
+    rm "$home/state/ext-context"
+    mv "$home/state/ext-context.saved" "$home/state/ext-context"
+    out=$(click "$home" "fmd:$KEY:$option" "$CAPTAIN" 880000000000000093 "$POST" Other)
+    [ "$(button_requests "$home")" = 1 ] || fail "recovery filed a second request"
+    record=$(button_request "$home" "$choice")
+    [ "$record" = "$original" ] || fail "retry changed the original choice or audit"
+    [ -f "$home/state/ext-context/$(jq -r '.slug' <<<"$record").offered.json" ] || fail "retry did not offer the original request"
+    [ "$(resolved_lines "$home" pick)" = 0 ] || fail "retry recorded an answer itself"
+  done
+  pass "13 option and Discuss retries preserve published request identity and payload after notification failure"
+}
+
+test_14_audit_metadata_does_not_match_options() {
+  local home out record
+  home="$TMP_ROOT/c14"
+  setup_home "$home"
+  open_request "$home"
+  open_key "$home" merge
+  emit_decision "$home" 1 '{"key":"key:'"$TASK"':merge","options":[{"label":"Merge"},{"label":"Hold"}]}' >/dev/null
+  deliver "$home" "$POST"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmd:key:$TASK:merge:2" "$CAPTAIN" 880000000000000094)
+  assert_contains "$out" "Sent: Hold." "the Hold click was not sent"
+  record=$(button_request "$home" option)
+  [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "the Hold decision was not recorded"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
+  assert_contains "$out" "Hold chosen by Dana" "the audit's merge key must not match the Merge option"
+  open_key "$home" ambiguous-audit
+  emit_decision "$home" 2 '{"key":"key:'"$TASK"':ambiguous-audit","options":[{"label":"Merge"},{"label":"Hold"}]}' >/dev/null
+  deliver "$home" 700000000000000011
+  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key ambiguous-audit 'Decision answer: Merge or Hold (Discord button: option 2 Hold)' >/dev/null 2>&1 || fail "could not record the ambiguous answer"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
+  jq -e '.content == "✅ Decided <t:1791720000:f>"' <<<"$out" >/dev/null || fail "actual answer ambiguity must survive audit removal"
+  pass "14 option matching ignores appended audit metadata and retains actual answer ambiguity"
+}
+
 test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records
@@ -1086,3 +1158,6 @@ test_9_emit_refuses_unsafe_or_closed_decisions
 test_10_real_discord_client_routes_clicks
 test_11_unsent_click_releases_its_claim
 test_12_topic_thread_posts_take_clicks_there
+
+test_13_published_requests_retry_the_original_identity
+test_14_audit_metadata_does_not_match_options

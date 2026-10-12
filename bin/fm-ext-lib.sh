@@ -597,7 +597,7 @@ fm_ext_decision_key_occurrence() {
 #   unknown     its state cannot be read
 # Returns 1 only for a malformed key.
 fm_ext_decision_key_outcome() {
-  local key=$1 occurrence=${2:-} rest task slug file rc out mode answer count current
+  local key=$1 occurrence=${2:-} rest task slug file rc out mode answer count current stamp
   fm_ext_decision_key_valid "$key" || return 1
   case "$key" in
     hold:*)
@@ -624,10 +624,12 @@ fm_ext_decision_key_outcome() {
             1) printf 'superseded\t\n'; return 0 ;;
             *) printf 'unknown\t\n'; return 0 ;;
           esac
+          stamp=$(printf '%s\n' "$out" | sed -n '4p')
           mode=${out%%$'\n'*}
           out=${out#*$'\n'}
           answer=${out%%$'\n'*}
-          count=${out#*$'\n'}
+          out=${out#*$'\n'}
+          count=${out%%$'\n'*}
           # The post's call was answered once more than the count it was
           # posted at; any other count is a later lifecycle's record.
           if [ "$mode" = reconciled ]; then
@@ -635,6 +637,7 @@ fm_ext_decision_key_outcome() {
             return 0
           fi
           if [ -n "$occurrence" ]; then
+            [ -z "$stamp" ] || [ "$stamp" = "${occurrence%#*}" ] || { printf 'superseded\t\n'; return 0; }
             case "${occurrence##*#}" in
               ''|*[!0-9]*) printf 'superseded\t\n'; return 0 ;;
             esac

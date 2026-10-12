@@ -201,7 +201,8 @@
 # answer does), else the first paragraph of the recorded decision, and nothing
 # for a `reconciled` record, whose evidence is not the captain's words - and on
 # the third the count of resolution records, the same count `open --identity`
-# reports after its `#`. Exit 0 means a record was found, 1 means the task
+# reports after its `#`, then the surviving hold-set stamp on the fourth line.
+# Exit 0 means a record was found, 1 means the task
 # carries none, and 2 means the row could not be read. The local Discord bridge
 # uses it to show on a decision post which option an answer given elsewhere
 # chose, and the count to tell that post's call from a later re-hold.
@@ -2084,7 +2085,8 @@ command_answered() {  # <task-id>
         ;;
     esac
   fi
-  printf '%s\n%s\n%s\n' "$mode" "$answer" "$(resolution_record_count "$body")"
+  printf '%s\n%s\n%s\n%s\n' "$mode" "$answer" "$(resolution_record_count "$body")" \
+    "$(body_hold_set_timestamp "$decoded")"
 }
 
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
