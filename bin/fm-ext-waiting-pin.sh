@@ -106,11 +106,11 @@ import json, re, sys
 s = sys.stdin.read()
 value = json.loads(s) if s.startswith(chr(34)) else s
 value = value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " ")
-value = re.sub(r"\s*\((?:[^()]*\+\s*)?repo:\s*[^)]+\)", "", value)
+value = re.sub(r"\s*\(repo:\s*[^)]+\)\s*$", "", value)
 links = sys.argv[1]
 links = json.loads(links) if links.startswith(chr(34)) else links
 pr_targets = [link[3:] for link in links.split(",") if link.startswith("pr:")]
-artifact = r"\([^()]+\)\s+(?:https?://\S+|\S*/\S+|\S+\.md)"
+artifact = r"\((?:report|pr)\)\s+(?:https?://\S+|\S*/\S+|\S+\.md)"
 targets = [artifact, r"data/\S+?/report\.md"] + [re.escape(url) for url in pr_targets]
 value = re.sub(r"(?:\s+(?:" + "|".join(targets) + r"))+$", "", value)
 tokens = [t for t in value.split(" ") if not re.search(r"(?:data|state)/|/home/|\.md\b", t)]

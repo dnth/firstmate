@@ -183,7 +183,7 @@ SH
   pass "1c multiline titles remain single decisions in previews and publications"
 }
 test_1d_artifact_suffixes_render_title_only() {
-  local home out title fake
+  local home out title fake payload
   home="$TMP_ROOT/c1d"
   setup_home "$home"
   (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add artrep1 "Inspect system prompt and tool descriptions; find room for optimization" --repo kcc-chatbot --report data/artrep1/report.md >/dev/null) \
@@ -197,7 +197,7 @@ test_1d_artifact_suffixes_render_title_only() {
   hold_call "$home" plain1 "Decide the merge wording" "waiting on captain"
   hold_call "$home" plainurl "Approve https://example.com release" "waiting on captain"
   hold_call "$home" endurl "Review https://example.com" "waiting on captain"
-  for title in absrep otherart urlart; do
+  for title in absrep otherart urlart plainparen plainrepo; do
     hold_call "$home" "$title" "Legacy artifact title" "waiting on captain"
   done
   fake="$home/fakebin"
@@ -209,8 +209,10 @@ if [ "$1" = show ]; then
 import json, sys
 titles = {
     "absrep": "Approve absolute report (report) /home/captain/report.md (repo: firstmate)",
-    "otherart": "Approve other artifact (design) state/preview.html (repo: firstmate)",
+    "otherart": "Approve other artifact (report) state/preview.html (repo: firstmate)",
     "urlart": "Approve linked artifact (pr) https://github.com/o/r/pull/100 (repo: firstmate)",
+    "plainparen": "Review (production) https://example.com",
+    "plainrepo": "Check (repo: firstmate) handling",
 }
 for line in sys.stdin:
     if line.startswith("  title: ") and sys.argv[1] in titles:
@@ -223,7 +225,7 @@ fi
 exec "$REAL_TASKS_AXI" "$@"
 SH
   chmod +x "$fake/tasks-axi"
-  out=$(home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" "$REFRESH" content) || fail "content must succeed when configured"
+  out=$(home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_EXT_NOW_OVERRIDE=100 "$REFRESH" content) || fail "content must succeed when configured"
   assert_contains "$out" "- Inspect system prompt and tool descriptions; find room for optimization" "the report suffix must strip to the title alone"
   assert_contains "$out" "- Approve the copy" "the PR suffix must strip to the title alone"
   assert_contains "$out" "- Decide the merge wording" "a plain title must stay unchanged"
@@ -232,9 +234,15 @@ SH
   for title in "Approve absolute report" "Approve other artifact" "Approve linked artifact"; do
     printf '%s\n' "$out" | grep -Fx -- "- $title" >/dev/null || fail "artifact suffix must leave exactly the human title"
   done
+  for title in "Review (production) https://example.com" "Check (repo: firstmate) handling"; do
+    printf '%s\n' "$out" | grep -Fx -- "- $title" >/dev/null || fail "ordinary parenthetical title text must survive"
+  done
   case "$out" in
-    *"(design)"*|*"(pr)"*|*"pull/100"*|*"(report)"*|*"data/"*|*"state/"*|*"/home/"*|*".md"*|*"github.com/o/r/pull/99"*|*"(repo:"*) fail "content must not leak artifact suffixes or paths: $out" ;;
+    *"(pr)"*|*"pull/100"*|*"(report)"*|*"data/"*|*"state/"*|*"/home/"*|*".md"*|*"github.com/o/r/pull/99"*) fail "content must not leak artifact suffixes or paths: $out" ;;
   esac
+  home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_EXT_NOW_OVERRIDE=100 "$REFRESH" refresh >/dev/null || fail "cleaned titles must publish"
+  payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | head -1)
+  [ "$(jq -r '.text' "$payload")" = "$out" ] || fail "published title cleaning must match the preview"
   pass "1d artifact and PR suffixes render the title alone"
 }
 
