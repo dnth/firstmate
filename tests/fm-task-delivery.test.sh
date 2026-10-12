@@ -89,6 +89,43 @@ EOF
   assert_not_contains "$out" "acceptance criteria are missing" "spawn rejected concrete brace syntax"
   pass "fm-spawn: unresolved task and criterion placeholders refuse before launch"
 }
+test_scout_spawn_refuses_unresolved_task_placeholder() {
+  local rec home proj fakebin out status
+  rec=$(make_home scout-placeholder)
+  IFS='|' read -r home proj fakebin <<EOF2
+$rec
+EOF2
+  write_brief "$home" scout-placeholder-x1
+  printf '\n{TASK}\n' >> "$home/data/scout-placeholder-x1/brief.md"
+  out=$(run_spawn "$home" "$fakebin" scout-placeholder-x1 "$proj" claude --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "scout spawn accepted an unresolved task placeholder"
+  assert_contains "$out" "still contains {TASK}" "scout spawn did not identify the task placeholder"
+  assert_contains "$out" "scout brief" "scout refusal did not name its kind"
+  assert_absent "$home/state/scout-placeholder-x1.meta" "refused scout spawn wrote task metadata"
+  pass "fm-spawn: a scout spawn refuses an unresolved task placeholder before launch"
+}
+
+test_secondmate_spawn_refuses_unresolved_charter_placeholder() {
+  local rec home proj fakebin mate out status
+  rec=$(make_home charter-placeholder)
+  IFS='|' read -r home proj fakebin <<EOF2
+$rec
+EOF2
+  printf '%s\n' claude > "$home/config/crew-harness"
+  mate="$TMP_ROOT/charter-placeholder/mate"
+  mkdir -p "$mate/bin" "$mate/data"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  printf '%s\n' "charter-placeholder-m1" > "$mate/.fm-secondmate-home"
+  printf 'charter for charter-placeholder-m1 with {TASK}\n' > "$mate/data/charter.md"
+  out=$(run_spawn "$home" "$fakebin" charter-placeholder-m1 "$mate" --secondmate)
+  status=$?
+  [ "$status" -ne 0 ] || fail "secondmate spawn accepted an unresolved charter placeholder"
+  assert_contains "$out" "still contains {TASK}" "secondmate spawn did not identify the charter placeholder"
+  assert_contains "$out" "secondmate brief" "secondmate refusal did not name its kind"
+  assert_absent "$home/state/charter-placeholder-m1.meta" "refused secondmate spawn wrote task metadata"
+  pass "fm-spawn: a secondmate spawn refuses an unresolved charter placeholder before launch"
+}
 
 test_spawn_allows_legacy_brief_until_completion_gate() {
   local rec home proj fakebin out
@@ -736,6 +773,8 @@ EOF
 test_ship_spawn_requires_a_valid_delivery_contract
 test_promote_transaction_help
 test_spawn_refuses_unresolved_brief_placeholders
+test_scout_spawn_refuses_unresolved_task_placeholder
+test_secondmate_spawn_refuses_unresolved_charter_placeholder
 test_spawn_allows_legacy_brief_until_completion_gate
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch

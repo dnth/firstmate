@@ -3279,6 +3279,14 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# Scaffold fill guard, checked before any endpoint exists.
+# fm-brief.sh scaffolds ship, scout, and secondmate briefs with a {TASK} fill
+# site; a spawn that still carries it would launch a worker with no task.
+if grep -F '{TASK}' "$BRIEF" >/dev/null 2>&1; then
+  echo "error: $KIND brief still contains {TASK}; replace every scaffold placeholder before spawn" >&2
+  exit 1
+fi
+
 # Orchestration opt-in is explicit task data, never a keyword scan of prose:
 # fm-brief.sh --orchestrate records a front-matter marker `orchestration: enabled`
 # at the very top of the generated brief, and a ship task launched with
@@ -3319,10 +3327,6 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  if grep -F '{TASK}' "$BRIEF" >/dev/null 2>&1; then
-    echo "error: ship brief still contains {TASK}; replace every scaffold placeholder before spawn" >&2
-    exit 1
-  fi
   if grep -Fx '# Acceptance criteria' "$BRIEF" >/dev/null 2>&1; then
     if ! "$FM_ROOT/bin/fm-receipt-check.sh" --parse-criteria "$BRIEF" >/dev/null 2>&1; then
       echo "error: ship brief acceptance criteria are invalid or still contain placeholders" >&2
