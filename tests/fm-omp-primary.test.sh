@@ -1627,6 +1627,124 @@ JS
   pass "OMP busy branch neither blocks main-only rows nor successor arms, and settles each branch wake once"
 }
 
+test_native_omp_branch_handoff_regressions() {
+  local mode
+  for mode in suppressed suppressed-switch replacement-resolve replacement-reject; do
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-branch-$mode)
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "$state/arm-log"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-trigger-$count" ]; do sleep 0.02; done
+if [ "$count" = 1 ]; then
+  printf 'signal: branch-eligible wake 1\n'
+else
+  printf 'check: ext-request main-only\n'
+fi
+exit 0
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    MODE="$mode" node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const wakes = [];
+const offers = [];
+const handlers = new Map();
+const api = {
+  zod: { object: () => ({}) },
+  // A branch double: it accepts every branch-eligible wake and holds its
+  // settlement until the test resolves or rejects it.
+  events: {
+    emit(name, offer) {
+      if (name !== "fm-branch-supervision:dispatch" || !offer.message.includes("branch-eligible")) return;
+      let settle;
+      const settlement = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+      offers.push({ message: offer.message, settle });
+      offer.accept(settlement);
+    },
+  },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push(String(message.content));
+  },
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8")) : 0;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await sleep(10); }
+  throw new Error(`timeout waiting for ${label}: wakes=${JSON.stringify(wakes)} arms=${count()} offers=${offers.length}`);
+}
+const delivered = (text) => wakes.filter((wake) => wake.includes(text)).length;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?busy-branch=${Date.now()}`);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-busy" } };
+try {
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+writeFileSync(`${state}/watch-trigger-1`, "trigger\n");
+await waitFor(() => offers.length === 1 && count() === 2, "branch acceptance and its successor arm");
+const mode = process.env.MODE;
+const replacement = mode.startsWith("replacement-");
+if (replacement) {
+  await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
+  await waitFor(() => count() === 3, "replacement arm while settlement is unresolved");
+}
+const mainArm = replacement ? 3 : 2;
+writeFileSync(`${state}/watch-trigger-${mainArm}`, "trigger\n");
+await waitFor(() => delivered("check: ext-request main-only") === 1, "main-only delivery before branch settlement");
+await waitFor(() => count() === mainArm + 1, "main-only successor before branch settlement");
+if (mode === "replacement-resolve") {
+  offers[0].settle.resolve();
+  await sleep(200);
+  if (delivered("branch-eligible wake 1") !== 0) throw new Error("resolved branch wake reached main");
+} else {
+  offers[0].settle.reject(new Error("branch gave the wake back"));
+  await sleep(200);
+  if (delivered("branch-eligible wake 1") !== 0) throw new Error("rejected close bypassed the open main episode");
+  if (offers.length !== 1) throw new Error("rejected close was re-offered before a boundary");
+  execFileSync("bash", ["-c", '. "$FM_ROOT_OVERRIDE/bin/fm-wake-lib.sh"; fm_wake_append check returned.status "check: ext-request retained"']);
+  await handlers.get("turn_start")({ type: "turn_start" }, context);
+  if (mode === "suppressed-switch") {
+    await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
+    await waitFor(() => count() === mainArm + 2, "replacement of a suppressed returned close");
+  } else {
+    await handlers.get("turn_end")({ type: "turn_end" }, context);
+  }
+  await waitFor(() => delivered("branch-eligible wake 1") === 1, "returned close reaching main");
+  await sleep(200);
+  if (delivered("branch-eligible wake 1") !== 1) throw new Error("returned close reached main twice");
+}
+if (offers.length !== 1) throw new Error(`returned close was re-offered: ${offers.length}`);
+const expectedArms = mainArm + (mode === "suppressed-switch" ? 2 : 1);
+if (count() !== expectedArms) throw new Error(`returned close restored an extra arm: ${count()} expected ${expectedArms}`);
+} finally {
+  writeFileSync(`${state}/watch-stop`, "stop\n");
+  await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+}
+console.log("omp-busy-branch-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP busy branch: $out"
+  assert_contains "$out" omp-busy-branch-ok "a busy branch blocked main or successor delivery: $out"
+  pass "OMP branch handoff preserves single delivery and nonblocking replacement: $mode"
+  done
+}
+
 make_omp_queue_fixture() {  # <name>
   local fixture=$TMP_ROOT/$1
   mkdir -p "$fixture/.omp/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/config"
@@ -2427,6 +2545,7 @@ test_native_omp_refused_handling_delivery_is_typed_once
 test_native_omp_session_switch_carries_inflight_actionable_close
 test_native_omp_unacknowledged_wake_keeps_successor_chain
 test_native_omp_busy_branch_does_not_block_main_or_successors
+test_native_omp_branch_handoff_regressions
 test_native_omp_durable_queue_session_notifications
 test_native_omp_unowned_lock_preserves_startup_and_queue
 test_native_omp_empty_queue_suppresses_session_notifications

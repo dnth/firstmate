@@ -69,6 +69,7 @@ type PendingActionableClose = {
   predecessorArmPid: string;
   delivered?: true;
   fallbackOnly?: true;
+  branchOffered?: true;
 };
 
 type UnconsumedWake = {
@@ -118,9 +119,8 @@ type SessionGeneration = {
   // Closes the supervision branch accepted and has not settled yet, by pending
   // token. The delivery loop never waits on a branch: an accepted close stays
   // pending here until its settlement resolves (finished) or rejects (moved to
-  // branchReturned so the loop delivers it to main without a second offer).
+  // main-only delivery so the loop delivers it without a second offer).
   branchInFlight: Set<string>;
-  branchReturned: Set<string>;
   // Main-fallback coalescing (docs/omp-supervision-branch.md "Main-fallback
   // re-entry coalescing"): while a main fallback notification's handling
   // episode is open, further main-bound injections are suppressed so a burst of
@@ -313,7 +313,6 @@ function createGeneration(): SessionGeneration {
     cleanupFailure: "",
     unconsumedWakes: new Map(),
     branchInFlight: new Set(),
-    branchReturned: new Set(),
     deferredClose: null,
     mainFallbackEpisode: false,
     mainFallbackSuccessor: false,
@@ -462,7 +461,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       ((value as { delivered?: unknown }).delivered !== undefined &&
         (value as { delivered?: unknown }).delivered !== true) ||
       ((value as { fallbackOnly?: unknown }).fallbackOnly !== undefined &&
-        (value as { fallbackOnly?: unknown }).fallbackOnly !== true)
+        (value as { fallbackOnly?: unknown }).fallbackOnly !== true) ||
+      ((value as { branchOffered?: unknown }).branchOffered !== undefined &&
+        (value as { branchOffered?: unknown }).branchOffered !== true)
     ) {
       throw new Error(`invalid ${runtimeLabel} replacement actionable handoff at ${actionableHandoff}`);
     }
@@ -972,8 +973,8 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // synchronous branch delivery did; rejection hands it back so the loop
   // delivers it to main once, through the ordinary coalescing path, without a
   // second branch offer or a second successor restore. The replacement claim
-  // stays open until then, so a replacement session waiting on this close
-  // replays it only if the branch rejected it.
+  // stays open until then; replacement sessions also defer only this close
+  // and replay it only if the branch rejected it.
   function trackBranchSettlement(
     owner: SessionGeneration,
     pending: PendingActionableClose,
@@ -999,7 +1000,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         settleClaim("failed");
         releaseClaim();
         if (!generationIsLive(owner)) return;
-        owner.branchReturned.add(pending.token);
         void processPendingActionables(owner);
       },
     );
@@ -1106,21 +1106,23 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         if (!pending) break;
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
         if (existingClaim && existingClaim.owner !== owner) {
-          const settlement = await existingClaim.settlement;
-          if (!generationIsLive(owner)) return;
-          if (settlement === "delivered") {
-            pending.delivered = true;
-            continue;
-          }
-          if (replacementCoordinator.deliveries.get(pending.token) === existingClaim) {
-            replacementCoordinator.deliveries.delete(pending.token);
-          }
+          owner.branchInFlight.add(pending.token);
+          void existingClaim.settlement.then((result) => {
+            owner.branchInFlight.delete(pending.token);
+            if (!generationIsLive(owner)) return;
+            if (result === "delivered") pending.delivered = true;
+            if (replacementCoordinator.deliveries.get(pending.token) === existingClaim) {
+              replacementCoordinator.deliveries.delete(pending.token);
+            }
+            void processPendingActionables(owner);
+          });
+          continue;
         }
         let settleClaim: (settlement: "delivered" | "failed") => void = () => {};
         const settlement = new Promise<"delivered" | "failed">((resolveSettlement) => {
           settleClaim = resolveSettlement;
         });
-        const deliveryClaim = { owner, settlement };
+        const deliveryClaim: ActionableDeliveryClaim = { owner, settlement };
         replacementCoordinator.deliveries.set(pending.token, deliveryClaim);
         const releaseClaim = (): void => {
           if (replacementCoordinator.deliveries.get(pending.token) === deliveryClaim) {
@@ -1130,11 +1132,11 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         try {
           // A close the branch handed back already has its successor and its
           // handling-delivery handshake; it only still owes main a delivery.
-          const returnedFromBranch = owner.branchReturned.delete(pending.token);
+          const alreadyOfferedToBranch = pending.branchOffered === true;
           // A new restoration supersedes whatever became of the previous
           // successor; only a failure during this delivery is retried after it.
-          if (!returnedFromBranch) owner.deferredClose = null;
-          const restoration = pending.fallbackOnly || returnedFromBranch
+          if (!alreadyOfferedToBranch) owner.deferredClose = null;
+          const restoration = pending.fallbackOnly || alreadyOfferedToBranch
             ? { failure: "", recovery: undefined }
             : await restoreAfterActionableClose(owner, pending.predecessorArmPid);
           if (!generationIsLive(owner)) {
@@ -1159,7 +1161,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
                 ? "delivered"
                 : "failed";
             }
-          } else if (returnedFromBranch) {
+          } else if (alreadyOfferedToBranch) {
             outcome = await deliverMainWake(owner, message, pending);
           } else {
             outcome = await deliverActionableWake(
@@ -1174,6 +1176,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
             // Handed to the branch. Its successor already runs, so the next
             // close - including a main-only row - proceeds now; the claim
             // stays open until the branch settles.
+            pending.branchOffered = true;
             trackBranchSettlement(owner, pending, outcome.branch, settleClaim, releaseClaim);
             continue;
           }
