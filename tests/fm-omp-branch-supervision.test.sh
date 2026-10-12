@@ -541,7 +541,10 @@ export async function createAgentSession(opts) {
   globalThis.__customTools = opts.customTools;
   return {
     session: {
-      async prompt() { await globalThis.__branchPrompt(); },
+      async prompt() {
+        globalThis.__promptMirrorSends.push([...globalThis.__mirrorSends]);
+        await globalThis.__branchPrompt();
+      },
       async sendCustomMessage(message) {
         // Mirror sends are branch-visible delivery: record content in order.
         // failMirrorSendsOnce throws once per listed substring, so a test
@@ -593,6 +596,7 @@ const results = [];
 const failOnce = [...(scenario.failSendsOnce ?? [])];
 globalThis.__failMirrorOnce = [...(scenario.failMirrorSendsOnce ?? [])];
 globalThis.__mirrorSends = [];
+globalThis.__promptMirrorSends = [];
 let stepIndex = 0;
 const pi = {
   on(name, fn) { handlers.set(name, fn); },
@@ -638,14 +642,6 @@ globalThis.__branchPrompt = async () => {
       fs.rmSync(`${gate.root}/bin/fm-branch-outcome.sh`, { force: true });
       fs.writeFileSync(`${gate.root}/bin/fm-branch-outcome.sh`, `#!/usr/bin/env bash\nset -u\nif [ "\${1:-}" = append ]; then\n  : > "${gate.dir}/append-entered"\n  for i in $(seq 1 1200); do [ -e "${gate.release}" ] && break; sleep 0.05; done\nfi\nexec "${gate.real}" "$@"\n`, { mode: 0o755 });
       results.push({ delivery_held: true });
-    } else if (action.wait_for_gate) {
-      // Async gate: poll for the release file without blocking the event
-      // loop, so the chain stays busy while turn_end is timed.
-      const { existsSync } = await import("node:fs");
-      for (let i = 0; i < 600 && !existsSync(action.wait_for_gate); i += 1) {
-        await new Promise((r) => setTimeout(r, 50));
-      }
-      results.push({ gate_released: existsSync(action.wait_for_gate) });
     } else if (action.exec) {
       execSync(action.exec, { shell: "/bin/bash", stdio: "pipe" });
       results.push({ exec: action.exec });
@@ -740,7 +736,7 @@ for (const step of scenario.steps) {
   } else if (step.turn_end) {
     const turnEnd = handlers.get("turn_end");
     const startedAt = Date.now();
-    const ctx = { sessionManager: step.poison_ctx ? null : new sdk.SessionManager() };
+    const ctx = { sessionManager: new sdk.SessionManager() };
     const returned = turnEnd?.({}, ctx);
     if (returned instanceof Promise) {
       const timeout = new Promise((resolve) => setTimeout(() => resolve("timeout"), step.turn_end_timeout_ms ?? 1000));
@@ -769,7 +765,7 @@ for (const step of scenario.steps) {
     throw new Error(`unknown driver step: ${JSON.stringify(step)}`);
   }
 }
-console.log(JSON.stringify({ results, sends, mirrorSends: globalThis.__mirrorSends ?? [] }));
+console.log(JSON.stringify({ results, sends, mirrorSends: globalThis.__mirrorSends ?? [], promptMirrorSends: globalThis.__promptMirrorSends }));
 JS
 }
 
@@ -1098,12 +1094,8 @@ JSON
 
   assert_contains "$out" '"accepted":true' "the wake after turn_end was not accepted: $out"
   assert_contains "$out" '"rejected":""' "the wake after turn_end did not settle: $out"
-  # Branch-visible proof: all three mirror sends landed, in dialog order,
-  # before the wake's report merged (sends order follows the same chain).
-  assert_contains "$out" '"mirrorSends":["[captain] captain: ship the first item","[main] main: first acknowledged","[captain] captain: ship the second item"]' \
-    "the mirror batch did not reach the branch in order before the later wake: $out"
-  # The cursor advanced only after the full mirror batch reached the branch:
-  # enqueueWake flushes the mirror before handling the wake.
+  assert_contains "$out" '"promptMirrorSends":[["[captain] captain: ship the first item","[main] main: first acknowledged","[captain] captain: ship the second item"]]' \
+    "the mirror batch was not visible in order at the later wake prompt entry: $out"
   assert_equals '{"file":"'"$state"'/main.session.jsonl","index":3}' "$(cat "$state/.branch-mirror-cursor")" \
     "the mirror cursor did not advance to the flushed batch"
   pass "mirrored dialog from a turn reaches the branch before a later wake"
