@@ -1437,14 +1437,80 @@ test_past_due_call_marked_due_while_held() {
   pass "a past-due call is marked due in OPEN DECISIONS while the hold and the spawn refusal survive"
 }
 
-# The due report must decide from each held call's WHOLE body: a resolution record
-# for the current lifecycle can sit past the 500-character preview a rendered
-# listing keeps, and a report that missed it would mark an already-answered call
-# due. This fixture buries the record behind a long decision text, and it pins the
-# identity the due row carries against `open --identity`, the reader a consumer
-# compares with.
+assert_due_matches_exact_reads() {
+  local home=$1 today=$2 id identity expected actual
+  shift 2
+  : > "$home/exact-due.tsv"
+  for id in "$@"; do
+    tasks_in "$home" show "$id" --full > "$home/exact-show.txt" || fail "exact show failed for $id"
+    identity=$(run_captain "$home" open "$id" --identity) || fail "exact identity failed for $id"
+    python3 - "$home/exact-show.txt" "$id" "$today" "$identity" >> "$home/exact-due.tsv" <<'EXACT'
+import datetime
+import json
+import re
+import sys
+from pathlib import Path
+fields = {}
+for line in Path(sys.argv[1]).read_text().splitlines():
+    match = re.match(r"^  ([a-z_]+): (.*)$", line)
+    if match:
+        key, value = match.groups()
+        fields[key] = json.loads(value) if value.startswith('"') else value
+body = fields["body"]
+stamp = body.splitlines()[0].removeprefix("Captain hold set: ")
+records = re.findall(r"^Resolution recorded by fm-(?:captain|decision)-hold\.$", body, re.M)
+assert sys.argv[4] == f"{stamp}#{len(records)}", "exact identity disagrees with exact body"
+review = re.search(r"^Captain hold review by: (\d{4}-\d{2}-\d{2})$", body, re.M)
+review = review.group(1) if review else str(datetime.date.fromisoformat(stamp[:10]) + datetime.timedelta(days=14))
+record = re.search(r"^Resolution recorded by fm-(captain|decision)-hold\.\n([^\n]*(?:\n[^\n]+)*)", body, re.M)
+settled = bool(record and record.group(1) == "captain" and f"Hold stamp: {stamp}" in record.group(2).splitlines())
+until = fields.get("hold_until", "-")
+if (fields["state"] != "done" and fields["hold_kind"] == "captain"
+        and fields["hold_reason"] not in ("", "-", "null") and fields["blocked"] == "no"
+        and (until in ("", "-", "null") or until <= sys.argv[3])
+        and review <= sys.argv[3] and not settled):
+    print(sys.argv[2], review, fields["title"], sys.argv[4], sep="\t")
+EXACT
+    [ "$?" -eq 0 ] || fail "exact-read oracle failed for $id"
+  done
+  expected=$(LC_ALL=C sort "$home/exact-due.tsv")
+  actual=$(due_at "$home" "$today" | LC_ALL=C sort) || fail "batch reader failed"
+  [ "$actual" = "$expected" ] || fail "batch [$actual] disagrees with exact reads [$expected]"
+}
+
+test_due_advisory_rechecks_eligibility() (
+  local home id identity live
+  home=$(make_home due-freshness)
+  id=freshness-call
+  export PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state"
+  export FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" FM_CAPTAIN_HOLD_TODAY=2026-08-16
+  . "$ROOT/bin/fm-classify-lib.sh"
+  tasks_in "$home" add "$id" 'Choose later' --kind captain --repo sample >/dev/null || fail "create freshness call"
+  hold_at "$home" 2026-08-01T00:00:00Z "$id" pending >/dev/null || fail "hold freshness call"
+  identity=$(run_captain "$home" open "$id" --identity) || fail "capture freshness identity"
+  if fm_advisory_superseded "$home/state" "$id" decision "$id" backlog "$identity"; then
+    fail "ordinary due advisory was retired"
+  fi
+  run_captain "$home" hold "$id" --reason later --until 2027-01-01 >/dev/null || fail "defer freshness call"
+  live=$(run_captain "$home" open "$id" --identity) || fail "read deferred identity"
+  [ "$live" = "$identity" ] || fail "deferral unexpectedly changed the lifecycle"
+  fm_advisory_superseded "$home/state" "$id" decision "$id" backlog "$identity" || fail "deferred due advisory remained deliverable"
+  run_captain "$home" hold "$id" --reason pending --until 2026-08-16 >/dev/null || fail "restore due deferral"
+  if fm_advisory_superseded "$home/state" "$id" decision "$id" backlog "$identity"; then
+    fail "expired deferral suppressed due advisory"
+  fi
+  tasks_in "$home" add blocking-call 'Blocking work' --kind ship --repo sample >/dev/null || fail "create blocker"
+  tasks_in "$home" block "$id" --by blocking-call >/dev/null || fail "block due call"
+  fm_advisory_superseded "$home/state" "$id" decision "$id" backlog "$identity" || fail "blocked due advisory remained deliverable"
+  tasks_in "$home" unblock "$id" --by blocking-call >/dev/null || fail "clear blocker"
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2027-01-01\n' > "$home/future-body.txt"
+  tasks_in "$home" update "$id" --body-file "$home/future-body.txt" >/dev/null || fail "postpone review"
+  fm_advisory_superseded "$home/state" "$id" decision "$id" backlog "$identity" || fail "not-yet-due advisory remained deliverable"
+  pass "due advisory freshness rechecks deferral, blockers, and review date with lifecycle identity"
+)
+
 test_due_reads_the_whole_body_not_a_listing_preview() {
-  local home id long out identity live expected digest
+  local home id long out identity live expected digest call
   home=$(make_home due-whole-body)
   id=buried-record
   long=$(python3 -c 'print("r" * 900)')
@@ -1453,7 +1519,7 @@ test_due_reads_the_whole_body_not_a_listing_preview() {
     || fail "could not create the whole-body fixture"
   hold_at "$home" 2026-08-01T00:00:00Z "$id" "buried pending" >/dev/null \
     || fail "could not hold the whole-body fixture"
-  printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n\nResolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: released\nHold stamp: 2026-08-01T00:00:00Z\n\nCaptain decision:\n%s\n' \
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n\nResolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: released\n%s\nHold stamp: 2026-08-01T00:00:00Z\n\nCaptain decision:\nBuried.\n' \
     "$digest" "$long" > "$home/buried-body.txt" || fail "could not stage the buried record"
   tasks_in "$home" update "$id" --body-file "$home/buried-body.txt" >/dev/null \
     || fail "could not seed the buried record"
@@ -1463,6 +1529,23 @@ test_due_reads_the_whole_body_not_a_listing_preview() {
     *"$id"*) fail "a call whose current-lifecycle record sits past the listing preview was marked due: $out" ;;
   esac
   [ -z "$out" ] || fail "the buried-record fixture produced unexpected rows: $out"
+
+  for call in reheld-parity legacy-parity interrupted-parity; do
+    tasks_in "$home" add "$call" "Choose $call" --kind captain --repo sample >/dev/null \
+      || fail "could not create $call"
+    hold_at "$home" 2026-07-01T00:00:00Z "$call" pending >/dev/null || fail "could not hold $call"
+  done
+  printf 'Buried.\n' > "$home/parity-answer.txt"
+  run_captain "$home" answer reheld-parity --decision-file "$home/parity-answer.txt" --release >/dev/null \
+    || fail "could not release parity call"
+  hold_at "$home" 2026-08-01T00:00:00Z reheld-parity again >/dev/null || fail "could not rehold parity call"
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\n\nResolution recorded by fm-decision-hold.\nDecision digest: %s\nResolution mode: released\n\nCaptain decision:\nBuried.\n' \
+    "$digest" > "$home/legacy-parity.txt"
+  tasks_in "$home" update legacy-parity --body-file "$home/legacy-parity.txt" >/dev/null || fail "seed legacy parity"
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n\nResolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: answered\nHold stamp: 2026-08-01T00:00:00Z\n\nCaptain decision:\nBuried.\n' \
+    "$digest" > "$home/interrupted-parity.txt"
+  tasks_in "$home" update interrupted-parity --body-file "$home/interrupted-parity.txt" >/dev/null || fail "seed interrupted parity"
+  assert_due_matches_exact_reads "$home" 2026-08-16 "$id" reheld-parity legacy-parity interrupted-parity
 
   printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n' > "$home/plain-body.txt" \
     || fail "could not stage the plain body"
@@ -1476,7 +1559,8 @@ test_due_reads_the_whole_body_not_a_listing_preview() {
   live=$(run_captain "$home" open "$id" --identity) || fail "open --identity failed"
   [ "$identity" = "$live" ] || fail "the due row identity [$identity] disagrees with open --identity [$live]"
 
-  pass "the due report reads the whole body, and its identity matches open --identity"
+  assert_due_matches_exact_reads "$home" 2026-08-16 "$id" reheld-parity legacy-parity interrupted-parity
+  pass "whole-body due marking and identities agree with independent exact reads across lifecycle histories"
 }
 
 test_review_lifecycle_regressions() (
@@ -1568,6 +1652,7 @@ test_diverged_reports_status_close_over_open_hold
 test_hold_records_review_by_date_and_stays_live
 test_past_due_call_marked_due_while_held
 test_due_reads_the_whole_body_not_a_listing_preview
+test_due_advisory_rechecks_eligibility
 test_deferred_hold_leaves_captains_call_until_due
 test_board_build_writes_decision_cards
 test_out_of_band_close_is_recordable

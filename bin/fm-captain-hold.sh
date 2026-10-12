@@ -277,9 +277,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
-# shellcheck source=bin/fm-axi-rows-lib.sh
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-axi-rows-lib.sh"
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
