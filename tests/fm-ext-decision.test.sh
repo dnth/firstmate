@@ -1146,6 +1146,50 @@ test_14_audit_metadata_does_not_match_options() {
   pass "14 option matching ignores appended audit metadata and retains actual answer ambiguity"
 }
 
+test_15_full_labels_keep_digits_and_overlaps_together() {
+  local home pair options option label slug key post out record mode answer expected gen=0
+  home="$TMP_ROOT/c15"
+  setup_home "$home"
+  open_request "$home"
+  for pair in digits overlap; do
+    case "$pair" in
+      digits) options='[{"label":"Wait 2 days"},{"label":"Proceed"}]'; option=1; label='Wait 2 days' ;;
+      overlap) options='[{"label":"Approve"},{"label":"Approve with changes"}]'; option=2; label='Approve with changes' ;;
+    esac
+    for mode in click typed ambiguous; do
+      gen=$((gen + 1))
+      slug="$pair-$mode"
+      key="key:$TASK:$slug"
+      post="70000000000000002$gen"
+      open_key "$home" "$slug"
+      emit_decision "$home" "$gen" '{"key":"'"$key"'","options":'"$options"'}' >/dev/null
+      deliver "$home" "$post"
+      if [ "$mode" = click ]; then
+        out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmd:$key:$option" "$CAPTAIN" "88000000000000010$gen" "$post")
+        assert_contains "$out" "Sent: $label." "the full-label click was not sent"
+        record=$(jq -c --arg key "$key" 'select(.decision.key == $key and .decision.choice == "option")' "$home"/state/ext-inbox/*.json)
+        [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "could not record the full-label click"
+        expected="✅ $label chosen by Dana <t:1791720000:f>"
+      else
+        if [ "$mode" = typed ]; then
+          answer="Decision answer: $label, please."
+          expected="✅ $label chosen by the captain <t:1791720000:f>"
+        else
+          case "$pair" in
+            digits) answer='Decision answer: Wait 2 days or Proceed' ;;
+            overlap) answer='Decision answer: Approve with changes or Approve' ;;
+          esac
+          expected='✅ Decided <t:1791720000:f>'
+        fi
+        home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key "$slug" "$answer" >/dev/null 2>&1 || fail "could not record the typed full-label answer"
+      fi
+      out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
+      jq -e --arg expected "$expected" '.content == $expected and ([.components[].components[].disabled] | all)' <<<"$out" >/dev/null || fail "the full-label outcome lost its choice, attribution, or ambiguity: $out"
+    done
+  done
+  pass "15 full labels preserve embedded digits and prefer the longest overlap while multi-option answers stay ambiguous"
+}
+
 test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records
@@ -1161,3 +1205,5 @@ test_12_topic_thread_posts_take_clicks_there
 
 test_13_published_requests_retry_the_original_identity
 test_14_audit_metadata_does_not_match_options
+
+test_15_full_labels_keep_digits_and_overlaps_together
