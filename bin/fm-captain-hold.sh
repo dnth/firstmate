@@ -7,10 +7,11 @@
 # owes an answer. The invoking agent decides what is genuinely waiting on the
 # captain; this script supplies guarded creation, a durable record of what the
 # captain actually said, the investigation completion gate, and the one
+# keyed-answer intake every channel feeds.
 #
 # Settings: FM_CAPTAIN_HOLD_REVIEW_DAYS (default 14) is the days after the
-# hold-set stamp a captain call becomes due for review. Override per call,
-# never persist per row: existing holds without a review-by line count from
+# hold-set stamp a captain call becomes due for review. Override per invocation:
+# new holds persist the resulting date; existing holds without a review-by line count from
 # their hold-set stamp plus this interval. --until is unrelated: it defers a
 # call and hides it from the live surface until its date, while a review-by
 # date keeps the call live and visible at once.
@@ -51,13 +52,13 @@
 # default repo from that origin's metadata). Prefer holding the work item the
 # question gates over minting a new row. Creating a missing row uses
 # `tasks-axi add --kind captain`: that kind is backlog metadata, and the Beads
-# adapter maps it to native issue type `task`. Captain holds have no due
-# semantics (`--until` is the optional hold deferral), so the create waives
+# adapter maps it to native issue type `task`. Captain holds use a body-level
+# review date rather than a backend due field, so the create waives
 # Beads `due.required` through `BD_DUE_REQUIRED` rather than inventing a due
 # date or registering a `types.custom` captain issue type. The command records
 # a UTC `Captain hold set:` timestamp in the task body, followed by a
-# `Captain hold review by:` date (stamp plus FM_CAPTAIN_HOLD_REVIEW_DAYS,
-# default 14) so a call that sits unanswered resurfaces for review. Repeating
+# `Captain hold review by:` date using the interval above,
+# so a call that sits unanswered resurfaces for review. Repeating
 # an active hold preserves the existing lines, while re-holding released work
 # starts a new lifecycle. A task already closed is refused rather than
 # reopened. The review-by date never defers the call, never touches the hold
@@ -229,10 +230,14 @@
 # chose, and the stamp plus count to distinguish its lifecycle from a re-hold.
 #
 # `due` is the read-only review-by report: every still-open captain-held task
-# whose review-by date has passed as of today, with older holds
+# whose review-by date is today or earlier, with older holds
 # that carry no review-by line counted from their hold-set stamp plus the
-# interval. Answered, released, reconciled, deferred (--until future), and
-# not-yet-due calls never list. It mutates nothing and never clears a hold.
+# interval. Calls with a current-lifecycle resolution, released or closed calls,
+# blocked calls, deferred (--until future), and not-yet-due calls never list.
+# It mutates nothing and never clears a hold.
+# It requires the Markdown backlog backend and the installed tasks-axi package's
+# parser and row projection; other backends are refused. The drain and waiting
+# pin each bound this read at 20 seconds and omit due marking if it fails.
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
 #
@@ -882,8 +887,7 @@ body_hold_review_by() {  # <decoded-task-body>
   esac
 }
 
-# Days after the hold-set stamp a call becomes due for review. Documented in
-# the header; override per call, never persisted per row.
+# The header owns interval configuration; only the resulting date is persisted.
 hold_review_days() {  # prints the interval
   local raw=${FM_CAPTAIN_HOLD_REVIEW_DAYS:-14}
   case "$raw" in
@@ -2281,15 +2285,9 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
-# Read-only review-by report. Prints one
-# `<task>\t<review-by>\t<title>\t<identity>` line per still-open captain-held task
-# whose review-by date has passed as of today, in board order; prints nothing
-# when none is due.
-# A hold that carries no review-by line counts from its hold-set stamp plus
-# the interval, so pre-change bodies are never rewritten to be listed. Closed,
-# answered, deferred (--until future), and not-yet-due calls never list. The
-# review-by date clears no hold and reaches no expiry path: every listed task
-# still refuses `tasks-axi ready` and still answers through the same paths.
+# The header owns report eligibility and read limits. Prints one
+# `<task>\t<review-by>\t<title>\t<identity>` line per eligible call in board order,
+# or nothing when none is due.
 # The identity is the `<hold-set stamp>#<recorded answers>` pair `open --identity`
 # reports, taken from the same body, so a consumer anchors a due call without
 # reading the row again.

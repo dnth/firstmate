@@ -11,7 +11,7 @@ A decision is not a separate thing in this system: it is an ordinary backlog tas
 The command addresses the active home's configured data directory through `bin/fm-tasks-axi.sh` and the transition library, so the existing backlog remains the only durable work database and a secondmate-owned captain call stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
-The `hold` subcommand is the mandatory captain-hold creation path: it uses an existing task or creates one when nothing exists to hold, records its UTC hold-set timestamp as the leading line of the task body followed by a `Captain hold review by:` date (stamp plus `FM_CAPTAIN_HOLD_REVIEW_DAYS`, default 14), then invokes the underlying tasks-axi hold operation and verifies both records.
+The `hold` subcommand is the mandatory captain-hold creation path: it uses an existing task or creates one when nothing exists to hold, records its UTC hold-set timestamp and review-by date at the start of the task body, then invokes the underlying tasks-axi hold operation and verifies both records.
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 Retries of an active hold preserve its hold-set timestamp and every body line, while re-holding released work starts a new timestamped lifecycle; a closed task is refused rather than reopened, and `--until` stores the captain's own deferral date through tasks-axi's date gate.
 
@@ -31,7 +31,7 @@ A status-side keyed decision that is still open but covered by no inventoried ta
 With a non-empty inventory it appends a `captain-held [key=<key>]` transfer event naming the reviewed inventory for every still-open keyed status decision, which `bin/fm-classify-lib.sh` recognizes as closing the live status copy without claiming that the captain has answered it.
 
 Scout teardown calls the read-only `verify` subcommand after checking for the report and before removing any source state.
-The read-only `due` subcommand lists every still-open captain-held task past its review-by date; older holds without a review-by line count from their hold-set stamp plus the interval and no body is rewritten.
+The [script header](../bin/fm-captain-hold.sh) owns the read-only `due` report's eligibility, legacy-date fallback, configuration, and backend limits.
 `verify` requires the recorded attestation, requires every recorded inventory entry to still be durable (actively captain-held, or carrying a recorded answer), and fails on any keyed status decision that opened after the last `complete`, which makes re-running `complete` the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
@@ -127,7 +127,10 @@ Upstream's fuller `hold_bucket` projection (`blocked`/`dated`/`aged`/`live`) is 
 `--all-decisions` reveals every open decision within the bounded projection.
 
 Re-holding through the wrapper with `--until` remains the durable deferral.
-The wake drain folds past-due live calls into OPEN DECISIONS marked due for review (rendered even with no status logs) and the waiting pin marks their titles, so firstmate batches them into one captain review; the date never clears the held bit, never reaches the `--until` expiry path, and never makes the task dispatchable.
+The wake drain and waiting pin consume the `due` report, which projects the whole Markdown board once through the installed tasks-axi parser and row projection.
+Each row carries its title and lifecycle identity from that same snapshot, so consumers cannot pair old due prose with a newer hold's identity by re-reading the task.
+Buffered backlog advisories are rechecked against one fresh due snapshot per reconciliation batch, including eligibility changes such as deferral.
+The [captain-hold-lifecycle policy](../.agents/skills/captain-hold-lifecycle/SKILL.md) owns the batched captain review; the report changes presentation only, never the hold bit, deferral expiry, or dispatch eligibility.
 
 ## Legacy identity compatibility
 

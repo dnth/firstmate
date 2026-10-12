@@ -775,7 +775,9 @@ EOF
 #     covers the unkeyed slot). Superseded when the keyed fold no longer holds
 #     the key open after the captured status-log revision - a resolved/captain-
 #     held line for the exact key, or a terminal declaration that closes it per
-#     the fold's own semantics.
+#     the fold's own semantics. A backlog endpoint instead uses the current
+#     due-report snapshot: the call must remain eligible with the captured
+#     lifecycle identity. An unsuccessful read cannot prove supersession.
 #   worker - a stopped-worker/stale-pane advisory anchored at the status
 #     revision <endpoint>@<ident> captured at production. Superseded when the
 #     same file has any non-blank byte appended past <endpoint> (the worker's

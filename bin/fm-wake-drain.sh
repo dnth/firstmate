@@ -15,9 +15,10 @@
 # Machine channel: under FM_WAKE_DRAIN_DECISION_REVISIONS=1 (set only by the
 # away-mode daemon) every rendered OPEN DECISIONS row also emits one
 # "DECISION_REVISION<TAB><task><TAB><key><TAB><endpoint><TAB><ident>" line on
-# stderr carrying the same status-log revision the presentation folded the
-# decision from, so the consumer can anchor its advisory to this snapshot
-# (issue #188).
+# stderr carrying the status-log revision or backlog lifecycle identity the
+# presentation used, so the consumer anchors its advisory to this snapshot.
+# Backlog rows use endpoint `backlog`; bin/fm-captain-hold.sh's `due` report
+# owns their identity format.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
