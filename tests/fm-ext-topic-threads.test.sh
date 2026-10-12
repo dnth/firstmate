@@ -1083,7 +1083,7 @@ PY
   rid2="discord:${GUILD}:${CHANNEL}:${MESSAGE}:999999999999999999"
   slug2=$(intake_as "$home" "Yes" 999999999999999999 "$MESSAGE" message)
   generation=1
-  for state in needs-you done none; do
+  for state in "needs-you" "done" "none"; do
     emit_as "$home" "$rid2" followup "$generation" "In-thread reply." "" "$state" >/dev/null
     emit_as "$home" "$RID" followup "$generation" "Top-level reply." "" "$state" >/dev/null
     out=$(deliver "$home")
