@@ -26,8 +26,11 @@
 # --origin records how the request arrived: "slash" (the default) for a /fm
 # command interaction, "message" for an ordinary Discord message, which is the
 # only kind the gateway can add reactions to. The destination context also
-# carries a topic field with the fixed-label Discord thread name when
-# bin/fm-ext-topic.sh returns one; otherwise the field is omitted.
+# carries a topic field with the Discord thread name when bin/fm-ext-topic.sh
+# returns one (Firstmate's title, else the request-text fallback, else the
+# label-plus-time last fallback); otherwise the field is omitted. A topic
+# context also carries request_text, the request's own text, so the poster can
+# re-derive the name at validate time instead of trusting the stored string.
 # --reply-to-message-id marks a request that answers one of Firstmate's own
 # posted Discord messages: the
 # inbox record then carries reply_to {message_id, request_id, text}, with that
@@ -331,12 +334,13 @@ CONTEXT_JSON=$(jq -cn \
   --arg authority "$AUTHORITY" \
   --arg origin "$ORIGIN" \
   --arg topic "$TOPIC" \
+  --arg request_text "$TEXT" \
   --argjson recorded_at "$NOW" \
   '{request_id:$request_id, slug:$slug, platform:$platform, source:$source,
     guild_id:$guild_id, channel_id:$channel_id, thread_id:$thread_id,
     message_id:$message_id, author:$author, authority:$authority,
     origin:$origin, recorded_at:$recorded_at}
-   + if $topic == "" then {} else {topic:$topic} end') \
+   + if $topic == "" then {} else {topic:$topic, request_text:$request_text} end') \
   || die "could not build the destination context" 1
 
 INBOX_DIR=$(fm_ext_inbox_dir)

@@ -3,8 +3,10 @@
 Posts pending ``state/ext-outbox`` payloads to the request's Discord destination
 and records receipts through ``bin/fm-ext-outbox.sh``.
 The topic-thread routing contract is owned by docs/configuration.md under
-"Topic threads (one thread per request)"; bin/fm-ext-topic.sh owns the fixed
-public labels and source-message MYT time used for names.
+"Topic threads (one thread per request)"; bin/fm-ext-topic.sh owns the name
+priority (Firstmate's title, the request-text fallback, the label-plus-time
+last fallback) and the validation the poster applies before every create and
+rename.
 Unsent payloads (no posting marker, no receipt, no terminal failed marker)
 are retried after restart.
 Oversized replies are split with the X-mode Discord budget pattern
@@ -46,6 +48,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -434,7 +437,10 @@ def request_progress_path(payload: dict, home: Path) -> Path:
 
 
 def load_request_thread(payload: dict, home: Path) -> str:
-    """This request's recorded topic-thread id, or "" when none exists."""
+    """This request's recorded topic-thread id, or "" when none exists.
+
+    Kept for callers that need only the id; load_request_topic carries the
+    recorded name and state rename comparisons use."""
     path = request_progress_path(payload, home)
     if path.is_symlink() or not path.is_file():
         return ""
@@ -450,7 +456,34 @@ def load_request_thread(payload: dict, home: Path) -> str:
     return thread_id if _SNOWFLAKE.fullmatch(thread_id) else ""
 
 
-def save_request_thread(payload: dict, thread_id: str, home: Path) -> None:
+def load_request_topic(payload: dict, home: Path) -> dict:
+    """This request's recorded topic-thread id, name, and state, or {}."""
+    path = request_progress_path(payload, home)
+    if path.is_symlink() or not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if data.get("request_id") != payload.get("request_id"):
+        return {}
+    thread_id = str(data.get("topic_thread_id") or "")
+    if not _SNOWFLAKE.fullmatch(thread_id):
+        return {}
+    name = data.get("topic_name") or ""
+    state = data.get("thread_state") or ""
+    creating = data.get("creating_title") or ""
+    return {"topic_thread_id": thread_id,
+            "topic_name": name if isinstance(name, str) else "",
+            "thread_state": state if isinstance(state, str) else "",
+            "creating_title": creating if isinstance(creating, str) else ""}
+
+
+def save_request_thread(payload: dict, thread_id: str, home: Path,
+                        topic_name: str = "", thread_state: str = "",
+                        creating_title: str = "") -> None:
     """Record this request's topic-thread id for every later generation.
 
     A private state artifact beside the outbox, written with the same guards
@@ -462,7 +495,17 @@ def save_request_thread(payload: dict, thread_id: str, home: Path) -> None:
     path = request_progress_path(payload, home)
     if path.is_symlink():
         raise RuntimeError("thread record is a symlink")
-    body = json.dumps({"request_id": payload.get("request_id"), "topic_thread_id": thread_id})
+    try:
+        prior = json.loads(path.read_text(encoding="utf-8"))
+        prior_name = prior.get("topic_name") if isinstance(prior, dict) else ""
+        prior_state = prior.get("thread_state") if isinstance(prior, dict) else ""
+        prior_creating = prior.get("creating_title") if isinstance(prior, dict) else ""
+    except (OSError, ValueError):
+        prior_name, prior_state, prior_creating = "", "", ""
+    body = json.dumps({"request_id": payload.get("request_id"), "topic_thread_id": thread_id,
+                       "topic_name": topic_name or prior_name,
+                       "thread_state": thread_state or prior_state,
+                       "creating_title": creating_title or prior_creating})
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
     try:
@@ -484,26 +527,46 @@ def save_request_thread(payload: dict, thread_id: str, home: Path) -> None:
     os.chmod(path, 0o600)
 
 
-def public_topic_name(payload: dict, name: str, home: Path | None = None) -> str:
-    result = subprocess.run(
-        [str(firstmate_root() / "bin" / "fm-ext-topic.sh"),
-         "--text-file", "-", "--origin", str(payload.get("origin") or "slash"),
-         "--thread-id", str(payload.get("thread_id") or ""),
-         "--channel-id", str(payload.get("channel_id") or ""),
-         "--message-id", str(payload.get("message_id") or ""), "--validate-name"],
-        input=name, capture_output=True, text=True, check=False,
-        env=_env_for(home or firstmate_home()),
-    )
+_THREAD_STATES = {"needs-you": "❓ ", "done": "✅ ", "none": ""}
+
+
+def public_topic_name(
+    payload: dict,
+    name: str,
+    home: Path | None = None,
+    request_text: str = "",
+    title: str = "",
+) -> str:
+    """Re-derive this request's thread name and check the stored one.
+
+    The request text (plus Firstmate's title when the creating payload
+    carries one) goes through bin/fm-ext-topic.sh, and the stored name is
+    accepted only when it equals that fresh derivation or a legacy
+    label-plus-time name for the same message. Anything else falls back to
+    the fresh name, so a tampered stored string can never reach Discord.
+    """
+    with _temp_text(request_text) as text_file, _temp_text(title) as title_file, _temp_text(name) as stored_file:
+        result = subprocess.run(
+            [str(firstmate_root() / "bin" / "fm-ext-topic.sh"),
+             "--text-file", text_file, "--origin", str(payload.get("origin") or "slash"),
+             "--thread-id", str(payload.get("thread_id") or ""),
+             "--channel-id", str(payload.get("channel_id") or ""),
+             "--message-id", str(payload.get("message_id") or ""),
+             "--title-file", title_file, "--validate-name", "--stored-file", stored_file],
+            capture_output=True, text=True, check=False,
+            env=_env_for(home or firstmate_home()),
+        )
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def thread_name_for(payload: dict, home: Path) -> str:
     """Public-safe thread name for this request, or "" when it needs none.
 
-    The name comes from the durable destination context the intake recorded,
-    never from request text at post time, so later follow-ups reuse the exact
-    name the first reply used. Anything unusable - no context, no recorded
-    name, an already-threaded request - means no thread is created.
+    Firstmate's title on the creating payload wins; otherwise the name is
+    re-derived from the request text the intake recorded, never trusted from
+    the stored string alone, so later follow-ups reuse the exact name the
+    first reply used. Anything unusable - no context, no recorded text, an
+    already-threaded request - means no thread is created.
     """
     if payload.get("origin") != "message":
         return ""
@@ -517,7 +580,165 @@ def thread_name_for(payload: dict, home: Path) -> str:
     if not isinstance(context, dict):
         return ""
     name = context.get("topic") or ""
-    return public_topic_name(payload, name, home) if isinstance(name, str) and name else ""
+    request_text = context.get("request_text") or ""
+    if not isinstance(request_text, str) or not request_text:
+        # Contexts recorded before the request text was stored: the inbox
+        # record carries the same text while the request is still queued.
+        try:
+            inbox_path = state_dir(home) / "ext-inbox" / f"{payload['slug']}.json"
+            inbox = json.loads(inbox_path.read_text(encoding="utf-8"))
+            request_text = inbox.get("text") or "" if isinstance(inbox, dict) else ""
+        except (OSError, ValueError, KeyError):
+            request_text = ""
+    if not isinstance(name, str) or not name or not isinstance(request_text, str) or not request_text:
+        return ""
+    recorded = load_request_topic(payload, home)
+    recorded_name = recorded.get("topic_name") or ""
+    if recorded_name:
+        # A thread already exists: its recorded base name wins over any
+        # later title, so state renames build on the name Discord shows.
+        # The base re-validates against the creating title the record keeps,
+        # so a tampered record still falls back to a fresh derivation.
+        return public_topic_name(payload, recorded_name, home, request_text,
+                                 recorded.get("creating_title") or "")
+    return public_topic_name(payload, name, home, request_text, _title_for(payload))
+
+
+def _context_for(payload: dict, home: Path | None) -> dict:
+    try:
+        base = home or firstmate_home()
+        context_path = state_dir(base) / "ext-context" / f"{payload['slug']}.json"
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError):
+        return {}
+    return context if isinstance(context, dict) else {}
+
+
+def _request_text_for(payload: dict, home: Path | None) -> str:
+    text = _context_for(payload, home).get("request_text") or ""
+    return text if isinstance(text, str) else ""
+
+
+def _title_for(payload: dict) -> str:
+    title = payload.get("thread_title") or ""
+    return title if isinstance(title, str) else ""
+
+
+def state_prefix(state: object) -> str | None:
+    """Thread-name prefix for a thread_state value, or None when unknown."""
+    if not isinstance(state, str):
+        return None
+    return _THREAD_STATES.get(state)
+
+
+def state_thread_name(base: str, state: object) -> str | None:
+    """Base name with the thread_state prefix applied, or None when unknown.
+
+    The base is always the unprefixed thread name: any existing marker is
+    stripped before the new one is applied, so needs-you then done shows a
+    single ✅ and none always restores the bare name.
+    """
+    prefix = state_prefix(state)
+    if prefix is None or not base:
+        return None
+    bare = base
+    for known in ("❓ ", "✅ "):
+        if bare.startswith(known):
+            bare = bare[len(known):]
+            break
+    return prefix + bare if prefix else bare
+
+
+def discord_rename_thread(thread_id: str, name: str) -> dict:
+    """Rename a topic thread Firstmate created, best effort over REST."""
+    token = _bot_token()
+    if not token:
+        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
+    if not _SNOWFLAKE.fullmatch(thread_id):
+        raise DiscordSendError("permanent", "thread id is not a Discord id")
+    body = json.dumps({"name": name}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{DISCORD_API_BASE}/channels/{thread_id}",
+        data=body,
+        method="PATCH",
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read().decode("utf-8") or "{}"
+    except urllib.error.HTTPError as err:
+        outcome = classify_http_code(err.code)
+        try:
+            details = json.loads(err.read().decode("utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            details = {}
+        if not isinstance(details, dict):
+            details = {}
+        raise DiscordSendError(outcome, f"discord HTTP {err.code}", err.code, details) from err
+    except urllib.error.URLError as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    except (TimeoutError, OSError) as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as err:
+        raise DiscordSendError("ambiguous", "discord HTTP 200 with invalid JSON") from err
+    if not isinstance(data, dict):
+        raise DiscordSendError("ambiguous", "discord thread rename returned no object")
+    return {"ok": True, "thread_id": thread_id}
+
+
+def maybe_rename_topic_thread(
+    payload: dict,
+    thread_id: str,
+    home: Path,
+    rename_thread=None,
+) -> str:
+    """Apply this generation's thread_state to its topic thread, best effort.
+
+    Only threads this request created (the request-wide record matches) are
+    renamed, and only when the prefixed name differs from the recorded name.
+    Any failure - unknown state, no base name, rate limit, transport error -
+    is logged and leaves the reply delivered; renaming never blocks or loses
+    a reply.
+    """
+    state = payload.get("thread_state")
+    if not state:
+        return thread_id
+    if state_prefix(state) is None:
+        return thread_id
+    if payload.get("origin") != "message":
+        return thread_id
+    if str(payload.get("thread_id") or "") != str(payload.get("channel_id") or ""):
+        return thread_id
+    if str(payload.get("channel_id") or "") != dedicated_channel(home):
+        return thread_id
+    recorded = load_request_topic(payload, home)
+    if recorded.get("topic_thread_id") != thread_id:
+        return thread_id
+    base = thread_name_for(payload, home)
+    if not base:
+        return thread_id
+    want = state_thread_name(base, state)
+    if want is None:
+        return thread_id
+    if want == (recorded.get("topic_name") or base):
+        return thread_id
+    renamer = rename_thread or discord_rename_thread
+    try:
+        renamer(thread_id, want)
+    except Exception as err:
+        print(f"fm-ext-poster: thread rename skipped: {err}", file=sys.stderr)
+        return thread_id
+    try:
+        save_request_thread(payload, thread_id, home, topic_name=want, thread_state=state)
+    except Exception as err:
+        print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
+    return thread_id
 
 
 def discord_create_thread(payload: dict, name: str) -> dict:
@@ -526,8 +747,13 @@ def discord_create_thread(payload: dict, name: str) -> dict:
     Thread creation needs the channel that owns the message and that message's
     id. An in-thread request has a thread field distinct from its parent
     channel and must keep that destination rather than create a nested thread.
+
+    The name the caller derived is re-validated against the request text
+    (plus Firstmate's title when this payload carries one) before it may
+    reach Discord, so only a name the rules can produce is ever created.
     """
-    name = public_topic_name(payload, name)
+    name = public_topic_name(payload, name, None,
+                             _request_text_for(payload, None), _title_for(payload))
     if not name:
         raise DiscordSendError("permanent", "request does not need a topic thread")
     token = _bot_token()
@@ -620,7 +846,9 @@ def ensure_topic_thread(
     if not _SNOWFLAKE.fullmatch(thread_id):
         return ""
     try:
-        save_request_thread(payload, thread_id, home)
+        save_request_thread(payload, thread_id, home, topic_name=name,
+                            thread_state=(payload.get("thread_state") if isinstance(payload.get("thread_state"), str) else ""),
+                            creating_title=_title_for(payload))
     except Exception:
         return thread_id
     return thread_id
@@ -987,6 +1215,7 @@ def deliver_one(
     home: Path | None = None,
     react: ReactFn | None = None,
     create_thread: ThreadFn | None = None,
+    rename_thread=None,
 ) -> str:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1094,6 +1323,8 @@ def deliver_one(
     )
     if payload.get("kind") in ("answer", "final"):
         react_to_request(payload, REACT_DONE, react)
+    if thread_id:
+        maybe_rename_topic_thread(payload, thread_id, home, rename_thread)
     return "sent"
 
 
@@ -1102,11 +1333,13 @@ def drain_outbox(
     home: Path | None = None,
     react: ReactFn | None = None,
     create_thread: ThreadFn | None = None,
+    rename_thread=None,
 ) -> list[str]:
     results = []
     for path in list_pending(home=home):
         try:
-            results.append(deliver_one(path, send=send, home=home, react=react, create_thread=create_thread))
+            results.append(deliver_one(path, send=send, home=home, react=react,
+                                       create_thread=create_thread, rename_thread=rename_thread))
         except DiscordSendError:
             results.append("failed")
     return results
