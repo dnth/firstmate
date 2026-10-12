@@ -106,8 +106,7 @@ print(value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " "), en
 }
 
 # waiting_pin_board <data>: print the message body lines from durable board
-# records only. Captain calls come from actionable open captain-hold annotations;
-# PR-ready URLs come from the recorded pr= metadata fm-pr-lib.sh owns.
+# records only. Captain calls come from actionable open captain-hold annotations.
 # Prints nothing when there is nothing waiting.
 waiting_pin_board() {
   local data=$1 listing ids today id title
