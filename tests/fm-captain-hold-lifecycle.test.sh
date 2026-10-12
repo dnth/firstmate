@@ -1350,6 +1350,20 @@ test_past_due_call_marked_due_while_held() {
   case "$ready" in
     *"$id"*) fail "a due call became dispatchable" ;;
   esac
+  # The ready listing is not the dispatch gate: fm-spawn.sh itself must refuse
+  # the held row before creating any endpoint or local copy.
+  mkdir -p "$home/data/$id" "$home/spawn-proj"
+  printf 'spawn refusal probe brief\n' > "$home/data/$id/brief.md"
+  out=$(env -u FM_TASK_ID PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/unused-projects" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home/spawn-proj" --scout 2>&1)
+  case "$out" in
+    *"not dispatchable in state queued yes no"*) : ;;
+    *) fail "fm-spawn.sh did not refuse the held row for its captain hold: $out" ;;
+  esac
+  [ -e "$home/state/$id.meta" ] && fail "a refused spawn published task metadata"
   printf 'Captain says left.\n' > "$home/decision.txt"
   run_captain "$home" answer "$id" --decision-file "$home/decision.txt" >/dev/null \
     || fail "a due call refused its answer"
