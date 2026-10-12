@@ -604,8 +604,9 @@ test_stale_pane_transient_persistent_resume() {
   pass "lifecycle: stale pane transient self-handles, persistent escalates once and clears, resumed clears quietly"
 }
 
+# shellcheck disable=SC2030,SC2031 # the ( ) body is the subshell this fixture scopes its env to
 test_backlog_due_recovery_delivers_and_retires() (
-  local dir state fakebin task marker out channel key endpoint ident before after repeat
+  local dir state fakebin task marker out channel key endpoint ident before after
   command -v tasks-axi >/dev/null 2>&1 || fail "backlog recovery test needs tasks-axi"
   dir=$(make_supercase wd-backlog-due)
   state="$dir/state"
@@ -686,7 +687,7 @@ SH
   FM_CAPTAIN_HOLD_NOW=2026-08-02T00:00:00Z "$ROOT/bin/fm-captain-hold.sh" hold due-release --reason second >/dev/null || fail "rehold delivered call"
   export FM_CAPTAIN_HOLD_TODAY=2026-08-17
   fm_advisory_superseded "$state" due-release decision due-release backlog '2026-08-01T00:00:00Z#0' || fail "old lifecycle stayed current after rehold"
-  for repeat in first same; do
+  for _ in first same; do
     bash -c '. "$1"; fm_recovery_marker_publish "$2" downtime' _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "publish reheld recovery"
     handle_durable_wakes "check: rearm-resurface" "$state" || fail "deliver reheld recovery"
     after=$(grep -Fc 'due-release [key=due-release] needs-decision:' "$dir/sent.log")
@@ -696,6 +697,7 @@ SH
   pass "due calls retain backlog freshness with absent, completed, and overlapping status logs"
 )
 
+# shellcheck disable=SC2030,SC2031 # the ( ) body is the subshell this fixture scopes its env to
 test_over_cap_decision_batches_still_deliver() (
   local mode dir state fakebin task title marker line emitted i
   title=$(python3 -c 'print("x" * 220)')

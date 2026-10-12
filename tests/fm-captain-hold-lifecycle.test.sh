@@ -1375,7 +1375,7 @@ test_out_of_band_close_is_recordable() {
 # staying captain-held: the hold bit, the spawn refusal, and the answer path
 # all survive, and answered, deferred, or not-yet-due calls are not marked.
 test_past_due_call_marked_due_while_held() {
-  local home id show out ready decision
+  local home id show out ready
   home=$(make_home review-due)
   id=due-call
   tasks_in "$home" add "$id" "Pick the due option" --kind captain --repo sample >/dev/null \
