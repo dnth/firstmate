@@ -115,6 +115,12 @@ type SessionGeneration = {
   // still delivering the wake it was started for; its bounded retry runs once
   // that delivery settles instead of being skipped by the single-flight guard.
   deferredClose: { message: string; predecessorArmPid: string } | null;
+  // Closes the supervision branch accepted and has not settled yet, by pending
+  // token. The delivery loop never waits on a branch: an accepted close stays
+  // pending here until its settlement resolves (finished) or rejects (moved to
+  // branchReturned so the loop delivers it to main without a second offer).
+  branchInFlight: Set<string>;
+  branchReturned: Set<string>;
   // Main-fallback coalescing (docs/omp-supervision-branch.md "Main-fallback
   // re-entry coalescing"): while a main fallback notification's handling
   // episode is open, further main-bound injections are suppressed so a burst of
@@ -170,8 +176,11 @@ export type PrimaryWatchCoreOptions = {
   // in-flight re-delivery or a decision-owned wake.
   sendFollowUp: (content: string, options?: { forceTurn?: boolean }) => Promise<void>;
   // Optional supervision-branch dispatch handshake. A synchronous non-null
-  // settlement means the branch accepted handling, while rejection returns
-  // delivery ownership to the core's consumption-acknowledged main path.
+  // settlement means the branch accepted handling. The core never waits on it
+  // inside its delivery loop: later closes, their successor arms, and main-only
+  // rows proceed while the branch works, the close finishes when the
+  // settlement resolves, and a rejection returns delivery ownership to the
+  // core's consumption-acknowledged main path exactly once.
   // Never offered for repair-failed delivery: only main can repair the cycle.
   offerWakeToBranch?: (message: string) => Promise<void> | null;
   // Coalesce main-fallback wake injections behind the active handling episode.
@@ -303,6 +312,8 @@ function createGeneration(): SessionGeneration {
     pendingActionables: [],
     cleanupFailure: "",
     unconsumedWakes: new Map(),
+    branchInFlight: new Set(),
+    branchReturned: new Set(),
     deferredClose: null,
     mainFallbackEpisode: false,
     mainFallbackSuccessor: false,
@@ -930,13 +941,15 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     }
   }
 
+  type ActionableWakeOutcome = MainWakeOutcome | { branch: Promise<void> };
+
   async function deliverActionableWake(
     owner: SessionGeneration,
     message: string,
     repairFailed: boolean,
     pending: PendingActionableClose,
     recovery?: RecoveryHandoff,
-  ): Promise<MainWakeOutcome> {
+  ): Promise<ActionableWakeOutcome> {
     if (!generationIsLive(owner)) return "failed";
     if (recovery) {
       const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
@@ -947,21 +960,54 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     }
     if (!repairFailed && offerWakeToBranch) {
       const branchDelivery = offerWakeToBranch(message);
-      if (branchDelivery) {
-        try {
-          await branchDelivery;
-          return "delivered";
-        } catch {
-          // The core retains delivery ownership when branch settlement rejects.
-        }
-      }
+      // Accepted: the branch owns handling. The loop does not wait for it -
+      // trackBranchSettlement reconciles the record when it settles.
+      if (branchDelivery) return { branch: branchDelivery };
     }
     return await deliverMainWake(owner, message, pending);
   }
 
+  // A branch-accepted close stays pending, but outside the delivery loop's
+  // candidates, until the branch settles. Resolution finishes it exactly as a
+  // synchronous branch delivery did; rejection hands it back so the loop
+  // delivers it to main once, through the ordinary coalescing path, without a
+  // second branch offer or a second successor restore. The replacement claim
+  // stays open until then, so a replacement session waiting on this close
+  // replays it only if the branch rejected it.
+  function trackBranchSettlement(
+    owner: SessionGeneration,
+    pending: PendingActionableClose,
+    settlement: Promise<void>,
+    settleClaim: (settlement: "delivered" | "failed") => void,
+    releaseClaim: () => void,
+  ): void {
+    owner.branchInFlight.add(pending.token);
+    settlement.then(
+      () => {
+        owner.branchInFlight.delete(pending.token);
+        settleClaim("delivered");
+        releaseClaim();
+        pending.delivered = true;
+        try {
+          finishPendingActionable(owner, pending);
+        } catch (error) {
+          surfaceCleanupFailure(owner, error);
+        }
+      },
+      () => {
+        owner.branchInFlight.delete(pending.token);
+        settleClaim("failed");
+        releaseClaim();
+        if (!generationIsLive(owner)) return;
+        owner.branchReturned.add(pending.token);
+        void processPendingActionables(owner);
+      },
+    );
+  }
+
   function surfaceFailure(owner: SessionGeneration, message: string): void {
     if (coalesceMainFallbackWakes && (owner.mainFallbackWakeInFlight || owner.mainFallbackEpisode)) {
-      if (owner.pendingActionables.some((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token))) {
+      if (owner.pendingActionables.some((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token) && !owner.branchInFlight.has(pending.token))) {
         owner.mainFallbackSuccessor = true;
         schedulePendingCleanup(owner);
       }
@@ -1048,12 +1094,14 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         }
         // A record the runtime has accepted but not consumed is neither
         // redelivered nor finished here: consumption finishes it; replacement
-        // replays it.
+        // replays it. A record a branch is still handling is skipped the same
+        // way: its settlement finishes it or hands it back.
         const pending = owner.pendingActionables.find(
           (item) =>
             !item.delivered &&
             !owner.unconsumedWakes.has(item.token) &&
-            !owner.episodeCoalesced.has(item.token),
+            !owner.episodeCoalesced.has(item.token) &&
+            !owner.branchInFlight.has(item.token),
         );
         if (!pending) break;
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
@@ -1080,10 +1128,13 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           }
         };
         try {
+          // A close the branch handed back already has its successor and its
+          // handling-delivery handshake; it only still owes main a delivery.
+          const returnedFromBranch = owner.branchReturned.delete(pending.token);
           // A new restoration supersedes whatever became of the previous
           // successor; only a failure during this delivery is retried after it.
-          owner.deferredClose = null;
-          const restoration = pending.fallbackOnly
+          if (!returnedFromBranch) owner.deferredClose = null;
+          const restoration = pending.fallbackOnly || returnedFromBranch
             ? { failure: "", recovery: undefined }
             : await restoreAfterActionableClose(owner, pending.predecessorArmPid);
           if (!generationIsLive(owner)) {
@@ -1094,7 +1145,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           const message = restoration.failure
             ? `${pending.message}\n\n${restoration.failure}`
             : pending.message;
-          let outcome: MainWakeOutcome;
+          let outcome: ActionableWakeOutcome;
           if (pending.fallbackOnly) {
             let baselineRows = owner.mainFallbackBaselineRows ?? mainOwnedWakeSnapshot();
             if (!baselineRows && mainOwnedWakeRows() === 0) baselineRows = new Set();
@@ -1108,6 +1159,8 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
                 ? "delivered"
                 : "failed";
             }
+          } else if (returnedFromBranch) {
+            outcome = await deliverMainWake(owner, message, pending);
           } else {
             outcome = await deliverActionableWake(
               owner,
@@ -1116,6 +1169,13 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
               pending,
               restoration.recovery,
             );
+          }
+          if (typeof outcome === "object") {
+            // Handed to the branch. Its successor already runs, so the next
+            // close - including a main-only row - proceeds now; the claim
+            // stays open until the branch settles.
+            trackBranchSettlement(owner, pending, outcome.branch, settleClaim, releaseClaim);
+            continue;
           }
           if (outcome === "suppressed") {
             if (restoration.failure) {
@@ -1631,7 +1691,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         }
         const retry = owner.pendingActionables.find(
           (pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token) &&
-            !owner.episodeCoalesced.has(pending.token),
+            !owner.episodeCoalesced.has(pending.token) && !owner.branchInFlight.has(pending.token),
         );
         if (retry && !owner.mainFallbackWakeInFlight) {
           owner.mainFallbackSuccessor = true;
@@ -1660,7 +1720,8 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         // its notification was never read, so the rows it covered still earn
         // one successor injection.
         const next = owner.pendingActionables
-          .filter((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token))
+          .filter((pending) =>
+            !pending.delivered && !owner.unconsumedWakes.has(pending.token) && !owner.branchInFlight.has(pending.token))
           .pop();
         if (next && !owner.mainFallbackWakeInFlight && !owner.mainFallbackSuccessorGranted) {
           owner.mainFallbackSuccessor = true;
@@ -1669,7 +1730,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           owner.episodeCoalesced.delete(next.token);
           void processPendingActionables(owner);
         } else if (
-          owner.pendingActionables.every((pending) => pending.delivered) &&
+          owner.pendingActionables.every((pending) => pending.delivered || owner.branchInFlight.has(pending.token)) &&
           !owner.mainFallbackWakeInFlight &&
           !owner.mainFallbackSuccessorGranted
         ) {
