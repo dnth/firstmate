@@ -322,6 +322,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-secondmate-charter-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
@@ -2328,6 +2330,113 @@ validate_omp_prewalk_for_launch_dir() {
   fi
 }
 
+validate_firstmate_home_for_spawn() {
+  local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
+  abs_home=$(resolved_existing_dir "$home") || return 1
+  abs_active_home=$(resolved_existing_dir "$FM_HOME")
+  abs_root=$(resolved_existing_dir "$FM_ROOT")
+  if [ "$abs_home" = "/" ]; then
+    echo "error: secondmate home cannot be the filesystem root: $home" >&2
+    return 1
+  fi
+  if [ "$abs_home" = "$abs_active_home" ]; then
+    echo "error: secondmate home cannot be the active firstmate home: $home" >&2
+    return 1
+  fi
+  if [ "$abs_home" = "$abs_root" ]; then
+    echo "error: secondmate home cannot be the firstmate repo: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
+    echo "error: secondmate home cannot be inside the active firstmate home: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_root" "$abs_home"; then
+    echo "error: secondmate home cannot be inside the firstmate repo: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
+    echo "error: secondmate home cannot be an ancestor of the active firstmate home: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_home" "$abs_root"; then
+    echo "error: secondmate home cannot be an ancestor of the firstmate repo: $home" >&2
+    return 1
+  fi
+  validate_firstmate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
+  if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
+    echo "error: firstmate home $home is not a seeded secondmate home" >&2
+    return 1
+  fi
+  marker_id=$(cat "$abs_home/$SUB_HOME_MARKER" 2>/dev/null || true)
+  if [ "$marker_id" != "$id" ]; then
+    echo "error: firstmate home $home is marked for secondmate ${marker_id:-unknown}, expected $id" >&2
+    return 1
+  fi
+  if [ ! -f "$abs_home/AGENTS.md" ]; then
+    echo "error: $home is not a firstmate home (missing AGENTS.md)" >&2
+    return 1
+  fi
+  if [ ! -d "$abs_home/bin" ]; then
+    echo "error: $home is not a firstmate home (missing bin/)" >&2
+    return 1
+  fi
+  printf '%s\n' "$abs_home"
+}
+
+validate_firstmate_operational_dirs() {
+  local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
+  for name in data state config projects; do
+    dir="$abs_home/$name"
+    if [ -L "$dir" ] && [ ! -e "$dir" ]; then
+      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
+      return 1
+    fi
+    if [ -d "$dir" ]; then
+      abs_dir=$(cd "$dir" && pwd -P)
+    elif [ -e "$dir" ]; then
+      echo "error: secondmate $name path is not a directory: $dir" >&2
+      return 1
+    else
+      abs_dir="$abs_home/$name"
+    fi
+    if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
+      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
+      return 1
+    fi
+    if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
+      echo "error: secondmate $name directory cannot be inside the active firstmate home: $dir" >&2
+      return 1
+    fi
+    if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
+      echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
+      return 1
+    fi
+  done
+}
+
+if [ "$KIND" = secondmate ]; then
+  if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
+    FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
+  fi
+  if [ -z "$FIRSTMATE_HOME" ]; then
+    FIRSTMATE_HOME=$(secondmate_registry_field "$DATA/secondmates.md" "$ID" home || true)
+  fi
+fi
+
+if [ "$KIND" = secondmate ]; then
+  [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
+  PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
+  if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
+    if ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
+      echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
+      exit 1
+    fi
+    SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
+  fi
+  BRIEF=$(secondmate_spawn_brief "$PROJ_ABS" "$DATA/$ID/brief.md") || exit 1
+fi
+
 OMP_BIN=
 OMP_BIN_CANON=
 OMP_BUN_CANON=
@@ -2529,10 +2638,6 @@ if [ "$HARNESS" = omp ]; then
     fi
   fi
 fi
-
-secondmate_registry_value() {
-  secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
-}
 
 shell_quote() {
   printf "'"
@@ -3038,110 +3143,7 @@ prepare_omp_secondmate_session() {
   fi
 }
 
-validate_firstmate_home_for_spawn() {
-  local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
-  abs_home=$(resolved_existing_dir "$home") || return 1
-  abs_active_home=$(resolved_existing_dir "$FM_HOME")
-  abs_root=$(resolved_existing_dir "$FM_ROOT")
-  if [ "$abs_home" = "/" ]; then
-    echo "error: secondmate home cannot be the filesystem root: $home" >&2
-    return 1
-  fi
-  if [ "$abs_home" = "$abs_active_home" ]; then
-    echo "error: secondmate home cannot be the active firstmate home: $home" >&2
-    return 1
-  fi
-  if [ "$abs_home" = "$abs_root" ]; then
-    echo "error: secondmate home cannot be the firstmate repo: $home" >&2
-    return 1
-  fi
-  if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
-    echo "error: secondmate home cannot be inside the active firstmate home: $home" >&2
-    return 1
-  fi
-  if path_is_ancestor_of "$abs_root" "$abs_home"; then
-    echo "error: secondmate home cannot be inside the firstmate repo: $home" >&2
-    return 1
-  fi
-  if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
-    echo "error: secondmate home cannot be an ancestor of the active firstmate home: $home" >&2
-    return 1
-  fi
-  if path_is_ancestor_of "$abs_home" "$abs_root"; then
-    echo "error: secondmate home cannot be an ancestor of the firstmate repo: $home" >&2
-    return 1
-  fi
-  validate_firstmate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
-  if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
-    echo "error: firstmate home $home is not a seeded secondmate home" >&2
-    return 1
-  fi
-  marker_id=$(cat "$abs_home/$SUB_HOME_MARKER" 2>/dev/null || true)
-  if [ "$marker_id" != "$id" ]; then
-    echo "error: firstmate home $home is marked for secondmate ${marker_id:-unknown}, expected $id" >&2
-    return 1
-  fi
-  if [ ! -f "$abs_home/AGENTS.md" ]; then
-    echo "error: $home is not a firstmate home (missing AGENTS.md)" >&2
-    return 1
-  fi
-  if [ ! -d "$abs_home/bin" ]; then
-    echo "error: $home is not a firstmate home (missing bin/)" >&2
-    return 1
-  fi
-  printf '%s\n' "$abs_home"
-}
-
-validate_firstmate_operational_dirs() {
-  local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
-  for name in data state config projects; do
-    dir="$abs_home/$name"
-    if [ -L "$dir" ] && [ ! -e "$dir" ]; then
-      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
-      return 1
-    fi
-    if [ -d "$dir" ]; then
-      abs_dir=$(cd "$dir" && pwd -P)
-    elif [ -e "$dir" ]; then
-      echo "error: secondmate $name path is not a directory: $dir" >&2
-      return 1
-    else
-      abs_dir="$abs_home/$name"
-    fi
-    if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
-      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
-      return 1
-    fi
-    if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the active firstmate home: $dir" >&2
-      return 1
-    fi
-    if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
-      return 1
-    fi
-  done
-}
-
 if [ "$KIND" = secondmate ]; then
-  if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
-    FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
-  fi
-  if [ -z "$FIRSTMATE_HOME" ]; then
-    FIRSTMATE_HOME=$(secondmate_registry_value "$ID" home || true)
-  fi
-fi
-
-if [ "$KIND" = secondmate ]; then
-  [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
-  PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
-  if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
-    if ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
-      echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
-      exit 1
-    fi
-    SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
-  fi
   WT="$PROJ_ABS"
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
@@ -3244,11 +3246,6 @@ if [ "$KIND" = secondmate ]; then
       propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
       || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   fi
-  if [ -f "$PROJ_ABS/data/charter.md" ]; then
-    BRIEF="$PROJ_ABS/data/charter.md"
-  else
-    BRIEF="$DATA/$ID/brief.md"
-  fi
 else
   if [ "$RELAUNCH" -eq 1 ]; then
     PROJ_ABS=$(fm_meta_get "$RELAUNCH_META" project)
@@ -3314,15 +3311,18 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
   esac
 }
 
+# Scaffold fill guard, checked before any endpoint exists.
+# Secondmates also validate their effective charter before home preparation.
+if grep -F '{TASK}' "$BRIEF" >/dev/null 2>&1; then
+  echo "error: $KIND brief still contains {TASK}; replace every scaffold placeholder before spawn" >&2
+  exit 1
+fi
+
 # Brief/spawn delivery agreement, checked before any endpoint exists.
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  if grep -F '{TASK}' "$BRIEF" >/dev/null 2>&1; then
-    echo "error: ship brief still contains {TASK}; replace every scaffold placeholder before spawn" >&2
-    exit 1
-  fi
   if grep -Fx '# Acceptance criteria' "$BRIEF" >/dev/null 2>&1; then
     if ! "$FM_ROOT/bin/fm-receipt-check.sh" --parse-criteria "$BRIEF" >/dev/null 2>&1; then
       echo "error: ship brief acceptance criteria are invalid or still contain placeholders" >&2

@@ -161,6 +161,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-secondmate-charter-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -905,12 +907,22 @@ do_relaunch() {
       ;;
   esac
 
+  if [ "$KIND" = scout ]; then
+    if grep -F '{TASK}' "$RELAUNCH_BRIEF" >/dev/null 2>&1 \
+       || [[ "$NOTE" == *'{TASK}'* ]]; then
+      die "scout brief or progress note still contains {TASK}; replace every scaffold placeholder before relaunch"
+    fi
+  fi
+
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else
     note_line="note=none"
   fi
   safe_checkpoint
+  if [ "$KIND" = secondmate ]; then
+    secondmate_spawn_brief "$WT" "$DATA/$ID/brief.md" >/dev/null || exit 1
+  fi
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"

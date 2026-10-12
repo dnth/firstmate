@@ -89,6 +89,229 @@ EOF
   assert_not_contains "$out" "acceptance criteria are missing" "spawn rejected concrete brace syntax"
   pass "fm-spawn: unresolved task and criterion placeholders refuse before launch"
 }
+test_scout_spawn_refuses_unresolved_task_placeholder() {
+  local rec home proj fakebin out status wt
+  rec=$(make_home scout-placeholder)
+  IFS='|' read -r home proj fakebin <<EOF2
+$rec
+EOF2
+  write_brief "$home" scout-placeholder-x1
+  printf '\n{TASK}\n' >> "$home/data/scout-placeholder-x1/brief.md"
+  out=$(run_spawn "$home" "$fakebin" scout-placeholder-x1 "$proj" claude --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "scout spawn accepted an unresolved task placeholder"
+  assert_contains "$out" "still contains {TASK}" "scout spawn did not identify the task placeholder"
+  assert_contains "$out" "scout brief" "scout refusal did not name its kind"
+  assert_absent "$home/state/scout-placeholder-x1.meta" "refused scout spawn wrote task metadata"
+  wt="$TMP_ROOT/scout-placeholder/wt"
+  fm_git_worktree "$proj" "$wt" "wt-scout-filled"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "$wt"; exit 0 ;;
+esac
+case "\${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane) printf 'ready\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    for a in "\$@"; do
+      case "\$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=\${a#touch }
+          marker=\${marker#\'}; marker=\${marker%\'}; : > "\$marker"
+          ;;
+      esac
+    done
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "$wt"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  write_brief "$home" scout-filled-x2
+  out=$(FM_FAKE_PANE_PATH="$wt" run_spawn "$home" "$fakebin" scout-filled-x2 "$proj" claude --scout)
+  status=$?
+  [ "$status" -eq 0 ] || fail "scout spawn with a filled brief should succeed: $out"
+  assert_contains "$out" "spawned scout-filled-x2" "filled scout spawn did not report success"
+  assert_present "$home/state/scout-filled-x2.meta" "filled scout spawn published no record"
+  pass "fm-spawn: a scout spawn refuses an unresolved task placeholder before launch"
+}
+
+test_secondmate_spawn_refuses_unresolved_charter_placeholder() {
+  local rec home proj fakebin mate primary before out status source
+  rec=$(make_home charter-placeholder)
+  IFS='|' read -r home proj fakebin <<EOF2
+$rec
+EOF2
+  primary="$TMP_ROOT/charter-placeholder/primary"
+  mate="$TMP_ROOT/charter-placeholder/mate"
+  fm_git_init_commit "$primary"
+  git -C "$primary" branch -M main
+  mkdir -p "$primary/bin"
+  cp "$ROOT/bin/fm-harness.sh" "$primary/bin/"
+  printf '# Firstmate\n' > "$primary/AGENTS.md"
+  printf 'data/\nstate/\nconfig/\n.fm-secondmate-home\n' > "$primary/.gitignore"
+  git -C "$primary" add .
+  git -C "$primary" -c user.name=Test -c user.email=test@example.invalid commit -qm seeded
+  before=$(git -C "$primary" rev-parse HEAD)
+  git -C "$primary" worktree add -q --detach "$mate" "$before"
+  printf 'new version\n' >> "$primary/README.md"
+  git -C "$primary" -c user.name=Test -c user.email=test@example.invalid commit -qam advance
+  mkdir -p "$mate/data"
+  printf '%s\n' charter-placeholder-m1 > "$mate/.fm-secondmate-home"
+  printf '%s\n' claude > "$home/config/crew-harness"
+  write_brief "$home" charter-placeholder-m1
+  for source in charter fallback; do
+    if [ "$source" = charter ]; then
+      printf 'charter with {TASK}\n' > "$mate/data/charter.md"
+    else
+      rm "$mate/data/charter.md"
+      printf '{TASK}\n' >> "$home/data/charter-placeholder-m1/brief.md"
+    fi
+    out=$(FM_TEST_ROOT_OVERRIDE="$primary" run_spawn "$home" "$fakebin" charter-placeholder-m1 "$mate" --secondmate --harness claude)
+    status=$?
+    [ "$status" -ne 0 ] || fail "secondmate accepted an unresolved $source placeholder"
+    assert_contains "$out" 'secondmate brief still contains {TASK}' "secondmate did not identify the $source placeholder"
+    [ "$(git -C "$mate" rev-parse HEAD)" = "$before" ] || fail "refused $source spawn advanced the secondmate checkout"
+    assert_absent "$mate/state" "refused $source spawn prepared secondmate state"
+    assert_absent "$mate/config" "refused $source spawn propagated inheritance"
+    assert_absent "$home/state/charter-placeholder-m1.meta" "refused spawn wrote task metadata"
+  done
+  printf 'Concrete charter\n' > "$mate/data/charter.md"
+  out=$(FM_TEST_ROOT_OVERRIDE="$primary" run_spawn "$home" "$fakebin" charter-placeholder-m1 "$mate" --secondmate --harness claude)
+  assert_not_contains "$out" 'still contains {TASK}' "filled charter did not override unresolved fallback"
+  [ "$(git -C "$mate" rev-parse HEAD)" = "$(git -C "$primary" rev-parse HEAD)" ] || fail "filled charter did not reach ordinary checkout preparation"
+  pass "fm-spawn: secondmate charter and fallback refuse before checkout preparation"
+}
+
+test_remote_secondmate_refuses_placeholder_before_endpoint_access() {
+  local rec home proj fakebin mate out status action endpoint
+  rec=$(make_home remote-placeholder)
+  IFS='|' read -r home proj fakebin <<EOF2
+$rec
+EOF2
+  mate="$TMP_ROOT/remote-placeholder/mate"
+  mkdir -p "$mate/bin" "$mate/data"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  printf '%s\n' remote-placeholder-m1 > "$mate/.fm-secondmate-home"
+  printf 'charter with {TASK}\n' > "$mate/data/charter.md"
+  for endpoint in absent recorded; do
+    if [ "$endpoint" = recorded ]; then
+      mkdir -p "$mate/state/parent-route"
+      printf 'endpoint_task_id=remote-placeholder-m1\nbackend=herdr\nherdr_session=fm-remote\n' > "$mate/state/parent-route/remote-placeholder-m1.meta"
+      cp "$mate/state/parent-route/remote-placeholder-m1.meta" "$home/endpoint-before"
+    fi
+    for action in launch relaunch; do
+      if [ "$action" = launch ]; then
+        set -- launch remote-placeholder-m1 claude - - herdr - - -
+      else
+        set -- relaunch remote-placeholder-m1 claude - -
+      fi
+      out=$(FM_HOME="$mate" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" 2>&1)
+      status=$?
+      [ "$status" -ne 0 ] || fail "remote $action accepted an unresolved charter"
+      assert_contains "$out" 'secondmate brief still contains {TASK}' "remote $action accessed $endpoint endpoint before validating charter"
+      assert_absent "$mate/data/.parent-route" "refused remote $action prepared control data"
+      if [ "$endpoint" = absent ]; then
+        assert_absent "$mate/state/parent-route" "refused remote $action prepared control state"
+      else
+        cmp -s "$home/endpoint-before" "$mate/state/parent-route/remote-placeholder-m1.meta" || fail "refused remote $action changed endpoint metadata"
+      fi
+    done
+  done
+  pass "remote secondmate launch and relaunch validate before endpoint access"
+}
+
+test_scout_relaunch_validates_brief_and_pending_note() {
+  local rec home proj fakebin wt out status source id=scout-relaunch
+  rec=$(make_home scout-relaunch)
+  IFS='|' read -r home proj fakebin <<EOF2
+$rec
+EOF2
+  wt="$TMP_ROOT/scout-relaunch/wt"
+  fm_git_worktree "$proj" "$wt" scout-relaunch-wt
+  write_brief "$home" "$id"
+  cp "$home/data/$id/brief.md" "$home/brief-before"
+  printf 'claude\n' > "$home/agent-command"
+  cat > "$home/state/$id.meta" <<EOF2
+window=firstmate:fm-$id
+endpoint_task_id=$id
+worktree=$wt
+project=$proj
+harness=claude
+kind=scout
+model=default
+effort=default
+EOF2
+  cp "$home/state/$id.meta" "$home/meta-before"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf 'fm-scout-relaunch\n' ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*) cat "$FM_HOME/agent-command" ;;
+      *pane_current_path*) printf '%s\n' "$FM_TEST_SCOUT_WT" ;;
+      *) printf 'firstmate\n' ;;
+    esac ;;
+  capture-pane) printf '> \n' ;;
+  send-keys)
+    printf '%s\n' "$*" >> "$FM_HOME/endpoint-writes"
+    case "$*" in *'/exit'*) printf 'zsh\n' > "$FM_HOME/agent-command" ;; esac ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/spawn" <<'SH'
+#!/usr/bin/env bash
+printf 'control_relaunch_tx=%s\n' "$FM_CONTROL_RELAUNCH_TX" >> "$FM_HOME/state/$1.meta"
+printf 'claude\n' > "$FM_HOME/agent-command"
+SH
+  chmod +x "$fakebin/spawn"
+  for source in brief note note-file; do
+    cp "$home/brief-before" "$home/data/$id/brief.md"
+    if [ "$source" = brief ]; then
+      printf '{TASK}\n' >> "$home/data/$id/brief.md"
+      set -- --note 'Concrete progress.'
+    elif [ "$source" = note ]; then
+      set -- --note 'Progress still has {TASK}.'
+    else
+      printf 'Progress still has {TASK}.\n' > "$home/input-note"
+      set -- --note-file "$home/input-note"
+    fi
+    cp "$home/data/$id/brief.md" "$home/expected-brief"
+    out=$(FM_HOME="$home" FM_TEST_SCOUT_WT="$wt" PATH="$fakebin:$PATH" \
+      "$ROOT/bin/fm-control.sh" "$id" relaunch "$@" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "scout relaunch accepted unresolved $source"
+    assert_contains "$out" 'still contains {TASK}' "scout relaunch failed to identify unresolved $source"
+    cmp -s "$home/expected-brief" "$home/data/$id/brief.md" || fail "refused scout relaunch modified its brief"
+    cmp -s "$home/meta-before" "$home/state/$id.meta" || fail "refused scout relaunch modified metadata"
+    [ "$(cat "$home/agent-command")" = claude ] || fail "refused scout relaunch stopped the agent"
+    assert_absent "$home/endpoint-writes" "refused scout relaunch sent endpoint input"
+    assert_absent "$home/state/$id.control-relaunch" "refused scout relaunch opened a transaction"
+    assert_absent "$home/state/$id.control-relaunch.note" "refused scout relaunch persisted a note"
+  done
+  cp "$home/brief-before" "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_TEST_SCOUT_WT="$wt" PATH="$fakebin:$PATH" \
+    FM_RESTART_SPAWN_CMD="$fakebin/spawn" FM_CONTROL_POLL=0.01 \
+    FM_CONTROL_EXIT_WAIT=0.1 FM_CONTROL_LAUNCH_WAIT=0.1 \
+    "$ROOT/bin/fm-control.sh" "$id" relaunch --note 'Concrete progress with {"ok":true}.' 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "filled scout relaunch failed: $out"
+  assert_contains "$out" "relaunched $id" "filled scout relaunch did not report success"
+  assert_contains "$(cat "$home/data/$id/brief.md")" 'Concrete progress with {"ok":true}.' "filled scout relaunch omitted its progress note"
+  assert_present "$home/endpoint-writes" "filled scout relaunch never reached its endpoint"
+  pass "scout relaunch validates existing instructions and both pending note forms before transitions"
+}
 
 test_spawn_allows_legacy_brief_until_completion_gate() {
   local rec home proj fakebin out
@@ -109,7 +332,7 @@ EOF
 run_spawn() {  # <home> <fakebin> <spawn-args...>
   local home=$1 fakebin=$2
   shift 2
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
@@ -736,6 +959,10 @@ EOF
 test_ship_spawn_requires_a_valid_delivery_contract
 test_promote_transaction_help
 test_spawn_refuses_unresolved_brief_placeholders
+test_scout_spawn_refuses_unresolved_task_placeholder
+test_secondmate_spawn_refuses_unresolved_charter_placeholder
+test_remote_secondmate_refuses_placeholder_before_endpoint_access
+test_scout_relaunch_validates_brief_and_pending_note
 test_spawn_allows_legacy_brief_until_completion_gate
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch

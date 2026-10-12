@@ -42,3 +42,18 @@ registry_scope_for_brief() {
     brief_section_text "$brief" "Routing scope" | normalize_registry_text
   fi
 }
+
+secondmate_spawn_brief() {
+  local home=$1 fallback=$2 brief
+  if [ -f "$home/data/charter.md" ]; then
+    brief="$home/data/charter.md"
+  else
+    brief=$fallback
+  fi
+  [ -f "$brief" ] || { echo "error: no brief at $brief" >&2; return 1; }
+  if grep -F '{TASK}' "$brief" >/dev/null 2>&1; then
+    echo "error: secondmate brief still contains {TASK}; replace every scaffold placeholder before spawn" >&2
+    return 1
+  fi
+  printf '%s\n' "$brief"
+}
