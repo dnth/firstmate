@@ -1,7 +1,10 @@
 """Local outbox poster for the Communication Officer gateway plugin.
 
-Posts pending ``state/ext-outbox`` payloads to the Discord destination stored
-in each payload and records receipts through ``bin/fm-ext-outbox.sh``.
+Posts pending ``state/ext-outbox`` payloads to the request's Discord destination
+and records receipts through ``bin/fm-ext-outbox.sh``.
+The topic-thread routing contract is owned by docs/configuration.md under
+"Topic threads (one thread per request)"; bin/fm-ext-topic.sh owns the fixed
+public labels and source-message MYT time used for names.
 Unsent payloads (no posting marker, no receipt, no terminal failed marker)
 are retried after restart.
 Oversized replies are split with the X-mode Discord budget pattern
@@ -35,8 +38,8 @@ import json
 import os
 import re
 import subprocess
-import threading
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -45,12 +48,13 @@ from pathlib import Path
 from typing import Callable
 
 try:
-    from .intake import firstmate_home, firstmate_root
+    from .intake import dedicated_channel, firstmate_home, firstmate_root
 except ImportError:  # loaded from sys.path in hermetic tests
-    from intake import firstmate_home, firstmate_root
+    from intake import dedicated_channel, firstmate_home, firstmate_root
 
 SendFn = Callable[[dict], dict]
 ReactFn = Callable[[str, str, str], None]
+ThreadFn = Callable[[dict, str], dict]
 
 _WATCHER_STARTED = False
 _WATCHER_LOCK = threading.Lock()
@@ -71,10 +75,11 @@ _SNOWFLAKE = re.compile(r"^[0-9]+$")
 class DiscordSendError(Exception):
     """Classified Discord send outcome for outbox delivery."""
 
-    def __init__(self, outcome: str, message: str = "", http_code: int | None = None):
+    def __init__(self, outcome: str, message: str = "", http_code: int | None = None, api_error: dict | None = None):
         super().__init__(message or outcome)
         self.outcome = outcome
         self.http_code = http_code
+        self.api_error = api_error or {}
 
 
 def classify_http_code(code: int) -> str:
@@ -387,13 +392,215 @@ class _temp_json:
 
 
 def _mktemp() -> tuple[int, str]:
-    import tempfile
-
     return tempfile.mkstemp(prefix="fm-ext-receipt.")
 
 
 def _bot_token() -> str:
     return os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("HERMES_DISCORD_TOKEN") or ""
+
+
+def request_progress_path(payload: dict, home: Path) -> Path:
+    """Progress-adjacent record holding this request's topic-thread id.
+
+    The outbox payload and its chunk progress are per generation but the thread
+    belongs to the whole request, so the thread id lives in one request-wide
+    record beside them. Every later generation reuses it instead of creating a
+    second thread.
+    """
+    return state_dir(home) / "ext-outbox" / f"{payload['slug']}.thread.json"
+
+
+def load_request_thread(payload: dict, home: Path) -> str:
+    """This request's recorded topic-thread id, or "" when none exists."""
+    path = request_progress_path(payload, home)
+    if path.is_symlink() or not path.is_file():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    if data.get("request_id") != payload.get("request_id"):
+        return ""
+    thread_id = str(data.get("topic_thread_id") or "")
+    return thread_id if _SNOWFLAKE.fullmatch(thread_id) else ""
+
+
+def save_request_thread(payload: dict, thread_id: str, home: Path) -> None:
+    """Record this request's topic-thread id for every later generation.
+
+    A private state artifact beside the outbox, written with the same guards
+    the shell publication helper enforces: a regular single-link file at mode
+    0600, replaced atomically. Its basename is <slug>.thread.json, which the
+    pending scan skips as a marker, avoiding payload validation for completed
+    topics.
+    """
+    path = request_progress_path(payload, home)
+    if path.is_symlink():
+        raise RuntimeError("thread record is a symlink")
+    body = json.dumps({"request_id": payload.get("request_id"), "topic_thread_id": thread_id})
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    try:
+        if path.stat().st_nlink != 1:
+            path.unlink()
+            raise RuntimeError("thread record is hard-linked")
+    except FileNotFoundError:
+        raise RuntimeError("thread record vanished after write")
+    os.chmod(path, 0o600)
+
+
+def public_topic_name(payload: dict, name: str, home: Path | None = None) -> str:
+    result = subprocess.run(
+        [str(firstmate_root() / "bin" / "fm-ext-topic.sh"),
+         "--text-file", "-", "--origin", str(payload.get("origin") or "slash"),
+         "--thread-id", str(payload.get("thread_id") or ""),
+         "--channel-id", str(payload.get("channel_id") or ""),
+         "--message-id", str(payload.get("message_id") or ""), "--validate-name"],
+        input=name, capture_output=True, text=True, check=False,
+        env=_env_for(home or firstmate_home()),
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def thread_name_for(payload: dict, home: Path) -> str:
+    """Public-safe thread name for this request, or "" when it needs none.
+
+    The name comes from the durable destination context the intake recorded,
+    never from request text at post time, so later follow-ups reuse the exact
+    name the first reply used. Anything unusable - no context, no recorded
+    name, an already-threaded request - means no thread is created.
+    """
+    if payload.get("origin") != "message":
+        return ""
+    if str(payload.get("thread_id") or "") != str(payload.get("channel_id") or ""):
+        return ""
+    try:
+        context_path = state_dir(home) / "ext-context" / f"{payload['slug']}.json"
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError):
+        return ""
+    if not isinstance(context, dict):
+        return ""
+    name = context.get("topic") or ""
+    return public_topic_name(payload, name, home) if isinstance(name, str) and name else ""
+
+
+def discord_create_thread(payload: dict, name: str) -> dict:
+    """Start a public thread on the request's own message over Discord REST.
+
+    Thread creation needs the channel that owns the message and that message's
+    id. An in-thread request has a thread field distinct from its parent
+    channel and must keep that destination rather than create a nested thread.
+    """
+    name = public_topic_name(payload, name)
+    if not name:
+        raise DiscordSendError("permanent", "request does not need a topic thread")
+    token = _bot_token()
+    if not token:
+        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
+    channel = str(payload.get("channel_id") or "")
+    message = str(payload.get("message_id") or "")
+    if not (_SNOWFLAKE.fullmatch(channel) and _SNOWFLAKE.fullmatch(message)):
+        raise DiscordSendError("permanent", "thread parent is not a Discord message id")
+    if str(payload.get("thread_id") or "") != channel:
+        raise DiscordSendError("permanent", "thread parent is not the request channel")
+    body = json.dumps({"name": name, "auto_archive_duration": 1440}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{DISCORD_API_BASE}/channels/{channel}/messages/{message}/threads",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read().decode("utf-8") or "{}"
+    except urllib.error.HTTPError as err:
+        outcome = classify_http_code(err.code)
+        try:
+            details = json.loads(err.read().decode("utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            details = {}
+        if not isinstance(details, dict):
+            details = {}
+        raise DiscordSendError(outcome, f"discord HTTP {err.code}", err.code, details) from err
+    except urllib.error.URLError as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    except (TimeoutError, OSError) as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as err:
+        raise DiscordSendError("ambiguous", "discord HTTP 200 with invalid JSON") from err
+    thread_id = str(data.get("id") or "")
+    if not _SNOWFLAKE.fullmatch(thread_id):
+        raise DiscordSendError("ambiguous", "discord thread create returned no thread id")
+    return {"ok": True, "thread_id": thread_id}
+
+
+def ensure_topic_thread(
+    payload: dict,
+    progress: dict,
+    home: Path,
+    create_thread: ThreadFn | None = None,
+) -> str:
+    """Return the thread id this generation must post into.
+
+    A partially posted generation keeps its original destination so retries
+    cannot split one reply between conversations, even if another generation
+    creates a topic thread in the meantime. New generations reuse the
+    request-wide record, or create a thread only for a top-level message in
+    the dedicated channel. Discord error 160004 identifies an existing thread
+    by the source message id, including when concurrent creators race.
+    An empty result lets the caller post in place; the caller records this
+    generation's destination in chunk progress, while save_request_thread
+    persists the shared destination for later generations.
+    """
+    if (payload.get("origin") != "message"
+            or str(payload.get("thread_id") or "") != str(payload.get("channel_id") or "")):
+        return ""
+    if int(progress.get("posted_count") or 0) > 0:
+        return str(progress.get("topic_thread_id", load_request_thread(payload, home)) or "")
+    recorded = load_request_thread(payload, home)
+    if recorded:
+        return recorded
+    if str(payload.get("channel_id") or "") != dedicated_channel(home):
+        return ""
+    name = thread_name_for(payload, home)
+    if not name:
+        return ""
+    creator = create_thread or discord_create_thread
+    try:
+        receipt = creator(payload, name)
+    except DiscordSendError as err:
+        if err.api_error.get("code") != 160004:
+            return ""
+        receipt = {"thread_id": str(payload.get("message_id") or "")}
+    except Exception:
+        return ""
+    thread_id = str((receipt or {}).get("thread_id") or "")
+    if not _SNOWFLAKE.fullmatch(thread_id):
+        return ""
+    try:
+        save_request_thread(payload, thread_id, home)
+    except Exception:
+        return thread_id
+    return thread_id
 
 
 def discord_send(payload: dict) -> dict:
@@ -656,6 +863,7 @@ def deliver_one(
     send: SendFn | None = None,
     home: Path | None = None,
     react: ReactFn | None = None,
+    create_thread: ThreadFn | None = None,
 ) -> str:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -704,14 +912,19 @@ def deliver_one(
     if int(progress.get("total") or 0) != len(chunks):
         release_inflight(payload, home=home)
         return "mid-delivery"
+    thread_id = ensure_topic_thread(payload, progress, home, create_thread)
+    progress["topic_thread_id"] = thread_id
     write_progress(payload, progress, home)
     start = int(progress.get("posted_count") or 0)
     ids = list(progress.get("discord_message_ids") or [])
+    send_payload = dict(payload)
+    if thread_id:
+        send_payload["thread_id"] = thread_id
     for index in range(start, len(chunks)):
         progress["inflight"] = index
         write_progress(payload, progress, home)
         try:
-            receipt = sender(_chunk_payload(payload, chunks[index], index, len(chunks)))
+            receipt = sender(_chunk_payload(send_payload, chunks[index], index, len(chunks)))
         except Exception as err:
             outcome = classify_send_failure(err)
             if outcome == "transient":
@@ -745,7 +958,8 @@ def deliver_one(
             "discord_message_id": ids[0] if ids else "",
             "discord_message_ids": ids,
             "chunks": len(chunks),
-            "channel_id": str(payload.get("thread_id") or payload.get("channel_id") or ""),
+            "channel_id": str(send_payload.get("thread_id") or send_payload.get("channel_id") or ""),
+            "thread_id": str(send_payload.get("thread_id") or ""),
         },
         home=home,
     )
@@ -758,11 +972,12 @@ def drain_outbox(
     send: SendFn | None = None,
     home: Path | None = None,
     react: ReactFn | None = None,
+    create_thread: ThreadFn | None = None,
 ) -> list[str]:
     results = []
     for path in list_pending(home=home):
         try:
-            results.append(deliver_one(path, send=send, home=home, react=react))
+            results.append(deliver_one(path, send=send, home=home, react=react, create_thread=create_thread))
         except DiscordSendError:
             results.append("failed")
     return results

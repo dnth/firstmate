@@ -15,7 +15,7 @@ metadata:
 
 The local Communication Officer bridge lets a firstmate instance answer Discord requests that a dedicated Hermes Gateway plugin delivered into this home: `/fm`, a message in the dedicated channel, or a reply to one of Firstmate's own posts.
 Load this skill for an `ext-request <slug>` check wake or the drain's `EXT REQUESTS AWAITING ANSWER` section.
-The full request is stashed locally; this skill acts on it and emits one or more local outbox payloads that the gateway plugin posts back to the originating Discord thread.
+The full request is stashed locally; this skill acts on it and emits one or more local outbox payloads that the gateway plugin posts to the request's Discord destination.
 
 This runs only when the local ext-bridge is on (`config/ext-bridge` plus a mode-0600 secret; see AGENTS.md "Local Communication Officer bridge").
 `docs/configuration.md` owns activation, generated state, allowlist, outbox receipts, and opt-out mechanics.
@@ -105,5 +105,6 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
    Increment `--generation` for each new follow-up.
    Reusing a generation is the idempotency guard.
 
-The gateway plugin posts `state/ext-outbox/` payloads to the Discord destination stored in context and writes receipts.
+The gateway plugin drains `state/ext-outbox/` payloads and writes receipts.
+The [topic-thread contract](../../../docs/configuration.md#topic-threads-one-thread-per-request) owns reply routing.
 Firstmate never talks to Discord itself.

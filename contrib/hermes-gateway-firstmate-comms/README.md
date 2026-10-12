@@ -43,6 +43,7 @@ In the [dedicated Firstmate channel](#dedicated-firstmate-channel), just write t
 Anywhere the gateway listens, a Discord reply to one of Firstmate's own messages is a request too, and Firstmate sees the message you replied to, so a reply of "yes" answers that message's question.
 Outside the dedicated channel, keep the reply's mention on (Discord's default), because the gateway only hears messages that mention the bot there.
 A message request uses the [delivery reactions](../../docs/configuration.md#delivery-reactions) instead of a text acknowledgement.
+See the [topic-thread contract](../../docs/configuration.md#topic-threads-one-thread-per-request) for dedicated-channel conversations and routing elsewhere, including unchanged `/fm` replies.
 
 Anywhere else, send `/fm` from Discord's command pop-up: type `/fm`, pick this bot's `/fm` entry when the pop-up shows it, put the request in its box, and send.
 For files attached to ordinary message requests, see the [attachment handling contract](../../docs/configuration.md#discord-attachments).
@@ -55,7 +56,7 @@ For thread authorization, reply routing, and the exact rules for the channel, re
 The dedicated channel is off until you set it.
 
 1. In Discord, create a text channel for Firstmate, for example `#firstmate`, in the server the bot is in.
-2. Check that the bot can View Channel, Send Messages, Read Message History, and Add Reactions there.
+2. Check that the bot can View Channel, Send Messages, Read Message History, Add Reactions, Create Public Threads, and Send Messages in Threads there.
 3. With Developer Mode on (User Settings, Advanced), right-click the channel and pick Copy Channel ID.
 4. In the Firstmate home, write that id on its own line to `config/ext-channel`, and add a `<guild>:<channel>:<author>` line for it to `config/ext-allowlist` so your messages there carry standing authority.
 5. In the gateway profile's `.env`, add the channel id to `DISCORD_FREE_RESPONSE_CHANNELS` so Hermes hands this plugin messages that do not mention the bot, and set `DISCORD_REACTIONS=false` so Hermes's own processing reactions do not mark a message done before Firstmate has answered it.

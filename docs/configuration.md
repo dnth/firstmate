@@ -827,6 +827,7 @@ Each poll drops `state/ext-context/` destination and offer records past that win
 It drops the leftover markers of already retired outbox generations.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
+Request-wide thread records remain while any payload, progress, receipt, or failed JSON record for the request remains, then become eligible for pruning based on their own age.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id`; its header owns the recorded metadata fields.
@@ -878,6 +879,21 @@ Only a new, human-written message or reply qualifies, including an attachment-on
 A message the plugin turns into a request, or ignores in the dedicated channel, is withheld from the gateway's general agent so it is not answered twice; every other message keeps its normal path.
 Every recorded request carries `origin`: `slash` for `/fm`, `message` for the two message paths.
 The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#dedicated-firstmate-channel) owns the Discord and gateway-profile setup that lets plain channel messages reach the plugin.
+
+### Topic threads (one thread per request)
+
+A top-level message request in the configured dedicated channel creates a Discord thread on its message with its first reply, and every later `ack`/`answer`/`followup`/`final` for that request posts into the same thread, including work linked to it after the inbox is gone.
+Replies to Firstmate posts outside the dedicated channel keep their existing routing without creating a thread.
+Names use one fixed public label from the closed list owned by [`bin/fm-ext-topic.sh`](../bin/fm-ext-topic.sh), followed by the source message's MYT time as `HH:MM` derived from its Discord snowflake.
+Matching chooses a label without copying request words; stored names and API names are checked against the same closed list and source time.
+A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
+Slash commands are unchanged: `/fm` replies post to their originating thread (the channel itself for a top-level interaction) and never attempt thread creation.
+A thread-creation failure (such as missing permission) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
+Once any chunk has posted, retries keep that generation's original destination even if another generation subsequently creates the topic thread.
+Creating a topic thread never widens who the allowlist admits.
+The [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) owns the unchanged public-safety rules for reply text.
+The intake records the name in the durable destination context (`bin/fm-ext-topic.sh` owns the fixed labels); the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record so every generation shares the same thread.
+The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, and unchanged-allowlist coverage.
 
 ### Delivery reactions
 

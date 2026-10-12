@@ -1636,7 +1636,9 @@ fm_ext_context_prune() {
 # fm_ext_outbox_prune <state>: drop the leftover markers of retired generations
 # past the retention window so state/ext-outbox stays bounded too. A generation
 # whose payload is still present is pending or mid-delivery and is never touched,
-# so this can only ever remove the residue of work that already finished.
+# so this can only ever remove the residue of work that already finished. A
+# request-wide thread record (<slug>.thread.json) is kept while any other JSON
+# record for its slug remains, then is pruned when its own age exceeds the window.
 fm_ext_outbox_prune() {
   local state=$1 dir now max_age file base stem mtime age
   dir="$state/$FM_EXT_OUTBOX_DIRNAME"
@@ -1654,6 +1656,7 @@ fm_ext_outbox_prune() {
       *.receipt.json) stem=${base%.receipt.json} ;;
       *.failed.json) stem=${base%.failed.json} ;;
       *.progress.json) stem=${base%.progress.json} ;;
+      *.thread.json) stem=${base%.thread.json} ;;
       *.posting) stem=${base%.posting} ;;
       *.inflight) stem=${base%.inflight} ;;
       *) continue ;;
@@ -1661,6 +1664,21 @@ fm_ext_outbox_prune() {
     if [ -e "$dir/$stem.json" ]; then
       continue
     fi
+    # A thread record belongs to the whole request, not one generation: keep
+    # it while any non-thread JSON file for its slug remains, so markers of retired
+    # generations keep it alive until they expire too.
+    case "$base" in
+      *.thread.json)
+        slug=${base%.thread.json}
+        for other in "$dir/$slug".*.json; do
+          [ -e "$other" ] || continue
+          case "${other##*/}" in
+            *.thread.json) continue ;;
+            *) continue 2 ;;
+          esac
+        done
+        ;;
+    esac
     mtime=$(fm_ext_file_mtime "$file") || continue
     case "$mtime" in
       ''|*[!0-9]*) continue ;;
