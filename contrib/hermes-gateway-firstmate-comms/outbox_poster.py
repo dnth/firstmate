@@ -83,6 +83,10 @@ REACT_SEEN = "\U0001f440"  # eyes: the request was accepted
 REACT_DONE = "\u2705"  # check mark: the answer has posted
 REACT_FAILED = "\u26a0\ufe0f"  # warning: a reply could not be delivered
 _SNOWFLAKE = re.compile(r"^[0-9]+$")
+# A request slug is the SHA-256 hex of its canonical id, and the request-wide
+# topic-thread record beside its payload is named "<slug>.thread.json".
+_SLUG = re.compile(r"^[0-9a-f]{64}$")
+_THREAD_RECORD_SUFFIX = ".thread.json"
 # How often the watcher sweeps decision posts for decisions closed on another
 # channel, which reads Firstmate's ledgers; click outcomes show within a cycle.
 DECISION_SWEEP_SECS = 30.0
@@ -456,9 +460,8 @@ def load_request_thread(payload: dict, home: Path) -> str:
     return thread_id if _SNOWFLAKE.fullmatch(thread_id) else ""
 
 
-def load_request_topic(payload: dict, home: Path) -> dict:
-    """This request's recorded topic-thread id, name, and state, or {}."""
-    path = request_progress_path(payload, home)
+def _read_thread_record(path: Path) -> dict:
+    """A thread record's fields plus its own path, or {} when unusable."""
     if path.is_symlink() or not path.is_file():
         return {}
     try:
@@ -467,18 +470,84 @@ def load_request_topic(payload: dict, home: Path) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    if data.get("request_id") != payload.get("request_id"):
-        return {}
     thread_id = str(data.get("topic_thread_id") or "")
     if not _SNOWFLAKE.fullmatch(thread_id):
         return {}
+    request_id = data.get("request_id") or ""
     name = data.get("topic_name") or ""
     state = data.get("thread_state") or ""
     creating = data.get("creating_title") or ""
-    return {"topic_thread_id": thread_id,
+    return {"path": path,
+            "request_id": request_id if isinstance(request_id, str) else "",
+            "topic_thread_id": thread_id,
             "topic_name": name if isinstance(name, str) else "",
             "thread_state": state if isinstance(state, str) else "",
             "creating_title": creating if isinstance(creating, str) else ""}
+
+
+def load_request_topic(payload: dict, home: Path) -> dict:
+    """This request's recorded topic-thread id, name, and state, or {}."""
+    record = _read_thread_record(request_progress_path(payload, home))
+    if not record or record.get("request_id") != payload.get("request_id"):
+        return {}
+    return record
+
+
+def _thread_record_slug(path: Path) -> str:
+    """The request slug a thread record file is named for, or "".
+
+    The record keeps no slug field, but its basename is always
+    ``<sha256-request-slug>.thread.json``, which is how the creating
+    request's context is found again for name validation.
+    """
+    name = path.name
+    if not name.endswith(_THREAD_RECORD_SUFFIX):
+        return ""
+    slug = name[:-len(_THREAD_RECORD_SUFFIX)]
+    return slug if _SLUG.fullmatch(slug) else ""
+
+
+def _creating_request(recorded: dict) -> dict:
+    """A stand-in payload for the top-level request that created a thread.
+
+    Name validation re-derives the public name from the creating request's
+    own text, title, and message time, so the thread's record is resolved
+    back to that request through its canonical id - guild, channel, thread,
+    and message are all still readable there - and then through that
+    request's context file.
+    """
+    parts = str(recorded.get("request_id") or "").split(":")
+    if len(parts) != 5 or parts[0] != "discord":
+        return {}
+    slug = _thread_record_slug(recorded["path"])
+    if not slug:
+        return {}
+    return {"origin": "message", "slug": slug, "request_id": recorded["request_id"],
+            "guild_id": parts[1], "channel_id": parts[2], "thread_id": parts[2],
+            "message_id": parts[4]}
+
+
+def load_thread_record_by_id(thread_id: str, home: Path) -> dict:
+    """The record of the topic thread with this id, or {}.
+
+    A thread is renamed both by the request that created it and by a later
+    request that arrived inside it, so the record is found by the thread it
+    names rather than by the request that is speaking. Only records this home
+    already wrote are read, so an unknown thread - a captain-made one, or a
+    non-dedicated channel or DM - resolves to nothing and is never renamed.
+    """
+    if not _SNOWFLAKE.fullmatch(str(thread_id or "")):
+        return {}
+    directory = state_dir(home) / "ext-outbox"
+    try:
+        candidates = sorted(directory.glob(f"*{_THREAD_RECORD_SUFFIX}"))
+    except OSError:
+        return {}
+    for path in candidates:
+        record = _read_thread_record(path)
+        if record and record.get("topic_thread_id") == thread_id:
+            return record
+    return {}
 
 
 def save_request_thread(payload: dict, thread_id: str, home: Path,
@@ -486,23 +555,38 @@ def save_request_thread(payload: dict, thread_id: str, home: Path,
                         creating_title: str = "") -> None:
     """Record this request's topic-thread id for every later generation.
 
+    The record is the request-wide one beside its outbox payload. A rename
+    made from inside the thread updates that same record through
+    save_thread_record instead of writing a second one.
+    """
+    save_thread_record(request_progress_path(payload, home), payload.get("request_id"),
+                       thread_id, topic_name=topic_name, thread_state=thread_state,
+                       creating_title=creating_title)
+
+
+def save_thread_record(path: Path, request_id: object, thread_id: str,
+                       topic_name: str = "", thread_state: str = "",
+                       creating_title: str = "") -> None:
+    """Write one thread record atomically, preserving any prior unset field.
+
     A private state artifact beside the outbox, written with the same guards
     the shell publication helper enforces: a regular single-link file at mode
     0600, replaced atomically. Its basename is <slug>.thread.json, which the
     pending scan skips as a marker, avoiding payload validation for completed
     topics.
     """
-    path = request_progress_path(payload, home)
     if path.is_symlink():
         raise RuntimeError("thread record is a symlink")
     try:
         prior = json.loads(path.read_text(encoding="utf-8"))
+        prior_request = prior.get("request_id") if isinstance(prior, dict) else ""
         prior_name = prior.get("topic_name") if isinstance(prior, dict) else ""
         prior_state = prior.get("thread_state") if isinstance(prior, dict) else ""
         prior_creating = prior.get("creating_title") if isinstance(prior, dict) else ""
     except (OSError, ValueError):
-        prior_name, prior_state, prior_creating = "", "", ""
-    body = json.dumps({"request_id": payload.get("request_id"), "topic_thread_id": thread_id,
+        prior_request, prior_name, prior_state, prior_creating = "", "", "", ""
+    body = json.dumps({"request_id": request_id if request_id is not None else prior_request,
+                       "topic_thread_id": thread_id,
                        "topic_name": topic_name or prior_name,
                        "thread_state": thread_state or prior_state,
                        "creating_title": creating_title or prior_creating})
@@ -692,29 +776,46 @@ def maybe_rename_topic_thread(
 ) -> str:
     """Apply this generation's thread_state to its topic thread, best effort.
 
-    Only threads this request created (the request-wide record matches) are
-    renamed, and only when the prefixed name differs from the recorded name.
-    Any failure - unknown state, no base name, rate limit, transport error -
-    is logged and leaves the reply delivered; renaming never blocks or loses
-    a reply.
+    The creating request renames the thread it created; a request that
+    arrived inside a topic thread this home created in the dedicated channel
+    renames that thread, resolved by its id so the base name and the last
+    applied marker come from the thread's own record. Only Firstmate-created
+    threads in the dedicated channel are touched, and only when the prefixed
+    name differs from the recorded one. Any failure - unknown state, no base
+    name, rate limit, transport error - is logged and leaves the reply
+    delivered; renaming never blocks or loses a reply.
     """
     state = payload.get("thread_state")
-    if not state:
-        return thread_id
     if state_prefix(state) is None:
         return thread_id
     if payload.get("origin") != "message":
         return thread_id
-    if str(payload.get("thread_id") or "") != str(payload.get("channel_id") or ""):
-        return thread_id
     if str(payload.get("channel_id") or "") != dedicated_channel(home):
         return thread_id
-    recorded = load_request_topic(payload, home)
-    if recorded.get("topic_thread_id") != thread_id:
-        return thread_id
-    base = thread_name_for(payload, home)
-    if not base:
-        return thread_id
+    thread_field = str(payload.get("thread_id") or "")
+    if thread_field == str(payload.get("channel_id") or ""):
+        recorded = load_request_topic(payload, home)
+        if recorded.get("topic_thread_id") != thread_id:
+            return thread_id
+        base = thread_name_for(payload, home)
+        if not base:
+            return thread_id
+    else:
+        # The request arrived inside a topic thread: it may only rename that
+        # thread, and only when this home created it, which is what having a
+        # record for the thread id proves. The base name and its last marker
+        # come from that record's own creating request, so the same name
+        # validation that guards a create also guards this rename.
+        thread_id = thread_field
+        recorded = load_thread_record_by_id(thread_id, home)
+        if not recorded:
+            return thread_id
+        creator = _creating_request(recorded)
+        if not creator:
+            return thread_id
+        base = thread_name_for(creator, home)
+        if not base:
+            return thread_id
     want = state_thread_name(base, state)
     if want is None:
         return thread_id
@@ -727,7 +828,9 @@ def maybe_rename_topic_thread(
         print(f"fm-ext-poster: thread rename skipped: {err}", file=sys.stderr)
         return thread_id
     try:
-        save_request_thread(payload, thread_id, home, topic_name=want, thread_state=state)
+        save_thread_record(recorded["path"], recorded.get("request_id"), thread_id,
+                           topic_name=want, thread_state=state,
+                           creating_title=recorded.get("creating_title") or "")
     except Exception as err:
         print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
     return thread_id
@@ -1338,8 +1441,10 @@ def deliver_one(
     )
     if payload.get("kind") in ("answer", "final"):
         react_to_request(payload, REACT_DONE, react)
-    if thread_id:
-        maybe_rename_topic_thread(payload, thread_id, home, rename_thread)
+    # Renaming is not tied to this generation's destination: an in-thread
+    # request posts where it arrived and may still mark that thread's state,
+    # so the call always runs and decides inside what it may touch.
+    maybe_rename_topic_thread(payload, thread_id, home, rename_thread)
     return "sent"
 
 

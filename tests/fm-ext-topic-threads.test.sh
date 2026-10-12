@@ -917,6 +917,121 @@ PY
   pass "16 emit and poster share title validation and strip nickname mentions"
 }
 
+# --- 17. a request inside a Firstmate-made topic thread marks its state ------
+#
+# The captain answers inside the thread, so that reply is its own in-thread
+# request: its thread_id is the topic thread and its channel_id the dedicated
+# channel. It must rename the very thread it arrived in - clearing the marker,
+# marking done, then needs-you again - never stacking prefixes, and leave the
+# name the creating request builds on next. A thread this home did not create,
+# in the dedicated channel or anywhere else, is never renamed; a rate-limited
+# rename still delivers the reply and records the receipt.
+
+test_17_in_thread_requests_mark_their_thread() {
+  local home slug out rid2 slug2
+  home="$TMP_ROOT/c17"
+  setup_home "$home"
+  slug=$(intake_as "$home" "InfoConnect v0.5.11 status" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Where are we on ic release?" \
+    "InfoConnect · v0.5.11 status" "needs-you" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/InfoConnect · v0.5.11 status" \
+    "the creating reply must open the thread"
+  assert_contains "$out" "thread-rename=777777777777777777/❓ InfoConnect · v0.5.11 status" \
+    "the creating reply must mark the thread needs-you"
+
+  rid2="discord:${GUILD}:${CHANNEL}:777777777777777777:999999999999999999"
+  slug2=$(intake_as "$home" "Yes" 999999999999999999 "777777777777777777" message)
+  emit_as "$home" "$rid2" ack 1 "Clearing the marker." "" "none" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "posted-to=777777777777777777 Clearing the marker." \
+    "an in-thread reply must post in its own thread"
+  assert_contains "$out" "thread-rename=777777777777777777/InfoConnect · v0.5.11 status" \
+    "an in-thread request must clear its own thread's marker"
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
+    || fail "an in-thread request must not create a thread: $out"
+
+  emit_as "$home" "$rid2" followup 2 "Blocked on your call." "" "needs-you" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ InfoConnect · v0.5.11 status" \
+    "a later in-thread marker must not stack on the previous one"
+
+  emit_as "$home" "$RID" followup 2 "Landed." "" "done" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/✅ InfoConnect · v0.5.11 status" \
+    "the creating request must build on the name the in-thread change left"
+
+  # A rate-limited rename must leave the reply delivered and receipted.
+  emit_as "$home" "$rid2" followup 3 "Still blocked." "" "needs-you" >/dev/null
+  out=$(
+    home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster as poster
+home = Path(sys.argv[1])
+os.environ["FM_HOME"] = str(home)
+posted = []
+def send(payload):
+    posted.append((payload["thread_id"], payload["text"]))
+    return {"ok": True, "discord_message_id": "999999999999999999"}
+def boom(thread_id, name):
+    raise RuntimeError("discord 429 rate limited")
+results = poster.drain_outbox(send=send, home=home, rename_thread=boom)
+print("results=" + ",".join(sorted(results)))
+for thread, text in posted:
+    print("posted-to=%s %s" % (thread, text))
+PY
+  )
+  assert_contains "$out" "results=sent" "a rate-limited rename must not fail the reply"
+  assert_contains "$out" "posted-to=777777777777777777 Still blocked." \
+    "a rate-limited in-thread rename must still deliver the reply"
+  [ -f "$home/state/ext-outbox/$slug2.followup.3.receipt.json" ] \
+    || fail "a rate-limited rename must still record the reply receipt"
+
+  # Only a thread this home created is ever renamed: a captain-made thread in
+  # the dedicated channel has no record, and any other channel or a DM is not
+  # the dedicated channel at all.
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug2" <<'PY'
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster as poster
+home, slug2 = Path(sys.argv[1]), sys.argv[2]
+os.environ["FM_HOME"] = str(home)
+context = json.loads((home / "state/ext-context" / (slug2 + ".json")).read_text())
+base = {"request_id": context["request_id"], "slug": slug2, "origin": "message",
+        "channel_id": context["channel_id"], "thread_id": context["thread_id"],
+        "message_id": context["message_id"], "thread_state": "needs-you"}
+calls = []
+def boom(thread_id, name):
+    calls.append(name)
+    raise RuntimeError("discord 429 rate limited")
+assert poster.maybe_rename_topic_thread(base, "", home, rename_thread=boom) == base["thread_id"]
+assert calls == ["❓ InfoConnect · v0.5.11 status"], calls
+for guarded in (dict(base, thread_id="444444444444444444"),
+                dict(base, channel_id="555555555555555555"),
+                dict(base, channel_id="666666666666666666", thread_id="666666666666666666")):
+    calls.clear()
+    poster.maybe_rename_topic_thread(guarded, "", home, rename_thread=boom)
+    assert calls == [], guarded
+# A tampered stored name never reaches Discord: the base is re-validated
+# through the creating request exactly as a create is, so the rename carries
+# the name the rules can produce, not the bytes in the record.
+record_path = sorted((home / "state/ext-outbox").glob("*.thread.json"))[0]
+record = json.loads(record_path.read_text())
+record["topic_name"] = "tampered thread name"
+record_path.write_text(json.dumps(record))
+calls.clear()
+poster.maybe_rename_topic_thread(base, "", home,
+    rename_thread=lambda tid, name: calls.append(name))
+assert calls == ["❓ InfoConnect · v0.5.11 status"], calls
+PY
+  then fail "in-thread renames must stay inside Firstmate threads"
+  fi
+  pass "17 an in-thread request marks the state of the thread it arrived in"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -935,5 +1050,6 @@ test_13_rename_never_blocks_and_never_leaves_home
 test_14_legacy_titles_markers_and_long_tokens
 test_15_existing_threads_keep_the_winning_name
 test_16_shared_title_screen_and_nickname_mentions
+test_17_in_thread_requests_mark_their_thread
 
 echo "all fm-ext-topic-threads tests passed"

@@ -890,7 +890,9 @@ Legacy label-plus-time names remain valid for the same source message when no va
 Anything else falls back to the fresh derivation.
 Once a thread exists, later titles do not replace its name; status changes preserve the original base name.
 A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
-The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name, only when the name changes and only for threads this request created.
+The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name, only when the name changes.
+Both the request that created the thread and a later request that arrived inside it may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.
+Only a thread this home created in the dedicated channel is renamed; a captain-made thread, a non-dedicated channel, or a DM is never renamed, and once a thread's record has aged out it can no longer be identified and is left alone.
 A rename failure, including a rate limit, is logged and never blocks or loses the reply.
 A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
 Slash commands are unchanged: `/fm` replies post to their originating thread (the channel itself for a top-level interaction) and never attempt thread creation.
@@ -900,6 +902,7 @@ Once any chunk has posted, retries keep that generation's original destination e
 Creating a topic thread never widens who the allowlist admits.
 The [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) owns the unchanged public-safety rules for reply text.
 The intake records the fallback name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record (thread id, current name including any marker, last state, creating title) so every generation shares the same thread.
+A marker applied from inside the thread updates that same record rather than writing a second one, so the next change on either path builds on the same name.
 The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, marker, and unchanged-allowlist coverage.
 
 ### Delivery reactions
