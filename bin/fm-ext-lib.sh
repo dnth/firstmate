@@ -570,9 +570,9 @@ fm_ext_decision_key_occurrence() {
       ;;
     key:*)
       rest=${key#key:}
-      # shellcheck source=bin/fm-classify-lib.sh
-      out=$(. "$_FM_EXT_LIB_DIR/fm-classify-lib.sh" \
-        && status_key_occurrence "$(fm_ext_state_dir)/${rest%%:*}.status" "${rest#*:}") || return 1
+      out=$(bash -c '. "$1" && status_key_occurrence "$2" "$3"' \
+        _ "$_FM_EXT_LIB_DIR/fm-classify-lib.sh" \
+        "$(fm_ext_state_dir)/${rest%%:*}.status" "${rest#*:}") || return 1
       [ "$out" != 0 ] || return 1
       ;;
   esac
@@ -663,18 +663,19 @@ fm_ext_decision_key_outcome() {
     printf 'unknown\t\n'
     return 0
   fi
-  # shellcheck source=bin/fm-classify-lib.sh
-  if ! out=$(. "$_FM_EXT_LIB_DIR/fm-classify-lib.sh" \
+  if ! out=$(bash -c '
+    file=$2 slug=$3 occurrence=$4
+    . "$1" \
     && current=$(status_key_occurrence "$file" "$slug") \
     && if [ -n "$occurrence" ] && [ "$current" != "$occurrence" ]; then
-      printf 'superseded\t'
+      printf "superseded\t"
     else
       case "$(status_key_closing_verb "$file" "$slug")" in
-        needs-decision|blocked) printf 'open\t' ;;
-        resolved) printf 'decided\t%s' "$(status_resolved_key_answer "$file" "$slug")" ;;
-        *) printf 'superseded\t' ;;
+        needs-decision|blocked) printf "open\t" ;;
+        resolved) printf "decided\t%s" "$(status_resolved_key_answer "$file" "$slug")" ;;
+        *) printf "superseded\t" ;;
       esac
-    fi); then
+    fi' _ "$_FM_EXT_LIB_DIR/fm-classify-lib.sh" "$file" "$slug" "$occurrence"); then
     printf 'unknown\t\n'
     return 0
   fi
