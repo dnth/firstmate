@@ -1139,7 +1139,7 @@ test_diverged_reports_status_close_over_open_hold() {
 
   # A verified captain-held transfer close is NOT a divergence.
   home2=$(make_home no-divergence)
-  id2=held-call
+  id2='held-call'
   tasks_in "$home2" add "$id2" "Consistent records" --kind captain --repo sample >/dev/null \
     || fail "could not create the agreement fixture"
   run_captain "$home2" hold "$id2" --reason "pending" >/dev/null || fail "could not hold the fixture"
@@ -1444,7 +1444,7 @@ assert_due_matches_exact_reads() {
   for id in "$@"; do
     tasks_in "$home" show "$id" --full > "$home/exact-show.txt" || fail "exact show failed for $id"
     identity=$(run_captain "$home" open "$id" --identity) || fail "exact identity failed for $id"
-    python3 - "$home/exact-show.txt" "$id" "$today" "$identity" >> "$home/exact-due.tsv" <<'EXACT'
+    python3 - "$home/exact-show.txt" "$id" "$today" "$identity" >> "$home/exact-due.tsv" <<'EXACT' || fail "exact-read oracle failed for $id"
 import datetime
 import json
 import re
@@ -1471,13 +1471,13 @@ if (fields["state"] != "done" and fields["hold_kind"] == "captain"
         and review <= sys.argv[3] and not settled):
     print(sys.argv[2], review, fields["title"], sys.argv[4], sep="\t")
 EXACT
-    [ "$?" -eq 0 ] || fail "exact-read oracle failed for $id"
   done
   expected=$(LC_ALL=C sort "$home/exact-due.tsv")
   actual=$(due_at "$home" "$today" | LC_ALL=C sort) || fail "batch reader failed"
   [ "$actual" = "$expected" ] || fail "batch [$actual] disagrees with exact reads [$expected]"
 }
 
+# shellcheck disable=SC2030,SC2031 # the ( ) body is the subshell this fixture scopes its env to
 test_due_advisory_rechecks_eligibility() (
   local home id identity live
   home=$(make_home due-freshness)
@@ -1563,6 +1563,7 @@ test_due_reads_the_whole_body_not_a_listing_preview() {
   pass "whole-body due marking and identities agree with independent exact reads across lifecycle histories"
 }
 
+# shellcheck disable=SC2030,SC2031 # the ( ) body is the subshell this fixture scopes its env to
 test_review_lifecycle_regressions() (
   home=$(make_home review-regressions)
   fakebin="$home/fakebin"
