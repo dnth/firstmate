@@ -182,6 +182,62 @@ SH
   [ "$(jq -r '.text' "$payload")" = "$out" ] || fail "published content must preserve the preview's single-line decisions"
   pass "1c multiline titles remain single decisions in previews and publications"
 }
+test_1d_artifact_suffixes_render_title_only() {
+  local home out
+  home="$TMP_ROOT/c1d"
+  setup_home "$home"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add artrep1 "Inspect system prompt and tool descriptions; find room for optimization" --repo kcc-chatbot --report data/artrep1/report.md >/dev/null) \
+    || fail "artifact task must be created"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold artrep1 --reason "waiting on captain" --kind captain >/dev/null) \
+    || fail "artifact task must accept a captain hold"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add artpr1 "Approve the copy" --repo firstmate --pr https://github.com/o/r/pull/99 >/dev/null) \
+    || fail "PR-suffixed task must be created"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold artpr1 --reason "waiting on captain" --kind captain >/dev/null) \
+    || fail "PR-suffixed task must accept a captain hold"
+  hold_call "$home" plain1 "Decide the merge wording" "waiting on captain"
+  out=$(home_env "$home" "$REFRESH" content) || fail "content must succeed when configured"
+  assert_contains "$out" "- Inspect system prompt and tool descriptions; find room for optimization" "the report suffix must strip to the title alone"
+  assert_contains "$out" "- Approve the copy" "the PR suffix must strip to the title alone"
+  assert_contains "$out" "- Decide the merge wording" "a plain title must stay unchanged"
+  case "$out" in
+    *"(report)"*|*"data/"*|*"state/"*|*"/home/"*|*".md"*|*"github.com/o/r/pull/99"*|*"(repo:"*) fail "content must not leak artifact suffixes or paths: $out" ;;
+  esac
+  pass "1d artifact and PR suffixes render the title alone"
+}
+
+test_1e_path_like_tokens_never_render() {
+  local home out fake
+  home="$TMP_ROOT/c1e"
+  setup_home "$home"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add pathy1 "Review the draft" --kind captain >/dev/null) \
+    || fail "path-token task must be created"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold pathy1 --reason "waiting on captain" --kind captain >/dev/null) \
+    || fail "path-token task must accept a captain hold"
+  fake="$home/fakebin"
+  mkdir "$fake"
+  cat > "$fake/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = show ]; then
+  "$REAL_TASKS_AXI" "$@" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if line.startswith("  title: "):
+        print("  title: " + json.dumps("Review the draft data/sneaky/report.md /home/captain/notes.md state/cache"))
+    else:
+        print(line, end="")
+'
+  exit "${PIPESTATUS[0]}"
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$fake/tasks-axi"
+  out=$(home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" "$REFRESH" content) || fail "content must succeed when configured"
+  assert_contains "$out" "- Review the draft" "the human title words must survive backstop stripping"
+  case "$out" in
+    *"data/"*|*"state/"*|*"/home/"*|*".md"*) fail "content must never render a path-like token: $out" ;;
+  esac
+  pass "1e path-like tokens never reach the pin"
+}
 
 test_1_content_lists_calls_and_prs_without_leaks() {
   local home out
@@ -870,6 +926,8 @@ PYTEST
 
 test_1b_long_titles_render_cleanly_without_ids_or_commands
 test_1c_multiline_titles_remain_single_decisions
+test_1d_artifact_suffixes_render_title_only
+test_1e_path_like_tokens_never_render
  test_1_content_lists_calls_and_prs_without_leaks
 test_2_refresh_creates_then_edits_in_place
 test_3_deleted_message_recreated_once

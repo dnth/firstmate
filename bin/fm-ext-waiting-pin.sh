@@ -89,19 +89,28 @@ waiting_pin_now() {
 # (truncated, N chars total - use show <id> --full ...)`), which must never
 # reach the public pin: it leaks the task id and a command. Held calls
 # therefore always read the full title here instead of reusing the listed
-# one; the renderer's 200-character call-line cap shortens it cleanly. Fails
-# when the read fails so the refresh defers rather than publishing a leak or
-# a false all-clear.
+# one; the renderer's 200-character call-line cap shortens it cleanly.
+# tasks-axi folds typed links (--report, --pr) into the stored title prose,
+# so strip those artifact suffixes plus the `(repo: ...)` tag here: no local
+# paths or PR URLs may reach the public pin. A final backstop drops any
+# remaining path-like token. Fails when the read fails so the refresh defers
+# rather than publishing a leak or a false all-clear.
 waiting_pin_title() {
   local data=$1 id=$2 show_output raw
   show_output=$(fm_backlog_row_show "$data" "$id" --full 2>/dev/null) || return 1
   raw=$(printf '%s\n' "$show_output" | sed -n 's/^  title: //p' | head -1) || return 1
   [ -n "$raw" ] || return 1
   printf '%s' "$raw" | python3 -c '
-import json, sys
+import json, re, sys
 s = sys.stdin.read()
 value = json.loads(s) if s.startswith(chr(34)) else s
-print(value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " "), end="")
+value = value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " ")
+value = re.sub(r"\s*\(report\)\s*\bdata/\S+?/report\.md\b", "", value)
+value = re.sub(r"\s*\bdata/\S+?/report\.md\b", "", value)
+value = re.sub(r"\s*https?://\S+", "", value)
+value = re.sub(r"\s*\((?:[^()]*\+\s*)?repo:\s*[^)]+\)", "", value)
+tokens = [t for t in value.split(" ") if not re.search(r"(^|/)(data|state)/|/home/|\.md\b", t)]
+print(re.sub(r"\s+", " ", " ".join(tokens)).strip(), end="")
 ' || return 1
 }
 
