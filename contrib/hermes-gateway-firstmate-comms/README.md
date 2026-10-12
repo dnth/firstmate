@@ -65,6 +65,27 @@ The dedicated channel is off until you set it.
 Only the allowlist decides who may instruct Firstmate in that channel; anyone it refuses is ignored there.
 `DISCORD_REACTIONS=false` also stops the 👀 and ✅ Hermes adds to messages its general agent handles in this gateway profile.
 
+## Decision buttons
+
+When Firstmate asks the captain to settle a decision, its post can carry one button per numbered option, for example Approve / Hold, plus a Discuss button.
+Clicking an option answers exactly that decision; a merge, prod deploy, deletion, money, credential, or other destructive option first shows an ephemeral "Confirm: <label>?" with a Confirm button.
+Once the decision is answered, by button or any other way, the post's buttons are disabled and the post reads "✅ <option> chosen by <user> <time>".
+Every click gets an ephemeral notice only the clicker sees: recorded, the confirmation prompt, already decided, no longer open, or not authorised.
+Only an author with a `<guild>:<channel>:<author>` allowlist rule can click; anyone else gets "not authorised" and nothing is recorded.
+While a decision is open, Discuss or a typed reply to the post remains the fallback; on a decided or replaced post every button, Discuss included, answers that nothing changed.
+The [decision buttons reference](../../docs/configuration.md#decision-buttons) owns who may click, what a click records, confirmation, staleness, expiry, and the authority boundaries.
+
+Buttons need no extra Discord permission or gateway setting beyond the ones above.
+After updating this plugin, restart the gateway service so it loads the click route.
+A click records the answer from the gateway process through Firstmate's own `bin/fm-captain-hold.sh` and `bin/fm-send.sh`, so the gateway's `PATH` must reach `tasks-axi` and the fleet's terminal backend the way Firstmate's own shell does.
+
+Hermes 0.20.x has no plugin hook for Discord component clicks, so the plugin registers a discord.py `DynamicItem` for the `fmd:` and `fmc:` custom ids on the Discord adapter's live client, found through the gateway runner's adapter registry the way Hermes's own platform actions find it.
+The outbox watcher re-registers it whenever the gateway reconnects with a new client, and logs one warning naming the Hermes version if a connected gateway cannot take it.
+A click is deferred ephemerally at once, then runs `bin/fm-ext-decision.sh click`, which owns every check and notice and records the answer.
+The outbox watcher then edits settled posts over Discord REST with mentions disabled, within one cycle for a click and on a 30-second sweep for a decision closed elsewhere.
+Until the route is registered on the current client, the poster sends a decision as plain text with no buttons, so a button is never shown that nothing would answer; the captain can still reply to it.
+[The decision button regression test](../../tests/fm-ext-decision.test.sh) covers posting, authorisation, recording, confirmation, staleness, double clicks, fallbacks, and post edits, and drives the installed Hermes gateway's real discord.py routing when that Python is available.
+
 ## How it works
 
 The plugin registers slash command `fm` and the `pre_gateway_dispatch` hook.

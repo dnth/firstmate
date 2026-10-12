@@ -11,6 +11,7 @@
 #     [--reply-to-message-id <id> [--reply-to-request-id <request_id>]
 #      [--reply-to-text-file <path>]]
 #     [--attachment-manifest <path>]
+#     [--origin button --decision-file <path>]
 #
 # Opt-in is config/ext-bridge plus a mode-0600 home secret. FM_EXT_BRIDGE can
 # only turn a configured bridge off, never on. The presented --secret-file must
@@ -47,6 +48,18 @@
 # a non-allowlisted author copies nothing, and an attachment-only message
 # (empty text) is still recorded when a manifest entry is present.
 #
+# --origin button records a decision-button click, which
+# bin/fm-ext-decision.sh sends here after its own checks. A click records
+# nothing itself: it is a request, like a typed reply, for Firstmate to record
+# the chosen option through its normal decision path. A click is never stronger
+# than the same author's typed message, and it is narrower: it is admitted only
+# at standing authority, so a click whose author holds only a confirm rule or
+# no rule exits 3 and writes nothing. --decision-file (button origin only) is
+# JSON {key, occurrence, choice, text, by, author, at} - choice "discuss", or
+# "option" with option_id, option, confirmed, and confirm_prompt when
+# confirmed - and is recorded as the request's "decision" field, with text cut
+# to its first 1000 characters.
+#
 # Idempotent: the same message id claims the existing offer and does not
 # append a second wake. If the wake cannot be appended, the offer marker is
 # removed so a later intake or poll can retry. Canonical request_id keeps
@@ -76,6 +89,7 @@ usage: fm-ext-intake.sh --request-id discord:<guild>:<channel>:<thread>:<message
          [--reply-to-message-id <id> [--reply-to-request-id <request_id>]
           [--reply-to-text-file <path>]]
          [--attachment-manifest <path>]
+         [--origin button --decision-file <path>]
 EOF
 }
 
@@ -101,6 +115,7 @@ REPLY_MESSAGE_ID=
 REPLY_REQUEST_ID=
 REPLY_TEXT_FILE=
 ATTACHMENT_MANIFEST=
+DECISION_FILE=
 # Longest replied-to text kept in a request's reply_to context, in characters.
 REPLY_TEXT_MAX=1000
 
@@ -127,6 +142,7 @@ while [ "$#" -gt 0 ]; do
     --reply-to-request-id) shift; REPLY_REQUEST_ID=${1:-} ;;
     --reply-to-text-file) shift; REPLY_TEXT_FILE=${1:-} ;;
     --attachment-manifest) shift; ATTACHMENT_MANIFEST=${1:-} ;;
+    --decision-file) shift; DECISION_FILE=${1:-} ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -150,9 +166,16 @@ EXPECTED_RID="discord:${GUILD_ID}:${CHANNEL_ID}:${THREAD_ID}:${MESSAGE_ID}"
   || die "request_id does not match guild/channel/thread/message fields"
 
 case "$ORIGIN" in
-  slash|message) ;;
-  *) die "origin must be slash or message, got '$ORIGIN'" ;;
+  slash|message|button) ;;
+  *) die "origin must be slash, message, or button, got '$ORIGIN'" ;;
 esac
+if [ "$ORIGIN" = button ]; then
+  [ -n "$DECISION_FILE" ] || die "--origin button needs --decision-file"
+  [ -z "$REPLY_MESSAGE_ID$REPLY_REQUEST_ID$REPLY_TEXT_FILE$ATTACHMENT_MANIFEST" ] \
+    || die "a decision-button click cannot carry reply-to context or attachments"
+elif [ -n "$DECISION_FILE" ]; then
+  die "--decision-file needs --origin button"
+fi
 if [ -n "$REPLY_MESSAGE_ID" ]; then
   case "$REPLY_MESSAGE_ID" in
     *[!0-9]*) die "reply-to message id must be a Discord id, got '$REPLY_MESSAGE_ID'" ;;
@@ -175,6 +198,12 @@ ALLOWLIST=$(fm_ext_allowlist_path "$FM_HOME")
 # without keeping a second copy of the allowlist grammar.
 AUTHORITY=$(fm_ext_authority "$ALLOWLIST" "$GUILD_ID" "$CHANNEL_ID" "$AUTHOR") \
   || die "request is not allowlisted" 3
+# Only an author-scoped rule answers a decision by button; every other click is
+# refused here before anything is written, so a click is never stronger than the
+# same author's typed message.
+if [ "$ORIGIN" = button ] && [ "$AUTHORITY" != standing ]; then
+  die "a decision-button click needs a <guild>:<channel>:<author> allowlist rule" 3
+fi
 
 command -v jq >/dev/null 2>&1 || die "jq is required" 1
 
@@ -200,6 +229,42 @@ if [ -n "$REPLY_TEXT_FILE" ]; then
   [ -f "$REPLY_TEXT_FILE" ] && [ ! -L "$REPLY_TEXT_FILE" ] \
     || die "reply-to text file not found: $REPLY_TEXT_FILE"
   REPLY_TEXT=$(cat -- "$REPLY_TEXT_FILE")
+fi
+
+DECISION_JSON=null
+if [ -n "$DECISION_FILE" ]; then
+  [ -f "$DECISION_FILE" ] && [ ! -L "$DECISION_FILE" ] \
+    || die "decision file not found: $DECISION_FILE"
+  DECISION_KEY=$(jq -er '.key | select(type == "string")' "$DECISION_FILE" 2>/dev/null) \
+    || die "decision file has no key"
+  fm_ext_decision_key_valid "$DECISION_KEY" || die "decision key is malformed"
+  DECISION_JSON=$(jq -c \
+    --argjson label_max "$FM_EXT_DECISION_LABEL_MAX" \
+    --argjson text_max "$FM_EXT_DECISION_TEXT_MAX" '
+    select(type == "object"
+      and (.choice == "discuss" or .choice == "option")
+      and (.occurrence | type == "string")
+      and (.text | type == "string")
+      and (.by | type == "string")
+      and (.author | type == "string" and test("^[0-9]+$"))
+      and (.at | type == "string")
+      and (.choice == "discuss"
+        or ((.option_id | type == "number" and . >= 1 and . == floor)
+          and (.option | type == "string" and length >= 1 and length <= $label_max)
+          and (.confirmed | type == "boolean")
+          and ((.confirm_prompt // "") | type == "string"))))
+    | {key, occurrence, choice,
+       text: (if (.text | length) > $text_max
+              then (.text | .[0:$text_max]) + "…" else .text end),
+       by, author, at}
+      + if .choice == "option"
+        then {option_id, option, confirmed}
+          + if has("confirm_prompt") then {confirm_prompt} else {} end
+        else {} end
+  ' "$DECISION_FILE" 2>/dev/null) && [ -n "$DECISION_JSON" ] \
+    || die "decision file must hold {key, occurrence, choice, text, by, author, at} and, for an option, option_id, option, confirmed"
+  [ "$(jq -r '.author' <<<"$DECISION_JSON")" = "$AUTHOR" ] \
+    || die "decision file author does not match --author"
 fi
 
 SLUG=$(fm_ext_request_slug "$REQUEST_ID") || die "could not derive request slug" 1
@@ -229,6 +294,7 @@ INBOX_JSON=$(jq -cn \
   --arg reply_request_id "$REPLY_REQUEST_ID" \
   --arg reply_text "$REPLY_TEXT" \
   --argjson reply_max "$REPLY_TEXT_MAX" \
+  --argjson decision "$DECISION_JSON" \
   --argjson recorded_at "$NOW" \
   '{schema_version:$schema_version, request_id:$request_id, slug:$slug,
     platform:$platform, source:$source, guild_id:$guild_id,
@@ -241,7 +307,8 @@ INBOX_JSON=$(jq -cn \
                 then ($reply_text | .[0:$reply_max]) + "…"
                 else $reply_text end)}
          + if $reply_request_id == "" then {} else {request_id:$reply_request_id} end)}
-     end') \
+     end
+   + if $decision == null then {} else {decision:$decision} end') \
   || die "could not build the inbox record" 1
 
 CONTEXT_JSON=$(jq -cn \

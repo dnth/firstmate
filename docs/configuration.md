@@ -737,7 +737,7 @@ Its opt-in, request allowlist, authority levels, audit context, correlation, chu
 ## Local Communication Officer bridge (config/ext-bridge)
 
 The sibling local bridge lets a dedicated Hermes Gateway plugin deliver Discord requests into this firstmate home and post replies from a local outbox.
-A request arrives three ways: the `/fm` slash command, an ordinary message in the optional dedicated channel, or a Discord reply to one of Firstmate's own posted messages.
+A request arrives four ways: the `/fm` slash command, an ordinary message in the optional dedicated channel, a Discord reply to one of Firstmate's own posted messages, or a click on one of Firstmate's [decision buttons](#decision-buttons).
 It is a different seam from optional X mode.
 It does not use `FMX_PAIRING_TOKEN`, `https://myfirstmate.io`, hosted public-follow-up, or pending-reply.
 Firstmate core contains no Discord library.
@@ -877,7 +877,7 @@ In the dedicated channel a reply to anyone else's message is still a request, ju
 
 Only a new, human-written message or reply qualifies, including an attachment-only message: bot and webhook posts (Firstmate's own included), edits, and system messages never become requests, and neither path widens who the allowlist admits.
 A message the plugin turns into a request, or ignores in the dedicated channel, is withheld from the gateway's general agent so it is not answered twice; every other message keeps its normal path.
-Every recorded request carries `origin`: `slash` for `/fm`, `message` for the two message paths.
+Every recorded request carries `origin`: `slash` for `/fm`, `message` for the two message paths, and `button` for a decision-button click.
 The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#dedicated-firstmate-channel) owns the Discord and gateway-profile setup that lets plain channel messages reach the plugin.
 
 ### Topic threads (one thread per request)
@@ -898,9 +898,42 @@ The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the cre
 ### Delivery reactions
 
 A request that arrived as a message gets reactions on the captain's message instead of a text acknowledgement: 👀 when intake accepts it, ✅ once its `answer` or `final` reply has posted, and ⚠️ when a reply fails terminally (a permanent HTTP 4xx or a spent mid-delivery recovery budget) or the request could not be recorded.
-A slash command is a Discord interaction with no message to react to, so `/fm` keeps its short text acknowledgement instead.
+A slash command is a Discord interaction with no message to react to, so `/fm` keeps its short text acknowledgement instead, and a [decision-button](#decision-buttons) click, also an interaction, gets an ephemeral reply only its clicker sees.
 Reactions are best effort and use the same bot token and User-Agent as replies: one that fails is dropped, and the poster adds ✅ or ⚠️ only after that delivery outcome is durable, so a failed reaction can neither block nor repeat a reply.
 `bin/fm-ext-emit.sh` copies the request's `origin` into every outbox payload, which is how the poster knows whether a message exists to react to.
+
+### Decision buttons
+
+Firstmate can attach option buttons to an `answer`, `followup`, or `final`, so the captain settles a decision with one click.
+Each decision post is bound to exactly one decision Firstmate already tracks, named by its key: `hold:<task-id>` for a captain call held on the board, or `key:<task-id>:<slug>` for a worker's keyed status decision.
+`bin/fm-ext-emit.sh --decision-file` posts one to five options, numbered in the same order as the post's numbered text, and refuses a key that is not open at that moment; its header owns the file format.
+Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every decision post also carries a Discuss button, `fmd:<key>:d`.
+Channel members can read a `custom_id` through the Discord API, so the key is never written into a label or the post text, and emit refuses a post that names the key or its task id.
+A decision post goes where every reply to its request goes: into the request's Discord thread when it has one, otherwise its channel.
+
+Only an author with a `<guild>:<channel>:<author>` allowlist rule can click: everyone else, including a confirm-rule author, gets an ephemeral "not authorised" and nothing is recorded.
+A click is therefore never stronger than the same author's typed message.
+A click on an option records the answer through Firstmate's existing keyed decision path and nowhere else: `bin/fm-captain-hold.sh answers` for a captain call and `bin/fm-send.sh --resolve-key` for a worker's decision.
+The recorded provenance names who clicked (Discord name and id), when (UTC), the key, the option, and any confirmation.
+The click then sends one request through `bin/fm-ext-intake.sh --origin button` at that author's `standing` authority, so Firstmate wakes and acts on the recorded answer; its `decision` field repeats the key, option, decision text cut to its first 1000 characters, and the audit.
+If that request cannot be published, the answer still stands, the clicker is told Firstmate has not heard yet, and the same request is sent again on the next click or plugin sweep until intake accepts it.
+When `bin/fm-send.sh` reports the worker's copy durable but unconfirmed, the answer also stands and is never resent; the request marks it `delivery: unconfirmed` for Firstmate to follow up.
+A Discuss click on an open decision decides nothing: it sends one request so Firstmate picks the decision up in the thread, and a typed reply to the post, including a bare option number, keeps working exactly as before.
+
+An option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible needs a second click.
+The first click answers with an ephemeral `Confirm: <label>?` and a Confirm button, and nothing is recorded until that button is clicked; the recorded provenance then quotes the prompt.
+Emit marks an option this way when the emitter declares `confirm`, and always when its label names such an action.
+A confirmed click from a standing-rule author is that author's explicit word for that one decision only, never standing authority, and merge authority stays where `AGENTS.md` puts it.
+
+Each post is bound to the lifecycle of its decision that was open when it was posted, so a captain call re-held or a worker key reopened for a new question is a different decision to it.
+After a decision is answered on any channel, its posts are disabled and edited to show the outcome, read from the same ledgers rather than from any step Firstmate must remember: `✅ <option> chosen by <user> <time>` names the clicker for a click and the captain for an answer recorded elsewhere that names exactly one option by number or label, `✅ Decided <time>` covers any other answer, including one naming several options, `Closed - no longer needed <time>` covers a decision closed with no captain answer or replaced by a later lifecycle, and `Replaced by a newer post <time>` covers an older post for the same decision.
+The answer text recorded elsewhere is never shown, and `<time>` is a Discord timestamp of when the bridge saw the outcome, so each reader sees it in their own time zone.
+A click, Discuss included, on a decided, superseded, replaced, or expired post is a no-op with an ephemeral notice.
+A double click records one answer, and so does a typed answer racing a click, because every click rechecks the ledgers under a per-decision lock and `bin/fm-send.sh --resolve-key` holds a per-key lock across its check, delivery, and closing record.
+The post's own records follow the retention window above, so its buttons expire with it.
+`bin/fm-ext-decision.sh`'s header owns the click checks, notices, and the post records, and the plugin edits a clicked post within one outbox cycle and sweeps for decisions closed elsewhere every 30 seconds.
+Labels and decision posts follow the same public-safety rule as every reply.
+The plugin posts buttons only while the gateway's Discord client routes their clicks, and otherwise posts the decision as plain text that the captain answers by replying to it; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#decision-buttons) owns that routing.
 
 ## Process-to-event sources (state/procevent)
 

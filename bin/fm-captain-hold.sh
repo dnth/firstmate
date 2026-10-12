@@ -31,6 +31,7 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh answered <task-id>
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -193,6 +194,17 @@
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
+#
+# `answered` is the read-only reader for what a closed call recorded. It prints
+# the newest resolution record's mode on the first line, the captain's answer
+# on the second - the record's `Answer:` line when it carries one (every keyed
+# answer does), else the first paragraph of the recorded decision, and nothing
+# for a `reconciled` record, whose evidence is not the captain's words - and on
+# the third the count of resolution records, the same count `open --identity`
+# reports after its `#`. Exit 0 means a record was found, 1 means the task
+# carries none, and 2 means the row could not be read. The local Discord bridge
+# uses it to show on a decision post which option an answer given elsewhere
+# chose, and the count to tell that post's call from a later re-hold.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -2030,6 +2042,41 @@ EOF
   done
 }
 
+# What a closed captain call recorded (see the header): the newest record's
+# mode, then the captain's answer. Read-only.
+command_answered() {  # <task-id>
+  local id=${1:-} body decoded mode text answer=''
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*)
+      printf 'fm-captain-hold: task id must be a non-empty privacy-safe slug: %s\n' "$id" >&2
+      exit 2
+      ;;
+  esac
+  fm_tasks_axi_compatible || { printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2; exit 2; }
+  task_show "$id" || return 1
+  body=$(show_field "$TASK_SHOW_OUTPUT" body)
+  body_has_resolution_record "$body" || return 1
+  mode=$(recorded_resolution_mode "$body" || true)
+  decoded=$(decode_shown_value "$body") \
+    || { printf 'fm-captain-hold: could not decode the record of %s\n' "$id" >&2; exit 2; }
+  if [ "$mode" != reconciled ]; then
+    case "$decoded" in
+      *$'Captain decision:\n'*)
+        # Records are prepended, so the first decision block is the newest.
+        text=${decoded#*$'Captain decision:\n'}
+        text=${text%%$'\nResolution recorded by fm-'*}
+        answer=$(printf '%s\n' "$text" | sed -n 's/^Answer: //p' | head -1)
+        if [ -z "$answer" ]; then
+          answer=$(printf '%s\n' "$text" | awk 'NF == 0 { exit } { print }' | tr '\n' ' ')
+          answer=${answer%"${answer##*[![:space:]]}"}
+        fi
+        ;;
+    esac
+  fi
+  printf '%s\n%s\n%s\n' "$mode" "$answer" "$(resolution_record_count "$body")"
+}
+
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
 # A row this home does not carry is 3 when the caller requests the distinction,
 # and so is a home with no backlog file at all, because a backlog that does not
@@ -2119,6 +2166,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  answered) shift; command_answered "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@"; rc=$?; refresh_waiting_pin_after_board_mutation; exit "$rc" ;;
   -h|--help) usage ;;

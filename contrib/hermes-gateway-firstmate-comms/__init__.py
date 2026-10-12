@@ -6,8 +6,9 @@ Do not enable it on a crewmate TUI profile. Crewmate Hermes still launches as
 
 This plugin never calls ``ctx.dispatch_tool("terminal", ...)``.
 It execs ``bin/fm-ext-intake.sh`` with ``--text-file`` for /fm, for messages in
-the optional dedicated channel, and for replies to Firstmate's own posts, and
-watches the local outbox using ``bin/fm-ext-outbox.sh``.
+the optional dedicated channel, and for replies to Firstmate's own posts, execs
+``bin/fm-ext-decision.sh`` for clicks on Firstmate's decision buttons, and watches
+the local outbox using ``bin/fm-ext-outbox.sh``.
 """
 
 from __future__ import annotations

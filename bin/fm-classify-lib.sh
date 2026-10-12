@@ -625,6 +625,49 @@ EOF
   printf '%s' "$verb"
 }
 
+# How many separate lifecycles <key> has had in a status log, through the same
+# fold as status_key_closing_verb: a needs-decision or blocked line for <key>
+# starts a new lifecycle only when <key> is not already open (a repeated line
+# while open is the same decision), and a ship/scout terminal declaration
+# closes every open key. Prints 0 when the key never opened. A Discord decision
+# post records this number so a click can tell its own lifecycle from a later
+# reopening of the same key.
+status_key_occurrence() {  # <status-file> <key>
+  local f=$1 want=$2 line resolve held open='' was kind event candidates count=0
+  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || { printf '0\n'; return 0; }
+  kind=$(_fm_status_kind "$f")
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  candidates=$(grep -E \
+    "^[[:space:]]*(needs-decision|blocked|done|failed|$resolve|$held)[[:space:]:[]" \
+    "$f") || [ "$?" -eq 1 ] || candidates=$(cat "$f")
+  while IFS= read -r line || [ -n "$line" ]; do
+    event=$(status_line_verb "$line")
+    case "$event:$kind" in
+      done:ship|done:scout|failed:ship|failed:scout)
+        open=''
+        continue
+        ;;
+    esac
+    case "$event" in
+      needs-decision|blocked|"$resolve"|"$held") ;;
+      *) continue ;;
+    esac
+    if [ "$want" != default ]; then
+      case "$line" in *"[key=$want]"*) ;; *) continue ;; esac
+    fi
+    was=0
+    _fm_open_set_has "$open" "$want" && was=1
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    if [ "$was" = 0 ] && _fm_open_set_has "$open" "$want"; then
+      count=$((count + 1))
+    fi
+  done <<EOF
+$candidates
+EOF
+  printf '%s\n' "$count"
+}
+
 # Count canonical `resolved [key=<key>]: answered:` records from fm-send.
 # This is process evidence, not tamper-proof provenance; same-user forgery risk is accepted.
 # Each recorded gate response requires its own matching status record.
@@ -637,6 +680,20 @@ status_resolved_key_count() {  # <status-file> <key>
     esac
   done < "$f"
   printf '%s\n' "$count"
+}
+
+# The answer excerpt of the newest canonical `resolved [key=<key>]: answered:`
+# record from fm-send, or nothing when the key has none. Like the count above,
+# this reads process evidence of what was sent, not tamper-proof provenance.
+status_resolved_key_answer() {  # <status-file> <key>
+  local f=$1 want=$2 line answer=''
+  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "resolved [key=$want]: answered: "*) answer=${line#"resolved [key=$want]: answered: "} ;;
+    esac
+  done < "$f"
+  printf '%s' "$answer"
 }
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one

@@ -13,7 +13,7 @@ metadata:
 
 # ext-respond
 
-The local Communication Officer bridge lets a firstmate instance answer Discord requests that a dedicated Hermes Gateway plugin delivered into this home: `/fm`, a message in the dedicated channel, or a reply to one of Firstmate's own posts.
+The local Communication Officer bridge lets a firstmate instance answer Discord requests that a dedicated Hermes Gateway plugin delivered into this home: `/fm`, a message in the dedicated channel, a reply to one of Firstmate's own posts, or a click on one of Firstmate's decision buttons.
 Load this skill for an `ext-request <slug>` check wake or the drain's `EXT REQUESTS AWAITING ANSWER` section.
 The full request is stashed locally; this skill acts on it and emits one or more local outbox payloads that the gateway plugin posts to the request's Discord destination.
 
@@ -35,8 +35,30 @@ Read that field first, because it decides what you may do without asking.
   Emit an `answer` saying what you would do and that it is waiting on the captain, then raise the decision to the captain through the ordinary escalation path.
   A Discord message admitted by a server-wide rule is a request, not an order.
 
-Neither level is authorization for destructive, irreversible, or security-sensitive work; those always require trusted-channel confirmation first.
+Neither level is authorization for destructive, irreversible, or security-sensitive work; those always require trusted-channel confirmation first, except the one decision a confirmed decision-button click answers (see below).
 A missing or unrecognized `authority` value is treated as `confirm`.
+
+## Decisions with buttons
+
+When a reply asks the captain to settle a decision Firstmate already tracks, attach its options as buttons with `bin/fm-ext-emit.sh --decision-file`.
+The emit header owns the file format, and the [decision buttons reference](../../../docs/configuration.md#decision-buttons) owns the contract.
+
+- Key a captain call held on the board `hold:<task-id>`, and a worker's open keyed decision `key:<task-id>:<slug>`; emit refuses a key that is not open.
+- List the options in the order the post's own text numbers them, so a typed number and a button name the same option, and write short, concrete, public-safe labels such as "Merge" or "Hold".
+- Set `"confirm": true` on every option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible.
+- For a captain call that gates held work, set `"mode": "release"` so the answer lifts the hold instead of closing the task.
+- Never write the key or its task id into the post text or a label; only the button ids carry it.
+
+A click arrives as a request with `origin` `button` and `authority` `standing`; its `decision` field says what happened.
+
+1. `choice` `option`: the answer is already recorded through `decision.recorded_via`, with who, when, and any confirmation, and the worker has it; never answer the decision again.
+   Act on the outcome through the normal lifecycle, exactly as if the captain had typed that option, never as more.
+   When `decision.delivery` is `unconfirmed`, fm-send left the worker's copy durable but unconfirmed: never resend it; confirm it reached the worker through the normal recovery path, then close the key with the closing record fm-send names.
+   A `confirmed` click is the clicker's explicit word for that one decision only, which is the confirmation a merge, prod deploy, deletion, money, or credential option needs; it is never standing authority, and merge authority otherwise stays where AGENTS.md puts it.
+2. `choice` `discuss`: nothing is decided; talk it through with the captain in the thread.
+3. Finish with an `answer` or `final`, as for any request.
+
+When you settle a decision that has a button post any other way, such as a typed numbered reply, record it through its own channel as usual and name the chosen option in the answer, by its number or label; the post then disables itself and shows that option as the captain's choice, and an answer naming no single option shows a plain "✅ Decided".
 
 ## Acknowledge first, act, then follow up
 
@@ -85,6 +107,7 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
    a. Read `request_id`, `text`, `author`, destination ids, and `attachments` plus `skipped_attachments`.
       When `reply_to` is present, read `reply_to.text` to resolve what a short answer such as "yes" refers to, and use `reply_to.request_id` when present to find any task linked to the earlier request; the [reply-context contract](../../../docs/configuration.md#dedicated-channel-and-reply-continuation-configext-channel) owns its fields and bounds.
       The reply carries its own `authority`; the earlier request's authority never transfers to it.
+      When `decision` is present, the request is a button click; handle it as [Decisions with buttons](#decisions-with-buttons) says.
       Ignore unknown extra fields.
    b. Classify as actionable, question, or pure acknowledgment.
    c. Act on an actionable request through the normal lifecycle.
