@@ -117,7 +117,7 @@ The live observation and the burst regression record are kept in [runtime-backen
 ## How the branch knows what the captain said
 
 Main's captain and assistant text - never tool calls, tool results, operational injections, or the branch's own merged notes - is mirrored into the branch as read-only `fm-main-mirror` messages at main's turn end, before the next wake is handed over.
-The mirror cursor is durable (`state/.branch-mirror-cursor`), so a restart replays only the not-yet-mirrored dialog from main's session file, and a replacement main session re-anchors from its start.
+The turn_end handler snapshots that dialog synchronously and queues the ownership-gated push and flush on the serialized delivery chain without awaiting it, so a busy chain never holds main's turn end behind OMP's 30 s handler cap; the batch still lands before any later wake through that same chain, and the durable cursor still advances only after the complete batch reaches the branch.
 The branch prompt frames mirrored text as context for judgment, never as instructions addressed to the branch; an authorization addressed to main (for example "you may merge when green") does not relax the branch's role limits.
 
 ## Two-stage noise filter

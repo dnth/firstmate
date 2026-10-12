@@ -1543,21 +1543,49 @@ ${context.command}
     mainStreaming = false;
   });
 
-  // Mirror at main's turn_end: collect the new captain/assistant dialog into
-  // the volatile queue, then deliver it through the serialized chain so it
-  // lands before any later wake. The durable cursor advances only in
-  // flushMirror after the complete pending batch reaches the branch.
-  pi.on?.("turn_end", async (_event, ctx) => {
+  // Mirror at main's turn_end: snapshot this turn's dialog synchronously -
+  // ctx is not valid after the handler returns - then queue the
+  // ownership-gated push and flush on the serialized branch chain without
+  // awaiting it, so a busy delivery chain never holds main's turn end behind
+  // OMP's 30 s handler cap. The batch still lands before any later wake
+  // through that same chain, and the durable cursor still advances only in
+  // flushMirror after the complete batch reaches the branch. A generation
+  // change or lost ownership drops the batch, and the chain containment
+  // below swallows the drop so no rejection escapes the handler.
+  pi.on?.("turn_end", (_event, ctx) => {
     rememberMainContext(ctx);
     const turnGeneration = generation;
-    if (!(await enqueueDelivery(() => actingAsOwner(turnGeneration)))) return;
-    if (turnGeneration !== generation) return;
+    let snapshotFile: string;
+    let snapshotEntries: Array<{ type: string }>;
     try {
-      pendingMirror.push(...collectMainDialog(ctx.sessionManager, mirrorCollection));
+      const manager = ctx.sessionManager as ReadonlyEntries | undefined;
+      if (!manager || typeof manager.getSessionFile !== "function" || typeof manager.getEntries !== "function") return;
+      snapshotFile = manager.getSessionFile() ?? "";
+      snapshotEntries = manager.getEntries().slice();
     } catch {
       return;
     }
-    enqueueMirrorFlush();
+    const snapshotManager: ReadonlyEntries = {
+      getSessionFile: () => snapshotFile,
+      getEntries: () => snapshotEntries,
+    };
+    branchChain = branchChain
+      .then(async () => {
+        if (turnGeneration !== generation) return;
+        if (!(await enqueueDelivery(() => actingAsOwner(turnGeneration)))) return;
+        if (turnGeneration !== generation) return;
+        let items: MirrorItem[];
+        try {
+          items = collectMainDialog(snapshotManager, mirrorCollection);
+        } catch {
+          return;
+        }
+        if (items.length > 0) pendingMirror.push(...items);
+        enqueueMirrorFlush();
+      })
+      .catch(() => {
+        // A dropped batch must never reject the chain or the handler.
+      });
   });
 
   // A synchronous live handoff from a branch, or hung-branch takeover, remains
@@ -1600,10 +1628,16 @@ ${context.command}
     }
   };
 
-  pi.on?.("session_start", async (_event, ctx) => {
+  pi.on?.("session_start", (_event, ctx) => {
     armSessionBoundary(ctx);
     const startedGeneration = generation;
-    await enqueueDelivery(() => actingAsOwner(startedGeneration));
+    // Same nonblocking treatment as turn_end: eagerly activating ownership
+    // here only warms the one-time per-generation marker/lease work, so it
+    // queues behind the chain instead of holding the handler past the cap.
+    void enqueueDelivery(() => actingAsOwner(startedGeneration)).catch(() => {
+      // Activation failure leaves ownership unevaluated; the next boundary
+      // re-evaluates it lazily exactly as before.
+    });
   });
 
   pi.on?.("session_switch", (_event, ctx) => {
