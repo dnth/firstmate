@@ -1014,11 +1014,13 @@ remote_env "$ROOT/bin/fm-procevent.sh" retire "$SID" >/dev/null \
 FM_LANDING_SEND_BIN="$LANDING_FAKEBIN/carrierless-send" landing_env \
   "$ROOT/bin/fm-procevent-remote-reply.sh" arm ios >/dev/null \
   || fail "could not re-arm the reply runner before the landing reply"
-FM_LANDING_SEND_BIN="$LANDING_FAKEBIN/carrierless-send" landing_env \
-  "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 || true
 landing_results_before=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" -print | sort)
 printf 'done [key=alpha-landing]: shipped PR %s merged as c3ee504e\n' "$LANDING_URL" \
   >> "$REMOTE_HOME/state/parent-replies.status"
+# start waits for the bounded reader: publish the reply first so capture does
+# not depend on a watcher restarting a reader that timed out with no input.
+FM_LANDING_SEND_BIN="$LANDING_FAKEBIN/carrierless-send" landing_env \
+  "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 || true
 LANDING_RESULT='' n=200
 while [ -z "$LANDING_RESULT" ] && [ "$n" -gt 0 ]; do
   LANDING_RESULT=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" -print | sort \
