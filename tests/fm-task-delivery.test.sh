@@ -90,7 +90,7 @@ EOF
   pass "fm-spawn: unresolved task and criterion placeholders refuse before launch"
 }
 test_scout_spawn_refuses_unresolved_task_placeholder() {
-  local rec home proj fakebin out status
+  local rec home proj fakebin out status wt
   rec=$(make_home scout-placeholder)
   IFS='|' read -r home proj fakebin <<EOF2
 $rec
@@ -103,6 +103,45 @@ EOF2
   assert_contains "$out" "still contains {TASK}" "scout spawn did not identify the task placeholder"
   assert_contains "$out" "scout brief" "scout refusal did not name its kind"
   assert_absent "$home/state/scout-placeholder-x1.meta" "refused scout spawn wrote task metadata"
+  wt="$TMP_ROOT/scout-placeholder/wt"
+  fm_git_worktree "$proj" "$wt" "wt-scout-filled"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "$wt"; exit 0 ;;
+esac
+case "\${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane) printf 'ready\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    for a in "\$@"; do
+      case "\$a" in
+        touch\ */.fm-launch-probe.*)
+          marker=\${a#touch }
+          marker=\${marker#\'}; marker=\${marker%\'}; : > "\$marker"
+          ;;
+      esac
+    done
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "$wt"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  write_brief "$home" scout-filled-x2
+  out=$(FM_FAKE_PANE_PATH="$wt" run_spawn "$home" "$fakebin" scout-filled-x2 "$proj" claude --scout)
+  status=$?
+  [ "$status" -eq 0 ] || fail "scout spawn with a filled brief should succeed: $out"
+  assert_contains "$out" "spawned scout-filled-x2" "filled scout spawn did not report success"
+  assert_present "$home/state/scout-filled-x2.meta" "filled scout spawn published no record"
   pass "fm-spawn: a scout spawn refuses an unresolved task placeholder before launch"
 }
 
