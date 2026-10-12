@@ -854,19 +854,35 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
   fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA)"
 }
 
+# The hold-set stamp and review-by line sit on the body's first two lines, so
+# both readers split those lines in the shell instead of piping every body
+# through sed: the due report runs them per held call, and a fork per call is
+# what used to make a fleet-sized due read miss its bound.
 body_hold_set_timestamp() {  # <decoded-task-body>
-  printf '%s\n' "$1" \
-    | sed -n \
-      -e '1s/^Captain hold set: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\)$/\1/p' \
-      -e '1s/^Captain hold set: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/\1/p' \
-    | head -1
+  local line stamp
+  line=${1%%$'\n'*}
+  case "$line" in
+    'Captain hold set: '*) stamp=${line#'Captain hold set: '} ;;
+    *) return 0 ;;
+  esac
+  case "$stamp" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s\n' "$stamp" ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) printf '%s\n' "$stamp" ;;
+  esac
 }
 
 body_hold_review_by() {  # <decoded-task-body>
-  printf '%s\n' "$1" \
-    | sed -n \
-      -e '2s/^Captain hold review by: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/\1/p' \
-    | head -1
+  local rest line date
+  rest=${1#*$'\n'}
+  [ "$rest" != "$1" ] || return 0
+  line=${rest%%$'\n'*}
+  case "$line" in
+    'Captain hold review by: '*) date=${line#'Captain hold review by: '} ;;
+    *) return 0 ;;
+  esac
+  case "$date" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s\n' "$date" ;;
+  esac
 }
 
 # Days after the hold-set stamp a call becomes due for review. Documented in
@@ -2276,8 +2292,13 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
 # answered, deferred (--until future), and not-yet-due calls never list. The
 # review-by date clears no hold and reaches no expiry path: every listed task
 # still refuses `tasks-axi ready` and still answers through the same paths.
+# ONE backlog read answers the whole report: the listing carries each row's body
+# beside the hold fields, and the hold-set stamp, the review-by line and the
+# first resolution record all live at the head of that body, so no per-call
+# `show` is needed. A token the tool cut short still falls back to one exact
+# read (due_body_for_row), so a bisected record block can never read as absent.
 command_due() {
-  local as_of data listing rows body
+  local as_of data listing rows
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   as_of=${FM_CAPTAIN_HOLD_TODAY:-$(date -u +%F)}
   case "$as_of" in
@@ -2286,12 +2307,12 @@ command_due() {
   esac
   require_tasks_axi
   data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
-  listing=$(fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked) \
+  listing=$(fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked,body) \
     || fail "could not list the backlog"
-  rows=$(axi_rows tasks "$listing" rows id title hold_kind hold_reason hold_until blocked state) \
+  rows=$(axi_rows tasks "$listing" rows id title hold_kind hold_reason hold_until blocked state raw:body) \
     || fail "could not parse the backlog listing"
   [ -n "$rows" ] || return 0
-  printf '%s\n' "$rows" | while IFS=$(printf '\t') read -r id title hold_kind hold_reason hold_until blocked state; do
+  printf '%s\n' "$rows" | while IFS=$(printf '\t') read -r id title hold_kind hold_reason hold_until blocked state raw_body; do
     [ -n "$id" ] || continue
     [ "$state" != "done" ] || continue
     [ "$hold_kind" = captain ] || continue
@@ -2303,28 +2324,88 @@ command_due() {
         [ "$hold_until" = "$as_of" ] || [ "$hold_until" \< "$as_of" ] || continue ;;
       *) continue ;;
     esac
-    task_show "$id" || fail "could not read captain-held task $id"
-    body=$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)") \
-      || fail "could not decode the body for $id"
-    due_line_for_body "$id" "$title" "$body" "$as_of" || continue
+    # A body that does not OPEN with its hold-set stamp cannot be due: the stamp
+    # reader only accepts the body's first line. Skipping such a row here keeps a
+    # held call's long notes from paying for a decision they cannot change.
+    due_body_candidate "$raw_body" || continue
+    # The date gate reads the LISTED token's head, so a held call that is not past
+    # due never pays for a body decode or a backend read; only a call the gate
+    # confirms pays for the exact body below.
+    due_row_head "$raw_body"
+    DUE_REVIEW=$(due_review_by "$DUE_HEAD" "$as_of") || continue
+    due_body_for_row "$id" "$raw_body" || fail "could not read captain-held task $id"
+    due_line_for_body "$id" "$title" "$DUE_BODY" "$DUE_REVIEW" || continue
   done || return 1
   return 0
 }
 
-# Print `<id>\t<review-by>\t<title>` when the decoded body is due as of the
-# date; print nothing otherwise. Only a resolution record linked to the
-# body's own hold-set stamp settles the call: retained records from a prior
-# lifecycle (a re-held task after an answer) never suppress the new live call,
-# while an interrupted close on the same stamp stays suppressed until retried.
-due_line_for_body() {  # <id> <title> <decoded-body> <as-of>
-  local id=$1 title=$2 body=$3 as_of=$4 stamp review
+# 0 when the raw listing body could carry a hold-set stamp, 1 otherwise. The
+# stamp is the body's first line and the listing quotes a value only when it
+# needs escaping, so an unquoted or quoted `Captain hold set: ` opening is the
+# cheap superset test; the body reader still owns the exact answer.
+due_body_candidate() {  # <raw-listing-body>
+  local raw=$1
+  case "${raw#\"}" in
+    'Captain hold set: '*) return 0 ;;
+  esac
+  return 1
+}
+
+# Rebuild the head of a listed row's body in DUE_HEAD, without a decoder. The two
+# lines the date gate reads are plain ASCII - the stamp and review-by readers
+# match them literally - and the token spells a line break as a `\n` escape, so
+# replacing that one escape rebuilds exactly those lines. The break after a stamp
+# line is always the token's first `\n` (a matching stamp line cannot hold a
+# backslash of its own), and a body this reconstruction cannot read is a body the
+# decoded reader would not mark either, because it would not read its first line
+# as a stamp.
+due_row_head() {  # <raw-listing-body>; sets DUE_HEAD
+  local raw=$1
+  DUE_HEAD=${raw#\"}
+  DUE_HEAD=${DUE_HEAD%\"}
+  DUE_HEAD=${DUE_HEAD//\\n/$'\n'}
+}
+
+# Decode one listed row's body into DUE_BODY. The listed token is the body with
+# at most its tail cut, and the date gate has already read the head it kept; a
+# token the tool marked cut falls back to one exact `show`, because a record
+# block the cut bisected would otherwise read as absent and mark an
+# already-answered call due. That read stays in this shell because task_show
+# carries its row in TASK_SHOW_OUTPUT.
+due_body_for_row() {  # <task-id> <raw-listing-body>; sets DUE_BODY
+  local id=$1 raw=$2
+  case "$raw" in
+    *'(truncated, '*' chars total - use show '*' --full'*) : ;;
+    *) DUE_BODY=$(decode_shown_value "$raw") || return 1; return 0 ;;
+  esac
+  task_show "$id" || return 1
+  DUE_BODY=$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)") || return 1
+}
+
+# Print the decoded body's review-by date (YYYY-MM-DD) when that date has passed
+# as of <as-of>, and print nothing otherwise. A hold that carries no review-by
+# line counts from its hold-set stamp plus the configured interval, so a
+# pre-change body lists unchanged; a body with no hold-set stamp at all never
+# lists, because there is no time to count from.
+due_review_by() {  # <decoded-body> <as-of>
+  local body=$1 as_of=$2 stamp review
   stamp=$(body_hold_set_timestamp "$body")
   [ -n "$stamp" ] || return 1
-  body_has_current_resolution_record "$body" && return 1
   review=$(body_hold_review_by "$body")
   [ -n "$review" ] || review=$(hold_review_by_for_stamp "$stamp")
   [ -n "$review" ] || return 1
   [ "$review" = "$as_of" ] || [ "$review" \< "$as_of" ] || return 1
+  printf '%s\n' "$review"
+}
+
+# Print `<id>\t<review-by>\t<title>` for a call the date gate has already shown
+# past due; print nothing otherwise. Only a resolution record linked to the
+# body's own hold-set stamp settles the call: retained records from a prior
+# lifecycle (a re-held task after an answer) never suppress the new live call,
+# while an interrupted close on the same stamp stays suppressed until retried.
+due_line_for_body() {  # <id> <title> <decoded-body> <review-by>
+  local id=$1 title=$2 body=$3 review=$4
+  body_has_current_resolution_record "$body" && return 1
   [ -n "$title" ] || title=$id
   printf '%s\t%s\t%s\n' "$id" "$review" "$(sanitize_field "$title")"
 }

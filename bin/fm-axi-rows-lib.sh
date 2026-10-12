@@ -7,6 +7,14 @@
 # explicit count-zero scalar; a non-empty listing must carry the expected table
 # header with every requested field and the declared number of parseable rows.
 # Anything else is incompatible rather than an empty board.
+#
+# A field named `raw:<field>` prints that column's RAW listing token instead of
+# its decoded value, for a caller that decodes the value itself because the
+# shared decoder would destroy it - it folds a JSON newline into a space, and a
+# multi-line body's line structure is exactly what a body reader needs. A raw
+# token is still a JSON string, so it carries no real tab or newline and stays
+# one field of one row; every token in the row is still decoded for validation,
+# so a raw request cannot smuggle a malformed row past this parser.
 axi_rows() {
   local table=$1 listing=$2 output=$3
   shift 3
@@ -83,16 +91,23 @@ axi_rows() {
         if (c == "\"") { inq = !inq; token = token c; i++; continue }
         if (c == "," && !inq) {
           token_bad = 0
-          out[++n] = decode_token(token)
+          # Validate through a copy: a raw: field wants this token verbatim, and
+          # an awk that passes an array element into a mutating parameter would
+          # hand back this cell already decoded.
+          validation = token
+          decode_token(validation)
           if (token_bad) return -1
+          out[++n] = token
           token = ""; i++; continue
         }
         token = token c; i++
       }
       if (inq) return -1
       token_bad = 0
-      out[++n] = decode_token(token)
+      validation = token
+      decode_token(validation)
       if (token_bad) return -1
+      out[++n] = token
       return n
     }
     function byte_value(c) {
@@ -167,6 +182,9 @@ axi_rows() {
       nul = sprintf("%c", 0)
       for (i = 0; i <= 255; i++) byte_of[sprintf("%c", i)] = i
       nwant = split(want, wanted, " ")
+      for (i = 1; i <= nwant; i++) {
+        if (wanted[i] ~ /^raw:/) { raw_is[i] = 1; sub(/^raw:/, "", wanted[i]) }
+      }
     }
     $0 == "count: 0" { zero_count = 1; next }
     table == "tasks" && /^tasks: 0 .*tasks in this backlog$/ { zero_scalar = 1; next }
@@ -201,10 +219,15 @@ axi_rows() {
       out = ""
       for (i = 1; i <= nwant; i++) {
         col = index_of[wanted[i]]
-        out = out (i > 1 ? "\t" : "") (col ? cells[col] : "")
+        if (i > 1) out = out "\t"
+        if (col) {
+          decoded = cells[col]
+          if (!raw_is[i]) decoded = decode_token(decoded)
+          out = out decoded
+        }
       }
       if (output == "items") {
-        out = todo_json(cells[index_of["id"]], cells[index_of["title"]])
+        out = todo_json(decode_token(cells[index_of["id"]]), decode_token(cells[index_of["title"]]))
         if (utf8_bad) { bad = 1; next }
       }
       print out
