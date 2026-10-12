@@ -33,6 +33,10 @@
 // for the rest of the session. Decision-owned wakes bypass coalescing and the
 // bound entirely. A still-unconsumed record rides the replacement handoff.
 //
+// Branch settlement runs outside the serialized delivery loop; the handoff
+// and rejection contract is owned by docs/omp-supervision-branch.md under
+// "Components and their owners".
+//
 // The active generation and the process-exit fallback are process-wide, not
 // per-core-instance.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
