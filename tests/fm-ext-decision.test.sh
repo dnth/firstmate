@@ -189,11 +189,17 @@ resolved_lines() {  # <home> <key-slug>
   grep -c "^resolved \[key=$2\]" "$1/state/$TASK.status" || true
 }
 
-# What Firstmate does with a button request, per the ext-respond skill: record
-# the option through the decision's own normal path, quoting the click's audit.
+# What Firstmate does with a button request, per the ext-respond skill: check
+# that the request's decision is still the open lifecycle it was clicked for,
+# then record the option through the decision's own normal path, quoting the
+# click's audit. Prints the still-open verdict; records only on "open".
 record_as_firstmate() {  # <home> <inbox-record-json>
-  local home=$1 record=$2 key option id by author at audit task mode
+  local home=$1 record=$2 key option id by author at audit task mode verdict
   key=$(jq -r '.decision.key' <<<"$record")
+  verdict=$(home_env "$home" "$ROOT/bin/fm-ext-decision.sh" still-open --key "$key" \
+    --occurrence "$(jq -r '.decision.occurrence' <<<"$record")")
+  printf '%s\n' "$verdict"
+  [ "$verdict" = open ] || return 0
   option=$(jq -r '.decision.option' <<<"$record")
   id=$(jq -r '.decision.option_id' <<<"$record")
   by=$(jq -r '.decision.by' <<<"$record")
@@ -386,7 +392,7 @@ test_2_standing_click_files_one_request_for_a_worker_key() {
   [ -z "$(reconcile "$home" True)" ] || fail "an unchanged sent post was edited again"
 
   # Firstmate records the request through its normal path; the post follows.
-  record_as_firstmate "$home" "$record"
+  [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "Firstmate found the clicked decision no longer open"
   [ "$(resolved_lines "$home" pick)" = 1 ] || fail "Firstmate's normal path did not record the answer"
   out=$(FM_EXT_NOW_OVERRIDE=1791720100 reconcile "$home" True)
   printf '%s' "$out" | jq -e --arg msg "$POST" '
@@ -430,7 +436,7 @@ test_3_captain_call_click_is_a_request_the_board_records() {
   printf '%s' "$record" | jq -e --arg key "hold:$id" '.decision.key == $key and .decision.mode == "done"
     and (.decision.occurrence | endswith("#0"))' >/dev/null \
     || fail "the request lost the call's key, close mode, or lifecycle: $record"
-  record_as_firstmate "$home" "$record"
+  [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "Firstmate found the clicked decision no longer open"
   show=$(cd "$home" && tasks-axi show "$id" --full)
   assert_contains "$show" "state: done" "Firstmate's normal path did not close the call"
   assert_contains "$show" "Answer: South" "the recorded call lost the chosen option"
@@ -479,6 +485,26 @@ test_3_captain_call_click_is_a_request_the_board_records() {
   home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open "$id-4" >/dev/null \
     || fail "a stale click closed the re-held captain call"
   [ "$(button_requests "$home")" = 1 ] || fail "a stale click filed a request"
+
+  # A captain-call click still queued when the call is released and re-held
+  # for a new question must not answer the new question either.
+  (cd "$home" && tasks-axi add "$id-5" "Pick a fifth route" --kind captain --repo sample >/dev/null) \
+    || fail "could not create the fifth captain-call fixture"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" hold "$id-5" --reason "route pending" --repo sample \
+    >/dev/null || fail "could not hold the fifth captain call"
+  emit_decision "$home" 5 '{"key":"hold:'"$id"'-5","options":[{"label":"North"}]}' >/dev/null
+  deliver "$home" 700000000000000009
+  click "$home" "fmd:hold:$id-5:1" "$CAPTAIN" 880000000000000005 700000000000000009 >/dev/null
+  record=$(jq -s 'map(select(.decision.key == "hold:'"$id"'-5")) | .[0]' "$home"/state/ext-inbox/*.json)
+  printf 'Wait - release it for now.\n' > "$home/answer.txt"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" answer "$id-5" --decision-file "$home/answer.txt" --release \
+    >/dev/null || fail "could not release the fifth captain call"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" hold "$id-5" --reason "a new question" --repo sample \
+    >/dev/null || fail "could not re-hold the fifth captain call"
+  [ "$(record_as_firstmate "$home" "$record")" = superseded ] \
+    || fail "a request queued before a release and re-hold must not be still open"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open "$id-5" >/dev/null \
+    || fail "the queued request closed the re-held captain call"
 
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
   printf '%s\n' "$out" | jq -se '
@@ -577,7 +603,7 @@ test_5_high_risk_options_need_a_confirmation_step() {
     and .decision.option == "Deploy to prod"
     and .text == "Decision answer by button: Deploy to prod (confirmed)"' >/dev/null \
     || fail "the request must carry the confirmation verbatim: $record"
-  record_as_firstmate "$home" "$record"
+  [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "Firstmate found the clicked decision no longer open"
   grep -qF 'confirmed by clicking "Confirm: Deploy to prod?"' "$home/state/$TASK.inbox/001.msg" \
     || fail "the recorded answer must show its confirmation"
   pass "5 merge, prod deploy, deletion, money, and credential options need a confirmation click before anything is sent, and the record shows it"
@@ -607,7 +633,7 @@ test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops() {
     || fail "exactly one double click may report it was sent"
   [ "$(grep -l 'Already sent' "$home"/dup.* | wc -l | tr -d ' ')" = 2 ] \
     || fail "every other double click must be a no-op with a notice: $(cat "$home"/dup.*)"
-  record_as_firstmate "$home" "$(button_request "$home" option)"
+  [ "$(record_as_firstmate "$home" "$(button_request "$home" option)")" = open ] || fail "Firstmate found the clicked decision no longer open"
 
   # Answered on other channels: Firstmate relays a typed reply through the real
   # keyed path, and the post reads the ledger.
@@ -670,7 +696,7 @@ test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops() {
 # --- 7. stale posts: replaced by a newer post, or expired -------------------
 
 test_7_stale_posts_are_no_ops() {
-  local home out
+  local home out record
   home="$TMP_ROOT/c7"
   setup_home "$home"
   open_request "$home"
@@ -695,7 +721,7 @@ test_7_stale_posts_are_no_ops() {
   deliver "$home" 700000000000000011
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmd:key:$TASK:swap:1" "$CAPTAIN" 880000000000000054 700000000000000011)
   assert_contains "$out" "Sent: South." "the replacement post's option 1 must send its own label"
-  record_as_firstmate "$home" "$(button_request "$home" option)"
+  [ "$(record_as_firstmate "$home" "$(button_request "$home" option)")" = open ] || fail "Firstmate found the clicked decision no longer open"
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
   printf '%s\n' "$out" | jq -se '
     (map({(.message): .content}) | add) as $shown
@@ -715,12 +741,32 @@ test_7_stale_posts_are_no_ops() {
     "a post must not answer a later lifecycle of its worker key"
   [ "$(button_requests "$home")" = 1 ] || fail "a click on a reopened key's old post filed a request"
 
+  # A click whose request is still queued when its question is answered on
+  # another channel and reopened for a new question: when Firstmate gets to
+  # it, the request must not answer the new question.
+  printf 'needs-decision [key=queued]: first question\n' >> "$home/state/$TASK.status"
+  emit_decision "$home" 6 '{"key":"key:'"$TASK"':queued","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
+  deliver "$home" 700000000000000013
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmd:key:$TASK:queued:1" "$CAPTAIN" 880000000000000056 700000000000000013)
+  assert_contains "$out" "Sent: North." "the click on the first question was not sent"
+  record=$(jq -s 'map(select(.decision.key == "key:'"$TASK"':queued")) | .[0]' "$home"/state/ext-inbox/*.json)
+  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key queued "South, typed before the click was handled" \
+    >/dev/null 2>&1 || fail "fm-send could not relay the typed answer"
+  printf 'needs-decision [key=queued]: second question\n' >> "$home/state/$TASK.status"
+  [ "$(record_as_firstmate "$home" "$record")" = superseded ] \
+    || fail "a request queued before an answer and reopen must not be still open"
+  [ "$(resolved_lines "$home" queued)" = 1 ] || fail "the queued request answered the reopened question"
+  [ "$(grep -c 'North' "$home/state/$TASK.inbox/"*.msg | awk -F: '{s += $NF} END {print s + 0}')" = 0 ] \
+    || fail "the worker received the queued North answer for the new question"
+  home_env "$home" "$ROOT/bin/fm-ext-decision.sh" still-open --key "key:$TASK:queued" \
+    --occurrence 2 >/dev/null || fail "the new question must stay open"
+
   FM_EXT_NOW_OVERRIDE=$(( $(date +%s) + 700000 )) home_env "$home" "$POLL" >/dev/null
   out=$(click "$home" "fmd:$KEY:2" "$CAPTAIN" 880000000000000053 700000000000000002)
   assert_contains "$out" "This decision post is no longer open - this click changed nothing." \
     "a click on an expired post must be a no-op with a notice"
-  [ "$(button_requests "$home")" = 1 ] || fail "a click on an expired post filed a request"
-  pass "7 clicks on a replaced, reopened, mismatched, or expired post are no-ops with a notice, and replaced posts say so"
+  [ "$(button_requests "$home")" = 2 ] || fail "a click on an expired post filed a request"
+  pass "7 clicks on a replaced, reopened, mismatched, or expired post are no-ops, and a request queued before its question was answered and reopened never answers the new one"
 }
 
 # --- 8. Discuss and typed replies always work -------------------------------

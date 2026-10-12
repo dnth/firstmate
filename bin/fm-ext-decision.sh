@@ -8,6 +8,7 @@
 #     [--author-name <name>] --secret-file <path> [--confirmed]
 #   fm-ext-decision.sh posts [--settled-only]
 #   fm-ext-decision.sh finalized --post <stem> --content-file <path>
+#   fm-ext-decision.sh still-open --key <key> --occurrence <occurrence>
 #
 # A decision post is an outbox reply that bin/fm-ext-emit.sh published with a
 # decision; the gateway poster copies that decision into the post's
@@ -83,6 +84,16 @@
 #   Records the content Discord now shows for a post, so posts lists it only
 #   when that content changes.
 #
+# still-open
+#   The check Firstmate runs before recording a button request: is the
+#   request's decision still open, and still the same lifecycle the clicked
+#   post was made for? It compares the request's occurrence with the
+#   decision's current one - a captain call's `fm-captain-hold.sh open
+#   --identity`, or a worker key's status_key_occurrence - so a request queued
+#   before its question was answered and reopened never answers the new
+#   question. Prints open, decided, superseded, or unknown; exits 0 only for
+#   open, 2 for unknown, and 1 otherwise. Read-only.
+#
 # Post records expire with the bridge retention window, so their buttons
 # expire with them. Discord text is untrusted and never reaches a shell
 # command: every value here is an id, a key, a number, or text Firstmate wrote.
@@ -102,6 +113,7 @@ usage: fm-ext-decision.sh click --post-id <id> --option <n>|discuss [--key <key>
          [--author-name <name>] --secret-file <path> [--confirmed]
        fm-ext-decision.sh posts [--settled-only]
        fm-ext-decision.sh finalized --post <stem> --content-file <path>
+       fm-ext-decision.sh still-open --key <key> --occurrence <occurrence>
 EOF
 }
 
@@ -495,10 +507,35 @@ command_finalized() {
     || die "could not record what the post shows" 1
 }
 
+# Is a button request's decision still the open question it was posted for?
+# Read-only; see "still-open" in the header.
+command_still_open() {
+  local key='' occurrence='' outcome state
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --key) shift; key=${1:-} ;;
+      --occurrence) shift; occurrence=${1:-} ;;
+      *) usage; exit 2 ;;
+    esac
+    shift || true
+  done
+  fm_ext_decision_key_valid "$key" || die "still-open needs --key hold:<task-id> or key:<task-id>:<slug>"
+  [ -n "$occurrence" ] || die "still-open needs the request's --occurrence"
+  outcome=$(fm_ext_decision_key_outcome "$key" "$occurrence") || die "malformed decision key"
+  state=${outcome%%$'\t'*}
+  printf '%s\n' "$state"
+  case "$state" in
+    open) exit 0 ;;
+    unknown) exit 2 ;;
+  esac
+  exit 1
+}
+
 case "${1:-}" in
   click) shift; command_click "$@" ;;
   posts) shift; command_posts "$@" ;;
   finalized) shift; command_finalized "$@" ;;
+  still-open) shift; command_still_open "$@" ;;
   --help|-h) help ;;
   *) usage; exit 2 ;;
 esac

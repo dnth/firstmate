@@ -52,8 +52,8 @@ The emit header owns the file format, and the [decision buttons reference](../..
 A click arrives as a request with `origin` `button` and `authority` `standing`; the plugin recorded nothing, so you record it, exactly like a typed reply naming that option.
 Its `decision` field carries the key, the post's `occurrence`, the option, any confirmation, and the audit (`by`, `author`, `at`).
 
-1. `choice` `option`: first confirm the decision is still open and is the same lifecycle (`bin/fm-captain-hold.sh open <task-id> --identity` equals `occurrence` for `hold:`; the key is still open in the worker's status log for `key:`).
-   If it is not, record nothing and answer that it was already decided.
+1. `choice` `option`: first run `bin/fm-ext-decision.sh still-open --key <key> --occurrence <occurrence>` with the request's own values; it checks that the decision is still open and still the same lifecycle the clicked post asked about, for captain calls and worker keys alike.
+   Unless it prints `open`, record nothing and answer that the decision was already settled or replaced; a request that waited while its question was answered and reopened must never answer the new question.
    Otherwise record it through the decision's own path, naming the option by its label and quoting the audit:
    - `hold:` - one keyed line `<task-id>\t<option>\t<option_id>. <option>\t<mode>` on stdin to `bin/fm-captain-hold.sh answers --source "Discord button: option <option_id> \"<option>\" chosen by <by> (<author>) at <at> for <key>"`.
    - `key:` - `bin/fm-send.sh <task-id> --resolve-key <slug> "Decision answer: <option> (<the same audit>)"`.
