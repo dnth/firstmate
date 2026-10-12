@@ -345,8 +345,10 @@ EOF
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
 # scan_open_decisions_incremental wrapper) rather than from the annotations
 # above, so a decision buried under later unrelated appends cannot be silently
-# missed. Informational `note:` lines and pending-reply resolutions are not
-# decisions; print_unread_status_section owns their one-shot surface. Runs on
+# missed, plus every still-open captain-held task past its review-by date from
+# bin/fm-captain-hold.sh's read-only `due` report, so board-only holds surface
+# even with no status log. Informational `note:` lines and pending-reply
+# resolutions are not decisions; print_unread_status_section owns their one-shot surface. Runs on
 # every drain - including the empty-queue fast path - because the decision can
 # still be open even when nothing new is queued for
 # its task this turn. The incremental wrapper bounds this scan's cost to bytes
@@ -356,7 +358,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open due bound task key verb note review title line item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
   local revisions='' s_task s_endpoint s_ident d_endpoint d_ident emit_revisions=false
 
@@ -379,6 +381,22 @@ print_open_decisions_section() {
     # revision anchor is a live capture taken beside the fold - the same
     # semantics this path always had.
     revisions=$(status_presentation_snapshot "$STATE" 2>/dev/null) || revisions=
+  fi
+  # Backlog-backed due calls join this same surface: a live captain-held task
+  # past its review-by date renders as its own open line even when no status
+  # log holds the key open, so board-only holds never stay silent. The fold
+  # above owns status-log truth; this append only adds backlog-due rows.
+  bound=${FM_DUE_REVIEW_TIMEOUT:-20}
+  case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
+  due=$(fm_run_timed "$bound" "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null) || due=
+  if [ -n "$due" ]; then
+    while IFS=$(printf '\t') read -r task review title; do
+      [ -n "$task" ] || continue
+      open="$open
+$task	$task	needs-decision	${title:-captain call} (due for review since $review)"
+    done <<EOF
+$due
+EOF
   fi
   [ -n "$open" ] || return 0
 
@@ -492,9 +510,15 @@ EOF
 
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
+  local have_snapshot=1
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
-  [ -n "$snapshot" ] || return 0
-  acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
+  # An empty snapshot means no status logs exist, not nothing open: the
+  # backlog-backed due rows inside print_open_decisions_section still render,
+  # so board-only holds surface on a status-less home too.
+  [ -n "$snapshot" ] || have_snapshot=0
+  if [ "$have_snapshot" = 1 ]; then
+    acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
+  fi
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
   if ! {
     print_unread_status_section "$snapshot" \
@@ -506,7 +530,9 @@ print_status_sections() {
     return 1
   fi
   command cat "$prepared" || { rm -f -- "$prepared"; return 1; }
-  status_commit_presentation_snapshot "$STATE" "$acknowledged"
+  if [ "$have_snapshot" = 1 ]; then
+    status_commit_presentation_snapshot "$STATE" "$acknowledged"
+  fi
   rm -f -- "$prepared"
 }
 
@@ -542,7 +568,9 @@ print_status_presentation() {  # [<deduped-raw-rows>]
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  # Sections run even with no status snapshot: the open-decisions fold carries
+  # backlog-backed due rows, so board-only holds surface on a status-less home.
+  if [ "$rc" -eq 0 ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
   fm_lock_release "$lock"
   if [ "$rc" -eq 0 ]; then print_ext_requests_section || true; fi
   return "$rc"

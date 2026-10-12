@@ -235,6 +235,33 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+test_board_only_due_call_surfaces_without_status_logs() {
+  local dir state out
+  command -v tasks-axi >/dev/null 2>&1 || { pass "tasks-axi absent; board-only due test skipped"; return 0; }
+  dir=$(make_case board-only-due)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # No status log exists at all: the only record of this call is the board.
+  mkdir -p "$dir/data" "$dir/config"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  (cd "$dir" && tasks-axi add board-only "Board only choice" --kind captain --repo sample >/dev/null) \
+    || fail "could not create the board-only fixture"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z \
+    "$ROOT/bin/fm-captain-hold.sh" hold board-only --reason "board only pending" >/dev/null \
+    || fail "could not hold the board-only fixture"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$DRAIN" > "$out" || fail "drain failed with no status logs"
+
+  grep -F 'OPEN DECISIONS' "$out" >/dev/null \
+    || fail "a board-only due call printed no OPEN DECISIONS section: $(cat "$out")"
+  grep -F 'board-only' "$out" | grep -F 'due for review' >/dev/null \
+    || fail "a board-only due call was not marked due in OPEN DECISIONS: $(cat "$out")"
+  pass "a board-only past-due call surfaces in OPEN DECISIONS with no status logs"
+}
+
+test_board_only_due_call_surfaces_without_status_logs
 test_over_long_decision_note_is_capped_with_a_marker
 test_buried_decision_still_surfaces
 test_explicit_resolution_closes_it

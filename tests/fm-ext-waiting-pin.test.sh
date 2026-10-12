@@ -868,6 +868,24 @@ PYTEST
   pass "17 overlapping refreshes capture and publish in the same order"
 }
 
+test_18_due_review_marks_batch_without_hiding_fresh() {
+  local home out
+  home="$TMP_ROOT/c18"
+  setup_home "$home"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add overdue-a "Overdue alpha choice" --kind captain >/dev/null) || fail "overdue fixture a must be created"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add overdue-b "Overdue beta choice" --kind captain >/dev/null) || fail "overdue fixture b must be created"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add fresh-c "Fresh gamma choice" --kind captain >/dev/null) || fail "fresh fixture must be created"
+  home_env "$home" env FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z "$ROOT/bin/fm-captain-hold.sh" hold overdue-a --reason "alpha pending" >/dev/null || fail "overdue hold a must succeed"
+  home_env "$home" env FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z "$ROOT/bin/fm-captain-hold.sh" hold overdue-b --reason "beta pending" >/dev/null || fail "overdue hold b must succeed"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" hold fresh-c --reason "gamma pending" >/dev/null || fail "fresh hold must succeed"
+  out=$(home_env "$home" env FM_CAPTAIN_HOLD_TODAY=2026-08-16 "$REFRESH" content) || fail "batch content must render"
+  assert_contains "$out" "Overdue alpha choice (due for review)" "the first overdue call must be marked"
+  assert_contains "$out" "Overdue beta choice (due for review)" "the second overdue call must be marked"
+  assert_contains "$out" "Fresh gamma choice" "the fresh call must stay listed"
+  assert_not_contains "$out" "Fresh gamma choice (due for review)" "the fresh call must stay unmarked"
+  pass "18 past-due calls are marked as a batch while fresh calls stay unmarked"
+}
+
 test_1b_long_titles_render_cleanly_without_ids_or_commands
 test_1c_multiline_titles_remain_single_decisions
  test_1_content_lists_calls_and_prs_without_leaks
@@ -893,5 +911,6 @@ test_15_pin_targets_and_reply_separation
 test_16_competing_pin_posters_share_one_claim
 
 test_17_refresh_capture_and_publication_are_serialized
+test_18_due_review_marks_batch_without_hiding_fresh
 
 echo "all fm-ext-waiting-pin tests passed"

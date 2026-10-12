@@ -1132,6 +1132,38 @@ test_diverged_reports_status_close_over_open_hold() {
   pass "a status close over an open hold surfaces through diverged"
 }
 
+# A hold records its review-by date 14 days out while staying live and visible.
+test_hold_records_review_by_date_and_stays_live() {
+  local home id show json
+  home=$(make_home review-by-live)
+  id=review-live
+  tasks_in "$home" add "$id" "Pick the live option" --kind captain --repo sample >/dev/null \
+    || fail "could not create the review-by fixture"
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_CAPTAIN_HOLD_NOW=2026-09-01T00:00:00Z \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason "live pending" >/dev/null \
+    || fail "could not hold the fixture"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "Captain hold set: 2026-09-01T00:00:00Z" "the hold lost its hold-set stamp"
+  assert_contains "$show" "Captain hold review by: 2026-09-15" "the hold recorded no 14-day review-by date"
+  assert_contains "$show" "held: yes" "the review-by date cleared the hold"
+  assert_contains "$show" "hold_until: \"-\"" "the review-by date leaked into the deferral gate"
+  json=$(run_bearings "$home") || fail "Bearings failed with a review-by hold"
+  printf '%s' "$json" | jq -e --arg id "$id" '
+    (.decisions_open | any(.id == $id))
+  ' >/dev/null || fail "a fresh review-by hold left Captain's Call: $json"
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_CAPTAIN_HOLD_NOW=2026-09-02T00:00:00Z \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason "live pending" >/dev/null \
+    || fail "could not repeat the active hold"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "Captain hold set: 2026-09-01T00:00:00Z" "repeating an active hold rewrote its stamp"
+  assert_contains "$show" "Captain hold review by: 2026-09-15" "repeating an active hold rewrote its review-by date"
+  pass "a hold records its 14-day review-by date while staying live and visible"
+}
+
 # A --until deferral leaves Captain's Call until its date, then returns.
 test_deferred_hold_leaves_captains_call_until_due() {
   local home id json
@@ -1270,6 +1302,106 @@ test_out_of_band_close_is_recordable() {
   pass "an out-of-band close stays recordable through answer"
 }
 
+# A live call past its review-by date is marked due in OPEN DECISIONS while
+# staying captain-held: the hold bit, the spawn refusal, and the answer path
+# all survive, and answered, deferred, or not-yet-due calls are not marked.
+test_past_due_call_marked_due_while_held() {
+  local home id show out ready decision
+  home=$(make_home review-due)
+  id=due-call
+  tasks_in "$home" add "$id" "Pick the due option" --kind captain --repo sample >/dev/null \
+    || fail "could not create the due fixture"
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason "due pending" >/dev/null \
+    || fail "could not hold the fixture"
+  # An older hold with no review-by line counts from its hold-set time and its
+  # body is never rewritten to list it.
+  tasks_in "$home" add legacy-due "Pick the legacy option" --kind captain --repo sample >/dev/null \
+    || fail "could not create the legacy fixture"
+  run_captain "$home" hold legacy-due --reason "legacy pending" >/dev/null \
+    || fail "could not hold the legacy fixture"
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\n\nolder body without a review line' > "$home/legacy-body.txt"
+  (cd "$home" && tasks-axi update legacy-due --body-file "$home/legacy-body.txt" >/dev/null) \
+    || fail "could not backdate the legacy body"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_CAPTAIN_HOLD_TODAY=2026-08-16 \
+    "$ROOT/bin/fm-captain-hold.sh" due) || fail "due failed on past-due holds"
+  printf '%s' "$out" | grep -F "$id" >/dev/null \
+    || fail "a past-due live call was not listed: $out"
+  printf '%s' "$out" | grep -F "legacy-due" >/dev/null \
+    || fail "a legacy hold without a review-by line was not counted from its hold-set time: $out"
+  show=$(tasks_in "$home" show legacy-due --full)
+  case "$show" in
+    *"Captain hold review by:"*) fail "listing a legacy hold rewrote its body" ;;
+  esac
+  out=$(env -u FM_TASK_ID FM_STATE_OVERRIDE="$home/state" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-wake-drain.sh" 2>/dev/null) || fail "drain failed on past-due holds"
+  printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null \
+    || fail "no OPEN DECISIONS section for past-due holds: $out"
+  printf '%s' "$out" | grep -F "$id" | grep -F 'due for review' >/dev/null \
+    || fail "a past-due call was not marked due in OPEN DECISIONS: $out"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "held: yes" "the due marking cleared the held bit"
+  ready=$(cd "$home/data" && tasks-axi ready) || fail "ready failed on a due hold"
+  case "$ready" in
+    *"$id"*) fail "a due call became dispatchable" ;;
+  esac
+  printf 'Captain says left.\n' > "$home/decision.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/decision.txt" >/dev/null \
+    || fail "a due call refused its answer"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_CAPTAIN_HOLD_TODAY=2026-08-16 \
+    "$ROOT/bin/fm-captain-hold.sh" due) || fail "due failed after the answer"
+  case "$out" in
+    *"$id"*) fail "an answered call stayed marked due" ;;
+  esac
+  # A re-held task after an answer carries its retained record below a new
+  # stamp: the new live call still surfaces once overdue.
+  tasks_in "$home" add reheld-due "Pick again" --kind captain --repo sample >/dev/null \
+    || fail "could not create the re-held fixture"
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_CAPTAIN_HOLD_NOW=2026-07-01T00:00:00Z \
+    "$ROOT/bin/fm-captain-hold.sh" hold reheld-due --reason "first ask" >/dev/null \
+    || fail "could not hold the re-held fixture"
+  printf 'Captain says go.\n' > "$home/reheld-decision.txt"
+  run_captain "$home" answer reheld-due --decision-file "$home/reheld-decision.txt" --release >/dev/null \
+    || fail "the re-held fixture refused its release answer"
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z \
+    "$ROOT/bin/fm-captain-hold.sh" hold reheld-due --reason "second ask" >/dev/null \
+    || fail "could not re-hold the released fixture"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_CAPTAIN_HOLD_TODAY=2026-08-16 \
+    "$ROOT/bin/fm-captain-hold.sh" due) || fail "due failed on the re-held call"
+  printf '%s' "$out" | grep -F "reheld-due" >/dev/null \
+    || fail "a re-held live call stayed suppressed by its retained record: $out"
+  # Deferred and not-yet-due calls are never marked.
+  tasks_in "$home" add not-yet "Pick later" --kind captain --repo sample >/dev/null \
+    || fail "could not create the fresh fixture"
+  run_captain "$home" hold not-yet --reason "fresh pending" >/dev/null \
+    || fail "could not hold the fresh fixture"
+  tasks_in "$home" add deferred-due "Pick after" --kind captain --repo sample >/dev/null \
+    || fail "could not create the deferred fixture"
+  run_captain "$home" hold deferred-due --reason "deferred pending" --until 2027-01-15 >/dev/null \
+    || fail "could not defer the fixture"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_CAPTAIN_HOLD_TODAY=2026-08-16 \
+    "$ROOT/bin/fm-captain-hold.sh" due) || fail "due failed on mixed holds"
+  case "$out" in
+    *"not-yet"*|*"deferred-due"*) fail "a not-yet-due or deferred call was marked due: $out" ;;
+  esac
+  pass "a past-due call is marked due in OPEN DECISIONS while the hold and the spawn refusal survive"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -1288,6 +1420,8 @@ test_deck_style_answers_close_plain_task_id_holds
 test_reconcile_requests_and_outcomes
 test_lavish_reconcile_selections_split_from_answers
 test_diverged_reports_status_close_over_open_hold
+test_hold_records_review_by_date_and_stays_live
+test_past_due_call_marked_due_while_held
 test_deferred_hold_leaves_captains_call_until_due
 test_board_build_writes_decision_cards
 test_out_of_band_close_is_recordable

@@ -109,7 +109,7 @@ print(value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " "), en
 # records only. Captain calls come from actionable open captain-hold annotations.
 # Prints nothing when there is nothing waiting.
 waiting_pin_board() {
-  local data=$1 listing ids today id title
+  local data=$1 listing ids today id title due_ids
   today=$(date -u '+%Y-%m-%d') || return 1
   listing=$(FM_TASKS_AXI_TIMEOUT=10 fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked) || return 1
   ids=$(axi_rows tasks "$listing" rows id hold_kind hold_reason hold_until blocked state | awk -F '\t' -v today="$today" '
@@ -117,10 +117,15 @@ waiting_pin_board() {
       ($4 == "" || $4 == "null" || $4 == "-" || $4 <= today) {
         print $1
       }') || return 1
+  due_ids=$("$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null | cut -f1) || due_ids=
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     title=$(waiting_pin_title "$data" "$id") || return 1
-    printf 'CALL %s\t%s\n' "$id" "$title"
+    if printf '%s\n' "$due_ids" | grep -qxF -- "$id"; then
+      printf 'CALL %s\t%s (due for review)\n' "$id" "$title"
+    else
+      printf 'CALL %s\t%s\n' "$id" "$title"
+    fi
   done <<< "$ids"
 }
 
