@@ -446,6 +446,9 @@ EOF
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
+  if [ -n "$due" ]; then
+    printf 'OPEN DECISIONS: answer a backlog-backed call: bin/fm-captain-hold.sh answer <task> --decision-file <path> [--release]\n' || return 1
+  fi
 }
 
 # Print the RECORD DIVERGENCE section: every captain call whose two records

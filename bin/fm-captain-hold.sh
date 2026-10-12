@@ -14,6 +14,7 @@
 # their hold-set stamp plus this interval. --until is unrelated: it defers a
 # call and hides it from the live surface until its date, while a review-by
 # date keeps the call live and visible at once.
+# FM_CAPTAIN_HOLD_TODAY is a test-only YYYY-MM-DD override for today's UTC date.
 #
 # There is no separate decision type. A captain call is an ordinary backlog
 # task held for the captain through this script's mandatory `hold` subcommand,
@@ -36,7 +37,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh due [--as-of YYYY-MM-DD]
+#   fm-captain-hold.sh due
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh answered <task-id>
 #   fm-captain-hold.sh diverged
@@ -228,7 +229,7 @@
 # chose, and the stamp plus count to distinguish its lifecycle from a re-hold.
 #
 # `due` is the read-only review-by report: every still-open captain-held task
-# whose review-by date has passed as of today (or --as-of), with older holds
+# whose review-by date has passed as of today, with older holds
 # that carry no review-by line counted from their hold-set stamp plus the
 # interval. Answered, released, reconciled, deferred (--until future), and
 # not-yet-due calls never list. It mutates nothing and never clears a hold.
@@ -535,6 +536,24 @@ body_has_resolution_record() {  # <task-body>
     *"Resolution recorded by fm-captain-hold."*"Reconciliation evidence:"*) return 0 ;;
   esac
   return 1
+}
+
+body_has_current_resolution_record() {
+  local body stamp
+  body=$(decode_shown_value "$1") || return 1
+  stamp=$(body_hold_set_timestamp "$body")
+  [ -n "$stamp" ] || return 1
+  body_has_resolution_record "$body" || return 1
+  printf '%s\n' "$body" | awk -v stamp="$stamp" '
+    /^Resolution recorded by fm-(captain|decision)-hold\.$/ {
+      if (record || $0 != "Resolution recorded by fm-captain-hold.") exit
+      record = 1
+      next
+    }
+    record && /^$/ { exit }
+    record && $0 == "Hold stamp: " stamp { matched = 1 }
+    END { exit !matched }
+  '
 }
 
 # The recorded decision digest of either record format, from the show-escaped
@@ -1204,7 +1223,7 @@ command_answer() {
     # its own record on top. Either way the close mode is the caller's flag,
     # checked against an interrupted close's recorded mode so a retry cannot
     # silently flip a release into a close.
-    if body_has_resolution_record "$body" \
+    if body_has_current_resolution_record "$body" \
       && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
@@ -1807,7 +1826,7 @@ reconcile_close() {
   fi
   [ "$hold_kind" = captain ] \
     || fail "task $id is not held for the captain; there is no captain call to reconcile"
-  if body_has_resolution_record "$body" \
+  if body_has_current_resolution_record "$body" \
     && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     [ "$recorded_mode" = reconciled ] \
@@ -2254,37 +2273,28 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
 
 # Read-only review-by report. Prints one `<task>\t<review-by>\t<title>` line
 # per still-open captain-held task whose review-by date has passed as of today
-# (or --as-of YYYY-MM-DD), in listing order; prints nothing when none is due.
+# in listing order; prints nothing when none is due.
 # A hold that carries no review-by line counts from its hold-set stamp plus
 # the interval, so pre-change bodies are never rewritten to be listed. Closed,
 # answered, deferred (--until future), and not-yet-due calls never list. The
 # review-by date clears no hold and reaches no expiry path: every listed task
 # still refuses `tasks-axi ready` and still answers through the same paths.
 command_due() {
-  local as_of='' data listing rows
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --as-of) shift; as_of=${1:-} ;;
-      -*) usage >&2; exit 2 ;;
-      *) usage >&2; exit 2 ;;
-    esac
-    shift
-  done
-  if [ -z "$as_of" ]; then
-    as_of=${FM_CAPTAIN_HOLD_TODAY:-$(date -u +%F)}
-  fi
+  local as_of data listing rows body
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  as_of=${FM_CAPTAIN_HOLD_TODAY:-$(date -u +%F)}
   case "$as_of" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
-    *) fail "--as-of must be a YYYY-MM-DD date: $as_of" ;;
+    *) fail "FM_CAPTAIN_HOLD_TODAY must be a YYYY-MM-DD date: $as_of" ;;
   esac
   require_tasks_axi
   data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
-  listing=$(fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked,body) \
+  listing=$(fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked) \
     || fail "could not list the backlog"
-  rows=$(axi_rows tasks "$listing" rows id title hold_kind hold_reason hold_until blocked body state) \
+  rows=$(axi_rows tasks "$listing" rows id title hold_kind hold_reason hold_until blocked state) \
     || fail "could not parse the backlog listing"
   [ -n "$rows" ] || return 0
-  printf '%s\n' "$rows" | while IFS=$(printf '\t') read -r id title hold_kind hold_reason hold_until blocked body state; do
+  printf '%s\n' "$rows" | while IFS=$(printf '\t') read -r id title hold_kind hold_reason hold_until blocked state; do
     [ -n "$id" ] || continue
     [ "$state" != "done" ] || continue
     [ "$hold_kind" = captain ] || continue
@@ -2296,8 +2306,11 @@ command_due() {
         [ "$hold_until" = "$as_of" ] || [ "$hold_until" \< "$as_of" ] || continue ;;
       *) continue ;;
     esac
+    task_show "$id" || fail "could not read captain-held task $id"
+    body=$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)") \
+      || fail "could not decode the body for $id"
     due_line_for_body "$id" "$title" "$body" "$as_of" || continue
-  done
+  done || return 1
   return 0
 }
 
@@ -2310,10 +2323,7 @@ due_line_for_body() {  # <id> <title> <decoded-body> <as-of>
   local id=$1 title=$2 body=$3 as_of=$4 stamp review
   stamp=$(body_hold_set_timestamp "$body")
   [ -n "$stamp" ] || return 1
-  case "$body" in
-    *'Resolution recorded by fm-decision-hold.'*) return 1 ;;
-    *"Hold stamp: $stamp"*) return 1 ;;
-  esac
+  body_has_current_resolution_record "$body" && return 1
   review=$(body_hold_review_by "$body")
   [ -n "$review" ] || review=$(hold_review_by_for_stamp "$stamp")
   [ -n "$review" ] || return 1

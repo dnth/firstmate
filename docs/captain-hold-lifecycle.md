@@ -31,7 +31,7 @@ A status-side keyed decision that is still open but covered by no inventoried ta
 With a non-empty inventory it appends a `captain-held [key=<key>]` transfer event naming the reviewed inventory for every still-open keyed status decision, which `bin/fm-classify-lib.sh` recognizes as closing the live status copy without claiming that the captain has answered it.
 
 Scout teardown calls the read-only `verify` subcommand after checking for the report and before removing any source state.
-The read-only `due` subcommand lists every still-open captain-held task past its review-by date (`--as-of` overrides today); older holds without a review-by line count from their hold-set stamp plus the interval and no body is rewritten.
+The read-only `due` subcommand lists every still-open captain-held task past its review-by date; older holds without a review-by line count from their hold-set stamp plus the interval and no body is rewritten.
 `verify` requires the recorded attestation, requires every recorded inventory entry to still be durable (actively captain-held, or carrying a recorded answer), and fails on any keyed status decision that opened after the last `complete`, which makes re-running `complete` the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 

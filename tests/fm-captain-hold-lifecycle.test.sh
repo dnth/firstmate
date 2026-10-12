@@ -1354,11 +1354,13 @@ test_past_due_call_marked_due_while_held() {
   # the held row before creating any endpoint or local copy.
   mkdir -p "$home/data/$id" "$home/spawn-proj"
   printf 'spawn refusal probe brief\n' > "$home/data/$id/brief.md"
-  out=$(env -u FM_TASK_ID PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  if out=$(env -u FM_TASK_ID PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/unused-projects" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$home/spawn-proj" --scout 2>&1)
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home/spawn-proj" --scout 2>&1); then
+    fail "fm-spawn.sh accepted a captain-held row"
+  fi
   case "$out" in
     *"not dispatchable in state queued yes no"*) : ;;
     *) fail "fm-spawn.sh did not refuse the held row for its captain hold: $out" ;;
@@ -1415,6 +1417,74 @@ test_past_due_call_marked_due_while_held() {
   esac
   pass "a past-due call is marked due in OPEN DECISIONS while the hold and the spawn refusal survive"
 }
+
+test_review_lifecycle_regressions() (
+  home=$(make_home review-regressions)
+  fakebin="$home/fakebin"
+  export PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home"
+  export FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config"
+  export FM_CAPTAIN_HOLD_TODAY=2026-08-16 FM_CAPTAIN_HOLD_REVIEW_DAYS=14
+  HOLD="$ROOT/bin/fm-captain-hold.sh"
+
+  tasks() { (cd "$home" && tasks-axi "$@"); }
+
+  printf 'Proceed.\n' > "$home/decision.txt"
+  digest=$(python3 -c 'import hashlib; print(hashlib.sha256(b"Proceed.").hexdigest())')
+  tasks add legacy-call 'Legacy choice' --kind captain --repo sample >/dev/null || fail "add legacy call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-01T00:00:00Z "$HOLD" hold legacy-call --reason first >/dev/null || fail "hold legacy call"
+  printf 'Captain hold set: 2026-07-01T00:00:00Z\nCaptain hold review by: 2026-07-15\n\nResolution recorded by fm-decision-hold.\nDecision digest: %s\nResolution mode: released\n\nCaptain decision:\nProceed.\n' "$digest" > "$home/legacy-body.txt"
+  tasks update legacy-call --body-file "$home/legacy-body.txt" >/dev/null || fail "seed legacy record"
+  "$HOLD" answer legacy-call --decision-file "$home/decision.txt" --release >/dev/null || fail "answer legacy call"
+  FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z "$HOLD" hold legacy-call --reason second >/dev/null || fail "rehold legacy call"
+  out=$("$HOLD" due) || fail "due on reheld legacy call"
+  assert_contains "$out" "$(printf 'legacy-call\t2026-08-15\tLegacy choice')" "legacy history suppressed the new call"
+  out=$("$ROOT/bin/fm-wake-drain.sh" 2>/dev/null) || fail "drain on reheld legacy call"
+  assert_contains "$out" 'legacy-call [key=legacy-call] needs-decision: Legacy choice (due for review since 2026-08-15)' "drain hid the reheld legacy call"
+  : > "$home/config/ext-bridge"
+  printf 'test-secret\n' > "$home/config/ext-secret"
+  chmod 600 "$home/config/ext-secret"
+  printf '111111111111111111:222222222222222222\n' > "$home/config/ext-waiting-pin"
+  out=$("$ROOT/bin/fm-ext-waiting-pin.sh" content) || fail "waiting pin on reheld legacy call"
+  assert_contains "$out" 'Legacy choice (due for review)' "waiting pin hid the reheld legacy call"
+  "$HOLD" answer legacy-call --decision-file "$home/decision.txt" >/dev/null || fail "historical release mode rejected a new close with identical words"
+  show=$(tasks show legacy-call --full) || fail "show answered legacy call"
+  assert_contains "$show" 'state: done' "new answer did not close the reheld call"
+  assert_contains "$show" 'Resolution mode: answered' "new lifecycle answer was not recorded"
+  pass "legacy history remains visible when reheld and identical answers use the new lifecycle mode"
+
+  tasks add reconciled-call 'Recheck choice' --kind captain --repo sample >/dev/null || fail "add reconcile call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-01T00:00:00Z "$HOLD" hold reconciled-call --reason first >/dev/null || fail "hold reconcile call"
+  "$HOLD" answer reconciled-call --decision-file "$home/decision.txt" --release >/dev/null || fail "release reconcile call"
+  FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z "$HOLD" hold reconciled-call --reason second >/dev/null || fail "rehold reconcile call"
+  "$HOLD" bind review-source >/dev/null || fail "bind reconcile source"
+  printf 'reconciled-call\n' | "$HOLD" reconcile-requests --source-id review-source --source regression >/dev/null || fail "request reconcile"
+  "$HOLD" reconcile close reconciled-call --evidence-file "$home/decision.txt" >/dev/null || fail "historical answer mode rejected new reconciliation with identical text"
+  show=$(tasks show reconciled-call --full) || fail "show reconciled call"
+  assert_contains "$show" 'state: done' "reconcile did not close the reheld call"
+  assert_contains "$show" 'Resolution mode: reconciled' "new reconciliation was not recorded"
+  pass "reconciliation retries only match records from the current lifecycle"
+
+  tasks add interrupted-call 'Interrupted choice' --kind captain --repo sample >/dev/null || fail "add interrupted call"
+  FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z "$HOLD" hold interrupted-call --reason pending >/dev/null || fail "hold interrupted call"
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n\nResolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: released\nHold stamp: 2026-08-01T00:00:00Z\n\nCaptain decision:\nProceed.\n' "$digest" > "$home/interrupted-body.txt"
+  tasks update interrupted-call --body-file "$home/interrupted-body.txt" >/dev/null || fail "seed interrupted resolution"
+  out=$("$HOLD" due) || fail "due on interrupted call"
+  assert_not_contains "$out" interrupted-call "current resolution did not suppress the interrupted call"
+  "$HOLD" answer interrupted-call --decision-file "$home/decision.txt" --release >/dev/null || fail "retry current resolution"
+  out=$("$HOLD" answered interrupted-call) || fail "read retried resolution"
+  count=$(printf '%s\n' "$out" | sed -n '3p')
+  [ "$count" = 1 ] || fail "retry wrote a duplicate current resolution"
+  pass "current linked resolution stays suppressed and retries without duplicate records"
+
+  if "$HOLD" due unexpected-argument > "$home/extra-argument.out" 2>&1; then
+    fail "due still accepts arguments"
+  fi
+  out=$(FM_CAPTAIN_HOLD_TODAY=invalid "$HOLD" due 2>&1) && fail "due accepts an invalid test date"
+  assert_contains "$out" 'FM_CAPTAIN_HOLD_TODAY must be a YYYY-MM-DD date' "test override validation names the removed flag"
+  pass "due rejects arguments and validates the test-only clock"
+)
+
+test_review_lifecycle_regressions || fail "review lifecycle regressions failed"
 
 test_uninventoried_report_decision_refuses_completion
 
