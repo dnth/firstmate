@@ -181,8 +181,8 @@ def request_name(raw):
         return ""
     if len(cleaned) <= NAME_MAX:
         return cleaned
-    head = cleaned[:NAME_MAX].rsplit(" ", 1)
-    base = head[0] if len(head) == 2 and head[0] else cleaned[:NAME_MAX].rstrip()
+    head = cleaned[:NAME_MAX - 1].rsplit(" ", 1)
+    base = head[0] if len(head) == 2 and head[0] else cleaned[:NAME_MAX - 1].rstrip()
     return base + "…"
 
 
@@ -206,7 +206,7 @@ fresh = derive()
 if sys.argv[5] == "1":
     stored = os.fdopen(5).read().strip()
     allowed = legacy_names()
-    if stored == fresh or (stored in allowed and stored.split()[-1] == clock):
+    if stored == fresh or (not clean_title(title_raw) and stored in allowed):
         # A title or request-text name must equal the fresh one; a legacy
         # label-plus-time name stays valid only for its own message time.
         print(stored)

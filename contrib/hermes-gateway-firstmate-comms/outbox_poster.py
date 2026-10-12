@@ -565,7 +565,7 @@ def thread_name_for(payload: dict, home: Path) -> str:
     Firstmate's title on the creating payload wins; otherwise the name is
     re-derived from the request text the intake recorded, never trusted from
     the stored string alone, so later follow-ups reuse the exact name the
-    first reply used. Anything unusable - no context, no recorded text, an
+    first reply used. Anything unusable - no context, no recorded name, an
     already-threaded request - means no thread is created.
     """
     if payload.get("origin") != "message":
@@ -581,16 +581,7 @@ def thread_name_for(payload: dict, home: Path) -> str:
         return ""
     name = context.get("topic") or ""
     request_text = context.get("request_text") or ""
-    if not isinstance(request_text, str) or not request_text:
-        # Contexts recorded before the request text was stored: the inbox
-        # record carries the same text while the request is still queued.
-        try:
-            inbox_path = state_dir(home) / "ext-inbox" / f"{payload['slug']}.json"
-            inbox = json.loads(inbox_path.read_text(encoding="utf-8"))
-            request_text = inbox.get("text") or "" if isinstance(inbox, dict) else ""
-        except (OSError, ValueError, KeyError):
-            request_text = ""
-    if not isinstance(name, str) or not name or not isinstance(request_text, str) or not request_text:
+    if not isinstance(name, str) or not name or not isinstance(request_text, str):
         return ""
     recorded = load_request_topic(payload, home)
     recorded_name = recorded.get("topic_name") or ""
@@ -599,7 +590,7 @@ def thread_name_for(payload: dict, home: Path) -> str:
         # later title, so state renames build on the name Discord shows.
         # The base re-validates against the creating title the record keeps,
         # so a tampered record still falls back to a fresh derivation.
-        return public_topic_name(payload, recorded_name, home, request_text,
+        return public_topic_name(payload, state_thread_name(recorded_name, "none"), home, request_text,
                                  recorded.get("creating_title") or "")
     return public_topic_name(payload, name, home, request_text, _title_for(payload))
 

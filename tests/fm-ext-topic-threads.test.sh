@@ -717,6 +717,79 @@ fi
 }
 
 
+test_14_legacy_titles_markers_and_long_tokens() {
+  local home slug legacy
+  home="$TMP_ROOT/c14"
+  setup_home "$home"
+  slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
+  legacy=$(expected_topic "$MESSAGE")
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$legacy" <<'PY'
+import io, json, os, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+home, slug, legacy = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+context_path = home / "state/ext-context" / (slug + ".json")
+context = json.loads(context_path.read_text())
+context["topic"] = legacy
+payload = dict(context, thread_title="Aceh · ingestion status")
+context["request_text"] = "!!! ???"
+context_path.write_text(json.dumps(context))
+assert poster.thread_name_for(payload, home) == payload["thread_title"]
+assert poster.public_topic_name(payload, legacy, home, "!!! ???", payload["thread_title"]) == payload["thread_title"]
+os.environ["DISCORD_BOT_TOKEN"] = "fixture"
+expected = payload["thread_title"]
+def respond(request, **kwargs):
+    assert json.loads(request.data)["name"] == expected
+    return io.BytesIO(b'{"id":"777777777777777777"}')
+with patch.object(poster.urllib.request, "urlopen", respond):
+    assert poster.discord_create_thread(payload, legacy)["thread_id"] == "777777777777777777"
+payload.pop("thread_title")
+(home / "state/ext-inbox" / (slug + ".json")).unlink()
+for text in (None, "ship the login fix"):
+    if text is None:
+        context.pop("request_text")
+    else:
+        context["request_text"] = text
+    context_path.write_text(json.dumps(context))
+    expected = legacy
+    assert poster.thread_name_for(payload, home) == legacy
+    with patch.object(poster.urllib.request, "urlopen", respond):
+        assert poster.discord_create_thread(payload, legacy)["thread_id"] == "777777777777777777"
+    attempts = []
+    def create(request, name):
+        attempts.append(name)
+        if len(attempts) == 1:
+            raise RuntimeError("retry later")
+        return {"thread_id": "777777777777777777"}
+    assert poster.ensure_topic_thread(payload, {}, home, create) == ""
+    assert poster.ensure_topic_thread(payload, {}, home, create) == "777777777777777777"
+    assert attempts == [legacy, legacy]
+    renames = []
+    for state, prefix in (("needs-you", "❓ "), ("done", "✅ "), ("none", "")):
+        marked = dict(payload, thread_state=state)
+        assert poster.maybe_rename_topic_thread(marked, "777777777777777777", home,
+            rename_thread=lambda tid, name: renames.append(name)) == "777777777777777777"
+        assert renames[-1] == prefix + legacy
+        assert poster.thread_name_for(marked, home) == legacy
+    poster.request_progress_path(payload, home).unlink()
+for text in ("x" * 91, "x" * 89 + " next", "first " + "x" * 90):
+    text_path = home / "long.txt"
+    text_path.write_text(text)
+    result = subprocess.run([str(poster.firstmate_root() / "bin/fm-ext-topic.sh"),
+        "--text-file", str(text_path), "--origin", "message", "--thread-id", payload["thread_id"],
+        "--channel-id", payload["channel_id"], "--message-id", payload["message_id"]],
+        capture_output=True, text=True, check=True)
+    name = result.stdout.strip()
+    assert len(name) <= 90 and name.endswith("…"), name
+    if text.startswith("first "):
+        assert name == "first…"
+PY
+  then fail "legacy names, title precedence, marker stability, and length must hold"
+  fi
+  pass "14 legacy titles and markers stay stable and long tokens fit"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -732,5 +805,6 @@ test_10_outside_channel_keeps_its_route
 test_11_titles_win_and_empty_falls_back_to_label_time
 test_12_title_creates_and_states_rename
 test_13_rename_never_blocks_and_never_leaves_home
+test_14_legacy_titles_markers_and_long_tokens
 
 echo "all fm-ext-topic-threads tests passed"
