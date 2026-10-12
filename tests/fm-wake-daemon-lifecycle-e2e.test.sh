@@ -736,7 +736,7 @@ SH
     afk_enter "$state"
     marker="$state/.watcher-down"
     bash -c '. "$1"; fm_recovery_marker_publish "$2" downtime' _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "publish capped recovery"
-    FM_DAEMON_DIR="$dir/daemon-bin" FM_REAL_WAKE_DRAIN="$DRAIN" FM_CAP_CAPTURE="$dir/capture.txt" FM_DUE_REVIEW_TIMEOUT=120 \
+    FM_DAEMON_DIR="$dir/daemon-bin" FM_REAL_WAKE_DRAIN="$DRAIN" FM_CAP_CAPTURE="$dir/capture.txt" \
       handle_durable_wakes "check: rearm-resurface" "$state" || fail "$mode capped capture dropped the batch"
     assert_grep 'more omitted (byte cap)' "$dir/capture.txt" "$mode batch did not reach the section cap: $(cat "$dir/capture.txt")"
     emitted=0

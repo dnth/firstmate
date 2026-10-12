@@ -358,7 +358,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open due bound task key verb note review title due_marker line row_origin item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open due task key verb note review title due_marker line row_origin item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
   local revisions='' s_task s_endpoint s_ident d_endpoint d_ident emit_revisions=false
 
@@ -386,11 +386,11 @@ print_open_decisions_section() {
   # past its review-by date renders as its own open line even when no status
   # log holds the key open, so board-only holds never stay silent. The fold
   # above owns status-log truth; this append only adds backlog-due rows. The
-  # read is bounded so a slow or wedged backlog read degrades to no due rows
-  # instead of stalling every wake-handling turn.
-  bound=${FM_DUE_REVIEW_TIMEOUT:-20}
-  case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
-  due=$(fm_run_timed "$bound" "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null) || due=
+  # read is bounded at 20 seconds so a slow or wedged backlog read degrades to
+  # no due rows instead of stalling every wake-handling turn; bin/fm-captain-hold.sh's
+  # `due` answers a fleet-sized board from one backlog listing, so that bound
+  # holds for the whole report rather than one held call at a time.
+  due=$(fm_run_timed 20 "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null) || due=
   # Every row below is "origin TAB task TAB key TAB verb TAB marker TAB note":
   # a status-log row carries the clear-marker sentinel "-", a backlog-due row
   # carries its due-for-review marker (with its own leading separator space)
