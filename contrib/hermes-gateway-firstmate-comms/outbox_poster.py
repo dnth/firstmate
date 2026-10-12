@@ -851,20 +851,11 @@ def maybe_rename_topic_thread(
 ) -> str:
     """Apply this generation's thread_state to its topic thread, best effort.
 
-    The creating request renames the thread it created; a request that
-    arrived inside a topic thread this home created in the dedicated channel
-    renames that thread, resolved by its id so the base name and the last
-    applied marker come from the thread's own record.
-
-    A thread is renamed only with positive evidence that this home created it.
-    A record that says ``firstmate`` carries that evidence; one that says
-    ``adopted`` was only reused for routing and is never renamed or marked; a
-    record written before provenance was kept is renamed only when Discord
-    reports the bot itself as the thread owner, and anything unproved - an
-    unknown owner, another user's owner, or a failed lookup - leaves the name
-    alone and is logged. Any other failure - unknown state, no base name, rate
-    limit, transport error - is logged too and leaves the reply delivered;
-    renaming never blocks or loses a reply.
+    docs/configuration.md's topic-thread contract owns eligibility and state
+    semantics. Resolve in-thread changes through the original record so name
+    validation and subsequent changes share the creating request's context.
+    Ownership lookup, rename, and record-update failures must not escape into
+    delivery: this runs after the reply and its receipt are already durable.
     """
     state = payload.get("thread_state")
     if state_prefix(state) is None:
