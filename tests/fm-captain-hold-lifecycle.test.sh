@@ -905,18 +905,20 @@ test_deck_style_answers_close_plain_task_id_holds() {
   local home id show out fb
   home=$(make_home deck-answers)
   id=deck-gate-task
-  tasks_in "$home" add "$id" "Pick the deploy order" --kind captain --repo sample >/dev/null \
-    || fail "could not create the plain task fixture"
-  run_captain "$home" hold "$id" --reason "deploy order pending" --repo sample >/dev/null \
+  tasks_in "$home" add "$id-origin" "Own the deck gate" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the deck steer owner"
+  write_origin_meta "$home" "$id-origin" ship
+  run_captain "$home" hold "$id" --title "Pick the deploy order" --reason "deploy order pending" --repo sample --origin "$id-origin" >/dev/null \
     || fail "could not hold the plain task for the captain"
   run_captain "$home" open "$id" >/dev/null || fail "a held task did not report open"
   [ "$(run_decisions "$home" id "$id" key)" = "$id-decision-key" ] \
     || fail "the shim's id verb did not compose the legacy identity"
 
   # The Deck's write path must also steer the owning task through fm-send:
-  # give the held task live metadata and a tmux double that records the
-  # doorbell, so the durable inbox record is observable.
-  write_origin_meta "$home" "$id" ship
+  # give the recorded Origin task live metadata and a tmux double that
+  # records the doorbell, so the durable inbox record is observable. The
+  # held task itself stays question-shaped (no worker metadata), so the
+  # default close mode still closes it.
   fb="$home/fakebin"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -963,9 +965,9 @@ SH
   assert_contains "$show" "Task: $id" "the Deck answer did not name its task id"
   # The owning task was steered: the answer text reached its durable inbox
   # record and the doorbell was rung through the recorded tmux endpoint.
-  assert_contains "$(cat "$home/answers.err")" "steered: $id -> $id" \
+  assert_contains "$(cat "$home/answers.err")" "steered: $id -> $id-origin" \
     "the Deck answer did not report steering the owning task"
-  grep -qF "ship-api-first" "$home/state/$id.inbox/001.msg" \
+  grep -qF "ship-api-first" "$home/state/$id-origin.inbox/001.msg" \
     || fail "the Deck answer never reached the owning task's durable inbox record"
   assert_contains "$(cat "$home/send.log")" "Firstmate instruction waiting" \
     "the Deck answer's doorbell was never rung"
@@ -979,7 +981,7 @@ SH
     || fail "an identical Deck answer replay was not idempotent"
   assert_contains "$(cat "$home/replay.err")" "already delivered" \
     "the replayed Deck answer did not report its deduped steer"
-  [ "$(count_glob "$home/state/$id.inbox/"*.msg)" = 1 ] \
+  [ "$(count_glob "$home/state/$id-origin.inbox/"*.msg)" = 1 ] \
     || fail "a replayed Deck answer duplicated the owning task's inbox record"
   # An absent key is skipped and the run reports nonzero.
   if printf 'no-such-task\tyes\tYes\n' | run_captain "$home" answers --source herdr-firstmate-flow \
@@ -1192,6 +1194,62 @@ EOF
   pass "the board build writes fm-bearings-board.v1 plus durable fm-decision-card.v1 records"
 }
 
+# A close-mode answer must never complete a task that still has a live
+# worker: regression for the 2026-10-12 incident where `answer` (no
+# `--release`) moved an in-flight task to Done while its validation run was
+# live. Refusal names both escapes, changes nothing, and the escapes behave:
+# `--release` lifts the hold without closing, `--close-live` closes
+# deliberately, and question-shaped held items with no worker metadata keep
+# closing exactly as before.
+test_answer_refuses_close_while_worker_is_live() {
+  local home id qid lid show out
+  home=$(make_home answer-live-guard)
+  id=sample-live-work
+  tasks_in "$home" add "$id" "Live gated work" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the live-worker fixture"
+  run_captain "$home" hold "$id" --reason "captain gate pending" --repo sample >/dev/null \
+    || fail "could not hold the live-worker fixture"
+  write_origin_meta "$home" "$id" ship
+  printf 'Captain chose the north route.\n' > "$home/live-decision.txt"
+  if out=$(run_captain "$home" answer "$id" --decision-file "$home/live-decision.txt" 2>&1); then
+    fail "a close-mode answer completed a task with a live worker"
+  fi
+  assert_contains "$out" "--release" "the live-worker refusal did not name --release"
+  assert_contains "$out" "--close-live" "the live-worker refusal did not name --close-live"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: in_flight" "a refused answer closed the live task"
+  assert_contains "$show" "held: yes" "a refused answer released the live hold"
+  assert_no_grep "Resolution recorded by fm-captain-hold." "$home/data/backlog.md" "a refused answer wrote a resolution record"
+  run_captain "$home" answer "$id" --decision-file "$home/live-decision.txt" --release >/dev/null \
+    || fail "--release could not lift the live hold"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: in_flight" "--release closed the live task"
+  assert_contains "$show" "Resolution mode: released" "--release did not record its mode"
+  qid=sample-live-question
+  tasks_in "$home" add "$qid" "Pick one option" --kind captain --repo sample >/dev/null \
+    || fail "could not create the question fixture"
+  run_captain "$home" hold "$qid" --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not hold the question fixture"
+  run_captain "$home" answer "$qid" --decision-file "$home/live-decision.txt" >/dev/null \
+    || fail "a question-shaped answer stopped closing"
+  show=$(tasks_in "$home" show "$qid" --full)
+  assert_contains "$show" "state: done" "a question-shaped answer did not close"
+  lid=sample-live-close
+  tasks_in "$home" add "$lid" "Deliberately closed work" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the close-live fixture"
+  run_captain "$home" hold "$lid" --reason "captain gate pending" --repo sample >/dev/null \
+    || fail "could not hold the close-live fixture"
+  write_origin_meta "$home" "$lid" ship
+  run_captain "$home" answer "$lid" --decision-file "$home/live-decision.txt" --close-live >/dev/null \
+    || fail "--close-live could not close the live task deliberately"
+  show=$(tasks_in "$home" show "$lid" --full)
+  assert_contains "$show" "state: done" "--close-live did not close the live task"
+  assert_contains "$show" "Resolution mode: answered" "--close-live did not record the answered mode"
+  run_captain "$home" answer "$lid" --decision-file "$home/live-decision.txt" --close-live >/dev/null \
+    || fail "an identical --close-live retry was not idempotent"
+  pass "a close-mode answer refuses while the worker is live and --release, --close-live, and question closes behave"
+}
+
 # Out-of-band closes stay recordable: when a held task was closed by hand, the
 # captain's words still land durably instead of being refused as absent.
 test_out_of_band_close_is_recordable() {
@@ -1233,3 +1291,4 @@ test_diverged_reports_status_close_over_open_hold
 test_deferred_hold_leaves_captains_call_until_due
 test_board_build_writes_decision_cards
 test_out_of_band_close_is_recordable
+test_answer_refuses_close_while_worker_is_live

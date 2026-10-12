@@ -22,7 +22,7 @@
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
-#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
+#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release | --close-live]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance> [--no-steer]   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
@@ -61,7 +61,13 @@
 # tasks-axi --archive-body). It closes a question with `tasks-axi done` - or,
 # with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
 # WORK item resumes without closing - and restores resolution-first body
-# ordering. An exact retry also completes unfinished ordering normalization and
+# ordering. A close-mode answer on an open task with live worker metadata
+# (state/<id>.meta is a regular, non-symlink file) is refused before the task
+# is changed: pass
+# `--release` to lift the hold so the work resumes, or `--close-live` to close
+# it deliberately, which records the same answered mode as a question close.
+# Question-shaped held items with no worker metadata close exactly as before.
+# An exact retry also completes unfinished ordering normalization and
 # is idempotent only when its requested close mode
 # matches the newest record; a changed decision or a mode mismatch is rejected.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
@@ -80,7 +86,9 @@
 # identically no matter which channel the answer arrived on. The key IS the
 # task id - no identity arithmetic. The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
-# resumes; anything else is skipped. A key that names no task, a task that is
+# resumes, and `close-live` completes a task that carries live worker metadata
+# (the explicit override for the `answer` live-worker guard); anything else is
+# skipped. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
 # and feeds nothing. A replayed delivery whose answer digest and requested
 # close mode both match the newest record is reported `closed:` and is a no-op;
@@ -1013,7 +1021,7 @@ apply_pending_retained_artifact() {  # <task-id>
   esac
 }
 
-close_answered() {  # <task-id> <release-0-or-1>
+close_answered() {  # <task-id> <release-0-or-1>; --close-live closes like 0
   if [ "$2" = 1 ]; then
     tasks_axi unhold "$1" >/dev/null
   else
@@ -1045,17 +1053,19 @@ remove_interrupted_answer_stamp() {  # <task-id>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence
+  local id=${1:-} decision_file='' release=0 close_live=0 show state hold_kind body outcome recorded_mode occurrence
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
       --release) release=1 ;;
+      --close-live) close_live=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
+  [ "$release" = 0 ] || [ "$close_live" = 0 ] || { usage >&2; exit 2; }
   validate_slug task-id "$id"
   load_decision "$decision_file"
   acquire_task_control_lock "$id"
@@ -1065,6 +1075,9 @@ command_answer() {
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
+  if [ "$release" = 0 ] && [ "$close_live" = 0 ] && [ "$state" != "done" ] && [ -f "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ]; then
+    fail "task $id has a live worker (state/$id.meta exists); a close-mode answer would complete it under its worker. Pass --release to lift the hold so the work resumes, or --close-live to close it deliberately"
+  fi
   if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
   # The occurrence the parent line names: the record about to be written is
   # one past those already in the body, and a retry names the newest one.
@@ -1119,7 +1132,7 @@ command_answer() {
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
         released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
-        answered|routed) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
+        answered|routed) { [ "$release" = 0 ] || [ "$close_live" = 1 ]; } || fail "task $id records this answer as a close; retry without --release" ;;
         *) fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay" ;;
       esac
       if ! close_answered "$id" "$release"; then
@@ -1419,6 +1432,7 @@ command_answers() {
     case "${mode:-}" in
       ''|done) : ;;
       release) release_flag=--release ;;
+      close-live) release_flag=--close-live ;;
       *)
         printf 'skipped: %s (unknown close mode %s)\n' "$key" "$(sanitize_field "$mode")"
         skipped=$((skipped + 1))
@@ -1471,7 +1485,7 @@ command_answers() {
       && { [ "$recorded_digest" = "$digest" ] \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
-      if { [ -z "$release_flag" ] && [ "$state" = "done" ] \
+      if { { [ -z "$release_flag" ] || [ "$release_flag" = --close-live ]; } && [ "$state" = "done" ] \
           && closed_answer_replay_mode_compatible "$recorded_mode" "$body"; } \
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
           && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
