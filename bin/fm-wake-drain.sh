@@ -340,6 +340,23 @@ EOF
   [ "$omitted" -gt 0 ] && printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted"
   return 0
 }
+# Print the lifecycle identity the due report captured for <task>, from the same
+# snapshot that rendered its row: a backlog advisory is anchored to the identity
+# that arrived with the row's prose, so no later read can pair them across
+# lifecycles. Reads the caller's DUE identities lookup and prints nothing for a
+# task it does not hold.
+due_identity_for() {  # <task>
+  local want=$1 task ident
+  while IFS=$(printf '\t') read -r task ident; do
+    [ "$task" = "$want" ] || continue
+    printf '%s' "$ident"
+    return 0
+  done <<EOF_DUE_IDENTITY
+$due_identities
+EOF_DUE_IDENTITY
+  return 1
+}
+
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
@@ -358,7 +375,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open due task key verb note review title due_marker line row_origin item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open due task key verb note review title due_marker due_identities line row_origin item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
   local revisions='' s_task s_endpoint s_ident d_endpoint d_ident emit_revisions=false
 
@@ -401,11 +418,16 @@ print_open_decisions_section() {
     note=$4; for (i=5; i<=NF; i++) note=note "\t" $i
     printf "status\t%s\t%s\t%s\t-\t%s\n", $1, $2, $3, note
   }') || return 1
+  # Each due row is "<task> TAB <review-by> TAB <title> TAB <identity>", and the
+  # identity is kept beside the rendered row so an advisory is never anchored to
+  # prose from this snapshot and an identity read from a later one.
+  due_identities=''
   if [ -n "$due" ]; then
-    while IFS=$(printf '\t') read -r task review title; do
+    while IFS=$(printf '\t') read -r task review title due_ident; do
       [ -n "$task" ] || continue
       open=$(printf '%s\nbacklog\t%s\t%s\t%s\t%s\t%s' "$open" "$task" "$task" \
         needs-decision " (due for review since $review)" "${title:-captain call}")
+      due_identities="$due_identities$task"$'\t'"$due_ident"$'\n'
     done <<EOF
 $due
 EOF
@@ -447,7 +469,7 @@ $revisions
 EOF_REV
       else
         d_endpoint=backlog
-        d_ident=$(fm_run_timed 10 "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" --identity --distinguish-absent 2>/dev/null) || return 1
+        d_ident=$(due_identity_for "$task") || return 1
       fi
       printf 'DECISION_REVISION\t%s\t%s\t%s\t%s\n' "$task" "$key" "$d_endpoint" "$d_ident" >&2
     fi

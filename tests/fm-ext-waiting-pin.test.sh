@@ -21,6 +21,9 @@ JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_DIR=$(dirname "$PYTHON_BIN")
 BASE_PATH="$PYTHON_DIR:$BASE_PATH"
+# The due report reads the board through the installed tasks-axi parser, and
+# tasks-axi itself runs under node, so one fixture wraps node to block that read.
+NODE_BIN=$(command -v node 2>/dev/null) || NODE_BIN=
 TASKS_AXI_BIN=$(command -v tasks-axi 2>/dev/null) || TASKS_AXI_BIN=
 [ -n "$TASKS_AXI_BIN" ] || fail "test needs tasks-axi on PATH"
 BASE_PATH="$(dirname "$TASKS_AXI_BIN"):$BASE_PATH"
@@ -893,20 +896,23 @@ test_19_due_timeout_keeps_calls_visible_and_releases_claim() {
   hold_call "$home" timeout-call 'Choose after due timeout' pending
   fake="$home/fakebin"
   mkdir -p "$fake"
-  cat > "$fake/tasks-axi" <<'SH'
+  # The due report reads the board through the tasks-axi parser, so the blocked
+  # read this fixture drives is the parser invocation. tasks-axi is itself a node
+  # script, so every other invocation passes through to the real interpreter.
+  cat > "$fake/node" <<'SH'
 #!/usr/bin/env bash
-if [ "$1" = list ]; then
-  if [ -e "$PIN_TEST_HOME/first-list" ]; then
-    : > "$PIN_TEST_HOME/due-started"
-    sleep 30
-  else
-    : > "$PIN_TEST_HOME/first-list"
-  fi
-fi
-exec "$REAL_TASKS_AXI" "$@"
+for arg in "$@"; do
+  case "$arg" in
+    --input-type=module)
+      : > "$PIN_TEST_HOME/due-started"
+      sleep 30
+      ;;
+  esac
+done
+exec "$REAL_NODE_BIN" "$@"
 SH
-  chmod +x "$fake/tasks-axi"
-  home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" PIN_TEST_HOME="$home" \
+  chmod +x "$fake/node"
+  home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" REAL_NODE_BIN="$NODE_BIN" PIN_TEST_HOME="$home" \
     "$PYTHON_BIN" - "$home" "$REFRESH" <<'PYTEST' || fail "timed-out due marking must return and release the pin claim"
 import json, pathlib, subprocess, sys, time
 home = pathlib.Path(sys.argv[1])

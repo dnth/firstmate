@@ -2284,21 +2284,24 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
-# Read-only review-by report. Prints one `<task>\t<review-by>\t<title>` line
-# per still-open captain-held task whose review-by date has passed as of today
-# in listing order; prints nothing when none is due.
+# Read-only review-by report. Prints one
+# `<task>\t<review-by>\t<title>\t<identity>` line per still-open captain-held task
+# whose review-by date has passed as of today, in board order; prints nothing
+# when none is due.
 # A hold that carries no review-by line counts from its hold-set stamp plus
 # the interval, so pre-change bodies are never rewritten to be listed. Closed,
 # answered, deferred (--until future), and not-yet-due calls never list. The
 # review-by date clears no hold and reaches no expiry path: every listed task
 # still refuses `tasks-axi ready` and still answers through the same paths.
-# ONE backlog read answers the whole report: the listing carries each row's body
-# beside the hold fields, and the hold-set stamp, the review-by line and the
-# first resolution record all live at the head of that body, so no per-call
-# `show` is needed. A token the tool cut short still falls back to one exact
-# read (due_body_for_row), so a bisected record block can never read as absent.
+# The identity is the `<hold-set stamp>#<recorded answers>` pair `open --identity`
+# reports, taken from the same body, so a consumer anchors a due call without
+# reading the row again.
+# ONE read answers the whole report: fm_due_snapshot projects the board source
+# through the installed tasks-axi's own markdown parser and row projection, so the
+# hold state, the blockers, the title and the whole body all come from one
+# snapshot, with no preview cut and no per-call `show` to disagree with it.
 command_due() {
-  local as_of data listing rows
+  local as_of data root backend file rows
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   as_of=${FM_CAPTAIN_HOLD_TODAY:-$(date -u +%F)}
   case "$as_of" in
@@ -2307,12 +2310,19 @@ command_due() {
   esac
   require_tasks_axi
   data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
-  listing=$(fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked,body) \
-    || fail "could not list the backlog"
-  rows=$(axi_rows tasks "$listing" rows id title hold_kind hold_reason hold_until blocked state raw:body) \
-    || fail "could not parse the backlog listing"
+  root=$(fm_backlog_root "$data") \
+    || fail "the backlog root cannot be resolved: ${FM_BACKLOG_TRANSITION_ERROR:-$DATA}"
+  backend=$(fm_tasks_axi_backend_resolve "$root") \
+    || fail "the backlog backend cannot be resolved: $root"
+  if [ "$backend" != markdown ]; then
+    fail "the due report reads the markdown board source; this home's backlog backend is '$backend'"
+  fi
+  file=$(fm_backlog_file "$data") \
+    || fail "the backlog file cannot be resolved: ${FM_BACKLOG_TRANSITION_ERROR:-$data}"
+  [ -e "$file" ] || return 0
+  rows=$(fm_due_snapshot "$file") || fail "could not read the backlog source $file"
   [ -n "$rows" ] || return 0
-  printf '%s\n' "$rows" | while IFS=$(printf '\t') read -r id title hold_kind hold_reason hold_until blocked state raw_body; do
+  printf '%s\n' "$rows" | while IFS=$(printf '\t') read -r id state hold_kind hold_reason hold_until blocked title raw_body; do
     [ -n "$id" ] || continue
     [ "$state" != "done" ] || continue
     [ "$hold_kind" = captain ] || continue
@@ -2327,59 +2337,71 @@ command_due() {
     # A body that does not OPEN with its hold-set stamp cannot be due: the stamp
     # reader only accepts the body's first line. Skipping such a row here keeps a
     # held call's long notes from paying for a decision they cannot change.
-    due_body_candidate "$raw_body" || continue
-    # The date gate reads the LISTED token's head, so a held call that is not past
-    # due never pays for a body decode or a backend read; only a call the gate
-    # confirms pays for the exact body below.
-    due_row_head "$raw_body"
-    DUE_REVIEW=$(due_review_by "$DUE_HEAD" "$as_of") || continue
-    due_body_for_row "$id" "$raw_body" || fail "could not read captain-held task $id"
+    DUE_BODY=$(printf '%s' "$raw_body" | base64 -d) || fail "could not decode the body of $id"
+    case "$DUE_BODY" in
+      'Captain hold set: '*) : ;;
+      *) continue ;;
+    esac
+    DUE_REVIEW=$(due_review_by "$DUE_BODY" "$as_of") || continue
     due_line_for_body "$id" "$title" "$DUE_BODY" "$DUE_REVIEW" || continue
   done || return 1
   return 0
 }
 
-# 0 when the raw listing body could carry a hold-set stamp, 1 otherwise. The
-# stamp is the body's first line and the listing quotes a value only when it
-# needs escaping, so an unquoted or quoted `Captain hold set: ` opening is the
-# cheap superset test; the body reader still owns the exact answer.
-due_body_candidate() {  # <raw-listing-body>
-  local raw=$1
-  case "${raw#\"}" in
-    'Captain hold set: '*) return 0 ;;
-  esac
-  return 1
+# Print the resolved tasks-axi package root, from its own executable, so this
+# script can read the board through the parser and row projection that same tool
+# renders from instead of a second reading of the board format.
+tasks_axi_package_root() {
+  local bin target dir
+  bin=$(command -v tasks-axi 2>/dev/null) || return 1
+  while [ -L "$bin" ]; do
+    target=$(readlink "$bin") || return 1
+    case "$target" in
+      /*) bin=$target ;;
+      *) bin=$(dirname "$bin")/$target ;;
+    esac
+  done
+  dir=$(dirname "$bin")       # <pkg>/dist/bin
+  dir=$(dirname "$dir")       # <pkg>/dist
+  dir=$(dirname "$dir")       # <pkg>
+  [ -f "$dir/dist/src/backends/markdown-grammar.js" ] || return 1
+  [ -f "$dir/dist/src/view.js" ] || return 1
+  printf '%s\n' "$dir"
 }
 
-# Rebuild the head of a listed row's body in DUE_HEAD, without a decoder. The two
-# lines the date gate reads are plain ASCII - the stamp and review-by readers
-# match them literally - and the token spells a line break as a `\n` escape, so
-# replacing that one escape rebuilds exactly those lines. The break after a stamp
-# line is always the token's first `\n` (a matching stamp line cannot hold a
-# backslash of its own), and a body this reconstruction cannot read is a body the
-# decoded reader would not mark either, because it would not read its first line
-# as a stamp.
-due_row_head() {  # <raw-listing-body>; sets DUE_HEAD
-  local raw=$1
-  DUE_HEAD=${raw#\"}
-  DUE_HEAD=${DUE_HEAD%\"}
-  DUE_HEAD=${DUE_HEAD//\\n/$'\n'}
+# Print the whole board as one row per id:
+#   <id>\t<state>\t<hold-kind>\t<hold-reason>\t<hold-until>\t<blocked>\t<title>\t<base64 body>
+# The body travels base64 so a multi-line body stays one field of one row, and
+# the caller decodes only the rows it keeps.
+fm_due_snapshot() {  # <backlog-file>
+  local file=$1 root
+  root=$(tasks_axi_package_root) \
+    || fail "the installed tasks-axi package layout is not readable; cannot read the board source"
+  FM_DUE_GRAMMAR="$root/dist/src/backends/markdown-grammar.js" \
+    FM_DUE_VIEW="$root/dist/src/view.js" \
+    node --input-type=module - "$file" <<'NODE'
+import { readFileSync } from "node:fs";
+const { parseBacklog } = await import(process.env.FM_DUE_GRAMMAR);
+const { toRow } = await import(process.env.FM_DUE_VIEW);
+const doc = parseBacklog(readFileSync(process.argv[2], "utf8"));
+const tasks = [];
+for (const section of doc.sections) {
+  for (const entry of section.entries) {
+    if (entry.kind === "task") tasks.push(entry.task);
+  }
 }
-
-# Decode one listed row's body into DUE_BODY. The listed token is the body with
-# at most its tail cut, and the date gate has already read the head it kept; a
-# token the tool marked cut falls back to one exact `show`, because a record
-# block the cut bisected would otherwise read as absent and mark an
-# already-answered call due. That read stays in this shell because task_show
-# carries its row in TASK_SHOW_OUTPUT.
-due_body_for_row() {  # <task-id> <raw-listing-body>; sets DUE_BODY
-  local id=$1 raw=$2
-  case "$raw" in
-    *'(truncated, '*' chars total - use show '*' --full'*) : ;;
-    *) DUE_BODY=$(decode_shown_value "$raw") || return 1; return 0 ;;
-  esac
-  task_show "$id" || return 1
-  DUE_BODY=$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)") || return 1
+const rows = [];
+const flat = (value) => String(value ?? "").replace(/[\t\r\n]/g, " ");
+for (const task of tasks) {
+  const row = toRow(task, { all: tasks, full: true });
+  rows.push([
+    flat(row.id), flat(row.state), flat(row.hold_kind), flat(row.hold_reason),
+    flat(row.hold_until), flat(row.blocked), flat(row.title),
+    Buffer.from(row.body ?? "", "utf8").toString("base64"),
+  ].join("\t"));
+}
+process.stdout.write(rows.length ? rows.join("\n") + "\n" : "");
+NODE
 }
 
 # Print the decoded body's review-by date (YYYY-MM-DD) when that date has passed
@@ -2398,16 +2420,18 @@ due_review_by() {  # <decoded-body> <as-of>
   printf '%s\n' "$review"
 }
 
-# Print `<id>\t<review-by>\t<title>` for a call the date gate has already shown
-# past due; print nothing otherwise. Only a resolution record linked to the
-# body's own hold-set stamp settles the call: retained records from a prior
-# lifecycle (a re-held task after an answer) never suppress the new live call,
-# while an interrupted close on the same stamp stays suppressed until retried.
+# Print one due row - `<id>`, the review-by date, the sanitized title, and the
+# call's lifecycle identity - for a call the date gate has already shown past due;
+# print nothing otherwise. Only a resolution record linked to the body's own
+# hold-set stamp settles the call: retained records from a prior lifecycle (a
+# re-held task after an answer) never suppress the new live call, while an
+# interrupted close on the same stamp stays suppressed until retried.
 due_line_for_body() {  # <id> <title> <decoded-body> <review-by>
   local id=$1 title=$2 body=$3 review=$4
   body_has_current_resolution_record "$body" && return 1
   [ -n "$title" ] || title=$id
-  printf '%s\t%s\t%s\n' "$id" "$review" "$(sanitize_field "$title")"
+  printf '%s\t%s\t%s\t%s\n' "$id" "$review" "$(sanitize_field "$title")" \
+    "$(body_hold_set_timestamp "$body")#$(resolution_record_count "$body")"
 }
 
 refresh_waiting_pin_after_board_mutation() {

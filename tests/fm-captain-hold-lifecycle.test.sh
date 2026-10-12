@@ -170,56 +170,6 @@ due_at() {  # <home> <today>
     FM_CAPTAIN_HOLD_TODAY="$today" "$ROOT/bin/fm-captain-hold.sh" due
 }
 
-# build_due_read_case <home> <trailing note>: the calls the due-read parity
-# fixture compares - past due on its recorded date, past due counted from its
-# hold-set stamp alone, re-held after a release, not yet due, and deferred -
-# every body ending in <trailing note>. A long note is what makes a listing cut
-# the bodies it reports, so the same case can be run through the batched read and
-# through the exact per-call read.
-build_due_read_case() {  # <home> <trailing-note>
-  local home=$1 tail=$2 id
-  for id in due-stamped due-legacy reheld fresh deferred; do
-    tasks_in "$home" add "$id" "$(printf '%s choice' "$id")" --kind captain --repo sample >/dev/null \
-      || return 1
-  done
-  hold_at "$home" 2026-08-01T00:00:00Z due-stamped "stamped pending" >/dev/null || return 1
-  hold_at "$home" 2026-08-01T00:00:00Z due-legacy "legacy pending" >/dev/null || return 1
-  printf 'Captain hold set: 2026-08-01T00:00:00Z\n' > "$home/legacy-body.txt" || return 1
-  tasks_in "$home" update due-legacy --body-file "$home/legacy-body.txt" >/dev/null || return 1
-  hold_at "$home" 2026-07-01T00:00:00Z reheld "first ask" >/dev/null || return 1
-  printf 'Go.\n' > "$home/reheld-decision.txt" || return 1
-  run_captain "$home" answer reheld --decision-file "$home/reheld-decision.txt" --release >/dev/null \
-    || return 1
-  hold_at "$home" 2026-08-01T00:00:00Z reheld "second ask" >/dev/null || return 1
-  hold_at "$home" 2026-08-14T00:00:00Z fresh "fresh pending" >/dev/null || return 1
-  hold_at "$home" 2026-08-01T00:00:00Z deferred "deferred pending" --until 2027-01-15 >/dev/null \
-    || return 1
-  [ -z "$tail" ] || append_body_note "$home" "$tail" || return 1
-  return 0
-}
-
-# append_body_note <home> <note>: add one trailing note to every due-read fixture
-# body, leaving the hold lines and any resolution record where the reader expects
-# them. The note carries no hold or record line, so it cannot change what the
-# report should mark - only how much of each body a listing can carry.
-append_body_note() {  # <home> <note>
-  local home=$1 note=$2 id
-  for id in due-stamped due-legacy reheld fresh deferred; do
-    tasks_in "$home" show "$id" --full | python3 -c '
-import json, sys
-note = sys.argv[1]
-body = ""
-for line in sys.stdin:
-    if line.startswith("  body: "):
-        body = json.loads(line[len("  body: "):].strip())
-        break
-print(body.rstrip("\n") + "\n\n" + note)
-' "$note" > "$home/body-$id.txt" || return 1
-    tasks_in "$home" update "$id" --body-file "$home/body-$id.txt" >/dev/null || return 1
-  done
-  return 0
-}
-
 write_origin_meta() {  # <home> <id> [kind]
   local home=$1 id=$2 kind=${3:-scout}
   fm_write_meta "$home/state/$id.meta" \
@@ -1487,45 +1437,46 @@ test_past_due_call_marked_due_while_held() {
   pass "a past-due call is marked due in OPEN DECISIONS while the hold and the spawn refusal survive"
 }
 
-# The due report answers a whole board from ONE backlog listing, so it must mark
-# exactly what a per-held-call `show` marked. This fixture builds the same calls
-# twice - once with bodies the listing keeps whole, once with a long trailing
-# note that makes the listing cut every reported body - and requires both runs to
-# print the same report, with the second really taking the exact per-call read.
-test_due_report_matches_the_per_call_read() {
-  local whole cut tail out_whole out_cut shows
-  whole=$(make_home due-read-whole)
-  cut=$(make_home due-read-cut)
-  tail=$(python3 -c 'print("p" * 2000)')
-  build_due_read_case "$whole" '' || fail "could not build the whole-body due fixture"
-  build_due_read_case "$cut" "$tail" || fail "could not build the cut-body due fixture"
+# The due report must decide from each held call's WHOLE body: a resolution record
+# for the current lifecycle can sit past the 500-character preview a rendered
+# listing keeps, and a report that missed it would mark an already-answered call
+# due. This fixture buries the record behind a long decision text, and it pins the
+# identity the due row carries against `open --identity`, the reader a consumer
+# compares with.
+test_due_reads_the_whole_body_not_a_listing_preview() {
+  local home id long out identity live expected digest
+  home=$(make_home due-whole-body)
+  id=buried-record
+  long=$(python3 -c 'print("r" * 900)')
+  digest=$(python3 -c 'import hashlib; print(hashlib.sha256(b"Buried.").hexdigest())')
+  tasks_in "$home" add "$id" "Buried record call" --kind captain --repo sample >/dev/null \
+    || fail "could not create the whole-body fixture"
+  hold_at "$home" 2026-08-01T00:00:00Z "$id" "buried pending" >/dev/null \
+    || fail "could not hold the whole-body fixture"
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n\nResolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: released\nHold stamp: 2026-08-01T00:00:00Z\n\nCaptain decision:\n%s\n' \
+    "$digest" "$long" > "$home/buried-body.txt" || fail "could not stage the buried record"
+  tasks_in "$home" update "$id" --body-file "$home/buried-body.txt" >/dev/null \
+    || fail "could not seed the buried record"
 
-  cat > "$cut/fakebin/tasks-axi" <<SH
-#!/usr/bin/env bash
-case "\$1" in show) printf '%s\n' "\$*" >> "$cut/due-shows.log" ;; esac
-exec $TASKS_AXI_BIN "\$@"
-SH
-  chmod +x "$cut/fakebin/tasks-axi"
-  : > "$cut/due-shows.log"
+  out=$(due_at "$home" 2026-08-16) || fail "the due report failed on the buried record"
+  case "$out" in
+    *"$id"*) fail "a call whose current-lifecycle record sits past the listing preview was marked due: $out" ;;
+  esac
+  [ -z "$out" ] || fail "the buried-record fixture produced unexpected rows: $out"
 
-  out_whole=$(due_at "$whole" 2026-08-16) || fail "the batched due read failed"
-  out_cut=$(due_at "$cut" 2026-08-16) || fail "the per-call due read failed"
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n' > "$home/plain-body.txt" \
+    || fail "could not stage the plain body"
+  tasks_in "$home" update "$id" --body-file "$home/plain-body.txt" >/dev/null \
+    || fail "could not clear the buried record"
+  out=$(due_at "$home" 2026-08-16) || fail "the due report failed on the plain call"
+  expected=$(printf '%s\t2026-08-15\tBuried record call' "$id")
+  assert_contains "$out" "$expected" "a past-due call without a current record was not reported"
+  identity=$(printf '%s\n' "$out" | awk -F '\t' -v want="$id" '$1 == want { print $4 }')
+  [ -n "$identity" ] || fail "the due row carried no lifecycle identity: $out"
+  live=$(run_captain "$home" open "$id" --identity) || fail "open --identity failed"
+  [ "$identity" = "$live" ] || fail "the due row identity [$identity] disagrees with open --identity [$live]"
 
-  [ "$out_whole" = "$out_cut" ] \
-    || fail "the batched read and the per-call read disagreed: [$out_whole] vs [$out_cut]"
-  assert_contains "$out_whole" "$(printf 'due-stamped\t2026-08-15\tdue-stamped choice')" \
-    "the recorded review-by date was not reported"
-  assert_contains "$out_whole" "$(printf 'due-legacy\t2026-08-15\tdue-legacy choice')" \
-    "a stamp-only hold was not counted from its hold-set time"
-  assert_contains "$out_whole" "$(printf 'reheld\t2026-08-15\treheld choice')" \
-    "a re-held call was suppressed by its retained record"
-  assert_not_contains "$out_whole" "fresh" "a not-yet-due call was marked due"
-  assert_not_contains "$out_whole" "deferred" "a deferred call was marked due"
-  shows=$(wc -l < "$cut/due-shows.log" | tr -d ' ')
-  [ "$shows" -gt 0 ] || fail "the cut-body run never took the exact per-call read"
-  [ ! -s "$whole/due-shows.log" ] || fail "the whole-body run paid for a per-call read"
-
-  pass "the batched due read marks exactly what the per-call read marks, cut bodies included"
+  pass "the due report reads the whole body, and its identity matches open --identity"
 }
 
 test_review_lifecycle_regressions() (
@@ -1616,7 +1567,7 @@ test_lavish_reconcile_selections_split_from_answers
 test_diverged_reports_status_close_over_open_hold
 test_hold_records_review_by_date_and_stays_live
 test_past_due_call_marked_due_while_held
-test_due_report_matches_the_per_call_read
+test_due_reads_the_whole_body_not_a_listing_preview
 test_deferred_hold_leaves_captains_call_until_due
 test_board_build_writes_decision_cards
 test_out_of_band_close_is_recordable
