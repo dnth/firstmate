@@ -96,22 +96,26 @@ waiting_pin_now() {
 # remaining path-like token. Fails when the read fails so the refresh defers
 # rather than publishing a leak or a false all-clear.
 waiting_pin_title() {
-  local data=$1 id=$2 show_output raw
+  local data=$1 id=$2 show_output raw links
   show_output=$(fm_backlog_row_show "$data" "$id" --full 2>/dev/null) || return 1
   raw=$(printf '%s\n' "$show_output" | sed -n 's/^  title: //p' | head -1) || return 1
   [ -n "$raw" ] || return 1
+  links=$(printf '%s\n' "$show_output" | sed -n 's/^  links: //p' | head -1) || return 1
   printf '%s' "$raw" | python3 -c '
 import json, re, sys
 s = sys.stdin.read()
 value = json.loads(s) if s.startswith(chr(34)) else s
 value = value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " ")
-value = re.sub(r"\s*\(report\)\s*\bdata/\S+?/report\.md\b", "", value)
-value = re.sub(r"\s*\bdata/\S+?/report\.md\b", "", value)
-value = re.sub(r"\s*https?://\S+", "", value)
 value = re.sub(r"\s*\((?:[^()]*\+\s*)?repo:\s*[^)]+\)", "", value)
-tokens = [t for t in value.split(" ") if not re.search(r"(^|/)(data|state)/|/home/|\.md\b", t)]
+links = sys.argv[1]
+links = json.loads(links) if links.startswith(chr(34)) else links
+pr_targets = [link[3:] for link in links.split(",") if link.startswith("pr:")]
+artifact = r"\([^()]+\)\s+(?:https?://\S+|\S*/\S+|\S+\.md)"
+targets = [artifact, r"data/\S+?/report\.md"] + [re.escape(url) for url in pr_targets]
+value = re.sub(r"(?:\s+(?:" + "|".join(targets) + r"))+$", "", value)
+tokens = [t for t in value.split(" ") if not re.search(r"(?:data|state)/|/home/|\.md\b", t)]
 print(re.sub(r"\s+", " ", " ".join(tokens)).strip(), end="")
-' || return 1
+' "$links" || return 1
 }
 
 # waiting_pin_board <data>: print the message body lines from durable board
