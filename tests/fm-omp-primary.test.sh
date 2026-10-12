@@ -1551,9 +1551,7 @@ esac
 while [ ! -e "$state/watch-stop" ]; do sleep 0.02; done
 SH
   chmod +x "$fixture/bin/fm-watch-arm.sh"
-  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
-    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
-    node --input-type=module 2>&1 <<'JS'
+  cat > "$fixture/branch-regression.mjs" <<'JS'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const state = process.env.FM_STATE_OVERRIDE;
@@ -1620,6 +1618,9 @@ writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
 console.log("omp-busy-branch-ok");
 JS
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 < "$fixture/branch-regression.mjs"
   ) || status=$?
   printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
   expect_code 0 "$status" "OMP busy branch: $out"
@@ -1650,9 +1651,7 @@ fi
 exit 0
 SH
   chmod +x "$fixture/bin/fm-watch-arm.sh"
-  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
-    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
-    MODE="$mode" node --input-type=module 2>&1 <<'JS'
+  cat > "$fixture/branch-regression.mjs" <<'JS'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -1737,6 +1736,9 @@ if (count() !== expectedArms) throw new Error(`returned close restored an extra 
 }
 console.log("omp-busy-branch-ok");
 JS
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    MODE="$mode" node --input-type=module 2>&1 < "$fixture/branch-regression.mjs"
   ) || status=$?
   printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
   expect_code 0 "$status" "OMP busy branch: $out"
@@ -1750,9 +1752,7 @@ test_native_omp_branch_settlement_retries_cleanup() {
   local fixture out status=0
   fixture=$(make_omp_queue_fixture native-branch-cleanup)
   write_queue_watcher "$fixture"
-  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
-    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
-    node --input-type=module 2>&1 <<'JS'
+  cat > "$fixture/branch-regression.mjs" <<'JS'
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -1822,6 +1822,9 @@ try {
 }
 console.log("omp-branch-cleanup-ok");
 JS
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 < "$fixture/branch-regression.mjs"
   ) || status=$?
   expect_code 0 "$status" "OMP branch settlement cleanup: $out"
   assert_contains "$out" omp-branch-cleanup-ok "branch settlement cleanup retry did not complete: $out"
