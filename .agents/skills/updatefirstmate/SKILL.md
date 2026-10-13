@@ -50,6 +50,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```
    The command first asks each mate to persist open conversational work, then relaunches only after its correlated answer arrives.
    Read `restarted:`, `nudged:`, and `unreached:` lines plus the closing `summary:` as the outcome, and never call a nudge a clean reload.
+   For a remote OMP binding refusal, reconcile rather than resend using the [routed-request binding rule](../../../docs/remote-secondmates.md#routed-requests).
 
 4. **Nudge the residual set.**
    For every target listed on the `nudge-secondmates:` line (do nothing when it says `none`), send a one-line re-read nudge so that secondmate picks up its new instructions too:

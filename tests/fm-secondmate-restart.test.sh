@@ -896,9 +896,16 @@ omp_marker_list() {  # <case-dir> <id>
 # for every other adapter in this file.
 OMP_LISTENER_PID=
 add_omp_mate() {  # <case-dir> <id>
+  add_local_mate "$1" "$2" omp
+  start_omp_session "$1" "$2"
+}
+
+# start_omp_session <case-dir> <id>: bring up that modelled session for a mate
+# whose home and durable record already exist. When FM_TEST_OMP_EVENTS names a
+# file, each answered persist request is also appended there as one line.
+start_omp_session() {  # <case-dir> <id>
   local dir=$1 id=$2 marker requests bash_bin i
   local home="$dir/home"
-  add_local_mate "$dir" "$id" omp
   printf 'omp' > "$dir/fake/command"
   printf 'omp' > "$dir/fake/becomes"
   bash_bin=$(fm_test_realpath "$(command -v bash)")
@@ -922,6 +929,8 @@ while :; do
     corr=$(cat "$FM_TEST_OMP_INBOX"/*.msg 2>/dev/null | grep -oE 'corr=[0-9a-f]{16}' | head -1)
     [ -z "$corr" ] || printf 'done [%s]: open records written down\n' "$corr" \
       >> "$FM_TEST_OMP_STATUS"
+    [ -z "$corr" ] || [ -z "$FM_TEST_OMP_EVENTS" ] \
+      || printf 'persisted %s\n' "$corr" >> "$FM_TEST_OMP_EVENTS"
     mv -f "$pending" "$pending.delivered"
   done
   /bin/sleep 0.02
@@ -930,7 +939,7 @@ SH
   chmod +x "$dir/omp-session"
   FM_TEST_OMP_MARKER="$marker" FM_TEST_OMP_REQUESTS="$requests" \
     FM_TEST_OMP_INBOX="$home/state/$id.inbox" FM_TEST_OMP_STATUS="$home/state/$id.status" \
-    "$bash_bin" "$dir/omp-session" &
+    FM_TEST_OMP_EVENTS="${FM_TEST_OMP_EVENTS:-}" "$bash_bin" "$dir/omp-session" &
   OMP_LISTENER_PID=$!
   i=0
   while [ ! -s "$marker" ] && [ "$i" -lt 200 ]; do /bin/sleep 0.02; i=$((i + 1)); done
@@ -1062,6 +1071,67 @@ test_omp_restart_stops_proves_cleans_then_relaunches() {
     "the durable record still names the retired endpoint"
   pass "T17 an OMP restart stops the owner, proves it gone, retires its session artifacts, then relaunches"
 }
+
+# --- T18: a local OMP mate restarts after an update changes its loaded closure
+# A remote mate's host binding refuses a session whose loaded extension closure
+# an update superseded unless a recorded fast-forward explains it. The local
+# placement's delivery binds no closure, so the same update must still reach the
+# running local session, have it persist, and only then stop and relaunch it.
+test_local_omp_restart_after_extension_closure_update() {
+  local dir out rc seed repo smhome marker bash_bin loaded tracked persisted_line stop_line
+  dir=$(new_case local-omp-update)
+  printf 'omp\n' > "$dir/home/config/secondmate-harness"
+  add_repo_backed_mate "$dir" sm1 omp
+  seed="$dir/seed" repo="$dir/fmrepo" smhome="$dir/sm1-home"
+  # The firstmate origin ships the OMP primary closure, and the home is on it
+  # when its session starts.
+  bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_omp_primary_closure_paths' _ "$ROOT" \
+    > "$dir/closure-paths"
+  while IFS= read -r path; do
+    mkdir -p "$seed/$(dirname "$path")"
+    cp "$ROOT/$path" "$seed/$path"
+  done < "$dir/closure-paths"
+  git -C "$seed" add -A
+  git -C "$seed" commit -qm 'ship the OMP primary closure'
+  git -C "$seed" push -q origin main
+  git -C "$repo" pull -q --ff-only
+  git -C "$smhome" checkout -q --detach main
+
+  make_omp_restart_stubs "$dir" sm1 987654
+  FM_TEST_OMP_EVENTS="$dir/stop.log" start_omp_session "$dir" sm1
+  bash_bin=$(fm_test_realpath "$(command -v bash)")
+  loaded=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
+    _ "$ROOT" "$smhome") || fail "could not derive the session's loaded closure"
+  marker="$smhome/state/.omp-primary-extension-loaded"
+  printf '%s\n%s\n%s\n%s\n' "$loaded" "$OMP_LISTENER_PID" "$bash_bin" "$bash_bin" > "$marker"
+
+  # The update crosses an extension change while that session keeps running.
+  printf '// extension change shipped by the update\n' >> "$seed/bin/fm-primary-watch-core.ts"
+  git -C "$seed" commit -qam 'change the OMP primary extension closure'
+  git -C "$seed" push -q origin main
+  out=$(run_update_in_case "$dir")
+  assert_contains "$out" "restart-secondmates: fm-sm1" \
+    "the update did not name the running local OMP mate for restart"
+  tracked=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
+    _ "$ROOT" "$smhome") || fail "could not derive the updated tracked closure"
+  [ "$(sed -n 1p "$marker")" = "$loaded" ] && [ "$tracked" != "$loaded" ] \
+    || fail "the update did not leave the running session on a superseded closure"
+
+  out=$(run_restart "$dir" fm-sm1); rc=$?
+  stop_omp_mate
+  clear_omp_restart_stubs
+
+  expect_code 0 "$rc" "a local OMP mate should restart after its extension closure changed"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 (omp)" \
+    "the local OMP restart after the update was not reported as a clean reload"
+  assert_contains "$(cat "$dir/home/state/sm1.inbox"/*.msg)" "Open-record persistence" \
+    "the superseded local session never received the persist request"
+  persisted_line=$(grep -n '^persisted corr=' "$dir/stop.log" | head -1 | cut -d: -f1)
+  stop_line=$(grep -n '^stopped 987654 ' "$dir/stop.log" | head -1 | cut -d: -f1)
+  [ -n "$persisted_line" ] && [ -n "$stop_line" ] && [ "$persisted_line" -lt "$stop_line" ] \
+    || fail "the superseded local session was not asked to persist before it stopped"$'\n'"$(cat "$dir/stop.log")"
+  pass "T18 a local OMP mate persists and restarts after an update changes its loaded closure"
+}
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
@@ -1083,5 +1153,6 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path
 test_omp_secondmate_is_restart_capable
 test_omp_secondmate_prepare_relaunch_clears_owned_markers
 test_omp_restart_stops_proves_cleans_then_relaunches
+test_local_omp_restart_after_extension_closure_update
 
 echo "# all fm-secondmate-restart tests passed"

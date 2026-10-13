@@ -420,6 +420,7 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and restarts every live secondmate left on the target commit through the persist-gated path, with fallback nudges when replacement cannot be proven, without touching project clones.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
+[Remote routed-request binding](remote-secondmates.md#routed-requests) owns the remote OMP update exception for the restart's persist request.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 After those repo updates, the attended path can refresh the installed machine-wide `omp` executable through `bin/fm-omp-update.sh`.

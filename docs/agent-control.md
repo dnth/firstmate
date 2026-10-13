@@ -130,6 +130,8 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-spawn-relaunch-dead-endpoint.test.sh` - proven-gone endpoint recreation in the recorded worktree across tmux, Herdr, zellij, and cmux for both `fm-spawn --relaunch` and `fm-control relaunch`, the lease-ownership gate, the Herdr drifted-shell `cd` recovery, and the live/ambiguous/unprovable refusal matrix.
-- `tests/fm-secondmate-restart.test.sh` - the persist gate, restart capability routing, local and remote control-plane relaunches, and already-current versus unprovable runtime behavior.
+- `tests/fm-secondmate-restart.test.sh` - the persist gate, restart capability routing, local and remote control-plane relaunches, already-current versus unprovable runtime behavior, and a local OMP restart after an update changes its loaded extension closure.
 - `tests/fm-update.test.sh` - fast-forward classification, live secondmate restart/nudge sets, and stopped or malformed endpoint handling.
 - `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` - host-local remote lifecycle control, including OMP endpoint binding and SSH unknown-state handling.
+- `tests/fm-remote-secondmate-update-restart.test.sh` - the remote OMP binding matrix for the restart persist request and an end-to-end update across an extension change followed by the persist-gated restart.
+- `tests/fm-remote-omp-update-restart-live-e2e.test.sh` - opt-in (`FM_OMP_REMOTE_UPDATE_LIVE_E2E=1`) real OMP and Herdr proof of the same update-then-restart path in a guarded lab; [the runtime verification record](verification/runtime-backends.md#remote-omp-update-and-restart) holds its latest result.

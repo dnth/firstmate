@@ -46,7 +46,12 @@
 # SAME command on its host over bin/fm-on.sh, through the host-local
 # fm-remote-secondmate-control.sh relaunch verb. The restart decision, the
 # profile, the request text, the bound, the failure vocabulary, and this report
-# are all computed here in the primary and are identical for both.
+# are all computed here in the primary and are identical for both. The update
+# this pass follows can change the very extension a remote OMP mate has loaded,
+# so the persist request alone is marked for its host binding to accept a
+# loaded closure that a recorded fast-forward of that home superseded
+# (bin/fm-remote-secondmate-control.sh owns the rule); any other mismatch, and
+# every later message, is still refused until the restart.
 #
 # Nothing here forces, stashes, or discards anything. bin/fm-control.sh owns the
 # restart transaction, its checkpoint, its journal, and its rollback; a refusal
@@ -69,7 +74,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,70{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in
@@ -288,7 +293,7 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     continue
   fi
   if ! send_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+    FM_PENDING_REPLY_EXISTING_CORR="$corr" FM_SEND_SECONDMATE_RESTART_PERSIST=1 \
     "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECONDMATE_PERSIST_REQUEST" 2>&1); then
     fm_pending_reply_discard_undelivered "$STATE" "$corr" >/dev/null 2>&1 || true
     REASON[i]="the request to write down its open work could not be delivered: $(first_reported_line "$send_out")"

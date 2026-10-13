@@ -220,7 +220,15 @@ Once a delivery receipt is consumed, it remains as a generation-scoped `.pending
 The send's success boundary is the durable inbox record, never the agent's later `handled/` move: once the record is durable and the ring has run, the send returns exit 0 and prints one machine line - `request=<corr> record=<NNN> state=recorded|handled`, `state=handled` when the record is already under `handled/` - without waiting for acknowledgement.
 An unavailable programmatic delivery returns exit 6 with the request durably queued, and the machine line still reports the record.
 A doorbell queued without a receipt still returns exit 0 for the durable record, because the record itself is the delivery boundary.
-An identity or extension mismatch returns exit 9 before notification and requires reconciliation rather than resend.
+An identity or extension mismatch returns exit 9 before notification and requires reconciliation rather than resend, except for the prior-closure case below.
+The restart-marked, parent-correlated, non-slash persist request `bin/fm-secondmate-restart.sh` sends before restarting a mate is the one routed request that may bind to a superseded closure.
+An update that changes the primary-extension closure leaves the running session on the closure it loaded, so without that exception the restart could never ask the session to persist its open work.
+The mismatch must be explained by the home itself: its tracked closure must be HEAD's committed closure, and the loaded closure must be the committed closure of an earlier position on the HEAD reflog's fast-forward chain, within a fixed bound of 64 distinct earlier positions.
+Every earlier position must be an ancestor of the next; a rewind, non-fast-forward move, missing reflog, uncommitted tracked closure, or loaded closure absent from that bounded chain is refused.
+Git appends that reflog entry in the same operation that moves HEAD, so the record cannot lag or lead the update, and it also explains a session updated before this rule existed.
+Ordinary messages, fallback re-read nudges, slash commands, and persist requests without their parent correlation retain the exit 9 refusal before enqueue or notification on a closure mismatch.
+The exception leaves every other identity, endpoint, session, and launch-path check in force.
+After the correlated persistence answer arrives, the restart uses the separate lifecycle control plane to stop and relaunch the session; an ordinary routed `/exit` cannot use the prior-closure exception.
 A delayed or missing `handled/` acknowledgement is never a send failure; the parent's pending-reply expectation simply keeps waiting for the correlated reply on its ordinary recovery schedule.
 The existing typed `/exit` path keeps its separate `delivered-no-turn` exit 4 and `delivered-no-turn-persistence-failed` exit 5 behavior.
 
@@ -284,6 +292,7 @@ Local secondmates retain their generation-specific local pointer contract; remot
 
 `/updatefirstmate` updates each remote code root from its own origin, then guardedly fast-forwards the persistent remote home to that code-root commit.
 Dirty, diverged, unavailable, or otherwise unsafe targets are reported and left untouched.
+The persist-gated restart that follows reaches an OMP mate whose loaded extension the update changed through the explained binding described under [Routed requests](#routed-requests).
 
 Retire a remote second mate with the normal guarded command:
 
@@ -309,9 +318,12 @@ bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
+bin/fm-test-run.sh tests/fm-remote-secondmate-update-restart.test.sh
 ```
 
 The account-level checks the doctor performs - a real Aqua login session, a real `launchctl` domain, and a real herdr server - are only ever exercised against fixtures here, so the readiness gate's behavior on a genuine Mac remains an operator-run smoke test.
+
+The opt-in `tests/fm-remote-omp-update-restart-live-e2e.test.sh` guard runs the update-then-restart path against a real OMP second mate and real Herdr in a guarded lab session; [the runtime verification record](verification/runtime-backends.md#remote-omp-update-and-restart) owns its latest result and scope.
 
 For a real-host smoke test, provision a disposable remote account and project, run the doctor and its repair against that account, launch the second mate, send one marked request, verify its correlated reply and structured fleet projection, simulate an unreachable host to confirm unknown-without-failover behavior, then retire only after the remote queue is empty.
 The deterministic suite is automated; real-host validation is still an operator-run smoke test and is not claimed by the repository tests.

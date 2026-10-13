@@ -21,7 +21,8 @@
 #   . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 #   install_remote_herdr_fixture <remote-root> <state-file> <log-file> \
 #     <send-fail-flag> <socket-path> [<omp-ack-pid> <omp-bun> <omp-bin> \
-#     <omp-active-pid-file> <force-idle-file> <pane-text-log>]
+#     <omp-active-pid-file> <force-idle-file> <pane-text-log> \
+#     <broken-ack-file> <execute-launch-file> <exit-stops-file>]
 #
 # Every invocation is appended verbatim to <log-file>, so a test reads back what
 # the remote pane received. Creating <send-fail-flag> makes every pane write
@@ -32,10 +33,14 @@
 # An active-PID file replaces the fixture's inert foreground process with one
 # real listener process, while a force-idle file prevents typed submission from
 # manufacturing a turn-start acknowledgement.
+# While an exit-stops file exists, submitting the exact `/exit` composer stops
+# the executed listener the way a real OMP exits: the process is terminated,
+# the active-PID file is emptied so the next launch may execute again, and the
+# pane stays as an agent-less shell that ignores later input.
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
-  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-} omp_active_pid_file=${9:-} force_idle_file=${10:-} pane_text_log=${11:-} broken_ack_file=${12:-} execute_launch_file=${13:-}
+  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-} omp_active_pid_file=${9:-} force_idle_file=${10:-} pane_text_log=${11:-} broken_ack_file=${12:-} execute_launch_file=${13:-} exit_stops_file=${14:-}
   local real_ps ps_fixture
   mkdir -p "$remote_root/bin"
   cat > "$script" <<SH
@@ -47,12 +52,33 @@ SEND_FAIL='$send_fail'
 SOCKET='$socket'
 FM_ROOT='$remote_root'
 SH
-  printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\nOMP_ACTIVE_PID_FILE=%q\nFORCE_IDLE_FILE=%q\nPANE_TEXT_LOG=%q\nOMP_BROKEN_ACK_FILE=%q\nOMP_EXECUTE_LAUNCH_FILE=%q\n' \
-    "$omp_ack_pid" "$omp_bun" "$omp_bin" "$omp_active_pid_file" "$force_idle_file" "$pane_text_log" "$broken_ack_file" "$execute_launch_file" >> "$script"
+  printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\nOMP_ACTIVE_PID_FILE=%q\nFORCE_IDLE_FILE=%q\nPANE_TEXT_LOG=%q\nOMP_BROKEN_ACK_FILE=%q\nOMP_EXECUTE_LAUNCH_FILE=%q\nEXIT_STOPS_FILE=%q\n' \
+    "$omp_ack_pid" "$omp_bun" "$omp_bin" "$omp_active_pid_file" "$force_idle_file" "$pane_text_log" "$broken_ack_file" "$execute_launch_file" "$exit_stops_file" >> "$script"
   cat >> "$script" <<'SH'
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
 save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
+pane_exited() { [ "$(jq_state -r --arg p "$1" '.exited[$p] // false')" = true ]; }
+stop_executed_agent() { # <pane>
+  local pane=$1 pid='' waited=0
+  [ -z "$OMP_ACTIVE_PID_FILE" ] || [ ! -f "$OMP_ACTIVE_PID_FILE" ] || IFS= read -r pid < "$OMP_ACTIVE_PID_FILE" || pid=
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      kill -TERM "$pid" 2>/dev/null || true
+      while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 250 ]; do
+        sleep 0.02
+        waited=$((waited + 1))
+      done
+      ;;
+  esac
+  [ -z "$OMP_ACTIVE_PID_FILE" ] || : > "$OMP_ACTIVE_PID_FILE"
+  jq_state --arg p "$pane" \
+    '.exited[$p] = true | .composer[$p] = ""
+     | .typed |= with_entries(select(.key != $p))
+     | .working |= with_entries(select(.key != $p))
+     | .omp_session |= with_entries(select(.key != $p))' | save
+}
 publish_omp_ack() { # <pane> <launch>
   local pane=$1 launch=$2 cwd session version normalized_launch
   local broken_pid doorbell turn_started
@@ -192,6 +218,7 @@ case "${1:-} ${2:-}" in
        | .working |= with_entries(select(.key != $p))' | save ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
+    ! pane_exited "${3:-}" || exit 0
     [ -z "$PANE_TEXT_LOG" ] || printf '%s\n' "${4:-}" >> "$PANE_TEXT_LOG"
     jq_state --arg p "${3:-}" --arg text "${4:-}" \
       '.typed[$p] = true | .composer[$p] = $text' | save ;;
@@ -229,8 +256,14 @@ case "${1:-} ${2:-}" in
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
     pane=${3:-}
+    ! pane_exited "$pane" || exit 0
     if [ "${4:-}" = ctrl+u ]; then
       jq_state --arg p "$pane" '.composer[$p] = ""' | save
+      exit 0
+    fi
+    if [ "${4:-}" = enter ] && [ -n "$EXIT_STOPS_FILE" ] && [ -f "$EXIT_STOPS_FILE" ] \
+      && [ "$(jq_state -r --arg p "$pane" '.composer[$p] // ""')" = /exit ]; then
+      stop_executed_agent "$pane"
       exit 0
     fi
     jq_state --arg p "$pane" '.typed[$p] = true | .working[$p] = true' | save

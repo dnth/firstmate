@@ -129,6 +129,11 @@
 # FM_PENDING_REPLY_EXISTING_CORR=<id> when
 # re-sending a recovery request for an already-open expectation so a second
 # record is not created. Direct unmarked captain input never creates one.
+# bin/fm-secondmate-restart.sh sets FM_SEND_SECONDMATE_RESTART_PERSIST=1 on its
+# persist request only: a remote target's control then receives
+# `send <id> <message> restart-persist`, the one request its OMP binding may bind
+# to an update-explained prior extension closure
+# (bin/fm-remote-secondmate-control.sh owns that rule). Local targets ignore it.
 #
 # After a successful typed submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
 # 0 disables) before returning: submit confirmation only proves the text was
@@ -1318,9 +1323,11 @@ else
       exit 1
     fi
     remote_out=
+    remote_send_args=("$TARGET_REMOTE_ID" "$MESSAGE")
+    [ "${FM_SEND_SECONDMATE_RESTART_PERSIST:-0}" != 1 ] || remote_send_args+=(restart-persist)
     if [ -n "$RECONCILE_DELIVERY_ID" ]; then
       remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh reconcile-send "$TARGET_REMOTE_ID" "$MESSAGE" "$RECONCILE_DELIVERY_ID" < /dev/null 2>&1) || send_rc=$?
-    elif remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1); then
+    elif remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "${remote_send_args[@]}" < /dev/null 2>&1); then
       :
     else
       send_rc=$?

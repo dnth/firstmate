@@ -7,7 +7,7 @@
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh beacon-age <id>
 #   fm-remote-secondmate-control.sh route <id>
-#   fm-remote-secondmate-control.sh send <id> <message>
+#   fm-remote-secondmate-control.sh send <id> <message> [restart-persist]
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
@@ -36,6 +36,10 @@
 # extension, or process binding refused before notification. Exits 7 and 8 are
 # no longer produced by this path. Every nonzero result names a no-resend
 # state.
+# `restart-persist` marks bin/fm-secondmate-restart.sh's correlated persist
+# request, the only request that may bind to a loaded closure which a recorded
+# fast-forward of this home superseded (remote_omp_prior_closure_explained);
+# every other closure mismatch still exits 9.
 # docs/remote-secondmates.md owns why.
 # A private parent-route state directory stores only the remote secondmate
 # agent's endpoint record; the home's own
@@ -195,8 +199,21 @@ remote_omp_delivery_load_libs() {
   . "$SCRIPT_DIR/fm-omp-process-lib.sh"
 }
 
-remote_omp_delivery_binding() { # <id>
-  local id=$1 harness session_dir session_dir_real pointer session session_parent
+# The one tracked-closure mismatch the binding may explain: the restart pass's
+# persist request reaching a session whose loaded closure a recorded fast-forward
+# of this home superseded. The home's tracked closure must be exactly HEAD's
+# committed closure, and the loaded version must be the committed closure of an
+# earlier position on HEAD's recorded fast-forward chain
+# (fm_omp_primary_version_fast_forwarded_from owns that walk).
+remote_omp_prior_closure_explained() { # <tracked-version>
+  local head
+  head=$(git -C "$TARGET_HOME" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null) || return 1
+  [ "$(fm_omp_primary_version_at_commit "$TARGET_HOME" "$head" 2>/dev/null || true)" = "$1" ] || return 1
+  fm_omp_primary_version_fast_forwarded_from "$TARGET_HOME" "$FM_OMP_MARKER_VERSION" >/dev/null
+}
+
+remote_omp_delivery_binding() { # <id> [restart-persist]
+  local id=$1 mode=${2:-} harness session_dir session_dir_real pointer session session_parent
   local primary_marker doorbell_marker expected_version path
   remote_omp_delivery_load_libs
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
@@ -208,17 +225,15 @@ remote_omp_delivery_binding() { # <id>
   [ "$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META" 2>/dev/null)" = alive ] \
     || remote_omp_delivery_refuse "exact remote OMP endpoint is not live"
 
-  for path in \
-    .omp/extensions/fm-primary-omp.ts \
-    .omp/extensions/lib/fm-branch-dispatch.ts \
-    .omp/extensions/lib/fm-task-inbox-doorbell.ts \
-    bin/fm-primary-watch-core.ts; do
+  while IFS= read -r path; do
     if ! { [ -f "$TARGET_HOME/$path" ] && [ ! -L "$TARGET_HOME/$path" ] \
       && [ -f "$FM_ROOT/$path" ] && [ ! -L "$FM_ROOT/$path" ] \
       && cmp -s "$TARGET_HOME/$path" "$FM_ROOT/$path"; }; then
       remote_omp_delivery_refuse "loaded OMP extension closure differs from the remote tracked code"
     fi
-  done
+  done <<EOF
+$(fm_omp_primary_closure_paths)
+EOF
 
   session_dir="$TARGET_HOME/state/omp-sessions"
   pointer="$TARGET_HOME/state/.omp-session"
@@ -243,8 +258,10 @@ remote_omp_delivery_binding() { # <id>
   primary_marker="$TARGET_HOME/state/.omp-primary-extension-loaded"
   fm_omp_primary_marker_read "$primary_marker" \
     || remote_omp_delivery_refuse "OMP primary extension readiness is unavailable or malformed"
-  [ "$FM_OMP_MARKER_VERSION" = "$expected_version" ] \
-    || remote_omp_delivery_refuse "loaded OMP primary extension does not match its tracked closure"
+  if [ "$FM_OMP_MARKER_VERSION" != "$expected_version" ]; then
+    { [ "$mode" = restart-persist ] && remote_omp_prior_closure_explained "$expected_version"; } \
+      || remote_omp_delivery_refuse "loaded OMP primary extension does not match its tracked closure"
+  fi
   [ "$FM_OMP_MARKER_BUN" = "$(fm_meta_get "$REMOTE_ENDPOINT_META" omp_bun)" ] \
     && [ "$FM_OMP_MARKER_BIN" = "$(fm_meta_get "$REMOTE_ENDPOINT_META" omp_bin)" ] \
     || remote_omp_delivery_refuse "loaded OMP primary extension does not match the endpoint launch identity"
@@ -432,7 +449,7 @@ cmd_relaunch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 _delivery_mode=${3:-} reconcile_mode=${4:-} reconcile_id=${5:-} harness relay_body meta
+  local id=$1 message=$2 delivery_mode=${3:-} reconcile_mode=${4:-} reconcile_id=${5:-} harness relay_body meta
   local send_args=()
   if [ "$reconcile_mode" = reconcile ]; then send_args=(--reconcile-delivery "$reconcile_id"); fi
   validate_id "$id"
@@ -451,11 +468,16 @@ cmd_send() {
       || remote_omp_delivery_refuse "relay request lacks the parent-owned from-firstmate carrier"
     fm_operational_input_body "$message" relay_body \
       || remote_omp_delivery_refuse "relay request carrier cannot be parsed"
+    if [ "$delivery_mode" = restart-persist ] \
+      && ! [[ "$relay_body" =~ ^corr=[[:xdigit:]]{16}[[:space:]]+[^/[:space:]] ]]; then
+      remote_omp_delivery_refuse "restart persist request lacks the canonical parent correlation"
+    fi
     if [[ "$relay_body" = /* ]]; then
       remote_omp_delivery_refuse "relay request lacks the canonical parent correlation"
     elif [[ "$relay_body" =~ ^corr=[[:xdigit:]]{16}[[:space:]]+(/.*)$ ]]; then
       relay_body=${BASH_REMATCH[1]}
     fi
+    remote_omp_delivery_binding "$id" "$delivery_mode"
     if [[ "$relay_body" = /* ]]; then
       # Slash commands retain the pre-inbox typed control path. In particular,
       # /exit must not be converted into a durable ordinary-text steer or carry
@@ -464,7 +486,6 @@ cmd_send() {
         "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "${send_args[@]}" "$relay_body"
       return
     fi
-    remote_omp_delivery_binding "$id"
     FM_SEND_RECONCILE_AUTH=1 FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
       FM_DATA_OVERRIDE="$CONTROL_DATA" FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE=1 \
       FM_SEND_OMP_INBOX_DURABLE_RESULT=1 \
@@ -710,7 +731,7 @@ case "${1:-}" in
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1" allow-markerless; state_value "$1" ;;
   beacon-age) shift; [ "$#" -eq 1 ] || usage; beacon_age "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
-  send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
+  send) shift; [ "$#" -eq 2 ] || { [ "$#" -eq 3 ] && [ "$3" = restart-persist ]; } || usage; cmd_send "$@" ;;
   reconcile-send) shift; [ "$#" -eq 3 ] || usage; cmd_reconcile_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;

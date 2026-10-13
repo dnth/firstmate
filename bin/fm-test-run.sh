@@ -174,7 +174,7 @@ family_for_basename() {
     fm-remote-doctor.test.sh|fm-remote-job.test.sh|fm-pending-reply-sleep-reconcile.test.sh|\
     fm-idle-sleep.test.sh|fm-remote-secondmate-sleep-reconcile.test.sh|\
     fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
-    fm-remote-secondmate-trace-context.test.sh|\
+    fm-remote-secondmate-trace-context.test.sh|fm-remote-secondmate-update-restart.test.sh|\
     fm-runpod-lifecycle.test.sh|fm-runpod-routing.test.sh|fm-runpod-pod-boot.test.sh|fm-runpod-omp-auth.test.sh|\
     fm-boat-lifecycle.test.sh|fm-boat-routing.test.sh|fm-boat-omp-auth.test.sh|fm-boat-lane-runner.test.sh|\
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
@@ -194,7 +194,7 @@ family_for_basename() {
     fm-grok-stop-live-e2e.test.sh|fm-omp-herdr-exit-live-e2e.test.sh|fm-omp-herdr-live-e2e.test.sh|\
     fm-omp-secondmate-live-e2e.test.sh|fm-omp-worker-tmux-live-e2e.test.sh|\
     fm-omp-compact-adviser-live-e2e.test.sh|\
-    fm-omp-primary-live-e2e.test.sh|\
+    fm-omp-primary-live-e2e.test.sh|fm-remote-omp-update-restart-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-inbox-doorbell-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-omp-branch-live-e2e.test.sh)
