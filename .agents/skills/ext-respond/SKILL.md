@@ -70,9 +70,9 @@ When you settle a decision that has a button post any other way, such as a typed
 Before composing a dedicated-channel reply, consult the [topic-thread contract](../../../docs/configuration.md#topic-threads-one-thread-per-request); the [emit header and help](../../../bin/fm-ext-emit.sh) own the title and state flags.
 
 - **Title the creating reply** with `<Project> · <2-5 word topic>` (for example `Aceh · ingestion status`), especially when the request is vague, long, or procedural.
-- **Mark needs-you** when the reply asks the captain to decide; the marker clears on its own once every decision post in the thread is answered.
+- **Mark needs-you** when the reply asks the captain to decide.
 - **Mark done** with the terminal answer or final.
-- **Clear the marker** when work resumes on a question that had no decision post.
+- **Clear the marker** when work resumes on an independent question, as defined by the topic-thread contract above.
 
 Titles are public: the same safety rules as reply text apply (no task ids, branch names, paths, hostnames, or secrets).
 

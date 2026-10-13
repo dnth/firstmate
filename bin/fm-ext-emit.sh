@@ -13,9 +13,8 @@
 # replace its name. Over-long, multi-line, or unsafe titles are
 # refused here instead of silently cut. --thread-state renames the existing
 # topic thread: needs-you prefixes "❓ ", done prefixes "✅ ", none removes the
-# prefix. Renames never block delivery; the poster applies them best effort,
-# records each outcome, and retries a failed one (docs/configuration.md
-# "Topic threads" owns the contract, including the needs-you auto-clear).
+# prefix. docs/configuration.md "Topic threads" owns rename eligibility,
+# best-effort delivery, auto-clear, and retry behaviour.
 #
 # Writes state/ext-outbox/<slug>.<kind>.<generation>.json once. Re-emitting the
 # same identity is a no-op success. A posting marker without a receipt is

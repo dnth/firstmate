@@ -599,7 +599,11 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     ``topic_name`` is the name Discord was last seen showing, ``thread_state``
     the state last asked for and ``state_at`` when it was asked, and
     ``rename`` the outcome of the last attempt to show that state, so a failed
-    rename stays visible and can be retried.
+    rename stays visible and can be retried. It keeps ``name``, ``at``, and
+    ``outcome`` (applied, unchanged, or failed); a failure also keeps ``error``,
+    ``retryable``, and ``attempts`` (consecutive failed attempts).
+    ``marked_open`` records whether the marker was associated with an open
+    decision, preserving that association when a reminder postdates it.
 
     A private state artifact beside the outbox, written with the same guards
     the shell publication helper enforces: a regular single-link file at mode
@@ -1046,10 +1050,9 @@ def reconcile_thread_states(
 ) -> list[str]:
     """The periodic pass over this home's own topic threads.
 
-    A needs-you thread whose decision posts are now all closed, with none
-    asked after that needs-you was marked, is cleared; a retryable failed
-    rename is retried. docs/configuration.md's topic-thread contract owns
-    the rule. Returns the threads it tried to rename. Never raises.
+    docs/configuration.md's topic-thread contract owns auto-clear and retry
+    eligibility. Returns the threads it tried to rename. The watcher catches
+    failures so this pass cannot interrupt reply delivery.
     """
     home = home or firstmate_home()
     directory = state_dir(home) / "ext-outbox"
