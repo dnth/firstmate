@@ -1421,6 +1421,39 @@ test_23_rename_failures_are_recorded_and_retried() {
   pass "23 rename outcomes are recorded and failures retried"
 }
 
+# --- 24. a reminder marked while a decision is open clears with it ----------
+#
+# Firstmate may re-mark needs-you after a decision post, as a reminder, while
+# that decision is still open. The marker belongs to that open decision, so
+# resolving it still clears the thread even though the reminder came later
+# than the post.
+
+test_24_reminders_while_a_decision_is_open_clear_with_it() {
+  local home slug out
+  home="$TMP_ROOT/c24"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "One call for you below." "Aceh · long chats" "" >/dev/null
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  open_decision_key "$home" north
+  emit_decision_post "$home" "$RID" 2 north
+  deliver "$home" >/dev/null
+  FM_EXT_NOW_OVERRIDE=$(( $(date +%s) + 120 )) \
+    emit_as "$home" "$RID" followup 3 "Reminder: the route call above still needs you." "" "needs-you" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "the reminder must mark the thread needs-you"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "an open decision must keep the reminder's marker: $out"
+  resolve_decision_key "$home" north North
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
+    "resolving the decision the reminder was about must clear the marker"
+  jq -e '.thread_state == "none"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "the cleared reminder must be recorded: $(cat "$home/state/ext-outbox/$slug.thread.json")"
+  pass "24 a reminder marked while a decision is open clears with it"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -1446,5 +1479,6 @@ test_20_button_requests_mark_their_thread
 test_21_resolving_the_last_decision_clears_the_marker
 test_22_drifted_names_reconcile_with_discord
 test_23_rename_failures_are_recorded_and_retried
+test_24_reminders_while_a_decision_is_open_clear_with_it
 
 echo "all fm-ext-topic-threads tests passed"

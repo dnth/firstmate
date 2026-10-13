@@ -897,7 +897,8 @@ Before trusting a stored name that already matches, the poster reads the name Di
 Both the request that created the thread and a later request of any origin that arrived inside it - a typed message, a decision-button click, or a `/fm` command - may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.
 Only a thread this home created in the dedicated channel is renamed; a captain-made thread, a non-dedicated channel, or a DM is never renamed, and once a thread's record has aged out it can no longer be identified and is left alone.
 A `needs-you` thread clears itself: once every decision post in it is closed in the ledgers - a click Firstmate recorded, a typed answer, or a captain call answered - the gateway's periodic decision sweep renames it to the bare name, so Firstmate never has to emit a separate `none`.
-Two open decisions keep the marker until the second one closes, and a `needs-you` marked after the thread's newest decision post was asked is a newer question that stands until a reply clears it.
+Two open decisions keep the marker until the second one closes, and a `needs-you` marked while a decision post in the thread is still open, such as a reminder, belongs to that decision and clears with it.
+Only a `needs-you` marked when no decision post in the thread was open and after its newest one was asked is a newer question that stands until a reply clears it.
 [`bin/fm-ext-decision.sh`](../bin/fm-ext-decision.sh) `threads` owns which decision posts count as open.
 A rename failure, including a rate limit, is logged, recorded, and never blocks or loses the reply.
 The record keeps the wanted state and the failure; the next reply in that thread retries any failed rename, and the periodic sweep also retries one that did not fail permanently.

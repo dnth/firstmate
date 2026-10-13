@@ -496,7 +496,8 @@ def _read_thread_record(path: Path) -> dict:
             "creator": creator if isinstance(creator, str) else "",
             "creating_title": creating if isinstance(creating, str) else "",
             "state_at": _epoch(state_at),
-            "rename": rename if isinstance(rename, dict) else {}}
+            "rename": rename if isinstance(rename, dict) else {},
+            "marked_open": data.get("marked_open") is True}
 
 
 def _epoch(value: object) -> float:
@@ -586,7 +587,8 @@ def save_request_thread(payload: dict, thread_id: str, home: Path,
 def save_thread_record(path: Path, request_id: object, thread_id: str,
                        topic_name: str = "", thread_state: str = "",
                        creating_title: str = "", creator: str = "",
-                       state_at: float | None = None, rename: dict | None = None) -> None:
+                       state_at: float | None = None, rename: dict | None = None,
+                       marked_open: bool | None = None) -> None:
     """Write one thread record atomically, preserving any prior unset field.
 
     ``creator`` is the provenance that authorises a later rename: ``firstmate``
@@ -632,6 +634,8 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     kept_rename = rename if rename is not None else prior.get("rename")
     if isinstance(kept_rename, dict) and kept_rename:
         record["rename"] = kept_rename
+    if (marked_open if marked_open is not None else prior.get("marked_open")) is True:
+        record["marked_open"] = True
     body = json.dumps(record)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
@@ -887,6 +891,7 @@ def apply_thread_state(
     rename_thread=None,
     thread_owner=None,
     read_thread=None,
+    marked_open: bool | None = None,
 ) -> str:
     """Show ``state`` on one recorded topic thread and record the outcome.
 
@@ -948,7 +953,7 @@ def apply_thread_state(
                            topic_name="" if rename["outcome"] == "failed" else want,
                            thread_state=state, creator=provenance,
                            creating_title=recorded.get("creating_title") or "",
-                           state_at=state_at, rename=rename)
+                           state_at=state_at, rename=rename, marked_open=marked_open)
     except Exception as err:
         print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
     return rename["outcome"]
@@ -990,7 +995,7 @@ def maybe_rename_topic_thread(
         recorded = load_thread_record_by_id(thread_id, home)
         if not recorded:
             return thread_id
-    state_at = None
+    state_at = marked_open = None
     if state is None:
         if (recorded.get("rename") or {}).get("outcome") != "failed":
             return thread_id
@@ -999,18 +1004,27 @@ def maybe_rename_topic_thread(
             return thread_id
     else:
         state_at = _epoch(payload.get("recorded_at")) or time.time()
+        # A needs-you marked while a decision post in the thread is still
+        # open belongs to that decision, however late the reminder came.
+        marked_open = False
+        if state == "needs-you":
+            try:
+                marked_open = decision_threads(home, thread_id).get(thread_id, {}).get("open", 0) > 0
+            except Exception:
+                marked_open = False
     apply_thread_state(recorded, state, home, state_at=state_at, rename_thread=rename_thread,
-                       thread_owner=thread_owner, read_thread=read_thread)
+                       thread_owner=thread_owner, read_thread=read_thread, marked_open=marked_open)
     return thread_id
 
 
-def decision_threads(home: Path) -> dict[str, dict]:
+def decision_threads(home: Path, thread_id: str = "") -> dict[str, dict]:
     """Each thread holding a decision post: {open, closed, last_posted_at}.
 
-    Read from ``bin/fm-ext-decision.sh threads``; {} when it cannot be read,
-    which clears nothing.
+    Read from ``bin/fm-ext-decision.sh threads``, only for ``thread_id`` when
+    given; {} when it cannot be read, which clears nothing.
     """
-    result = subprocess.run([str(_decision_cli()), "threads"], check=False, env=_env_for(home),
+    args = [str(_decision_cli()), "threads"] + (["--thread", thread_id] if thread_id else [])
+    result = subprocess.run(args, check=False, env=_env_for(home),
                             capture_output=True, text=True)
     if result.returncode != 0:
         return {}
@@ -1058,9 +1072,11 @@ def reconcile_thread_states(
                 summaries = decision_threads(home)
             summary = summaries.get(record["topic_thread_id"])
             if (summary and summary["open"] == 0 and summary["closed"] > 0
-                    and record.get("state_at", 0) <= summary["last_posted_at"]):
+                    and (record.get("marked_open")
+                         or record.get("state_at", 0) <= summary["last_posted_at"])):
                 apply_thread_state(record, "none", home, state_at=time.time(),
-                                   rename_thread=rename_thread, read_thread=read_thread)
+                                   rename_thread=rename_thread, read_thread=read_thread,
+                                   marked_open=False)
                 touched.append(record["topic_thread_id"])
                 continue
         failed = record.get("rename") or {}
