@@ -89,20 +89,33 @@ waiting_pin_now() {
 # (truncated, N chars total - use show <id> --full ...)`), which must never
 # reach the public pin: it leaks the task id and a command. Held calls
 # therefore always read the full title here instead of reusing the listed
-# one; the renderer's 200-character call-line cap shortens it cleanly. Fails
-# when the read fails so the refresh defers rather than publishing a leak or
-# a false all-clear.
+# one; the renderer's 200-character call-line cap shortens it cleanly.
+# tasks-axi folds typed links (--report, --pr) into the stored title prose,
+# so strip those artifact suffixes plus the `(repo: ...)` tag here: artifact
+# paths and links must not become decision text. A final backstop drops any
+# remaining path-like token. Fails when the read fails so the refresh defers
+# rather than publishing a leak or a false all-clear.
 waiting_pin_title() {
-  local data=$1 id=$2 show_output raw
+  local data=$1 id=$2 show_output raw links
   show_output=$(fm_backlog_row_show "$data" "$id" --full 2>/dev/null) || return 1
   raw=$(printf '%s\n' "$show_output" | sed -n 's/^  title: //p' | head -1) || return 1
   [ -n "$raw" ] || return 1
+  links=$(printf '%s\n' "$show_output" | sed -n 's/^  links: //p' | head -1) || return 1
   printf '%s' "$raw" | python3 -c '
-import json, sys
+import json, re, sys
 s = sys.stdin.read()
 value = json.loads(s) if s.startswith(chr(34)) else s
-print(value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " "), end="")
-' || return 1
+value = value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " ")
+value = re.sub(r"\s*\(repo:\s*[^)]+\)\s*$", "", value)
+links = sys.argv[1]
+links = json.loads(links) if links.startswith(chr(34)) else links
+pr_targets = [link[3:] for link in links.split(",") if link.startswith("pr:")]
+artifact = r"\((?:report|pr)\)\s+(?:https?://\S+|\S*/\S+|\S+\.md)"
+targets = [artifact, r"data/\S+?/report\.md"] + [re.escape(url) for url in pr_targets]
+value = re.sub(r"(?:\s+(?:" + "|".join(targets) + r"))+$", "", value)
+tokens = [t for t in value.split(" ") if not re.search(r"(?:data|state)/|/home/|\.md\b", t)]
+print(re.sub(r"\s+", " ", " ".join(tokens)).strip(), end="")
+' "$links" || return 1
 }
 
 # waiting_pin_due_title <due-rows> <id>: print the title the due report captured

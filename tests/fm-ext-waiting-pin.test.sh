@@ -185,6 +185,103 @@ SH
   [ "$(jq -r '.text' "$payload")" = "$out" ] || fail "published content must preserve the preview's single-line decisions"
   pass "1c multiline titles remain single decisions in previews and publications"
 }
+test_1d_artifact_suffixes_render_title_only() {
+  local home out title fake payload
+  home="$TMP_ROOT/c1d"
+  setup_home "$home"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add artrep1 "Inspect system prompt and tool descriptions; find room for optimization" --repo kcc-chatbot --report data/artrep1/report.md >/dev/null) \
+    || fail "artifact task must be created"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold artrep1 --reason "waiting on captain" --kind captain >/dev/null) \
+    || fail "artifact task must accept a captain hold"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add artpr1 "Approve the copy" --repo firstmate --pr https://github.com/o/r/pull/99 >/dev/null) \
+    || fail "PR-suffixed task must be created"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold artpr1 --reason "waiting on captain" --kind captain >/dev/null) \
+    || fail "PR-suffixed task must accept a captain hold"
+  hold_call "$home" plain1 "Decide the merge wording" "waiting on captain"
+  hold_call "$home" plainurl "Approve https://example.com release" "waiting on captain"
+  hold_call "$home" endurl "Review https://example.com" "waiting on captain"
+  for title in absrep otherart urlart plainparen plainrepo; do
+    hold_call "$home" "$title" "Legacy artifact title" "waiting on captain"
+  done
+  fake="$home/fakebin"
+  mkdir "$fake"
+  cat > "$fake/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = show ]; then
+  "$REAL_TASKS_AXI" "$@" | python3 -c '
+import json, sys
+titles = {
+    "absrep": "Approve absolute report (report) /home/captain/report.md (repo: firstmate)",
+    "otherart": "Approve other artifact (report) state/preview.html (repo: firstmate)",
+    "urlart": "Approve linked artifact (pr) https://github.com/o/r/pull/100 (repo: firstmate)",
+    "plainparen": "Review (production) https://example.com",
+    "plainrepo": "Check (repo: firstmate) handling",
+}
+for line in sys.stdin:
+    if line.startswith("  title: ") and sys.argv[1] in titles:
+        print("  title: " + json.dumps(titles[sys.argv[1]]))
+    else:
+        print(line, end="")
+' "$2"
+  exit "${PIPESTATUS[0]}"
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$fake/tasks-axi"
+  out=$(home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_EXT_NOW_OVERRIDE=100 "$REFRESH" content) || fail "content must succeed when configured"
+  assert_contains "$out" "- Inspect system prompt and tool descriptions; find room for optimization" "the report suffix must strip to the title alone"
+  assert_contains "$out" "- Approve the copy" "the PR suffix must strip to the title alone"
+  assert_contains "$out" "- Decide the merge wording" "a plain title must stay unchanged"
+  assert_contains "$out" "- Approve https://example.com release" "an ordinary URL inside a title must survive"
+  assert_contains "$out" "- Review https://example.com" "an ordinary trailing URL must survive"
+  for title in "Approve absolute report" "Approve other artifact" "Approve linked artifact"; do
+    printf '%s\n' "$out" | grep -Fx -- "- $title" >/dev/null || fail "artifact suffix must leave exactly the human title"
+  done
+  for title in "Review (production) https://example.com" "Check (repo: firstmate) handling"; do
+    printf '%s\n' "$out" | grep -Fx -- "- $title" >/dev/null || fail "ordinary parenthetical title text must survive"
+  done
+  case "$out" in
+    *"(pr)"*|*"pull/100"*|*"(report)"*|*"data/"*|*"state/"*|*"/home/"*|*".md"*|*"github.com/o/r/pull/99"*) fail "content must not leak artifact suffixes or paths: $out" ;;
+  esac
+  home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_EXT_NOW_OVERRIDE=100 "$REFRESH" refresh >/dev/null || fail "cleaned titles must publish"
+  payload=$(find "$home/state/ext-outbox" -name 'waiting-pin.*.json' | head -1)
+  [ "$(jq -r '.text' "$payload")" = "$out" ] || fail "published title cleaning must match the preview"
+  pass "1d artifact and PR suffixes render the title alone"
+}
+
+test_1e_path_like_tokens_never_render() {
+  local home out fake
+  home="$TMP_ROOT/c1e"
+  setup_home "$home"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add pathy1 "Review the draft" --kind captain >/dev/null) \
+    || fail "path-token task must be created"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold pathy1 --reason "waiting on captain" --kind captain >/dev/null) \
+    || fail "path-token task must accept a captain hold"
+  fake="$home/fakebin"
+  mkdir "$fake"
+  cat > "$fake/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = show ]; then
+  "$REAL_TASKS_AXI" "$@" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if line.startswith("  title: "):
+        print("  title: " + json.dumps("Review the draft (data/sneaky/report.md) [/home/captain/notes.md] (state/cache) state/cache [data/cache] notes.md"))
+    else:
+        print(line, end="")
+'
+  exit "${PIPESTATUS[0]}"
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$fake/tasks-axi"
+  out=$(home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" "$REFRESH" content) || fail "content must succeed when configured"
+  assert_contains "$out" "- Review the draft" "the human title words must survive backstop stripping"
+  case "$out" in
+    *"data/"*|*"state/"*|*"/home/"*|*".md"*) fail "content must never render a path-like token: $out" ;;
+  esac
+  pass "1e path-like tokens never reach the pin"
+}
 
 test_1_content_lists_calls_and_prs_without_leaks() {
   local home out
@@ -955,6 +1052,8 @@ test_20_long_overdue_title_keeps_marker
 
 test_1b_long_titles_render_cleanly_without_ids_or_commands
 test_1c_multiline_titles_remain_single_decisions
+test_1d_artifact_suffixes_render_title_only
+test_1e_path_like_tokens_never_render
  test_1_content_lists_calls_and_prs_without_leaks
 test_2_refresh_creates_then_edits_in_place
 test_3_deleted_message_recreated_once
