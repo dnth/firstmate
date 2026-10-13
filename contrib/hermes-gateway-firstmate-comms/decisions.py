@@ -56,6 +56,7 @@ _ACTION_ROW = 1
 _BUTTON = 2
 _STYLE_PRIMARY = 1
 _STYLE_SECONDARY = 2
+_STYLE_SUCCESS = 3
 _STYLE_DANGER = 4
 
 DISCUSS_LABEL = "Discuss"
@@ -90,15 +91,23 @@ def confirm_id(post_id: str, option: int) -> str:
 
 def components_for(decision: dict, disabled: bool = False) -> list[dict]:
     """The decision's buttons: one row of options, then the Discuss button.
-    An option that needs a confirmation click shows as a danger button.
+    The recommended option shows as a success button, even when it needs a
+    confirmation click. An option that needs a confirmation click shows as a
+    danger button.
     """
     key = decision["key"]
     options = []
     for option in decision["options"]:
+        if option.get("recommended"):
+            style = _STYLE_SUCCESS
+        elif option.get("confirm"):
+            style = _STYLE_DANGER
+        else:
+            style = _STYLE_SECONDARY
         options.append(
             {
                 "type": _BUTTON,
-                "style": _STYLE_DANGER if option.get("confirm") else _STYLE_SECONDARY,
+                "style": style,
                 "label": option["label"],
                 "custom_id": custom_id(key, option["id"]),
                 "disabled": disabled,

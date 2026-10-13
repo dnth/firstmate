@@ -949,7 +949,8 @@ A Discuss click on an open decision decides nothing and leaves the buttons on: i
 
 An option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible needs a second click.
 The first click answers with an ephemeral `Confirm: <label>?` and a Confirm button, and nothing is sent until that button is clicked; the request then carries the prompt, and Firstmate's record quotes it.
-Emit marks an option this way when the emitter declares `confirm`, and always when its label names such an action.
+At most one option per decision may be marked recommended (`recommended: true` in the decision file): its button renders green and its label is shown with a "⭐ " prefix, added once, while the stored label keeps that same shown text so the recorded answer quotes what the button showed.
+A recommended option that also needs confirmation still needs its second click; only its colour changes.
 A confirmed click from a standing-rule author is that author's explicit word for that one decision only, never standing authority, and merge authority stays where `AGENTS.md` puts it.
 
 Each post is bound to the lifecycle of its decision that was open when it was posted, so a captain call re-held or a worker key reopened for a new question is a different decision to it.

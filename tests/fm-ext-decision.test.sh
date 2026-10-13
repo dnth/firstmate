@@ -1199,6 +1199,82 @@ test_15_full_labels_keep_digits_and_overlaps_together() {
   pass "15 the longest full label prefix wins over trailing references, with ambiguity detection only in the fallback"
 }
 
+test_16_recommended_option_renders_green_with_a_single_star() {
+  local home payload out record rc long
+  home="$TMP_ROOT/c16"
+  setup_home "$home"
+  open_request "$home"
+  open_key "$home" pick
+  payload=$(emit_decision "$home" 1 '{"key":"'"$KEY"'","options":[
+    {"label":"North","recommended":true},{"label":"Merge it"}]}')
+  jq -e --arg key "$KEY" '.decision.key == $key
+    and .decision.options == [{"id":1,"label":"⭐ North","confirm":false,"recommended":true},{"id":2,"label":"Merge it","confirm":true}]' \
+    "$payload" >/dev/null || fail "the recommended payload lost its star or flags: $(cat "$payload")"
+  out=$(plugin_py "$home" "$payload" <<'PY'
+import json, sys
+import decisions
+payload = json.load(open(sys.argv[3]))
+print(json.dumps(decisions.components_for(payload["decision"])))
+PY
+) || fail "the renderer refused the recommended decision"
+  printf '%s' "$out" | jq -e --arg key "$KEY" '
+    .[0].components[0] == {"type":2,"style":3,"label":"⭐ North","custom_id":("fmd:" + $key + ":1"),"disabled":false}
+    and .[0].components[1] == {"type":2,"style":4,"label":"Merge it","custom_id":("fmd:" + $key + ":2"),"disabled":false}' \
+    >/dev/null || fail "the recommended button must be green and the other keeps its style: $out"
+  open_key "$home" confirm-rec
+  deliver "$home" "$POST"
+  payload=$(emit_decision "$home" 2 '{"key":"key:'"$TASK"':confirm-rec","options":[
+    {"label":"Merge it","confirm":true,"recommended":true},{"label":"Hold"}]}')
+  out=$(plugin_py "$home" "$payload" <<'PY'
+import json, sys
+import decisions
+payload = json.load(open(sys.argv[3]))
+print(json.dumps(decisions.components_for(payload["decision"])))
+PY
+) || fail "the renderer refused the confirm-plus-recommended decision"
+  printf '%s' "$out" | jq -e '.[0].components[0].style == 3 and .[0].components[1].style == 2' \
+    >/dev/null || fail "confirm-plus-recommended renders green and other options keep their styles: $out"
+  deliver "$home" 700000000000000031
+  out=$(click "$home" "fmd:key:$TASK:confirm-rec:1" "$CAPTAIN" 880000000000000101 700000000000000031)
+  assert_contains "$out" '{"text": "Confirm: ⭐ Merge it?", "confirm": "fmc:700000000000000031:1"}' \
+    "a confirm-plus-recommended option must still ask for a confirmation click"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmc:700000000000000031:1" "$CAPTAIN" 880000000000000102 700000000000000031)
+  assert_contains "$out" "Sent: ⭐ Merge it." "the confirmed recommended click was not sent"
+  record=$(button_request "$home" option)
+  [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "Firstmate found the recommended decision no longer open"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
+  printf '%s' "$out" | jq -e --arg expected "✅ ⭐ Merge it chosen by Dana <t:1791720000:f>" '.content == $expected' >/dev/null \
+    || fail "the recorded answer label must match the shown label: $out"
+  open_key "$home" pre-starred
+  deliver "$home" 700000000000000032
+  payload=$(emit_decision "$home" 3 '{"key":"key:'"$TASK"':pre-starred","options":[
+    {"label":"⭐ North","recommended":true},{"label":"South"}]}')
+  jq -e '[.decision.options[0].label] == ["⭐ North"]' "$payload" >/dev/null \
+    || fail "a pre-starred label must not be doubled: $(cat "$payload")"
+  open_key "$home" two-rec
+  set +e
+  printf '{"key":"key:%s:two-rec","options":[{"label":"North","recommended":true},{"label":"South","recommended":true}]}' \
+    "$TASK" > "$home/decision.json"
+  printf 'Pick one' > "$home/post.txt"
+  home_env "$home" "$EMIT" --request-id "discord:$GUILD:$CHANNEL:$CHANNEL:$REQUEST_MESSAGE" \
+    --kind followup --generation 4 --text-file "$home/post.txt" --decision-file "$home/decision.json" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "emit accepted two recommended options"
+  open_key "$home" star-limit
+  long=$(printf 'x%.0s' $(seq 1 79))
+  set +e
+  printf 'Pick one' > "$home/post.txt"
+  printf '{"key":"key:%s:star-limit","options":[{"label":"%s","recommended":true},{"label":"South"}]}' \
+    "$TASK" "$long" > "$home/decision.json"
+  home_env "$home" "$EMIT" --request-id "discord:$GUILD:$CHANNEL:$CHANNEL:$REQUEST_MESSAGE" \
+    --kind followup --generation 5 --text-file "$home/post.txt" --decision-file "$home/decision.json" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "emit accepted a recommended label whose star prefix exceeds the length limit"
+  pass "16 the recommended option renders green with a single star, still confirms when risky, and emit refuses two recommended options"
+}
+
 test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records
@@ -1216,3 +1292,5 @@ test_13_published_requests_retry_the_original_identity
 test_14_audit_metadata_does_not_match_options
 
 test_15_full_labels_keep_digits_and_overlaps_together
+
+test_16_recommended_option_renders_green_with_a_single_star
