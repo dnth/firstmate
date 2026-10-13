@@ -837,7 +837,7 @@ The optional pinned "Waiting on you" message lists actionable captain-held items
 Captain calls must have an open board row, a nonempty captain-hold reason, no blocker, and no future hold date.
 PR URLs come from task metadata for open board rows, or retained landing records awaiting the captain's merge word; refresh does not query the forge for readiness.
 The message renders each captain call as a single title line without internal task IDs or tool-generated help, includes an updated time in UTC, abbreviates long titles, and omits overflow items to fit Discord's 2000-character limit.
-Decision titles strip trailing report and PR artifacts and the trailing `(repo: ...)` tag, then discard tokens containing `data/`, `state/`, `/home/`, or a `.md` path, including tokens enclosed in punctuation.
+Decision titles strip trailing report and PR artifacts and the trailing `(repo: ...)` tag, then discard tokens containing `data/`, `state/`, `/home/`, or a `.md` path, including tokens enclosed in punctuation, and a call marked due for review is cleaned the same way from the title its due report captured.
 Ordinary title URLs and parenthetical text remain; recorded PR URLs still appear in the separate merge section.
 `bin/fm-ext-waiting-pin.sh` owns refresh and preview command syntax in its header and help.
 Refresh queues a dedicated waiting-pin snapshot in the local outbox; the gateway edits the recorded message, recreates a deleted message, or restores a removed pin when it delivers that snapshot.
@@ -847,7 +847,7 @@ Best-effort refresh runs through todo projection, captain hold/answer/reconcilia
 Matching pending content is skipped; other publication is rate-limited, including reconciliation of unchanged delivered content.
 A changed snapshot suppressed by the interval is not queued for later: another refresh is needed, and deletion or unpinning is detected only during delivery.
 When the bot lacks Manage Messages, the message stays as a single edited post and the shortfall is recorded in `state/ext-waiting-pin.json`.
-The [waiting-pin regression test](../tests/fm-ext-waiting-pin.test.sh) covers artifact suffix and path removal, ordinary URL and parenthetical preservation, long and multiline titles, publication, destination checks, competing callers, edit/recreation, and permission fallback.
+The [waiting-pin regression test](../tests/fm-ext-waiting-pin.test.sh) covers artifact suffix and path removal, due-title cleaning from the due report's own snapshot, ordinary URL and parenthetical preservation, long and multiline titles, publication, destination checks, competing callers, edit/recreation, and permission fallback.
 For Hermes 0.20.0 and newer, install the gateway plugin into a dedicated gateway profile, never the crewmate TUI profile; the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md) owns profile installation, compatibility verification, and destination resolution.
 Crewmate Hermes still launches as `hermes chat --tui`.
 The `ext-respond` skill owns drain, classification, lifecycle action, and local emit.

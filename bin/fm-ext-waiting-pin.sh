@@ -83,28 +83,25 @@ waiting_pin_now() {
   printf '%s\n' "$now"
 }
 
-# waiting_pin_title <data> <id>: print the task's full title from an exact
-# `show --full` read, decoded and normalized to one pin line. The board
-# listing truncates long titles with a tool-generated helper (`...
-# (truncated, N chars total - use show <id> --full ...)`), which must never
-# reach the public pin: it leaks the task id and a command. Held calls
-# therefore always read the full title here instead of reusing the listed
-# one; the renderer's 200-character call-line cap shortens it cleanly.
-# tasks-axi folds typed links (--report, --pr) into the stored title prose,
-# so strip those artifact suffixes plus the `(repo: ...)` tag here: artifact
-# paths and links must not become decision text. A final backstop drops any
-# remaining path-like token. Fails when the read fails so the refresh defers
+# waiting_pin_sanitize_title <raw> <links> [plain]: print <raw> cleaned into one
+# pin line. The single owner of pin title cleaning, so the held-call read and
+# the due-call snapshot can never disagree about what a public title may
+# contain. <raw> is the title exactly as its reader produced it: the
+# `show --full` read prints it JSON-quoted only when the value needs it, while a
+# due-report row carries plain text, selected by a non-empty <plain> so a plain
+# title that merely opens with a quote is not misread as JSON.
+# tasks-axi folds typed links (--report, --pr) into the stored title prose and
+# records them in <links>, so strip those artifact suffixes, the URLs of
+# <links> `pr:` targets, and the `(repo: ...)` tag here: artifact paths and
+# links must not become decision text. A final backstop drops any remaining
+# path-like token. Fails when the title cannot be cleaned, so the refresh defers
 # rather than publishing a leak or a false all-clear.
-waiting_pin_title() {
-  local data=$1 id=$2 show_output raw links
-  show_output=$(fm_backlog_row_show "$data" "$id" --full 2>/dev/null) || return 1
-  raw=$(printf '%s\n' "$show_output" | sed -n 's/^  title: //p' | head -1) || return 1
-  [ -n "$raw" ] || return 1
-  links=$(printf '%s\n' "$show_output" | sed -n 's/^  links: //p' | head -1) || return 1
+waiting_pin_sanitize_title() {  # <raw> <links> [plain]
+  local raw=$1 links=${2-} plain=${3-}
   printf '%s' "$raw" | python3 -c '
 import json, re, sys
 s = sys.stdin.read()
-value = json.loads(s) if s.startswith(chr(34)) else s
+value = s if sys.argv[2] else (json.loads(s) if s.startswith(chr(34)) else s)
 value = value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " ")
 value = re.sub(r"\s*\(repo:\s*[^)]+\)\s*$", "", value)
 links = sys.argv[1]
@@ -115,13 +112,31 @@ targets = [artifact, r"data/\S+?/report\.md"] + [re.escape(url) for url in pr_ta
 value = re.sub(r"(?:\s+(?:" + "|".join(targets) + r"))+$", "", value)
 tokens = [t for t in value.split(" ") if not re.search(r"(?:data|state)/|/home/|\.md\b", t)]
 print(re.sub(r"\s+", " ", " ".join(tokens)).strip(), end="")
-' "$links" || return 1
+' "$links" "$plain"
+}
+
+# waiting_pin_title <data> <id>: print the task's full title from an exact
+# `show --full` read, cleaned by waiting_pin_sanitize_title. The board listing
+# truncates long titles with a tool-generated helper (`... (truncated, N chars
+# total - use show <id> --full ...)`), which must never reach the public pin: it
+# leaks the task id and a command. Held calls therefore always read the full
+# title here instead of reusing the listed one; the renderer's 200-character
+# call-line cap shortens it cleanly. Fails when the read fails so the refresh
+# defers rather than publishing a leak or a false all-clear.
+waiting_pin_title() {
+  local data=$1 id=$2 show_output raw links
+  show_output=$(fm_backlog_row_show "$data" "$id" --full 2>/dev/null) || return 1
+  raw=$(printf '%s\n' "$show_output" | sed -n 's/^  title: //p' | head -1) || return 1
+  [ -n "$raw" ] || return 1
+  links=$(printf '%s\n' "$show_output" | sed -n 's/^  links: //p' | head -1) || return 1
+  waiting_pin_sanitize_title "$raw" "$links"
 }
 
 # waiting_pin_due_title <due-rows> <id>: print the title the due report captured
 # for <id>, from the same read that marked it due, so the marker is never paired
-# with a title read from a later snapshot. Prints nothing for a call the report
-# does not carry.
+# with a title read from a later snapshot. The caller cleans it with
+# waiting_pin_sanitize_title. Prints nothing for a call the report does not
+# carry.
 waiting_pin_due_title() {  # <due-rows> <id>
   local rows=$1 want=$2 id title
   while IFS=$(printf '\t') read -r id _ title _; do
@@ -136,20 +151,24 @@ EOF_DUE_TITLE
 
 # waiting_pin_board <data>: print the message body lines from durable board
 # records only. Captain calls come from actionable open captain-hold annotations.
+# A call the due report marks keeps that report's title, and every title is
+# cleaned by waiting_pin_sanitize_title; the due call's typed links come from the
+# same board listing that produced the call list, so no extra read is added.
 # Prints nothing when there is nothing waiting.
 waiting_pin_board() {
-  local data=$1 listing ids today id title due_rows due_title
+  local data=$1 listing ids today id links title due_rows due_title
   today=$(date -u '+%Y-%m-%d') || return 1
-  listing=$(FM_TASKS_AXI_TIMEOUT=10 fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked) || return 1
-  ids=$(axi_rows tasks "$listing" rows id hold_kind hold_reason hold_until blocked state | awk -F '\t' -v today="$today" '
+  listing=$(FM_TASKS_AXI_TIMEOUT=10 fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked,links) || return 1
+  ids=$(axi_rows tasks "$listing" rows id hold_kind hold_reason hold_until blocked state links | awk -F '\t' -v today="$today" '
     ($6 == "queued" || $6 == "in_flight") && $2 == "captain" && $3 != "" && $3 != "null" && $3 != "-" && $5 == "no" &&
       ($4 == "" || $4 == "null" || $4 == "-" || $4 <= today) {
-        print $1
+        print $1 "\t" $7
       }') || return 1
   due_rows=$(fm_run_timed 20 "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null) || due_rows=
-  while IFS= read -r id; do
+  while IFS=$(printf '\t') read -r id links; do
     [ -n "$id" ] || continue
     if due_title=$(waiting_pin_due_title "$due_rows" "$id"); then
+      due_title=$(waiting_pin_sanitize_title "$due_title" "$links" plain) || return 1
       printf 'CALL %s\t%s (due for review)\n' "$id" "$due_title"
       continue
     fi

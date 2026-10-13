@@ -74,6 +74,21 @@ record_pr() {  # <home> <id> <url>
   printf 'window=test\npr=%s\n' "$url" > "$home/state/$id.meta"
 }
 
+# make_due_call <home> <id> <title> [tasks-axi add flags...]: create a
+# captain-held call whose review-by date has already passed, so the due report
+# marks it due for review.
+make_due_call() {  # <home> <id> <title> [add flags...]
+  local home=$1 id=$2 title=$3
+  shift 3
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add "$id" "$title" --kind captain "$@" >/dev/null) \
+    || fail "tasks-axi add $id must succeed"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi hold "$id" --reason "waiting on captain" --kind captain >/dev/null) \
+    || fail "tasks-axi hold $id must succeed"
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n' > "$home/$id.body"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi update "$id" --body-file "$home/$id.body" >/dev/null) \
+    || fail "tasks-axi update $id must record the overdue body"
+}
+
 # Run the poster's waiting-pin deliver against a stubbed Discord edge.
 # STUB_MODE: normal | missing-pin | gone (404 on edit).
 stub_deliver() {  # <home> <payload> <mode>: prints the deliver verdict
@@ -1047,6 +1062,124 @@ test_20_long_overdue_title_keeps_marker() {
   pass "20 long overdue titles retain their marker inside the call-line cap"
 }
 
+test_21_due_titles_pass_through_the_pin_sanitizer() {
+  local home fake out row line
+  # A due call whose stored title carries typed-link artifacts is exactly the
+  # live leak: the due path rendered the title without the cleaning the held
+  # path applies. The marked forms come from a real board row, the bare forms
+  # from `--report`/`--pr` link folds.
+  home="$TMP_ROOT/c21a"
+  setup_home "$home"
+  make_due_call "$home" due-markers \
+    "Inspect the system prompt; find room for optimization (report) data/due-markers/report.md (pr) https://github.com/o/r/pull/55"
+  out=$(home_env "$home" env FM_CAPTAIN_HOLD_TODAY=2026-08-16 "$REFRESH" content) \
+    || fail "marked due content must render"
+  line=$(printf '%s\n' "$out" | grep '^- ')
+  [ "$line" = "- Inspect the system prompt; find room for optimization (due for review)" ] \
+    || fail "a due title must render sanitized with its marker: $line"
+  home="$TMP_ROOT/c21b"
+  setup_home "$home"
+  make_due_call "$home" due-links "Approve the copy" \
+    --repo kcc-chatbot --report data/due-links/report.md --pr https://github.com/o/r/pull/55
+  out=$(home_env "$home" env FM_CAPTAIN_HOLD_TODAY=2026-08-16 "$REFRESH" content) \
+    || fail "linked due content must render"
+  line=$(printf '%s\n' "$out" | grep '^- ')
+  [ "$line" = "- Approve the copy (due for review)" ] \
+    || fail "a due title must strip folded typed links: $line"
+  pass "21 due titles are sanitized exactly like held titles"
+}
+
+test_22_due_repo_tag_never_reaches_the_pin() {
+  local home fake out row line
+  # The board parser lifts a trailing `(repo: ...)` tag into the row's repo
+  # field, so a title carrying all three artifacts reaches a pin line only
+  # through the read that carries the title, exactly as test_1d's fake show
+  # already models for the held path. The due report is the due path's title
+  # source, so its own read is what this fixture stands in for.
+  home="$TMP_ROOT/c22repo"
+  setup_home "$home"
+  hold_call "$home" due-repo "Approve the copy" "waiting on captain"
+  fake="$home/fakebin"
+  mkdir "$fake"
+  row=$(printf 'due-repo\tqueued\tcaptain\twaiting on captain\t-\tno\t%s\t%s' \
+    "Approve the copy (report) data/due-repo/report.md (pr) https://github.com/o/r/pull/55 (repo: kcc-chatbot)" \
+    "$(printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n' | base64 | tr -d '\n')")
+  cat > "$fake/node" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    --input-type=module)
+      printf '%s\n' '$row'
+      exit 0
+      ;;
+  esac
+done
+exec "\$REAL_NODE_BIN" "\$@"
+SH
+  chmod +x "$fake/node"
+  out=$(home_env "$home" env PATH="$fake:$BASE_PATH" REAL_NODE_BIN="$NODE_BIN" FM_CAPTAIN_HOLD_TODAY=2026-08-16 "$REFRESH" content) \
+    || fail "repo-tagged due content must render"
+  line=$(printf '%s\n' "$out" | grep '^- ')
+  [ "$line" = "- Approve the copy (due for review)" ] \
+    || fail "a due title must strip its repo tag too: $line"
+  pass "22 a due title carrying a repo tag renders sanitized"
+}
+
+test_23_fresh_titles_keep_their_existing_sanitization() {
+  local home out
+  home="$TMP_ROOT/c23"
+  setup_home "$home"
+  hold_call "$home" fresh-markers \
+    "Inspect the system prompt; find room for optimization (report) data/fresh-markers/report.md (pr) https://github.com/o/r/pull/55" \
+    "waiting on captain"
+  out=$(home_env "$home" env FM_CAPTAIN_HOLD_TODAY=2026-08-16 "$REFRESH" content) \
+    || fail "fresh content must render"
+  printf '%s\n' "$out" | grep -Fx -- "- Inspect the system prompt; find room for optimization" >/dev/null \
+    || fail "a not-yet-due title must keep rendering sanitized: $out"
+  case "$out" in
+    *"(report)"*|*"(pr)"*|*"data/"*|*".md"*|*"pull/55"*) fail "a fresh title must not leak artifacts: $out" ;;
+  esac
+  pass "23 not-yet-due titles render sanitized exactly as before"
+}
+
+test_24_due_title_comes_from_the_due_report_snapshot() {
+  local home fake out row line
+  home="$TMP_ROOT/c24"
+  setup_home "$home"
+  hold_call "$home" snap-due "Captured choice (report) data/snap-due/report.md" "waiting on captain"
+  # The stored title changes after the due report captured it: the due line must
+  # keep the captured title, sanitized, rather than a title read later.
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi update snap-due --title "Later choice" >/dev/null) \
+    || fail "the stored title must change after the call was captured"
+  fake="$home/fakebin"
+  mkdir "$fake"
+  row=$(printf 'snap-due\tqueued\tcaptain\twaiting on captain\t-\tno\t%s\t%s' \
+    "Captured choice (report) data/snap-due/report.md" \
+    "$(printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n' | base64 | tr -d '\n')")
+  cat > "$fake/node" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    --input-type=module)
+      printf '%s\n' '$row'
+      exit 0
+      ;;
+  esac
+done
+exec "\$REAL_NODE_BIN" "\$@"
+SH
+  chmod +x "$fake/node"
+  out=$(home_env "$home" env PATH="$fake:$BASE_PATH" REAL_NODE_BIN="$NODE_BIN" FM_CAPTAIN_HOLD_TODAY=2026-08-16 "$REFRESH" content) \
+    || fail "snapshot content must render"
+  line=$(printf '%s\n' "$out" | grep '^- ')
+  [ "$line" = "- Captured choice (due for review)" ] \
+    || fail "the due line must carry the captured title, sanitized: $line"
+  case "$out" in
+    *"Later choice"*) fail "a title read after the due report replaced the snapshot: $out" ;;
+  esac
+  pass "24 a due line keeps the title captured by the due report"
+}
+
 test_19_due_timeout_keeps_calls_visible_and_releases_claim
 test_20_long_overdue_title_keeps_marker
 
@@ -1078,5 +1211,10 @@ test_16_competing_pin_posters_share_one_claim
 
 test_17_refresh_capture_and_publication_are_serialized
 test_18_due_review_marks_batch_without_hiding_fresh
+
+test_21_due_titles_pass_through_the_pin_sanitizer
+test_22_due_repo_tag_never_reaches_the_pin
+test_23_fresh_titles_keep_their_existing_sanitization
+test_24_due_title_comes_from_the_due_report_snapshot
 
 echo "all fm-ext-waiting-pin tests passed"
