@@ -100,6 +100,11 @@ emit_as() {
   fi
 }
 
+# The stand-in Discord edge for renames. An extra {"kind":"actual",
+# "thread_id":...,"name":...} argument is the name Discord really shows for
+# that thread (a manual rename); without one Discord shows the recorded name.
+# {"kind":"rename-fail","outcome":"transient"|"permanent"} makes every rename
+# fail with that classified outcome.
 deliver() {
   local home=$1
   shift
@@ -112,6 +117,8 @@ home = Path(sys.argv[1])
 os.environ["FM_HOME"] = str(home)
 extra = [json.loads(a) for a in sys.argv[2:]]
 threads = {item["request"]: item for item in extra if item.get("kind") == "thread"}
+actual = {item["thread_id"]: item["name"] for item in extra if item.get("kind") == "actual"}
+failing = [item["outcome"] for item in extra if item.get("kind") == "rename-fail"]
 sends = []
 def fake_create(payload, name):
     item = threads.get(payload["request_id"], {})
@@ -126,8 +133,16 @@ def send(payload):
     return {"ok": True, "discord_message_id": "9%09d" % len(posted)}
 renames = []
 def fake_rename(thread_id, name):
+    if failing:
+        raise outbox_poster.DiscordSendError(failing[0], "discord HTTP 429" if failing[0] == "transient"
+                                             else "discord HTTP 403", 429 if failing[0] == "transient" else 403)
     renames.append({"rename": [thread_id, name]})
     return {"ok": True, "thread_id": thread_id}
+def fake_read(thread_id):
+    if thread_id in actual:
+        return actual[thread_id]
+    return outbox_poster.load_thread_record_by_id(thread_id, home).get("topic_name", "")
+outbox_poster.discord_thread_name = fake_read
 results = outbox_poster.drain_outbox(send=send, home=home, create_thread=fake_create, rename_thread=fake_rename)
 print("results=" + ",".join(sorted(results)))
 for entry in sends:
@@ -137,6 +152,68 @@ for entry in renames:
 for entry in posted:
     print("posted-to=%s %s" % (entry["thread"], entry["text"]))
 PY
+}
+
+# One periodic thread-state pass against the same stand-in Discord edge as
+# deliver; takes the same extra arguments and prints each rename it made.
+sweep() {
+  local home=$1
+  shift
+  home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$@" <<'PY'
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home = Path(sys.argv[1])
+os.environ["FM_HOME"] = str(home)
+extra = [json.loads(a) for a in sys.argv[2:]]
+actual = {item["thread_id"]: item["name"] for item in extra if item.get("kind") == "actual"}
+failing = [item["outcome"] for item in extra if item.get("kind") == "rename-fail"]
+renames = []
+def fake_rename(thread_id, name):
+    if failing:
+        raise outbox_poster.DiscordSendError(failing[0], "discord HTTP 429", 429)
+    renames.append([thread_id, name])
+def fake_read(thread_id):
+    if thread_id in actual:
+        return actual[thread_id]
+    return outbox_poster.load_thread_record_by_id(thread_id, home).get("topic_name", "")
+outbox_poster.reconcile_thread_states(home=home, rename_thread=fake_rename, read_thread=fake_read)
+for thread_id, name in renames:
+    print("thread-rename=%s/%s" % (thread_id, name))
+print("swept")
+PY
+}
+
+# Count the rename lines in captured deliver or sweep output.
+renames_in() {
+  printf '%s\n' "$1" | grep -c '^thread-rename=' || true
+}
+
+# A worker's open keyed decision in this home's own task status log.
+open_decision_key() {
+  printf 'needs-decision [key=%s]: pick a route\n' "$2" >> "$1/state/route-fix.status"
+}
+
+resolve_decision_key() {
+  printf 'resolved [key=%s]: answered: %s\n' "$2" "$3" >> "$1/state/route-fix.status"
+}
+
+# emit_decision_post <home> <rid> <generation> <key-slug> [state]: one decision
+# post for the worker key, optionally carrying a thread state.
+emit_decision_post() {
+  local home=$1 rid=$2 generation=$3 key=$4 state=${5:-}
+  printf '{"key":"key:route-fix:%s","options":[{"label":"North"},{"label":"South"}]}' "$key" \
+    > "$home/decision-$generation.json"
+  write_text "$home/post-$generation.txt" "Which way should it go? 1. North 2. South"
+  if [ -n "$state" ]; then
+    home_env "$home" "$EMIT" --request-id "$rid" --kind followup --generation "$generation" \
+      --text-file "$home/post-$generation.txt" --decision-file "$home/decision-$generation.json" \
+      --thread-state "$state" >/dev/null
+  else
+    home_env "$home" "$EMIT" --request-id "$rid" --kind followup --generation "$generation" \
+      --text-file "$home/post-$generation.txt" --decision-file "$home/decision-$generation.json" >/dev/null
+  fi || fail "emit refused the decision post for $key"
 }
 
 # --- 1. a top-level request gets its replies in one new thread ---------------
@@ -1173,6 +1250,286 @@ PY
   pass "19 a record without provenance needs proved thread ownership"
 }
 
+# --- 20. a decision-button request marks the thread it was clicked in -------
+#
+# A click on a decision post inside a topic thread is its own request with
+# origin "button", filed from that thread. Its reply's state must rename the
+# thread through the thread's own record exactly like a typed in-thread
+# message: a none clears the question mark.
+
+test_20_button_requests_mark_their_thread() {
+  local home slug rid2 out
+  home="$TMP_ROOT/c20"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Pick a route below." "Aceh · long chats" "needs-you" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "the creating reply must mark the thread needs-you"
+  printf '{"key":"key:route-fix:north","occurrence":"1","choice":"option","option_id":1,"option":"North","confirmed":false,"text":"Pick a route","by":"captain","author":"%s","at":"now"}' \
+    "$AUTHOR" > "$home/click.json"
+  write_text "$home/click.txt" "Decision answer: North"
+  rid2="discord:${GUILD}:${CHANNEL}:777777777777777777:888888888888888888"
+  home_env "$home" "$INTAKE" --request-id "$rid2" \
+    --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id 777777777777777777 \
+    --message-id 888888888888888888 --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" --text-file "$home/click.txt" \
+    --origin button --decision-file "$home/click.json" >/dev/null \
+    || fail "the in-thread button request fixture was refused"
+  emit_as "$home" "$rid2" answer 1 "Recorded North." "" "none" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "posted-to=777777777777777777 Recorded North." \
+    "a button request's answer must post in the thread it was clicked in"
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
+    "a none from an in-thread button request must clear the question mark"
+  jq -e '.thread_state == "none" and .topic_name == "Aceh · long chats" and .rename.outcome == "applied"' \
+    "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "the thread record must follow the button request's state: $(cat "$home/state/ext-outbox/$slug.thread.json")"
+  pass "20 a decision-button request marks the thread it was clicked in"
+}
+
+# --- 21. resolving the thread's last open decision clears needs-you ---------
+#
+# Firstmate never has to remember a separate none: once every decision post
+# in a needs-you thread is closed in the ledgers - a click recorded, a typed
+# answer, or a captain call answered - the periodic pass clears the marker.
+# Two open decisions keep it until the second one resolves, and a needs-you
+# marked after the last decision post was asked is a newer question that
+# stands.
+
+test_21_resolving_the_last_decision_clears_the_marker() {
+  local home slug out
+  home="$TMP_ROOT/c21"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Two calls for you below." "Aceh · long chats" "" >/dev/null
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  open_decision_key "$home" north
+  open_decision_key "$home" south
+  emit_decision_post "$home" "$RID" 2 north needs-you
+  emit_decision_post "$home" "$RID" 3 south
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "the first decision post must mark the thread needs-you"
+  assert_contains "$out" "posted-to=777777777777777777 Which way should it go?" \
+    "decision posts must land in the topic thread"
+  out=$(sweep "$home")
+  assert_contains "$out" "swept" "the pass must run with both decisions open"
+  [ "$(renames_in "$out")" = 0 ] || fail "two open decisions must keep the marker: $out"
+  resolve_decision_key "$home" north North
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "an open second decision must keep the marker: $out"
+  jq -e '.thread_state == "needs-you"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "the record must stay needs-you while a decision is open"
+  resolve_decision_key "$home" south South
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
+    "resolving the last open decision must clear the marker"
+  jq -e '.thread_state == "none" and .topic_name == "Aceh · long chats" and .rename.outcome == "applied"' \
+    "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "the auto-clear must be recorded: $(cat "$home/state/ext-outbox/$slug.thread.json")"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "a cleared thread must not be renamed again: $out"
+  FM_EXT_NOW_OVERRIDE=$(( $(date +%s) + 120 )) \
+    emit_as "$home" "$RID" followup 4 "One more question for you." "" "needs-you" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "a later needs-you must mark the thread again"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "a needs-you newer than every decision post must stand: $out"
+  pass "21 resolving the thread's last open decision clears needs-you"
+}
+
+# --- 22. the real thread name wins over a drifted record ---------------------
+#
+# A manual rename on Discord leaves the stored name stale. Before trusting a
+# stored name that already matches the wanted one, the poster reads the name
+# Discord shows, so the next needs-you adds the prefix and the next none
+# removes it.
+
+test_22_drifted_names_reconcile_with_discord() {
+  local home slug out
+  home="$TMP_ROOT/c22"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Pick a route." "Aceh · long chats" "needs-you" >/dev/null
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  jq -e '.topic_name == "❓ Aceh · long chats"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "the record must store the marked name"
+  # Someone renamed the thread to its bare name on Discord.
+  emit_as "$home" "$RID" followup 2 "Still need your call." "" "needs-you" >/dev/null
+  out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"Aceh · long chats"}')
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "a needs-you must re-add the prefix a manual rename removed"
+  emit_as "$home" "$RID" followup 3 "Thanks, carrying on." "" "none" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
+    "the next none must remove the prefix again"
+  # The reverse drift: Discord shows a marker the record does not know about.
+  emit_as "$home" "$RID" followup 4 "Still carrying on." "" "none" >/dev/null
+  out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"❓ Aceh · long chats"}')
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
+    "a none must remove a prefix the record did not know about"
+  emit_as "$home" "$RID" followup 5 "No change." "" "none" >/dev/null
+  out=$(deliver "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "a name Discord already shows must make no rename call: $out"
+  jq -e '.rename.outcome == "unchanged"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "an already-correct name must be recorded as unchanged"
+  pass "22 the real thread name wins over a drifted record"
+}
+
+# --- 23. rename outcomes are recorded and failures retried -------------------
+#
+# Every rename outcome lands in the thread record. A failed rename keeps the
+# wanted state, names the error, and is retried: a transient failure by the
+# periodic pass, any failure by the next reply in that thread.
+
+test_23_rename_failures_are_recorded_and_retried() {
+  local home slug out record
+  home="$TMP_ROOT/c23"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  record="$home/state/ext-outbox/$slug.thread.json"
+  emit_as "$home" "$RID" answer 1 "Looking." "Aceh · long chats" "" >/dev/null
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  emit_as "$home" "$RID" followup 2 "Need your call." "" "needs-you" >/dev/null
+  out=$(deliver "$home" '{"kind":"rename-fail","outcome":"transient"}')
+  assert_contains "$out" "results=sent" "a failed rename must not fail the reply"
+  jq -e '.thread_state == "needs-you" and .topic_name == "Aceh · long chats"
+    and .rename.outcome == "failed" and .rename.name == "❓ Aceh · long chats"
+    and (.rename.error | test("429")) and .rename.retryable == true' "$record" >/dev/null \
+    || fail "a failed rename must be recorded with its error: $(cat "$record")"
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "the periodic pass must retry a transient rename failure"
+  jq -e '.topic_name == "❓ Aceh · long chats" and .rename.outcome == "applied"' "$record" >/dev/null \
+    || fail "a retried rename must be recorded as applied: $(cat "$record")"
+  emit_as "$home" "$RID" final 3 "Landed." "" "done" >/dev/null
+  out=$(deliver "$home" '{"kind":"rename-fail","outcome":"permanent"}')
+  jq -e '.thread_state == "done" and .rename.outcome == "failed" and .rename.retryable == false' \
+    "$record" >/dev/null || fail "a permanent failure must be recorded: $(cat "$record")"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "the periodic pass must leave a permanent failure for the next reply: $out"
+  emit_as "$home" "$RID" followup 4 "One more note." "" "" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · long chats" \
+    "the next reply in the thread must retry a failed rename"
+  jq -e '.topic_name == "✅ Aceh · long chats" and .rename.outcome == "applied"' "$record" >/dev/null \
+    || fail "the reply's retry must be recorded: $(cat "$record")"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "an applied rename must not be retried: $out"
+  pass "23 rename outcomes are recorded and failures retried"
+}
+
+# --- 24. a reminder marked while a decision is open clears with it ----------
+#
+# Firstmate may re-mark needs-you after a decision post, as a reminder, while
+# that decision is still open. The marker belongs to that open decision, so
+# resolving it still clears the thread even though the reminder came later
+# than the post.
+
+test_24_reminders_while_a_decision_is_open_clear_with_it() {
+  local home slug out
+  home="$TMP_ROOT/c24"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "One call for you below." "Aceh · long chats" "" >/dev/null
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  open_decision_key "$home" north
+  emit_decision_post "$home" "$RID" 2 north
+  deliver "$home" >/dev/null
+  FM_EXT_NOW_OVERRIDE=$(( $(date +%s) + 120 )) \
+    emit_as "$home" "$RID" followup 3 "Reminder: the route call above still needs you." "" "needs-you" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "the reminder must mark the thread needs-you"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "an open decision must keep the reminder's marker: $out"
+  resolve_decision_key "$home" north North
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
+    "resolving the decision the reminder was about must clear the marker"
+  jq -e '.thread_state == "none"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "the cleared reminder must be recorded: $(cat "$home/state/ext-outbox/$slug.thread.json")"
+  pass "24 a reminder marked while a decision is open clears with it"
+}
+
+test_25_unpublished_decisions_do_not_keep_the_marker() {
+  local home slug out
+  home="$TMP_ROOT/c25"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Calls below." "Aceh · long chats" "" >/dev/null
+  deliver "$home" >/dev/null
+  open_decision_key "$home" south
+  emit_decision_post "$home" "$RID" 2 south
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+path = home / "state/ext-outbox" / (slug + ".followup.2.json")
+payload = json.loads(path.read_text())
+def refuse(payload):
+    raise poster.DiscordSendError("permanent", "discord HTTP 403", 403)
+assert poster.deliver_one(path, send=refuse, home=home, react=lambda *args: None) == "terminal-failed"
+progress = poster.load_progress(payload, home)
+assert progress["posted_count"] == 0 and progress["discord_message_ids"] == []
+assert poster.decision_threads(home) == {}
+progress.pop("discord_message_ids")
+poster.write_progress(payload, progress, home)
+assert poster.decision_threads(home, "777777777777777777") == {}
+PY
+  then fail "a permanent first-send failure must not count as a decision post"
+  fi
+  open_decision_key "$home" north
+  emit_decision_post "$home" "$RID" 3 north needs-you
+  deliver "$home" >/dev/null
+  open_decision_key "$home" east
+  write_text "$home/partial.txt" "$(printf 'word %.0s' {1..600})"
+  printf '{"key":"key:route-fix:east","options":[{"label":"North"},{"label":"South"}]}' \
+    > "$home/partial-decision.json"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind followup --generation 4 \
+    --text-file "$home/partial.txt" --decision-file "$home/partial-decision.json" >/dev/null
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import sys
+from pathlib import Path
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+sent = []
+def partial(payload):
+    if sent:
+        raise poster.DiscordSendError("permanent", "discord HTTP 403", 403)
+    sent.append(payload["thread_id"])
+    return {"discord_message_id": "900000000000000001"}
+path = home / "state/ext-outbox" / (slug + ".followup.4.json")
+assert poster.deliver_one(path, send=partial, home=home, react=lambda *args: None) == "terminal-failed"
+assert sent == ["777777777777777777"]
+for thread in ("", "777777777777777777"):
+    summary = poster.decision_threads(home, thread)["777777777777777777"]
+    assert summary["open"] == 2 and summary["closed"] == 0, summary
+PY
+  then fail "a partially published multi-chunk decision must still count"
+  fi
+  resolve_decision_key "$home" north North
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "a partially published open decision must keep the marker: $out"
+  resolve_decision_key "$home" east North
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
+    "an unpublished open decision must not prevent auto-clear"
+  jq -e '.thread_state == "none"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "auto-clear must be recorded despite the failed first send"
+  FM_EXT_NOW_OVERRIDE=$(( $(date +%s) + 120 )) \
+    emit_as "$home" "$RID" followup 5 "A new question." "" "needs-you" >/dev/null
+  deliver "$home" >/dev/null
+  jq -e '.marked_open != true' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "an unpublished decision must not own a new marker"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "the new question must retain its marker: $out"
+  pass "25 unpublished decisions do not keep the marker"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -1194,5 +1551,11 @@ test_16_shared_title_screen_and_nickname_mentions
 test_17_in_thread_requests_mark_their_thread
 test_18_adopted_threads_never_take_state_markers
 test_19_legacy_records_need_proved_ownership
+test_20_button_requests_mark_their_thread
+test_21_resolving_the_last_decision_clears_the_marker
+test_22_drifted_names_reconcile_with_discord
+test_23_rename_failures_are_recorded_and_retried
+test_24_reminders_while_a_decision_is_open_clear_with_it
+test_25_unpublished_decisions_do_not_keep_the_marker
 
 echo "all fm-ext-topic-threads tests passed"

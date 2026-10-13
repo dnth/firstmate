@@ -72,7 +72,7 @@ Before composing a dedicated-channel reply, consult the [topic-thread contract](
 - **Title the creating reply** with `<Project> · <2-5 word topic>` (for example `Aceh · ingestion status`), especially when the request is vague, long, or procedural.
 - **Mark needs-you** when the reply asks the captain to decide.
 - **Mark done** with the terminal answer or final.
-- **Clear the marker** when work resumes.
+- **Clear the marker** when work resumes on an independent question, as defined by the topic-thread contract above.
 
 Titles are public: the same safety rules as reply text apply (no task ids, branch names, paths, hostnames, or secrets).
 

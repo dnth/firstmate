@@ -7,6 +7,7 @@
 #     --guild-id <id> --chat-id <id> --interaction-id <id> --author <id>
 #     [--author-name <name>] --secret-file <path> [--confirmed]
 #   fm-ext-decision.sh posts [--settled-only]
+#   fm-ext-decision.sh threads [--thread <id>]
 #   fm-ext-decision.sh finalized --post <stem> --content-file <path>
 #   fm-ext-decision.sh still-open --key <key> --occurrence <occurrence>
 #
@@ -82,6 +83,18 @@
 #   --settled-only it first settles every live post that a newer post for the
 #   same key replaced, or whose own lifecycle the ledgers report closed.
 #
+# threads [--thread <id>]
+#   Prints one JSON line per Discord thread that holds a decision post, with
+#   or without buttons: {thread_id, open, closed, last_posted_at}; --thread
+#   reads only that thread. Unpublished progress records are ignored.
+#   A post is closed once it is settled, replaced by
+#   a newer post, or its own lifecycle of its decision is decided or
+#   superseded in the ledgers; a decision whose state cannot be read counts
+#   as open. last_posted_at is the newest post's posting time (epoch seconds,
+#   0 when unknown). The gateway poster reads it when a reply marks a thread
+#   needs-you, and again to clear that marker once no decision in the thread
+#   is open. Read-only.
+#
 # finalized
 #   Records the content Discord now shows for a post, so posts lists it only
 #   when that content changes.
@@ -114,6 +127,7 @@ usage: fm-ext-decision.sh click --post-id <id> --option <n>|discuss [--key <key>
          --guild-id <id> --chat-id <id> --interaction-id <id> --author <id>
          [--author-name <name>] --secret-file <path> [--confirmed]
        fm-ext-decision.sh posts [--settled-only]
+       fm-ext-decision.sh threads [--thread <id>]
        fm-ext-decision.sh finalized --post <stem> --content-file <path>
        fm-ext-decision.sh still-open --key <key> --occurrence <occurrence>
 EOF
@@ -559,6 +573,46 @@ command_posts() {
   done < <(progress_files)
 }
 
+command_threads() {
+  local only='' file stem thread state posted
+  case "${1:-}" in
+    '') ;;
+    --thread)
+      only=${2:-}
+      case "$only" in
+        ''|*[!0-9]*) die "threads --thread needs a Discord thread id" ;;
+      esac
+      ;;
+    *) usage; exit 2 ;;
+  esac
+  while IFS= read -r file; do
+    stem=$(basename "$file" .progress.json)
+    jq -e '.decision.key and ((.discord_message_ids // []) | length > 0)' "$file" >/dev/null 2>&1 || continue
+    thread=$(post_thread "$stem") || continue
+    [ -z "$only" ] || [ "$thread" = "$only" ] || continue
+    if settled "$stem" || newer_post "$stem"; then
+      state=closed
+    else
+      case "$(fm_ext_decision_key_state "$(post_field "$stem" '.decision.key')" \
+        "$(post_field "$stem" '.decision.occurrence')")" in
+        decided|superseded) state=closed ;;
+        *) state=open ;;
+      esac
+    fi
+    posted=$(post_field "$stem" '.posted_at')
+    case "$posted" in
+      ''|*[!0-9.]*) posted=0 ;;
+    esac
+    jq -cn --arg thread "$thread" --arg state "$state" --argjson posted "$posted" \
+      '{thread_id:$thread, state:$state, posted_at:$posted}'
+  done < <(progress_files) \
+    | jq -sc 'group_by(.thread_id)[]
+        | {thread_id: .[0].thread_id,
+           open: (map(select(.state == "open")) | length),
+           closed: (map(select(.state == "closed")) | length),
+           last_posted_at: (map(.posted_at) | max)}'
+}
+
 command_finalized() {
   local stem='' content_file=''
   while [ "$#" -gt 0 ]; do
@@ -603,6 +657,7 @@ command_still_open() {
 case "${1:-}" in
   click) shift; command_click "$@" ;;
   posts) shift; command_posts "$@" ;;
+  threads) shift; command_threads "$@" ;;
   finalized) shift; command_finalized "$@" ;;
   still-open) shift; command_still_open "$@" ;;
   --help|-h) help ;;
