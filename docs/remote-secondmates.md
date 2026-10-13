@@ -220,12 +220,15 @@ Once a delivery receipt is consumed, it remains as a generation-scoped `.pending
 The send's success boundary is the durable inbox record, never the agent's later `handled/` move: once the record is durable and the ring has run, the send returns exit 0 and prints one machine line - `request=<corr> record=<NNN> state=recorded|handled`, `state=handled` when the record is already under `handled/` - without waiting for acknowledgement.
 An unavailable programmatic delivery returns exit 6 with the request durably queued, and the machine line still reports the record.
 A doorbell queued without a receipt still returns exit 0 for the durable record, because the record itself is the delivery boundary.
-An identity or extension mismatch returns exit 9 before notification and requires reconciliation rather than resend.
-The persist request `bin/fm-secondmate-restart.sh` sends before restarting a mate is the one request that may bind to a superseded closure.
+An identity or extension mismatch returns exit 9 before notification and requires reconciliation rather than resend, except for the prior-closure case below.
+The restart-marked, parent-correlated, non-slash persist request `bin/fm-secondmate-restart.sh` sends before restarting a mate is the one routed request that may bind to a superseded closure.
 An update that changes the primary-extension closure leaves the running session on the closure it loaded, so without that exception the restart could never ask the session to persist its open work.
-The mismatch must be explained by the home itself: its tracked closure must be HEAD's committed closure, and the loaded closure must be the committed closure of an earlier position on the HEAD reflog's fast-forward chain.
+The mismatch must be explained by the home itself: its tracked closure must be HEAD's committed closure, and the loaded closure must be the committed closure of an earlier position on the HEAD reflog's fast-forward chain, within a fixed bound of 64 distinct earlier positions.
+Every earlier position must be an ancestor of the next; a rewind, non-fast-forward move, missing reflog, uncommitted tracked closure, or loaded closure absent from that bounded chain is refused.
 Git appends that reflog entry in the same operation that moves HEAD, so the record cannot lag or lead the update, and it also explains a session updated before this rule existed.
-Every other request, and every mismatch that chain does not explain, still returns exit 9 before notification, so a superseded session receives only the persist request until its restart.
+Ordinary messages, fallback re-read nudges, slash commands, and persist requests without their parent correlation retain the exit 9 refusal before enqueue or notification on a closure mismatch.
+The exception leaves every other identity, endpoint, session, and launch-path check in force.
+After the correlated persistence answer arrives, the restart uses the separate lifecycle control plane to stop and relaunch the session; an ordinary routed `/exit` cannot use the prior-closure exception.
 A delayed or missing `handled/` acknowledgement is never a send failure; the parent's pending-reply expectation simply keeps waiting for the correlated reply on its ordinary recovery schedule.
 The existing typed `/exit` path keeps its separate `delivered-no-turn` exit 4 and `delivered-no-turn-persistence-failed` exit 5 behavior.
 
