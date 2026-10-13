@@ -185,7 +185,7 @@ async function flush() {
 const PRIMARY_ENTRY = `${PRIMARY}/.omp/extensions/fm-compact-adviser-omp.ts`;
 const WORKER_ENTRY = `${WORKER}/.omp/extensions/fm-compact-adviser-omp.ts`;
 const SECONDMATE_ENTRY = `${SECONDMATE}/.omp/extensions/fm-compact-adviser-omp.ts`;
-const EXPECTED_EVENTS = ["agent_end", "turn_end", "session_start", "session_switch",
+const EXPECTED_EVENTS = ["agent_end", "turn_start", "turn_end", "session_start", "session_switch",
   "session_before_switch", "session_compact", "session_before_compact",
   "session_shutdown", "input", "before_agent_start", "session_branch",
   "session_before_branch", "session_tree", "session_before_tree"];
@@ -348,10 +348,7 @@ console.log("AC1 inert-by-default gates: ok");
       return qualifyingJudgment();
     },
   });
-  for (const ev of ["agent_end", "turn_end", "session_start", "session_switch",
-    "session_before_switch", "session_compact", "session_before_compact",
-    "session_shutdown", "input", "before_agent_start", "session_branch",
-    "session_before_branch", "session_tree", "session_before_tree"]) {
+  for (const ev of EXPECTED_EVENTS) {
     assert.ok(pi.handlers.has(ev), `missing handler: ${ev}`);
   }
   const ctx = fakeCtx({ branch: settledBranch() }, appendedEntries);
@@ -414,7 +411,7 @@ console.log("AC1 inert-by-default gates: ok");
 {
   // A newer turn, input, or session change arriving before idle retires the
   // stale checkpoint instead of judging a superseded one.
-  for (const event of ["before_agent_start", "input", "session_switch"]) {
+  for (const event of ["before_agent_start", "turn_start", "input", "session_switch"]) {
     const configDir = mkdtempSync(join(TMP, `cfg-stale-${event}-`));
     const logDir = mkdtempSync(join(TMP, `log-stale-${event}-`));
     writeConfig(configDir, { mode: "hint", minContextTokens: 40000, logRequests: false });
@@ -431,6 +428,13 @@ console.log("AC1 inert-by-default gates: ok");
     await flush();
     assert.equal(calls, 0, `a ${event} arriving before idle must retire the stale checkpoint`);
     assert.equal(widgetCalls.length, 0, `a ${event} before idle must not show a hint`);
+    assert.equal(pi.appended.length, 0, `a ${event} before idle must not consume the checkpoint`);
+    if (event === "turn_start") {
+      await pi.handlers.get("agent_end")({ type: "agent_end", messages: [] }, ctx);
+      await flush();
+      assert.equal(calls, 1, "the notification turn's own settled checkpoint must still be judged");
+      assert.equal(widgetCalls.length, 1, "the notification turn can show its own hint");
+    }
   }
   console.log("stale-checkpoint retirement: ok");
 }

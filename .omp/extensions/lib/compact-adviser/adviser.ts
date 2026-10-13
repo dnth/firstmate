@@ -261,6 +261,9 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
       if (request === controller) request = undefined;
     }
   }
+  pi.on("turn_start", () => {
+    generation++;
+  });
   pi.on("turn_end", (_event, ctx) => {
     if (!ctx.isIdle() && hintVisible) invalidate(ctx);
   });
