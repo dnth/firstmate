@@ -193,6 +193,7 @@ family_for_basename() {
     fm-devin-herdr-live-e2e.test.sh|fm-hermes-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-omp-herdr-exit-live-e2e.test.sh|fm-omp-herdr-live-e2e.test.sh|\
     fm-omp-secondmate-live-e2e.test.sh|fm-omp-worker-tmux-live-e2e.test.sh|\
+    fm-omp-compact-adviser-live-e2e.test.sh|\
     fm-omp-primary-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-inbox-doorbell-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
@@ -437,6 +438,7 @@ tests/fm-omp-branch-bash.test.sh 44
 tests/fm-omp-branch-live-e2e.test.sh 12
 tests/fm-omp-branch-supervision.test.sh 4373
 tests/fm-omp-branch-types.test.sh 24
+tests/fm-omp-compact-adviser-live-e2e.test.sh 20
 tests/fm-omp-compact-adviser.test.sh 298
 tests/fm-omp-fleet-hooks.test.sh 2407
 tests/fm-omp-harness.test.sh 1764
@@ -967,6 +969,10 @@ families_for_changed_path() {
     bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
+      ;;
+    .omp/extensions/fm-compact-adviser-omp.ts|.omp/extensions/lib/compact-adviser/*)
+      printf '%s\n' "__script__:fm-omp-compact-adviser.test.sh"
+      printf '%s\n' "__script__:fm-omp-compact-adviser-live-e2e.test.sh"
       ;;
     .omp/extensions/fm-primary-omp.ts|.omp/extensions/lib/fm-task-inbox-doorbell.ts)
       printf '%s\n' watcher-wake-lock

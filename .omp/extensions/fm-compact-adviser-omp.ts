@@ -8,7 +8,10 @@
 //
 // Judge semantics and privacy budgets are pinned to upstream compact-adviser
 // commit b2a27b59ce86af4dc8fb5141e169bfbed1e68cee; the OMP API surface was
-// re-verified against @oh-my-pi/pi-coding-agent 18.2.6 source.
+// re-verified against @oh-my-pi/pi-coding-agent 18.2.6 source, and the settled
+// checkpoint's idle timing against the installed 18.10.1.
+// lib/compact-adviser/adviser.ts owns that timing: OMP emits agent_end while the
+// owning prompt is still in flight, so the settled check defers to idle.
 //
 // Gate chain, all required before any behavior registers:
 //   1. COMPACT_ADVISER_DISABLE truthy -> inert (upstream kill switch).
