@@ -1263,7 +1263,8 @@ fm_ext_outbox_schema_valid() {
           and all(.[]; type == "object"
             and (.id | type == "number")
             and (.label | type == "string" and length >= 1 and length <= $label_max)
-            and (.confirm | type == "boolean"))))
+            and (.confirm | type == "boolean")
+            and ((.recommended // false) | type == "boolean"))))
       else true end)
   ' "$file" >/dev/null 2>&1
 }

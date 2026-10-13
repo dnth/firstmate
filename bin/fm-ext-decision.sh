@@ -266,21 +266,25 @@ newer_post() {
 # longest full label prefix immediately. Only without that prefix, collect
 # standalone option numbers and whole-word labels and require one distinct id.
 answer_option() {
-  local stem=$1 answer=$2 ids='' word id label prefix
+  local stem=$1 answer=$2 ids='' word id label prefix options
   local -a words
   answer=${answer%%" (Discord button:"*}
   [ -n "$answer" ] || return 0
   answer=${answer#"Decision answer: "}
+  options=$(jq -c '[.decision.options[]
+    | ., (select(.recommended == true) | .label |= sub("^⭐ *"; "")
+          | select(.label | length > 0))]
+    | unique_by([.id, .label])' "$OUTBOX/$stem.progress.json" 2>/dev/null)
   prefix=$(jq -r --arg answer "$answer" '
     ($answer | ascii_downcase) as $text
-    | [.decision.options[] | (.label | ascii_downcase) as $option_label
+    | [.[] | (.label | ascii_downcase) as $option_label
        | select($text | startswith($option_label))
        | select($text[($option_label | length):] | test("^($|[^[:alnum:]_])"))]
     | if length == 0 then empty else
         (map(.label | length) | max) as $longest
         | map(select((.label | length) == $longest))
         | if length == 1 then .[0].id else empty end
-      end' "$OUTBOX/$stem.progress.json" 2>/dev/null)
+      end' <<<"$options" 2>/dev/null)
   if [ -n "$prefix" ]; then
     printf '%s\n' "$prefix"
     return 0
@@ -299,7 +303,7 @@ answer_option() {
     if printf '%s\n' "$answer" | grep -qiwF -- "$label"; then
       ids="$ids$id"$'\n'
     fi
-  done < <(jq -r '.decision.options[] | "\(.id)\t\(.label)"' "$OUTBOX/$stem.progress.json" 2>/dev/null)
+  done < <(jq -r '.[] | "\(.id)\t\(.label)"' <<<"$options" 2>/dev/null)
   ids=$(printf '%s' "$ids" | sort -u)
   case "$ids" in
     [1-9]) printf '%s\n' "$ids" ;;

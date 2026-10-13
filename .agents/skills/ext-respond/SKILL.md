@@ -46,6 +46,7 @@ The emit header owns the file format, and the [decision buttons reference](../..
 - Key a captain call held on the board `hold:<task-id>`, and a worker's open keyed decision `key:<task-id>:<slug>`; emit refuses a key that is not open.
 - List the options in the order the post's own text numbers them, so a typed number and a button name the same option, and write short, concrete, public-safe labels such as "Merge" or "Hold".
 - Set `"confirm": true` on every option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible.
+- Mark your recommended choice using the emit header's `recommended` field; the [decision buttons reference](../../../docs/configuration.md#decision-buttons) owns its display and confirmation behavior.
 - For a captain call that gates held work, set `"mode": "release"` so the answer lifts the hold instead of closing the task.
 - Never write the key or its task id into the post text or a label; only the button ids carry it.
 

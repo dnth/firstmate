@@ -29,12 +29,16 @@
 # The file is JSON:
 #   {"key": "hold:<task-id>" | "key:<task-id>:<slug>",
 #    "mode": "done" | "release",
-#    "options": [{"label": "<text>", "confirm": true|false}, ...]}
-# with 1-5 options whose labels are distinct, 1-80 characters, and free of
+#    "options": [{"label": "<text>", "confirm": true|false, "recommended": true|false}, ...]}
+# with 1-5 options whose input and displayed labels are distinct, 1-80 characters, and free of
 # control characters, in the same order as the post text numbers them; option
 # ids are 1-based in that order. "mode" (captain calls only, default done)
 # chooses how a chosen option closes the call, as in fm-captain-hold.sh
-# answers. The key must name a decision that is open right now (a held captain
+# answers. "confirm" and "recommended" are optional booleans, default false.
+# At most one option may set "recommended": true; emit adds "⭐ " unless the
+# label already starts with ⭐, and stores the displayed label in the payload.
+# The added prefix counts toward the 80-character label limit.
+# The key must name a decision that is open right now (a held captain
 # call, or a worker's open keyed status decision) and must fit Discord's
 # 100-character custom_id as fmd:<key>:<n>. An option needs a confirmation
 # click when it declares confirm, and always when its label matches
@@ -196,10 +200,14 @@ if [ -n "$DECISION_FILE" ]; then
       and (.label | type == "string" and length >= 1 and length <= $label_max
         and (explode | all(. >= 32 and . != 127))
         and test("^\\S(.*\\S)?$"))
-      and ((.confirm // false) | type == "boolean"))
+      and ((.confirm // false) | type == "boolean")
+      and ((.recommended // false) | type == "boolean")
+      and ((.label | length) + (if (.recommended // false) and ((.label | startswith("⭐")) | not) then 2 else 0 end) <= $label_max))
+    and ([.options[] | select(.recommended // false)] | length <= 1)
     and ([.options[].label | ascii_downcase] | length == (unique | length))
+    and ([.options[] | (if (.recommended // false) and ((.label | startswith("⭐")) | not) then ("⭐ " + .label) else .label end) | ascii_downcase] | length == (unique | length))
   ' "$DECISION_FILE" >/dev/null 2>&1 \
-    || die "decision file must hold {key, mode, options:[{label, confirm}]} with 1-$FM_EXT_DECISION_MAX_OPTIONS distinct labels of 1-$FM_EXT_DECISION_LABEL_MAX characters"
+    || die "decision file must hold {key, mode, options:[{label, confirm, recommended}]} with 1-$FM_EXT_DECISION_MAX_OPTIONS distinct labels of 1-$FM_EXT_DECISION_LABEL_MAX characters and at most one recommended option"
   DECISION_KEY=$(jq -r '.key' "$DECISION_FILE")
   DECISION_MODE=$(jq -r '.mode // "done"' "$DECISION_FILE")
   DECISION_TASK=$(fm_ext_decision_key_task "$DECISION_KEY") \
@@ -233,8 +241,10 @@ if [ -n "$DECISION_FILE" ]; then
     --arg text "$TEXT" \
     --argjson text_max "$FM_EXT_DECISION_TEXT_MAX" '
     {key, mode: $mode, occurrence: $occurrence,
-     options: [.options | to_entries[] | {"id": (.key + 1), "label": .value.label,
-       "confirm": ((.value.confirm // false) or (.value.label | test($pattern; "i")))}],
+     options: [.options | to_entries[] | ({"id": (.key + 1),
+       "label": (if (.value.recommended // false) and ((.value.label | startswith("⭐")) | not) then ("⭐ " + .value.label) else .value.label end),
+       "confirm": ((.value.confirm // false) or (.value.label | test($pattern; "i")))}
+       + if (.value.recommended // false) then {recommended: true} else {} end)],
      text: (if ($text | length) > $text_max
             then ($text | .[0:$text_max]) + "…" else $text end)}
   ' "$DECISION_FILE") || die "could not build the decision payload" 1
