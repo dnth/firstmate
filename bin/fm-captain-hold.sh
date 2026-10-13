@@ -9,6 +9,14 @@
 # captain actually said, the investigation completion gate, and the one
 # keyed-answer intake every channel feeds.
 #
+# Settings: FM_CAPTAIN_HOLD_REVIEW_DAYS (default 14) is the days after the
+# hold-set stamp a captain call becomes due for review. Override per invocation:
+# new holds persist the resulting date; existing holds without a review-by line count from
+# their hold-set stamp plus this interval. --until is unrelated: it defers a
+# call and hides it from the live surface until its date, while a review-by
+# date keeps the call live and visible at once.
+# FM_CAPTAIN_HOLD_TODAY is a test-only YYYY-MM-DD override for today's UTC date.
+#
 # There is no separate decision type. A captain call is an ordinary backlog
 # task held for the captain through this script's mandatory `hold` subcommand,
 # and its identity is simply the task id. Older installs created derived
@@ -30,6 +38,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
+#   fm-captain-hold.sh due
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh answered <task-id>
 #   fm-captain-hold.sh diverged
@@ -43,13 +52,18 @@
 # default repo from that origin's metadata). Prefer holding the work item the
 # question gates over minting a new row. Creating a missing row uses
 # `tasks-axi add --kind captain`: that kind is backlog metadata, and the Beads
-# adapter maps it to native issue type `task`. Captain holds have no due
-# semantics (`--until` is the optional hold deferral), so the create waives
+# adapter maps it to native issue type `task`. Captain holds use a body-level
+# review date rather than a backend due field, so the create waives
 # Beads `due.required` through `BD_DUE_REQUIRED` rather than inventing a due
 # date or registering a `types.custom` captain issue type. The command records
-# a UTC `Captain hold set:` timestamp in the task body: repeating an active
-# hold preserves the existing timestamp, while re-holding released work starts
-# a new lifecycle. A task already closed is refused rather than reopened.
+# a UTC `Captain hold set:` timestamp in the task body, followed by a
+# `Captain hold review by:` date using the interval above,
+# so a call that sits unanswered resurfaces for review. Repeating
+# an active hold preserves the existing lines, while re-holding released work
+# starts a new lifecycle. A task already closed is refused rather than
+# reopened. The review-by date never defers the call, never touches the hold
+# bit, and never reaches `--until`'s expiry path: the call stays live and
+# visible at once.
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
@@ -215,6 +229,15 @@
 # uses it to show on a decision post which option an answer given elsewhere
 # chose, and the stamp plus count to distinguish its lifecycle from a re-hold.
 #
+# `due` is the read-only review-by report: every still-open captain-held task
+# whose review-by date is today or earlier, with older holds
+# that carry no review-by line counted from their hold-set stamp plus the
+# interval. Calls with a current-lifecycle resolution, released or closed calls,
+# blocked calls, deferred (--until future), and not-yet-due calls never list.
+# It mutates nothing and never clears a hold.
+# It requires the Markdown backlog backend and the installed tasks-axi package's
+# parser and row projection; other backends are refused. The drain and waiting
+# pin each bound this read at 20 seconds and omit due marking if it fails.
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
 #
@@ -517,6 +540,24 @@ body_has_resolution_record() {  # <task-body>
   return 1
 }
 
+body_has_current_resolution_record() {
+  local body stamp
+  body=$(decode_shown_value "$1") || return 1
+  stamp=$(body_hold_set_timestamp "$body")
+  [ -n "$stamp" ] || return 1
+  body_has_resolution_record "$body" || return 1
+  printf '%s\n' "$body" | awk -v stamp="$stamp" '
+    /^Resolution recorded by fm-(captain|decision)-hold\.$/ {
+      if (record || $0 != "Resolution recorded by fm-captain-hold.") exit
+      record = 1
+      next
+    }
+    record && /^$/ { exit }
+    record && $0 == "Hold stamp: " stamp { matched = 1 }
+    END { exit !matched }
+  '
+}
+
 # The recorded decision digest of either record format, from the show-escaped
 # body (multi-line bodies print as one quoted line with \n escapes). Records
 # are prepended, so the first match is the newest record.
@@ -561,11 +602,16 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 # The record's label is what keeps an evidence-backed reconciliation from
 # reading as the captain's own words. `reconciled` closes a call that went moot
 # and carries verified evidence; every other mode carries what the captain said.
-resolution_block() {  # <mode>
-  local label='Captain decision:'
+resolution_block() {  # <mode> [hold-set-stamp]
+  local label='Captain decision:' stamp=${2:-}
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
-    "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
+  if [ -n "$stamp" ]; then
+    printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\nHold stamp: %s\n\n%s\n%s\n' \
+      "$DECISION_DIGEST" "$1" "$stamp" "$label" "$DECISION_TEXT"
+  else
+    printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
+      "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
+  fi
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -810,14 +856,86 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
   fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA)"
 }
 
+# The hold-set stamp and review-by line sit on the body's first two lines, so
+# both readers split those lines in the shell instead of piping every body
+# through sed: the due report runs them per held call, and a fork per call is
+# what used to make a fleet-sized due read miss its bound.
 body_hold_set_timestamp() {  # <decoded-task-body>
-  printf '%s\n' "$1" \
-    | sed -n \
-      -e '1s/^Captain hold set: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\)$/\1/p' \
-      -e '1s/^Captain hold set: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/\1/p' \
-    | head -1
+  local line stamp
+  line=${1%%$'\n'*}
+  case "$line" in
+    'Captain hold set: '*) stamp=${line#'Captain hold set: '} ;;
+    *) return 0 ;;
+  esac
+  case "$stamp" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s\n' "$stamp" ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) printf '%s\n' "$stamp" ;;
+  esac
 }
 
+body_hold_review_by() {  # <decoded-task-body>
+  local rest line date
+  rest=${1#*$'\n'}
+  [ "$rest" != "$1" ] || return 0
+  line=${rest%%$'\n'*}
+  case "$line" in
+    'Captain hold review by: '*) date=${line#'Captain hold review by: '} ;;
+    *) return 0 ;;
+  esac
+  case "$date" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s\n' "$date" ;;
+  esac
+}
+
+# The header owns interval configuration; only the resulting date is persisted.
+hold_review_days() {  # prints the interval
+  local raw=${FM_CAPTAIN_HOLD_REVIEW_DAYS:-14}
+  case "$raw" in
+    ''|*[!0-9]*|0*) printf '14\n' ;;
+    *) printf '%s\n' "$raw" ;;
+  esac
+}
+# The body with the leading hold lines removed (stamp plus review-by line).
+body_without_hold_lines() {  # <decoded-task-body>
+  local body=$1 stamp review
+  stamp=$(body_hold_set_timestamp "$body")
+  [ -n "$stamp" ] || { printf '%s' "$body"; return 0; }
+  review=$(body_hold_review_by "$body")
+  body=${body#"Captain hold set: $stamp"}
+  case "$body" in
+    $'\n\n'*) body=${body#$'\n\n'} ;;
+    $'\n'*) body=${body#$'\n'} ;;
+  esac
+  if [ -n "$review" ]; then
+    body=${body#"Captain hold review by: $review"}
+    case "$body" in
+      $'\n\n'*) body=${body#$'\n\n'} ;;
+      $'\n'*) body=${body#$'\n'} ;;
+    esac
+  fi
+  printf '%s' "$body"
+}
+
+# Review-by date (YYYY-MM-DD) for a hold-set stamp (YYYY-MM-DD or full UTC).
+# Prints nothing when the stamp is absent or the arithmetic fails.
+hold_review_by_for_stamp() {  # <hold-set-stamp> [days]
+  local stamp=${1:-} days=${2:-} day review
+  [ -n "$stamp" ] || return 0
+  [ -n "$days" ] || days=$(hold_review_days)
+  day=${stamp%%T*}
+  case "$day" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
+    *) return 0 ;;
+  esac
+  review=$(date -u -d "$day + $days days" +%F 2>/dev/null \
+    || date -u -j -v+"$days"d -f '%Y-%m-%d' "$day" +%F 2>/dev/null) || return 0
+  case "$review" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s\n' "$review" ;;
+  esac
+}
+
+# Write the hold-set stamp plus the review-by second line. Existing holds
+# keep every body line (no backfill); only a re-held lifecycle is rewritten.
 write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existing-0-or-1>
   local id=$1 body=$2 hold_set=$3 preserve=$4 existing new_body tmp
   body=$(decode_shown_value "$body") \
@@ -827,13 +945,10 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
     return 0
   fi
   if [ -n "$existing" ]; then
-    body=${body#"Captain hold set: $existing"}
-    case "$body" in
-      $'\n\n'*) body=${body#$'\n\n'} ;;
-      $'\n'*) body=${body#$'\n'} ;;
-    esac
+    body=$(body_without_hold_lines "$body")
   fi
-  new_body=$(printf 'Captain hold set: %s' "$hold_set")
+  new_body=$(printf 'Captain hold set: %s\nCaptain hold review by: %s' \
+    "$hold_set" "$(hold_review_by_for_stamp "$hold_set")")
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
   fi
@@ -969,18 +1084,17 @@ command_hold() {
 # preserving the previous body below it and archiving the pristine original.
 # Successful closure removes the stamp to restore resolution-first ordering.
 write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp hold_set
-  new_body=$(resolution_block "$mode")
+  local id=$1 mode=$2 body=$3 new_body tmp hold_set review
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   hold_set=$(body_hold_set_timestamp "$body")
+  new_body=$(resolution_block "$mode" "$hold_set")
   if [ -n "$hold_set" ]; then
-    body=${body#"Captain hold set: $hold_set"}
-    case "$body" in
-      $'\n\n'*) body=${body#$'\n\n'} ;;
-      $'\n'*) body=${body#$'\n'} ;;
-    esac
-    new_body=$(printf 'Captain hold set: %s\n\n%s' "$hold_set" "$new_body")
+    review=$(body_hold_review_by "$body")
+    [ -n "$review" ] || review=$(hold_review_by_for_stamp "$hold_set")
+    body=$(body_without_hold_lines "$body")
+    new_body=$(printf 'Captain hold set: %s\nCaptain hold review by: %s\n\n%s' \
+      "$hold_set" "$review" "$new_body")
   fi
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
@@ -1037,11 +1151,7 @@ remove_interrupted_answer_stamp() {  # <task-id>
     || fail "could not decode the closed body for $id"
   existing=$(body_hold_set_timestamp "$body")
   [ -n "$existing" ] || return 0
-  body=${body#"Captain hold set: $existing"}
-  case "$body" in
-    $'\n\n'*) body=${body#$'\n\n'} ;;
-    $'\n'*) body=${body#$'\n'} ;;
-  esac
+  body=$(body_without_hold_lines "$body")
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-normalize.XXXXXX") \
     || fail "cannot stage the closed body for $id"
   if ! printf '%s\n' "$body" > "$tmp" \
@@ -1127,7 +1237,7 @@ command_answer() {
     # its own record on top. Either way the close mode is the caller's flag,
     # checked against an interrupted close's recorded mode so a retry cannot
     # silently flip a release into a close.
-    if body_has_resolution_record "$body" \
+    if body_has_current_resolution_record "$body" \
       && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
@@ -1730,7 +1840,7 @@ reconcile_close() {
   fi
   [ "$hold_kind" = captain ] \
     || fail "task $id is not held for the captain; there is no captain call to reconcile"
-  if body_has_resolution_record "$body" \
+  if body_has_current_resolution_record "$body" \
     && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     [ "$recorded_mode" = reconciled ] \
@@ -2175,6 +2285,150 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+# The header owns report eligibility and read limits. Prints one
+# `<task>\t<review-by>\t<title>\t<identity>` line per eligible call in board order,
+# or nothing when none is due.
+# The identity is the `<hold-set stamp>#<recorded answers>` pair `open --identity`
+# reports, taken from the same body, so a consumer anchors a due call without
+# reading the row again.
+# ONE read answers the whole report: fm_due_snapshot projects the board source
+# through the installed tasks-axi's own markdown parser and row projection, so the
+# hold state, the blockers, the title and the whole body all come from one
+# snapshot, with no preview cut and no per-call `show` to disagree with it.
+command_due() {
+  local as_of data root backend file rows
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  as_of=${FM_CAPTAIN_HOLD_TODAY:-$(date -u +%F)}
+  case "$as_of" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
+    *) fail "FM_CAPTAIN_HOLD_TODAY must be a YYYY-MM-DD date: $as_of" ;;
+  esac
+  require_tasks_axi
+  data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
+  root=$(fm_backlog_root "$data") \
+    || fail "the backlog root cannot be resolved: ${FM_BACKLOG_TRANSITION_ERROR:-$DATA}"
+  backend=$(fm_tasks_axi_backend_resolve "$root") \
+    || fail "the backlog backend cannot be resolved: $root"
+  if [ "$backend" != markdown ]; then
+    fail "the due report reads the markdown board source; this home's backlog backend is '$backend'"
+  fi
+  file=$(fm_backlog_file "$data") \
+    || fail "the backlog file cannot be resolved: ${FM_BACKLOG_TRANSITION_ERROR:-$data}"
+  [ -e "$file" ] || return 0
+  rows=$(fm_due_snapshot "$file") || fail "could not read the backlog source $file"
+  [ -n "$rows" ] || return 0
+  printf '%s\n' "$rows" | while IFS=$(printf '\t') read -r id state hold_kind hold_reason hold_until blocked title raw_body; do
+    [ -n "$id" ] || continue
+    [ "$state" != "done" ] || continue
+    [ "$hold_kind" = captain ] || continue
+    [ -n "$hold_reason" ] && [ "$hold_reason" != "-" ] && [ "$hold_reason" != null ] || continue
+    [ "$blocked" = no ] || continue
+    case "$hold_until" in
+      ''|-|null) : ;;
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+        [ "$hold_until" = "$as_of" ] || [ "$hold_until" \< "$as_of" ] || continue ;;
+      *) continue ;;
+    esac
+    # A body that does not OPEN with its hold-set stamp cannot be due: the stamp
+    # reader only accepts the body's first line. Skipping such a row here keeps a
+    # held call's long notes from paying for a decision they cannot change.
+    DUE_BODY=$(printf '%s' "$raw_body" | base64 -d) || fail "could not decode the body of $id"
+    case "$DUE_BODY" in
+      'Captain hold set: '*) : ;;
+      *) continue ;;
+    esac
+    DUE_REVIEW=$(due_review_by "$DUE_BODY" "$as_of") || continue
+    due_line_for_body "$id" "$title" "$DUE_BODY" "$DUE_REVIEW" || continue
+  done || return 1
+  return 0
+}
+
+# Print the resolved tasks-axi package root, from its own executable, so this
+# script can read the board through the parser and row projection that same tool
+# renders from instead of a second reading of the board format.
+tasks_axi_package_root() {
+  local bin target dir
+  bin=$(command -v tasks-axi 2>/dev/null) || return 1
+  while [ -L "$bin" ]; do
+    target=$(readlink "$bin") || return 1
+    case "$target" in
+      /*) bin=$target ;;
+      *) bin=$(dirname "$bin")/$target ;;
+    esac
+  done
+  dir=$(dirname "$bin")       # <pkg>/dist/bin
+  dir=$(dirname "$dir")       # <pkg>/dist
+  dir=$(dirname "$dir")       # <pkg>
+  [ -f "$dir/dist/src/backends/markdown-grammar.js" ] || return 1
+  [ -f "$dir/dist/src/view.js" ] || return 1
+  printf '%s\n' "$dir"
+}
+
+# Print the whole board as one row per id:
+#   <id>\t<state>\t<hold-kind>\t<hold-reason>\t<hold-until>\t<blocked>\t<title>\t<base64 body>
+# The body travels base64 so a multi-line body stays one field of one row, and
+# the caller decodes only the rows it keeps.
+fm_due_snapshot() {  # <backlog-file>
+  local file=$1 root
+  root=$(tasks_axi_package_root) \
+    || fail "the installed tasks-axi package layout is not readable; cannot read the board source"
+  FM_DUE_GRAMMAR="$root/dist/src/backends/markdown-grammar.js" \
+    FM_DUE_VIEW="$root/dist/src/view.js" \
+    node --input-type=module - "$file" <<'NODE'
+import { readFileSync } from "node:fs";
+const { parseBacklog } = await import(process.env.FM_DUE_GRAMMAR);
+const { toRow } = await import(process.env.FM_DUE_VIEW);
+const doc = parseBacklog(readFileSync(process.argv[2], "utf8"));
+const tasks = [];
+for (const section of doc.sections) {
+  for (const entry of section.entries) {
+    if (entry.kind === "task") tasks.push(entry.task);
+  }
+}
+const rows = [];
+const flat = (value) => String(value ?? "").replace(/[\t\r\n]/g, " ");
+for (const task of tasks) {
+  const row = toRow(task, { all: tasks, full: true });
+  rows.push([
+    flat(row.id), flat(row.state), flat(row.hold_kind), flat(row.hold_reason),
+    flat(row.hold_until), flat(row.blocked), flat(row.title),
+    Buffer.from(row.body ?? "", "utf8").toString("base64"),
+  ].join("\t"));
+}
+process.stdout.write(rows.length ? rows.join("\n") + "\n" : "");
+NODE
+}
+
+# Print the decoded body's review-by date (YYYY-MM-DD) when that date has passed
+# as of <as-of>, and print nothing otherwise. A hold that carries no review-by
+# line counts from its hold-set stamp plus the configured interval, so a
+# pre-change body lists unchanged; a body with no hold-set stamp at all never
+# lists, because there is no time to count from.
+due_review_by() {  # <decoded-body> <as-of>
+  local body=$1 as_of=$2 stamp review
+  stamp=$(body_hold_set_timestamp "$body")
+  [ -n "$stamp" ] || return 1
+  review=$(body_hold_review_by "$body")
+  [ -n "$review" ] || review=$(hold_review_by_for_stamp "$stamp")
+  [ -n "$review" ] || return 1
+  [ "$review" = "$as_of" ] || [ "$review" \< "$as_of" ] || return 1
+  printf '%s\n' "$review"
+}
+
+# Print one due row - `<id>`, the review-by date, the sanitized title, and the
+# call's lifecycle identity - for a call the date gate has already shown past due;
+# print nothing otherwise. Only a resolution record linked to the body's own
+# hold-set stamp settles the call: retained records from a prior lifecycle (a
+# re-held task after an answer) never suppress the new live call, while an
+# interrupted close on the same stamp stays suppressed until retried.
+due_line_for_body() {  # <id> <title> <decoded-body> <review-by>
+  local id=$1 title=$2 body=$3 review=$4
+  body_has_current_resolution_record "$body" && return 1
+  [ -n "$title" ] || title=$id
+  printf '%s\t%s\t%s\t%s\n' "$id" "$review" "$(sanitize_field "$title")" \
+    "$(body_hold_set_timestamp "$body")#$(resolution_record_count "$body")"
+}
+
 refresh_waiting_pin_after_board_mutation() {
   [ -x "$SCRIPT_DIR/fm-ext-waiting-pin.sh" ] || return 0
   FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-ext-waiting-pin.sh" refresh >/dev/null 2>&1 || true
@@ -2193,6 +2447,7 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
   answered) shift; command_answered "$@" ;;
+  due) shift; command_due "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@"; rc=$?; refresh_waiting_pin_after_board_mutation; exit "$rc" ;;
   -h|--help) usage ;;

@@ -21,6 +21,9 @@ JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_DIR=$(dirname "$PYTHON_BIN")
 BASE_PATH="$PYTHON_DIR:$BASE_PATH"
+# The due report reads the board through the installed tasks-axi parser, and
+# tasks-axi itself runs under node, so one fixture wraps node to block that read.
+NODE_BIN=$(command -v node 2>/dev/null) || NODE_BIN=
 TASKS_AXI_BIN=$(command -v tasks-axi 2>/dev/null) || TASKS_AXI_BIN=
 [ -n "$TASKS_AXI_BIN" ] || fail "test needs tasks-axi on PATH"
 BASE_PATH="$(dirname "$TASKS_AXI_BIN"):$BASE_PATH"
@@ -868,6 +871,88 @@ PYTEST
   pass "17 overlapping refreshes capture and publish in the same order"
 }
 
+test_18_due_review_marks_batch_without_hiding_fresh() {
+  local home out
+  home="$TMP_ROOT/c18"
+  setup_home "$home"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add overdue-a "Overdue alpha choice" --kind captain >/dev/null) || fail "overdue fixture a must be created"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add overdue-b "Overdue beta choice" --kind captain >/dev/null) || fail "overdue fixture b must be created"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi add fresh-c "Fresh gamma choice" --kind captain >/dev/null) || fail "fresh fixture must be created"
+  home_env "$home" env FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z "$ROOT/bin/fm-captain-hold.sh" hold overdue-a --reason "alpha pending" >/dev/null || fail "overdue hold a must succeed"
+  home_env "$home" env FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z "$ROOT/bin/fm-captain-hold.sh" hold overdue-b --reason "beta pending" >/dev/null || fail "overdue hold b must succeed"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" hold fresh-c --reason "gamma pending" >/dev/null || fail "fresh hold must succeed"
+  out=$(home_env "$home" env FM_CAPTAIN_HOLD_TODAY=2026-08-16 "$REFRESH" content) || fail "batch content must render"
+  assert_contains "$out" "Overdue alpha choice (due for review)" "the first overdue call must be marked"
+  assert_contains "$out" "Overdue beta choice (due for review)" "the second overdue call must be marked"
+  assert_contains "$out" "Fresh gamma choice" "the fresh call must stay listed"
+  assert_not_contains "$out" "Fresh gamma choice (due for review)" "the fresh call must stay unmarked"
+  pass "18 past-due calls are marked as a batch while fresh calls stay unmarked"
+}
+
+test_19_due_timeout_keeps_calls_visible_and_releases_claim() {
+  local home fake
+  home="$TMP_ROOT/c19"
+  setup_home "$home"
+  hold_call "$home" timeout-call 'Choose after due timeout' pending
+  fake="$home/fakebin"
+  mkdir -p "$fake"
+  # The due report reads the board through the tasks-axi parser, so the blocked
+  # read this fixture drives is the parser invocation. tasks-axi is itself a node
+  # script, so every other invocation passes through to the real interpreter.
+  cat > "$fake/node" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    --input-type=module)
+      : > "$PIN_TEST_HOME/due-started"
+      sleep 30
+      ;;
+  esac
+done
+exec "$REAL_NODE_BIN" "$@"
+SH
+  chmod +x "$fake/node"
+  home_env "$home" env PATH="$fake:$BASE_PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" REAL_NODE_BIN="$NODE_BIN" PIN_TEST_HOME="$home" \
+    "$PYTHON_BIN" - "$home" "$REFRESH" <<'PYTEST' || fail "timed-out due marking must return and release the pin claim"
+import json, pathlib, subprocess, sys, time
+home = pathlib.Path(sys.argv[1])
+start = time.monotonic()
+result = subprocess.run([sys.argv[2], "refresh"], capture_output=True, text=True, timeout=30)
+assert result.returncode == 0, result.stderr
+assert "refreshed" in result.stdout, result.stdout + result.stderr
+assert (home / "due-started").exists(), "the due subprocess never reached the blocked read"
+assert 20 <= time.monotonic() - start < 30, "refresh did not honor the due bound"
+box = home / "state/ext-outbox"
+payloads = list(box.glob("waiting-pin.*.json"))
+assert len(payloads) == 1, payloads
+text = json.loads(payloads[0].read_text())["text"]
+assert "Choose after due timeout" in text, text
+assert "due for review" not in text, text
+assert not list(box.glob("*.inflight")), "refresh retained the publication claim"
+PYTEST
+  pass "19 a due timeout leaves calls visible without marking and releases the publication claim"
+}
+
+test_20_long_overdue_title_keeps_marker() {
+  local home title out line
+  home="$TMP_ROOT/c20"
+  setup_home "$home"
+  title=$(python3 -c 'print("T" * 220)')
+  hold_call "$home" long-overdue "$title" pending
+  printf 'Captain hold set: 2026-08-01T00:00:00Z\nCaptain hold review by: 2026-08-15\n' > "$home/body.txt"
+  (cd "$home/data" && PATH="$BASE_PATH" tasks-axi update long-overdue --body-file "$home/body.txt" >/dev/null) \
+    || fail "long overdue body must be recorded"
+  out=$(home_env "$home" env FM_CAPTAIN_HOLD_TODAY=2026-08-16 "$REFRESH" content) \
+    || fail "long overdue call must render"
+  line=$(printf '%s\n' "$out" | grep '^- ')
+  assert_contains "$line" '… (due for review)' "the cap must preserve the overdue marker"
+  [ "${#line}" -eq 200 ] || fail "the overdue call must respect the 200-character cap"
+  pass "20 long overdue titles retain their marker inside the call-line cap"
+}
+
+test_19_due_timeout_keeps_calls_visible_and_releases_claim
+test_20_long_overdue_title_keeps_marker
+
 test_1b_long_titles_render_cleanly_without_ids_or_commands
 test_1c_multiline_titles_remain_single_decisions
  test_1_content_lists_calls_and_prs_without_leaks
@@ -893,5 +978,6 @@ test_15_pin_targets_and_reply_separation
 test_16_competing_pin_posters_share_one_claim
 
 test_17_refresh_capture_and_publication_are_serialized
+test_18_due_review_marks_batch_without_hiding_fresh
 
 echo "all fm-ext-waiting-pin tests passed"

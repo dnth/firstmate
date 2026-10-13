@@ -235,6 +235,92 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+test_board_only_due_call_surfaces_without_status_logs() {
+  local dir state out err mode channel task key endpoint ident extra
+  command -v tasks-axi >/dev/null 2>&1 || { pass "tasks-axi absent; board-only due test skipped"; return 0; }
+  dir=$(make_case board-only-due)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  # No status log exists at all: the only record of this call is the board.
+  mkdir -p "$dir/data" "$dir/config"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  (cd "$dir" && tasks-axi add board-only "Board only choice" --kind captain --repo sample >/dev/null) \
+    || fail "could not create the board-only fixture"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z FM_CAPTAIN_HOLD_REVIEW_DAYS=14 \
+    "$ROOT/bin/fm-captain-hold.sh" hold board-only --reason "board only pending" >/dev/null \
+    || fail "could not hold the board-only fixture"
+  for mode in empty queued; do
+    if [ "$mode" = queued ]; then
+      append_wake "$state" check unrelated 'unrelated check' || fail "could not queue an unrelated wake"
+    fi
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+      FM_CONFIG_OVERRIDE="$dir/config" FM_CAPTAIN_HOLD_TODAY=2026-08-16 \
+      FM_WAKE_DRAIN_DECISION_REVISIONS=1 "$DRAIN" > "$out" 2> "$err" \
+      || fail "$mode drain failed with no status logs"
+
+    grep -Fx 'board-only [key=board-only] needs-decision: Board only choice (due for review since 2026-08-15)' "$out" >/dev/null \
+      || fail "$mode drain did not preserve the due row task/key/verb/note fields: $(cat "$out")"
+    grep -Fx "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'; answer a backlog-backed call: bin/fm-captain-hold.sh answer <task> --decision-file <path> [--release]" "$out" >/dev/null \
+      || fail "$mode drain omitted the backlog-backed answer command"
+    IFS=$(printf '\t') read -r channel task key endpoint ident extra < <(grep '^DECISION_REVISION' "$err") \
+      || fail "$mode drain emitted no decision revision"
+    [ "$channel" = DECISION_REVISION ] && [ "$task" = board-only ] && [ "$key" = board-only ] \
+      && [ "$endpoint" = backlog ] && [ "$ident" = '2026-08-01T00:00:00Z#0' ] && [ -z "$extra" ] \
+      || fail "$mode drain emitted malformed decision revision fields: $(cat "$err")"
+  done
+  printf 'Proceed with the work.\n' > "$dir/decision.txt"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-captain-hold.sh" answer board-only \
+    --decision-file "$dir/decision.txt" --release >/dev/null \
+    || fail "the advertised command could not answer a board-only call"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_CAPTAIN_HOLD_TODAY=2026-08-16 \
+    "$ROOT/bin/fm-captain-hold.sh" due > "$out" || fail "due failed after the board-only answer"
+  [ ! -s "$out" ] || fail "the answered board-only call remained due"
+  pass "a board-only past-due call surfaces in OPEN DECISIONS with no status logs"
+}
+
+test_over_long_due_title_keeps_its_review_marker() {
+  local dir state out title line
+  command -v tasks-axi >/dev/null 2>&1 || { pass "tasks-axi absent; long due title test skipped"; return 0; }
+  dir=$(make_case long-due-title)
+  state="$dir/state"
+  out="$dir/drain.out"
+  mkdir -p "$dir/data" "$dir/config"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  title="$(python3 -c 'print("T" * 200)') needs a call"
+  (cd "$dir" && tasks-axi add long-due "$title" --kind captain --repo sample >/dev/null) \
+    || fail "could not create the long due fixture"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_CAPTAIN_HOLD_NOW=2026-08-01T00:00:00Z FM_CAPTAIN_HOLD_REVIEW_DAYS=14 \
+    "$ROOT/bin/fm-captain-hold.sh" hold long-due --reason "long pending" >/dev/null \
+    || fail "could not hold the long due fixture"
+
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_CAPTAIN_HOLD_TODAY=2026-08-16 \
+    "$DRAIN" > "$out" || fail "drain failed on the long due title"
+
+  line=$(grep -F 'long-due [key=long-due] needs-decision:' "$out" | head -1)
+  [ -n "$line" ] || fail "the long due title did not render: $(cat "$out")"
+  case "$line" in
+    *' (due for review since 2026-08-15)') : ;;
+    *) fail "a due-for-review marker did not survive the per-item cap: $line" ;;
+  esac
+  case "$line" in
+    *'[truncated] (due for review since 2026-08-15)') : ;;
+    *) fail "an over-long due title was not cut before its marker with the shared truncation marker: $line" ;;
+  esac
+  [ "${#line}" -le 219 ] || fail "the capped due row ran ${#line} characters past its per-item budget"
+
+  pass "an over-long due title is cut to its per-item budget with the review marker left whole"
+}
+
+test_board_only_due_call_surfaces_without_status_logs
+test_over_long_due_title_keeps_its_review_marker
 test_over_long_decision_note_is_capped_with_a_marker
 test_buried_decision_still_surfaces
 test_explicit_resolution_closes_it

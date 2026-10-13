@@ -15,9 +15,10 @@
 # Machine channel: under FM_WAKE_DRAIN_DECISION_REVISIONS=1 (set only by the
 # away-mode daemon) every rendered OPEN DECISIONS row also emits one
 # "DECISION_REVISION<TAB><task><TAB><key><TAB><endpoint><TAB><ident>" line on
-# stderr carrying the same status-log revision the presentation folded the
-# decision from, so the consumer can anchor its advisory to this snapshot
-# (issue #188).
+# stderr carrying the status-log revision or backlog lifecycle identity the
+# presentation used, so the consumer anchors its advisory to this snapshot.
+# Backlog rows use endpoint `backlog`; bin/fm-captain-hold.sh's `due` report
+# owns their identity format.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -340,13 +341,32 @@ EOF
   [ "$omitted" -gt 0 ] && printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted"
   return 0
 }
+# Print the lifecycle identity the due report captured for <task>, from the same
+# snapshot that rendered its row: a backlog advisory is anchored to the identity
+# that arrived with the row's prose, so no later read can pair them across
+# lifecycles. Reads the caller's DUE identities lookup and prints nothing for a
+# task it does not hold.
+due_identity_for() {  # <task>
+  local want=$1 task ident
+  while IFS=$(printf '\t') read -r task ident; do
+    [ "$task" = "$want" ] || continue
+    printf '%s' "$ident"
+    return 0
+  done <<EOF_DUE_IDENTITY
+$due_identities
+EOF_DUE_IDENTITY
+  return 1
+}
+
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
 # scan_open_decisions_incremental wrapper) rather than from the annotations
 # above, so a decision buried under later unrelated appends cannot be silently
-# missed. Informational `note:` lines and pending-reply resolutions are not
-# decisions; print_unread_status_section owns their one-shot surface. Runs on
+# missed, plus every still-open captain-held task past its review-by date from
+# bin/fm-captain-hold.sh's read-only `due` report, so board-only holds surface
+# even with no status log. Informational `note:` lines and pending-reply
+# resolutions are not decisions; print_unread_status_section owns their one-shot surface. Runs on
 # every drain - including the empty-queue fast path - because the decision can
 # still be open even when nothing new is queued for
 # its task this turn. The incremental wrapper bounds this scan's cost to bytes
@@ -356,7 +376,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open due task key verb note review title due_marker due_identities line row_origin item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
   local revisions='' s_task s_endpoint s_ident d_endpoint d_ident emit_revisions=false
 
@@ -380,18 +400,54 @@ print_open_decisions_section() {
     # semantics this path always had.
     revisions=$(status_presentation_snapshot "$STATE" 2>/dev/null) || revisions=
   fi
+  # Backlog-backed due calls join this same surface: a live captain-held task
+  # past its review-by date renders as its own open line even when no status
+  # log holds the key open, so board-only holds never stay silent. The fold
+  # above owns status-log truth; this append only adds backlog-due rows. The
+  # read is bounded at 20 seconds so a slow or wedged backlog read degrades to
+  # no due rows instead of stalling every wake-handling turn; bin/fm-captain-hold.sh's
+  # `due` answers a fleet-sized board from one backlog listing, so that bound
+  # holds for the whole report rather than one held call at a time.
+  due=$(fm_run_timed 20 "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null) || due=
+  # Every row below is "origin TAB task TAB key TAB verb TAB marker TAB note":
+  # a status-log row carries the clear-marker sentinel "-", a backlog-due row
+  # carries its due-for-review marker (with its own leading separator space)
+  # there, and the note stays the LAST field so a note that holds tabs itself is
+  # never split. The fold's own rows are "task TAB key TAB verb TAB note", so
+  # the note is rebuilt intact behind the marker field.
+  open=$(printf '%s\n' "$open" | awk -F'\t' 'NF {
+    note=$4; for (i=5; i<=NF; i++) note=note "\t" $i
+    printf "status\t%s\t%s\t%s\t-\t%s\n", $1, $2, $3, note
+  }') || return 1
+  # Each due row is "<task> TAB <review-by> TAB <title> TAB <identity>", and the
+  # identity is kept beside the rendered row so an advisory is never anchored to
+  # prose from this snapshot and an identity read from a later one.
+  due_identities=''
+  if [ -n "$due" ]; then
+    while IFS=$(printf '\t') read -r task review title due_ident; do
+      [ -n "$task" ] || continue
+      open=$(printf '%s\nbacklog\t%s\t%s\t%s\t%s\t%s' "$open" "$task" "$task" \
+        needs-decision " (due for review since $review)" "${title:-captain call}")
+      due_identities="$due_identities$task"$'\t'"$due_ident"$'\n'
+    done <<EOF
+$due
+EOF
+  fi
   [ -n "$open" ] || return 0
 
-  while IFS=$(printf '\t') read -r task key verb note; do
+  while IFS=$(printf '\t') read -r row_origin task key verb due_marker note; do
     [ -n "$task" ] || continue
+    case "$due_marker" in -) due_marker='' ;; esac
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
+    line="$line $verb: "
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
-    # allowance passed down is one short of the cap.
-    fm_cap_line_var "$line" $((item_bytes - 1))
-    line=$FM_LINE_CAP_LINE
+    # allowance passed down is one short of the cap. A due row's marker is the
+    # whole reason that row is listed, so the cut is applied to the title alone
+    # and the marker is appended whole after it.
+    fm_cap_line_var "$line$note" $((item_bytes - 1 - ${#due_marker}))
+    line="$FM_LINE_CAP_LINE$due_marker"
     bytes=$(( ${#line} + 1 ))
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
       omitted=$((omitted + 1))
@@ -403,14 +459,19 @@ print_open_decisions_section() {
     shown=$((shown + 1))
     if [ "$emit_revisions" = true ]; then
       d_endpoint=- d_ident=-
-      while IFS=$(printf '\t') read -r s_task s_endpoint s_ident; do
-        [ "$s_task" = "$task" ] || continue
-        d_endpoint=$s_endpoint
-        d_ident=$s_ident
-        break
-      done <<EOF_REV
+      if [ "$row_origin" = status ]; then
+        while IFS=$(printf '\t') read -r s_task s_endpoint s_ident; do
+          [ "$s_task" = "$task" ] || continue
+          d_endpoint=$s_endpoint
+          d_ident=$s_ident
+          break
+        done <<EOF_REV
 $revisions
 EOF_REV
+      else
+        d_endpoint=backlog
+        d_ident=$(due_identity_for "$task") || return 1
+      fi
       printf 'DECISION_REVISION\t%s\t%s\t%s\t%s\n' "$task" "$key" "$d_endpoint" "$d_ident" >&2
     fi
   done <<EOF
@@ -427,7 +488,7 @@ EOF
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
-  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
+  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'; answer a backlog-backed call: bin/fm-captain-hold.sh answer <task> --decision-file <path> [--release]\n" || return 1
 }
 
 # Print the RECORD DIVERGENCE section: every captain call whose two records
@@ -492,9 +553,15 @@ EOF
 
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
+  local have_snapshot=1
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
-  [ -n "$snapshot" ] || return 0
-  acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
+  # An empty snapshot means no status logs exist, not nothing open: the
+  # backlog-backed due rows inside print_open_decisions_section still render,
+  # so board-only holds surface on a status-less home too.
+  [ -n "$snapshot" ] || have_snapshot=0
+  if [ "$have_snapshot" = 1 ]; then
+    acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
+  fi
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
   if ! {
     print_unread_status_section "$snapshot" \
@@ -506,7 +573,9 @@ print_status_sections() {
     return 1
   fi
   command cat "$prepared" || { rm -f -- "$prepared"; return 1; }
-  status_commit_presentation_snapshot "$STATE" "$acknowledged"
+  if [ "$have_snapshot" = 1 ]; then
+    status_commit_presentation_snapshot "$STATE" "$acknowledged"
+  fi
   rm -f -- "$prepared"
 }
 
@@ -542,7 +611,9 @@ print_status_presentation() {  # [<deduped-raw-rows>]
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  # Sections run even with no status snapshot: the open-decisions fold carries
+  # backlog-backed due rows, so board-only holds surface on a status-less home.
+  if [ "$rc" -eq 0 ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
   fm_lock_release "$lock"
   if [ "$rc" -eq 0 ]; then print_ext_requests_section || true; fi
   return "$rc"

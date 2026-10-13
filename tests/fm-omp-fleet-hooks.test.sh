@@ -149,6 +149,7 @@ HANDLER_ROOT="$TMP_ROOT/handler-root"
 mkdir -p "$HANDLER_ROOT/.omp/extensions" "$HANDLER_ROOT/bin"
 cp "$FM_HOOKS" "$HANDLER_ROOT/.omp/extensions/fm-fleet-hooks.ts"
 cp "$ROOT/bin/fm-classify-lib.sh" "$HANDLER_ROOT/bin/fm-classify-lib.sh"
+cp "$ROOT/bin/fm-timeout-lib.sh" "$HANDLER_ROOT/bin/fm-timeout-lib.sh"
 cat > "$HANDLER_ROOT/bin/fm-todo-project.sh" <<'SH'
 #!/usr/bin/env bash
 [ "$#" -eq 1 ] || exit 2

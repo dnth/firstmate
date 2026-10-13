@@ -34,6 +34,8 @@
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
 # bin/ script (which sets its own SCRIPT_DIR) or directly by a test.
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
 
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
@@ -773,7 +775,9 @@ EOF
 #     covers the unkeyed slot). Superseded when the keyed fold no longer holds
 #     the key open after the captured status-log revision - a resolved/captain-
 #     held line for the exact key, or a terminal declaration that closes it per
-#     the fold's own semantics.
+#     the fold's own semantics. A backlog endpoint instead uses the current
+#     due-report snapshot: the call must remain eligible with the captured
+#     lifecycle identity. An unsuccessful read cannot prove supersession.
 #   worker - a stopped-worker/stale-pane advisory anchored at the status
 #     revision <endpoint>@<ident> captured at production. Superseded when the
 #     same file has any non-blank byte appended past <endpoint> (the worker's
@@ -786,13 +790,28 @@ EOF
 #     paused nor captain-held.
 #   status / fleet / unknown - a plain captain-facing event is a fact, not a
 #     condition; it is never superseded by this predicate.
-fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
+fm_advisory_due_snapshot() {
+  FM_STATE_OVERRIDE="$1" fm_run_timed 20 "$_FM_CLASSIFY_LIB_DIR/fm-captain-hold.sh" due 2>/dev/null
+}
+
+fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident> [due-rows due-rc]
   local state=$1 task=$2 kind=$3 key=$4 endpoint=$5 ident=$6 f live_ident size
-  local span span_line span_key verb resolve held
+  local span span_line span_key verb resolve held due_rows
   f="$state/$task.status"
   case "$kind" in
     decision)
       case "$key" in ''|-) return 1 ;; esac
+      if [ "$endpoint" = backlog ]; then
+        if [ "$#" -ge 7 ]; then
+          [ "${8:-0}" -eq 0 ] || return 1
+          due_rows=$7
+        else
+          due_rows=$(fm_advisory_due_snapshot "$state") || return 1
+        fi
+        live_ident=$(printf '%s\n' "$due_rows" | awk -F '\t' -v task="$task" '$1 == task { print $4 }')
+        [ -n "$live_ident" ] && [ "$live_ident" = "$ident" ] && return 1
+        return 0
+      fi
       [ -e "$f" ] || return 0
       [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
       case "$endpoint" in ''|-|*[!0-9]*) return 1 ;; esac

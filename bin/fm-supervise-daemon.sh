@@ -1210,11 +1210,15 @@ advisory_mark_flushed() {  # <state> <file>
 # holding no new captain action). Every drop is logged so the daemon log names
 # why a buffered item never reached the pane.
 escalate_buffer_reconcile() {  # <state> <buf>
-  local state=$1 buf=$2 line
+  local state=$1 buf=$2 line due_rows='' due_rc=0 due_read=0
   while IFS= read -r line || [ -n "$line" ]; do
     if _advisory_fields "$line"; then
+      if [ "$ADVISORY_KIND" = decision ] && [ "$ADVISORY_ENDPOINT" = backlog ] && [ "$due_read" -eq 0 ]; then
+        due_rows=$(fm_advisory_due_snapshot "$state") || due_rc=$?
+        due_read=1
+      fi
       if fm_advisory_superseded "$state" "$ADVISORY_TASK" "$ADVISORY_KIND" \
-          "$ADVISORY_KEY" "$ADVISORY_ENDPOINT" "$ADVISORY_IDENT"; then
+          "$ADVISORY_KEY" "$ADVISORY_ENDPOINT" "$ADVISORY_IDENT" "$due_rows" "$due_rc"; then
         log "advisory superseded before delivery (task=$ADVISORY_TASK kind=$ADVISORY_KIND key=$ADVISORY_KEY): $ADVISORY_PROSE"
         continue
       fi
@@ -2102,11 +2106,11 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp recovery_offset_tmp
   local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
   local adv_task adv_key adv_rest adv_endpoint adv_ident
-  local decision_revisions='' rev_task rev_key rev_endpoint rev_ident rev_matched
+  local decision_revisions='' rev_task rev_key rev_matched
   local decisions_routed_completely=false
   local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_OFFSET_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
   local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
-  local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'"
+  local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'; answer a backlog-backed call: bin/fm-captain-hold.sh answer <task> --decision-file <path> [--release]"
   recovery_projection_tmp=$(mktemp "$state/.subsuper-recovery-projection.XXXXXX") || return 1
   recovery_seen_tmp=$(mktemp "$state/.subsuper-recovery-seen.XXXXXX") || {
     rm -f "$recovery_projection_tmp"
@@ -2184,6 +2188,9 @@ handle_durable_wakes() {  # <watcher-reason> <state>
             decision_parse_state=complete
           else
             [ -n "$line" ] || { capture_valid=false; break; }
+            if [[ "$line" =~ ^OPEN\ DECISIONS:\ [0-9]+\ more\ omitted\ \(byte\ cap\)$ ]]; then
+              continue
+            fi
             decision_lines="$decision_lines$line
 "
             decision_count=$((decision_count + 1))
@@ -2216,17 +2223,14 @@ handle_durable_wakes() {  # <watcher-reason> <state>
         '[key='*) adv_key=${adv_rest#\[key=}; adv_key=${adv_key%%\]*} ;;
       esac
       rev_matched=false
-      while IFS="$tab" read -r rev_task rev_key rev_endpoint rev_ident; do
-        [ -n "$rev_task" ] || continue
-        if [ "$rev_task" = "$adv_task" ] && [ "$rev_key" = "$adv_key" ]; then
-          adv_endpoint=$rev_endpoint
-          adv_ident=$rev_ident
-          rev_matched=true
-          break
-        fi
-      done <<EOF3
-$decision_revisions
-EOF3
+      IFS="$tab" read -r rev_task rev_key adv_endpoint adv_ident <<<"${decision_revisions%%$'\n'*}"
+      case "$decision_revisions" in
+        *$'\n'*) decision_revisions=${decision_revisions#*$'\n'} ;;
+        *) decision_revisions='' ;;
+      esac
+      if [ "$rev_task" = "$adv_task" ] && [ "$rev_key" = "$adv_key" ]; then
+        rev_matched=true
+      fi
       if [ "$rev_matched" != true ]; then
         # A rendered decision without its drain-snapshot revision means the
         # producer and consumer disagree; retain the episode for a retry

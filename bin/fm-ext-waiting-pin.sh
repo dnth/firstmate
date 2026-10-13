@@ -105,11 +105,27 @@ print(value.replace(chr(9), " ").replace(chr(10), " ").replace(chr(13), " "), en
 ' || return 1
 }
 
+# waiting_pin_due_title <due-rows> <id>: print the title the due report captured
+# for <id>, from the same read that marked it due, so the marker is never paired
+# with a title read from a later snapshot. Prints nothing for a call the report
+# does not carry.
+waiting_pin_due_title() {  # <due-rows> <id>
+  local rows=$1 want=$2 id title
+  while IFS=$(printf '\t') read -r id _ title _; do
+    [ "$id" = "$want" ] || continue
+    printf '%s' "$title"
+    return 0
+  done <<EOF_DUE_TITLE
+$rows
+EOF_DUE_TITLE
+  return 1
+}
+
 # waiting_pin_board <data>: print the message body lines from durable board
 # records only. Captain calls come from actionable open captain-hold annotations.
 # Prints nothing when there is nothing waiting.
 waiting_pin_board() {
-  local data=$1 listing ids today id title
+  local data=$1 listing ids today id title due_rows due_title
   today=$(date -u '+%Y-%m-%d') || return 1
   listing=$(FM_TASKS_AXI_TIMEOUT=10 fm_backlog_row_list "$data" --fields hold_kind,hold_reason,hold_until,blocked) || return 1
   ids=$(axi_rows tasks "$listing" rows id hold_kind hold_reason hold_until blocked state | awk -F '\t' -v today="$today" '
@@ -117,8 +133,13 @@ waiting_pin_board() {
       ($4 == "" || $4 == "null" || $4 == "-" || $4 <= today) {
         print $1
       }') || return 1
+  due_rows=$(fm_run_timed 20 "$SCRIPT_DIR/fm-captain-hold.sh" due 2>/dev/null) || due_rows=
   while IFS= read -r id; do
     [ -n "$id" ] || continue
+    if due_title=$(waiting_pin_due_title "$due_rows" "$id"); then
+      printf 'CALL %s\t%s (due for review)\n' "$id" "$due_title"
+      continue
+    fi
     title=$(waiting_pin_title "$data" "$id") || return 1
     printf 'CALL %s\t%s\n' "$id" "$title"
   done <<< "$ids"
@@ -201,7 +222,9 @@ for index, line in enumerate(lines):
     elif line == "PRs ready for your merge word:":
         in_calls = False
     elif in_calls and line.startswith("- ") and len(line) > 200:
-        lines[index] = line[:199] + "…"
+        marker = " (due for review)" if line.endswith(" (due for review)") else ""
+        title = line[:-len(marker)] if marker else line
+        lines[index] = title[:199 - len(marker)] + "…" + marker
 text = "\n".join(lines)
 if len(text) > 2000:
     suffix = "\n… More waiting items omitted; check the board for the full list."
