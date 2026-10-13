@@ -904,6 +904,16 @@ A rename failure, including a rate limit, is logged, recorded, and never blocks 
 The record keeps the wanted state and the failure; the next reply in that thread retries any failed rename, and the periodic sweep also retries one that did not fail permanently.
 Permanent failures, such as an archived thread refusing the rename, wait for the next reply; the periodic sweep never unarchives a thread just to remove a marker.
 A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
+
+Firstmate can also open a topic thread no captain request started, for example one thread per tracked item, with [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh).
+It opens a titled public thread directly in the dedicated channel and posts its first message there through the same outbox, poster, receipts, chunking, and posting markers as any reply; its header owns the flags, key format, and lookup output.
+A private key names the tracked item and maps to one stable request id, printed on success and recorded in the destination context, so re-running the same open never opens a second thread and later `followup`/`final` emits and thread states land in that thread exactly as for a request-created one.
+The title is required and passes the shared title screen; an opened thread has no request text, so its title is its only name.
+The open has no channel argument, and the poster re-checks the dedicated channel before creating the thread: a payload whose channel is no longer dedicated fails terminally rather than opening a thread anywhere else.
+The guild is the one the allowlist names for the dedicated channel, and an open refuses when the allowlist names none or more than one, so it never reaches a guild the bridge does not already admit.
+Unlike a request thread, an opened thread never falls back to posting in place: a create refused for a missing permission fails the first message with a reason naming the permissions the bot needs, and a create with an unknown outcome is never retried into a second thread.
+A captain message inside an opened thread is an ordinary in-thread request.
+An opened thread stays addressable for the bridge retention window; once its context ages out, the same key opens a fresh thread.
 Slash commands are unchanged: `/fm` replies post to their originating thread (the channel itself for a top-level interaction) and never attempt thread creation.
 A thread-creation failure (such as missing permission) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
 On that existing-thread path, the poster fetches and validates the winning name before recording the thread as adopted for reply routing.
@@ -916,7 +926,7 @@ The [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#the-reply-is-publ
 The intake records the fallback name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record so every generation shares the same thread.
 [`save_thread_record` in the poster](../contrib/hermes-gateway-firstmate-comms/outbox_poster.py) owns the record fields.
 A marker applied from inside the thread, or by the periodic sweep, updates that same record rather than writing a second one, so the next change on any path builds on the same name.
-The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, marker, auto-clear, drift, rename-retry, and unchanged-allowlist coverage.
+The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, marker, auto-clear, drift, rename-retry, opened-thread, and unchanged-allowlist coverage.
 
 ### Delivery reactions
 

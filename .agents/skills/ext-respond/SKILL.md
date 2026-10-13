@@ -4,7 +4,8 @@ description: >-
   Agent-only playbook for handling local Communication Officer Discord requests.
   Use on an "ext-request <slug>" check wake or a drain's "EXT REQUESTS AWAITING ANSWER" section to drain the local inbox, classify,
   act through the normal lifecycle, emit ack/answer/follow-up/final into the
-  local outbox, and link spawned work.
+  local outbox, and link spawned work; also load before opening a Discord topic
+  thread that no captain request started.
   Loaded only when the sibling local ext-bridge is enabled.
 user-invocable: false
 metadata:
@@ -76,6 +77,16 @@ Before composing a dedicated-channel reply, consult the [topic-thread contract](
 - **Clear the marker** when work resumes on an independent question, as defined by the topic-thread contract above.
 
 Titles are public: the same safety rules as reply text apply (no task ids, branch names, paths, hostnames, or secrets).
+
+## Open a thread for tracked work
+
+To post about a tracked item no captain request started, open its own thread with `bin/fm-ext-open.sh`; its [header and help](../../../bin/fm-ext-open.sh) own the flags, and the [topic-thread contract](../../../docs/configuration.md#topic-threads-one-thread-per-request) owns routing.
+
+- Use one stable private key per item, such as the board id, and the same `<Project> · <topic>` title rule as above.
+- The command prints the thread's request id; record it in the item's note or link the task with `bin/fm-ext-link.sh <task-id> <request_id>`, and recover it later with `--lookup`.
+- Post later updates with `bin/fm-ext-emit.sh --request-id <request_id> --kind followup|final --generation <n>`, starting at generation 1, with thread states as for any thread.
+- `--lookup` also shows whether the first message posted; a failure there names the missing permission or refusal, which goes to the captain as a blocker.
+- Captain replies inside the thread arrive as ordinary requests and follow the procedure below.
 
 ## Acknowledge first, act, then follow up
 

@@ -701,9 +701,11 @@ def thread_name_for(payload: dict, home: Path) -> str:
     re-derived from the request text the intake recorded, never trusted from
     the stored string alone, so later follow-ups reuse the exact name the
     first reply used. Anything unusable - no context, no recorded name, an
-    already-threaded request - means no thread is created.
+    already-threaded request - means no thread is created. A thread
+    bin/fm-ext-open.sh opened is named by its context's origin, so its title
+    is its only name even when the caller stands in as a message request.
     """
-    if payload.get("origin") != "message":
+    if payload.get("origin") not in ("message", "open"):
         return ""
     if str(payload.get("thread_id") or "") != str(payload.get("channel_id") or ""):
         return ""
@@ -714,6 +716,11 @@ def thread_name_for(payload: dict, home: Path) -> str:
         return ""
     if not isinstance(context, dict):
         return ""
+    opened = context.get("origin") == "open"
+    if payload.get("origin") == "open" and not opened:
+        return ""
+    if opened:
+        payload = dict(payload, origin="open")
     name = context.get("topic") or ""
     request_text = context.get("request_text") or ""
     if not isinstance(name, str) or not name or not isinstance(request_text, str):
@@ -988,8 +995,9 @@ def maybe_rename_topic_thread(
         return thread_id
     thread_field = str(payload.get("thread_id") or "")
     if thread_field == str(payload.get("channel_id") or ""):
-        # Only a top-level message request ever creates a topic thread.
-        if payload.get("origin") != "message":
+        # Only a top-level message request or an opened thread ever creates
+        # a topic thread.
+        if payload.get("origin") not in ("message", "open"):
             return thread_id
         recorded = load_request_topic(payload, home)
         if not thread_id or recorded.get("topic_thread_id") != thread_id:
@@ -1113,9 +1121,50 @@ def discord_create_thread(payload: dict, name: str) -> dict:
         raise DiscordSendError("permanent", "thread parent is not a Discord message id")
     if str(payload.get("thread_id") or "") != channel:
         raise DiscordSendError("permanent", "thread parent is not the request channel")
-    body = json.dumps({"name": name, "auto_archive_duration": 1440}).encode("utf-8")
+    return _post_thread(f"{DISCORD_API_BASE}/channels/{channel}/messages/{message}/threads",
+                        {"name": name, "auto_archive_duration": 1440}, token)
+
+
+# Discord's public-thread channel type, for a thread started without a message.
+_PUBLIC_THREAD = 11
+# Discord refusals that mean the bot lacks a permission in the channel.
+_MISSING_ACCESS = {50001, 50013}
+
+
+def discord_open_thread(payload: dict, name: str) -> dict:
+    """Start a public thread with no parent message in the dedicated channel.
+
+    This is how a thread bin/fm-ext-open.sh asked for comes into being. It
+    needs the same Create Public Threads permission as a thread on a request
+    message; a refusal for a missing permission says so in its reason.
+    """
+    name = public_topic_name(payload, name, None, "", _title_for(payload))
+    if not name:
+        raise DiscordSendError("permanent", "opened thread has no valid title")
+    token = _bot_token()
+    if not token:
+        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
+    channel = str(payload.get("channel_id") or "")
+    if not _SNOWFLAKE.fullmatch(channel) or str(payload.get("thread_id") or "") != channel:
+        raise DiscordSendError("permanent", "opened thread parent is not the request channel")
+    try:
+        return _post_thread(f"{DISCORD_API_BASE}/channels/{channel}/threads",
+                            {"name": name, "type": _PUBLIC_THREAD, "auto_archive_duration": 1440}, token)
+    except DiscordSendError as err:
+        if err.http_code == 403 or err.api_error.get("code") in _MISSING_ACCESS:
+            raise DiscordSendError(
+                err.outcome,
+                f"{err}: the bot lacks permission to open threads in the dedicated channel "
+                "(needs View Channel, Create Public Threads, and Send Messages in Threads)",
+                err.http_code, err.api_error) from err
+        raise
+
+
+def _post_thread(url: str, body_fields: dict, token: str) -> dict:
+    """POST one thread-create request and return its thread id."""
+    body = json.dumps(body_fields).encode("utf-8")
     request = urllib.request.Request(
-        f"{DISCORD_API_BASE}/channels/{channel}/messages/{message}/threads",
+        url,
         data=body,
         method="POST",
         headers={
@@ -1227,6 +1276,56 @@ def ensure_topic_thread(
                             creator=creator_provenance)
     except Exception:
         return thread_id
+    return thread_id
+
+
+def ensure_open_thread(
+    payload: dict,
+    progress: dict,
+    home: Path,
+    create_thread: ThreadFn | None = None,
+) -> str:
+    """Return the thread an opened topic posts into, creating it once.
+
+    An opened topic has no message to post beside, so unlike
+    ensure_topic_thread it never falls back to posting in place: it raises
+    DiscordSendError, classified like a send, when no thread can be had. The
+    thread may only start in the dedicated channel. ``open_attempt`` in chunk
+    progress marks a create whose outcome is not known; a later attempt
+    refuses rather than risk a second thread, because only the receipt of a
+    create proves no thread exists.
+    """
+    recorded = str(progress.get("topic_thread_id") or "") or load_request_thread(payload, home)
+    if recorded:
+        return recorded
+    if progress.get("open_attempt"):
+        raise DiscordSendError("permanent", "an earlier attempt to open this thread has an unknown "
+                               "outcome; refusing to open a second thread")
+    channel = str(payload.get("channel_id") or "")
+    if str(payload.get("thread_id") or "") != channel or channel != dedicated_channel(home):
+        raise DiscordSendError("permanent", "an opened thread may only start in the dedicated channel")
+    name = thread_name_for(payload, home)
+    if not name:
+        raise DiscordSendError("permanent", "opened thread has no valid title")
+    progress["open_attempt"] = True
+    write_progress(payload, progress, home)
+    try:
+        receipt = (create_thread or discord_open_thread)(payload, name)
+    except Exception as err:
+        if classify_send_failure(err) != "ambiguous":
+            # Discord answered, so no thread exists and a retry is safe.
+            progress["open_attempt"] = False
+            write_progress(payload, progress, home)
+        raise
+    thread_id = str((receipt or {}).get("thread_id") or "")
+    if not _SNOWFLAKE.fullmatch(thread_id):
+        raise DiscordSendError("ambiguous", "discord thread open returned no thread id")
+    thread_state = payload.get("thread_state") if isinstance(payload.get("thread_state"), str) else ""
+    try:
+        save_request_thread(payload, thread_id, home, topic_name=name, thread_state=thread_state,
+                            creating_title=_title_for(payload), creator="firstmate")
+    except Exception as err:
+        print(f"fm-ext-poster: opened thread record skipped: {err}", file=sys.stderr)
     return thread_id
 
 
@@ -1643,7 +1742,20 @@ def deliver_one(
     if int(progress.get("total") or 0) != len(chunks):
         release_inflight(payload, home=home)
         return "mid-delivery"
-    thread_id = ensure_topic_thread(payload, progress, home, create_thread)
+    if payload.get("origin") == "open":
+        try:
+            thread_id = ensure_open_thread(payload, progress, home, create_thread)
+        except Exception as err:
+            outcome = classify_send_failure(err)
+            if outcome == "transient":
+                abort_status = abort_delivery(payload, home=home)
+                return abort_status if abort_status == "already-receipted" else "failed"
+            if outcome == "permanent":
+                fail_status = record_failed(payload, failure_reason(err), home=home)
+                return fail_status if fail_status == "already-receipted" else "terminal-failed"
+            return "mid-delivery"
+    else:
+        thread_id = ensure_topic_thread(payload, progress, home, create_thread)
     progress["topic_thread_id"] = thread_id
     write_progress(payload, progress, home)
     start = int(progress.get("posted_count") or 0)
