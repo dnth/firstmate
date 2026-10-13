@@ -1454,6 +1454,82 @@ test_24_reminders_while_a_decision_is_open_clear_with_it() {
   pass "24 a reminder marked while a decision is open clears with it"
 }
 
+test_25_unpublished_decisions_do_not_keep_the_marker() {
+  local home slug out
+  home="$TMP_ROOT/c25"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Calls below." "Aceh · long chats" "" >/dev/null
+  deliver "$home" >/dev/null
+  open_decision_key "$home" south
+  emit_decision_post "$home" "$RID" 2 south
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+path = home / "state/ext-outbox" / (slug + ".followup.2.json")
+payload = json.loads(path.read_text())
+def refuse(payload):
+    raise poster.DiscordSendError("permanent", "discord HTTP 403", 403)
+assert poster.deliver_one(path, send=refuse, home=home, react=lambda *args: None) == "terminal-failed"
+progress = poster.load_progress(payload, home)
+assert progress["posted_count"] == 0 and progress["discord_message_ids"] == []
+assert poster.decision_threads(home) == {}
+progress.pop("discord_message_ids")
+poster.write_progress(payload, progress, home)
+assert poster.decision_threads(home, "777777777777777777") == {}
+PY
+  then fail "a permanent first-send failure must not count as a decision post"
+  fi
+  open_decision_key "$home" north
+  emit_decision_post "$home" "$RID" 3 north needs-you
+  deliver "$home" >/dev/null
+  open_decision_key "$home" east
+  write_text "$home/partial.txt" "$(printf 'word %.0s' {1..600})"
+  printf '{"key":"key:route-fix:east","options":[{"label":"North"},{"label":"South"}]}' \
+    > "$home/partial-decision.json"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind followup --generation 4 \
+    --text-file "$home/partial.txt" --decision-file "$home/partial-decision.json" >/dev/null
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import sys
+from pathlib import Path
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+sent = []
+def partial(payload):
+    if sent:
+        raise poster.DiscordSendError("permanent", "discord HTTP 403", 403)
+    sent.append(payload["thread_id"])
+    return {"discord_message_id": "900000000000000001"}
+path = home / "state/ext-outbox" / (slug + ".followup.4.json")
+assert poster.deliver_one(path, send=partial, home=home, react=lambda *args: None) == "terminal-failed"
+assert sent == ["777777777777777777"]
+for thread in ("", "777777777777777777"):
+    summary = poster.decision_threads(home, thread)["777777777777777777"]
+    assert summary["open"] == 2 and summary["closed"] == 0, summary
+PY
+  then fail "a partially published multi-chunk decision must still count"
+  fi
+  resolve_decision_key "$home" north North
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "a partially published open decision must keep the marker: $out"
+  resolve_decision_key "$home" east North
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
+    "an unpublished open decision must not prevent auto-clear"
+  jq -e '.thread_state == "none"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "auto-clear must be recorded despite the failed first send"
+  FM_EXT_NOW_OVERRIDE=$(( $(date +%s) + 120 )) \
+    emit_as "$home" "$RID" followup 5 "A new question." "" "needs-you" >/dev/null
+  deliver "$home" >/dev/null
+  jq -e '.marked_open != true' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "an unpublished decision must not own a new marker"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "the new question must retain its marker: $out"
+  pass "25 unpublished decisions do not keep the marker"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -1480,5 +1556,6 @@ test_21_resolving_the_last_decision_clears_the_marker
 test_22_drifted_names_reconcile_with_discord
 test_23_rename_failures_are_recorded_and_retried
 test_24_reminders_while_a_decision_is_open_clear_with_it
+test_25_unpublished_decisions_do_not_keep_the_marker
 
 echo "all fm-ext-topic-threads tests passed"

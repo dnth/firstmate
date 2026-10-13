@@ -86,7 +86,8 @@
 # threads [--thread <id>]
 #   Prints one JSON line per Discord thread that holds a decision post, with
 #   or without buttons: {thread_id, open, closed, last_posted_at}; --thread
-#   reads only that thread. A post is closed once it is settled, replaced by
+#   reads only that thread. Unpublished progress records are ignored.
+#   A post is closed once it is settled, replaced by
 #   a newer post, or its own lifecycle of its decision is decided or
 #   superseded in the ledgers; a decision whose state cannot be read counts
 #   as open. last_posted_at is the newest post's posting time (epoch seconds,
@@ -586,7 +587,7 @@ command_threads() {
   esac
   while IFS= read -r file; do
     stem=$(basename "$file" .progress.json)
-    jq -e '.decision.key' "$file" >/dev/null 2>&1 || continue
+    jq -e '.decision.key and ((.discord_message_ids // []) | length > 0)' "$file" >/dev/null 2>&1 || continue
     thread=$(post_thread "$stem") || continue
     [ -z "$only" ] || [ "$thread" = "$only" ] || continue
     if settled "$stem" || newer_post "$stem"; then
