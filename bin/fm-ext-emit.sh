@@ -30,13 +30,15 @@
 #   {"key": "hold:<task-id>" | "key:<task-id>:<slug>",
 #    "mode": "done" | "release",
 #    "options": [{"label": "<text>", "confirm": true|false, "recommended": true|false}, ...]}
-# with 1-5 options whose labels are distinct, 1-80 characters, and free of
+# with 1-5 options whose input and displayed labels are distinct, 1-80 characters, and free of
 # control characters, in the same order as the post text numbers them; option
 # ids are 1-based in that order. "mode" (captain calls only, default done)
 # chooses how a chosen option closes the call, as in fm-captain-hold.sh
-# answers. At most one option may set "recommended": true, and its label is
-# shown with a "⭐ " prefix while its payload label keeps that same shown
-# text. The key must name a decision that is open right now (a held captain
+# answers. "confirm" and "recommended" are optional booleans, default false.
+# At most one option may set "recommended": true; emit adds "⭐ " unless the
+# label already starts with ⭐, and stores the displayed label in the payload.
+# The added prefix counts toward the 80-character label limit.
+# The key must name a decision that is open right now (a held captain
 # call, or a worker's open keyed status decision) and must fit Discord's
 # 100-character custom_id as fmd:<key>:<n>. An option needs a confirmation
 # click when it declares confirm, and always when its label matches

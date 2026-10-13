@@ -949,13 +949,15 @@ A Discuss click on an open decision decides nothing and leaves the buttons on: i
 
 An option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible needs a second click.
 The first click answers with an ephemeral `Confirm: <label>?` and a Confirm button, and nothing is sent until that button is clicked; the request then carries the prompt, and Firstmate's record quotes it.
-At most one option per decision may be marked recommended (`recommended: true` in the decision file): its button renders green and its label is shown with a "⭐ " prefix, added once, while the stored label keeps that same shown text so the recorded answer quotes what the button showed.
-A recommended option that also needs confirmation still needs its second click; only its colour changes.
+The [emit header](../bin/fm-ext-emit.sh) owns the explicit and label-based rules that require confirmation.
+An optional recommended choice renders green with a star-prefixed label; the [emit header](../bin/fm-ext-emit.sh) owns the recommendation field, limit, and stored label format so the recorded answer quotes what the button showed.
+A recommended option that also needs confirmation still needs its second click.
 A confirmed click from a standing-rule author is that author's explicit word for that one decision only, never standing authority, and merge authority stays where `AGENTS.md` puts it.
 
 Each post is bound to the lifecycle of its decision that was open when it was posted, so a captain call re-held or a worker key reopened for a new question is a different decision to it.
 When Firstmate records an answer on any channel, its posts are disabled and edited to show the outcome, read from the same ledgers rather than from any step Firstmate must remember: `✅ <option> chosen by <user> <time>` names the clicker when the recorded answer is the option that post's click sent, and the captain for any other recorded answer that names exactly one option by number or label; `✅ Decided <time>` covers answers that cannot be matched to one option, `Closed - no longer needed <time>` covers a decision closed with no captain answer or replaced by a later lifecycle, and `Replaced by a newer post <time>` covers an older post for the same decision.
 Option matching ignores the appended Discord-button audit and the `Decision answer: ` prefix.
+For a recommended option, matching accepts its label with or without the leading star, while the outcome keeps the displayed label.
 A unique longest full option label at the start of the answer wins immediately, regardless of trailing text; otherwise the matcher collects standalone option numbers and whole-word labels and accepts only one distinct option.
 The answer text recorded elsewhere is never shown, and `<time>` is a Discord timestamp, so each reader sees it in their own time zone.
 A click, Discuss included, on a sent, decided, superseded, replaced, or expired post files no new request and gets an ephemeral notice, and a double click files one request because the first click claims the post.

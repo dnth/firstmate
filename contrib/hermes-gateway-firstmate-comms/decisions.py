@@ -91,9 +91,8 @@ def confirm_id(post_id: str, option: int) -> str:
 
 def components_for(decision: dict, disabled: bool = False) -> list[dict]:
     """The decision's buttons: one row of options, then the Discuss button.
-    The recommended option shows as a success button, even when it needs a
-    confirmation click. An option that needs a confirmation click shows as a
-    danger button.
+    Recommendation styling does not waive confirmation; the click handler
+    still requires it before filing a request.
     """
     key = decision["key"]
     options = []
