@@ -128,6 +128,8 @@
 #     statusIdent, statusEndpoint) matches the task's previously stored
 #     outcome - the caller then merges it silently instead of re-rendering.
 #     Anything else prints "current". Read-only under the store lock.
+#     Both run on every branch report, so each reads the store in ONE jq
+#     pass rather than one process per stored record.
 #   fm-branch-outcome.sh merge-receipt --seq <seq> --state accepted|failed|suppressed
 #     Append one merge-delivery receipt to the merge ledger.
 #   fm-branch-outcome.sh merge-replay
@@ -174,8 +176,11 @@ read_cursor() {
   printf '%s\n' "${value:-0}"
 }
 
-normalize_record() { # <jsonl-line>
-  printf '%s\n' "$1" | jq -ec '
+# The one store-record normalization filter: validate one decoded record and
+# rebuild it in canonical key order, or yield nothing. normalize_record applies
+# it to one line; the single-pass store scans below apply it inside one jq
+# process, so both read a record identically.
+NORMALIZE_RECORD_JQ='
     select(type == "object")
     | select(
         keys == ["epoch", "seq", "summary", "task", "verdict", "wake"]
@@ -206,7 +211,10 @@ normalize_record() { # <jsonl-line>
       then {seq, epoch, task, wake, verdict, summary, silent}
       else {seq, epoch, task, wake, verdict, summary}
       end
-  '
+'
+
+normalize_record() { # <jsonl-line>
+  printf '%s\n' "$1" | jq -ec "$NORMALIZE_RECORD_JQ"
 }
 
 last_seq() {
@@ -218,6 +226,41 @@ last_seq() {
 
 record_seq() { # <jsonl-line>
   printf '%s\n' "$1" | sed -n 's/^{"seq":\([0-9]*\),.*/\1/p'
+}
+
+# Single-pass store scans for the per-report delivery checks. Each reads the
+# whole store in ONE jq process: a per-line jq or sed spawn makes these checks
+# O(records) process launches, and they run inside the supervision branch's
+# serialized delivery chain on every report. They fold with reduce rather than
+# first/limit: jq 1.6 keeps emitting from first(foreach ...).
+#
+# _fm_outcome_seq_row <seq>: the normalized form of the FIRST raw store line
+# whose own text starts with {"seq":<seq>, - the same line record_seq would
+# match - or nothing when there is none or that line does not normalize.
+_fm_outcome_seq_row() { # <seq>
+  [ -s "$STORE" ] || return 0
+  jq -nRr --arg seq "$1" "def normalize_record: $NORMALIZE_RECORD_JQ;"'
+    reduce (inputs | select((capture("^\\{\"seq\":(?<s>[0-9]*),") | .s) == $seq)) as $line
+      (null; if . == null then $line else . end)
+    | select(. != null)
+    | (fromjson? | normalize_record | tojson) // empty
+  ' "$STORE"
+}
+
+# _fm_outcome_seq_and_prior_rows <seq>: line 1 is the FIRST normalized record
+# whose seq is <seq>; line 2, present only when one exists, is the latest
+# normalized record BEFORE it in store order with the same task. Prints
+# nothing when no normalized record carries <seq>.
+_fm_outcome_seq_and_prior_rows() { # <seq>
+  [ -s "$STORE" ] || return 0
+  jq -nRr --arg seq "$1" "def normalize_record: $NORMALIZE_RECORD_JQ;"'
+    reduce (inputs | fromjson? | normalize_record) as $r ({last: {}, hit: null, prior: null};
+      if .hit != null then .
+      elif ($r.seq | tostring) == $seq then .hit = $r | .prior = .last[$r.task]
+      else .last[$r.task] = $r end)
+    | select(.hit != null)
+    | (.hit | tojson), (.prior // empty | tojson)
+  ' "$STORE"
 }
 
 print_unread() {
@@ -861,15 +904,7 @@ $DELIVERED_KEYS" in
     SEQ=$2
     case "$SEQ" in ''|0|0*|*[!0-9]*) usage ;; esac
     fm_lock_acquire_wait "$LOCK" || exit 1
-    RROW=
-    if [ -s "$STORE" ]; then
-      while IFS= read -r LINE || [ -n "$LINE" ]; do
-        if [ "$(record_seq "$LINE")" = "$SEQ" ]; then
-          RROW=$(normalize_record "$LINE" 2>/dev/null) || RROW=
-          break
-        fi
-      done < "$STORE"
-    fi
+    RROW=$(_fm_outcome_seq_row "$SEQ" 2>/dev/null) || RROW=
     fm_lock_release "$LOCK"
     if [ -n "$RROW" ] && _fm_outcome_row_superseded "$RROW"; then
       printf 'suppressed\n'
@@ -888,28 +923,10 @@ $DELIVERED_KEYS" in
     SEQ=$2
     case "$SEQ" in ''|0|0*|*[!0-9]*) usage ;; esac
     fm_lock_acquire_wait "$LOCK" || exit 1
-    RROW=
-    RTASK=
+    PAIR=$(_fm_outcome_seq_and_prior_rows "$SEQ" 2>/dev/null) || PAIR=
+    RROW=${PAIR%%$'\n'*}
     PROW=
-    NORM=
-    if [ -s "$STORE" ]; then
-      while IFS= read -r LINE || [ -n "$LINE" ]; do
-        NORM=$(normalize_record "$LINE" 2>/dev/null) || continue
-        if [ "$(record_seq "$NORM")" = "$SEQ" ]; then
-          RROW=$NORM
-          RTASK=$(printf '%s' "$NORM" | jq -r '.task // ""' 2>/dev/null) || RTASK=
-          break
-        fi
-      done < "$STORE"
-      if [ -n "$RTASK" ]; then
-        while IFS= read -r LINE || [ -n "$LINE" ]; do
-          NORM=$(normalize_record "$LINE" 2>/dev/null) || continue
-          [ "$(record_seq "$NORM")" != "$SEQ" ] || break
-          NTASK=$(printf '%s' "$NORM" | jq -r '.task // ""' 2>/dev/null) || NTASK=
-          [ "$NTASK" != "$RTASK" ] || PROW=$NORM
-        done < "$STORE"
-      fi
-    fi
+    case "$PAIR" in *$'\n'*) PROW=${PAIR#*$'\n'} ;; esac
     fm_lock_release "$LOCK"
     if [ -z "$RROW" ] || [ -z "$PROW" ]; then
       printf 'current\n'

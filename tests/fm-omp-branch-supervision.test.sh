@@ -1003,6 +1003,47 @@ ROWS
   pass "repeat-prior compares the latest preceding outcome of the same task"
 }
 
+# The per-report delivery checks run inside the branch's serialized delivery
+# chain, so their cost must not grow with the store: repeat-prior and reconcile
+# read a large store in a constant number of jq processes, not one per record,
+# and still return the same verdicts.
+test_outcome_scans_stay_single_pass_on_a_large_store() {
+  local home state shim count_file real_jq seq_repeat seq_advisory out spawns
+  home="$TMP_ROOT/outcome-large-store"; state="$home/state"; shim="$home/shim"
+  mkdir -p "$state" "$shim"
+  awk 'BEGIN { for (n = 1; n <= 400; n++) printf "{\"seq\":%d,\"epoch\":1,\"task\":\"filler-%d\",\"wake\":\"w\",\"verdict\":\"routine\",\"summary\":\"filler %d\"}\n", n, n % 7, n }' \
+    > "$state/branch-outcomes.jsonl"
+  printf 'working: task-r continues\n' > "$state/task-r.status"
+  printf 'needs-decision [key=theme]: which palette\n' > "$state/task-q.status"
+  FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-r --verdict routine --summary 'task-r first' >/dev/null || fail "large-store append failed"
+  seq_repeat=$(FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-r --verdict routine --summary 'task-r again') || fail "large-store repeat append failed"
+  seq_advisory=$(FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-q --verdict captain --summary 'task-q waits on the palette' --advisory-gen adv-large) \
+    || fail "large-store advisory append failed"
+  printf 'resolved [key=theme]: captain picked dark\n' >> "$state/task-q.status"
+
+  real_jq=$(command -v jq) || fail "jq is required"
+  case "$real_jq" in /*) ;; *) fail "jq must resolve to an executable path for the spawn counter, got: $real_jq" ;; esac
+  count_file="$home/jq-spawns"
+  printf '#!/bin/sh\nprintf x >> "%s"\nexec "%s" "$@"\n' "$count_file" "$real_jq" > "$shim/jq"
+  chmod +x "$shim/jq"
+  scan() { # <subcommand> <seq> <expected>
+    : > "$count_file"
+    out=$(PATH="$shim:$PATH" FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" "$1" --seq "$2") \
+      || fail "$1 --seq $2 failed on a large store"
+    [ "$out" = "$3" ] || fail "$1 --seq $2 on a large store: expected $3, got $out"
+    spawns=$(wc -c < "$count_file" | tr -d ' ')
+    [ "$spawns" -le 20 ] || fail "$1 --seq $2 spawned $spawns jq processes over 403 records (expected a constant bound)"
+  }
+  scan repeat-prior "$seq_repeat" repeat
+  scan repeat-prior 1 current
+  scan reconcile "$seq_advisory" suppressed
+  scan reconcile 1 current
+  pass "repeat-prior and reconcile read a 403-record store in a bounded number of jq processes"
+}
+
 test_identical_repeat_routine_outcome_merges_silently() {
   local fixture state out seq1 seq2 ident1 ident2 end1 end2
   fixture="$TMP_ROOT/identical-repeat"
@@ -1760,6 +1801,7 @@ test_branch_repeat_check_gap_still_reconciles
 test_consumed_completion_is_redelivered_once_per_generation
 test_delivered_completion_re_report_opens_no_main_turn
 test_repeat_prior_uses_latest_same_task_outcome
+test_outcome_scans_stay_single_pass_on_a_large_store
 test_identical_repeat_routine_outcome_merges_silently
 test_decision_owned_wake_reaches_main_past_branch_and_episode
 test_decision_owned_wake_forces_turn_without_episode
