@@ -699,7 +699,8 @@ calls = []
 def boom(thread_id, name):
     calls.append(name)
     raise RuntimeError("discord 429 rate limited")
-poster.save_request_thread(base, "777777777777777777", home, topic_name="ship the login fix")
+poster.save_request_thread(base, "777777777777777777", home, topic_name="ship the login fix",
+    creator="firstmate")
 assert poster.maybe_rename_topic_thread(base, "777777777777777777", home, rename_thread=boom) == "777777777777777777"
 assert calls == ["✅ ship the login fix"]
 slash = dict(base, origin="slash")
@@ -811,7 +812,7 @@ context.pop("request_text")
 context_path.write_text(json.dumps(context))
 payload = dict(context, thread_title="Aceh · later title", thread_state="done")
 thread_id = payload["message_id"]
-poster.save_request_thread(payload, thread_id, home)
+poster.save_request_thread(payload, thread_id, home, creator="firstmate")
 renames = []
 assert poster.thread_name_for(payload, home) == legacy
 poster.maybe_rename_topic_thread(payload, thread_id, home,
@@ -840,12 +841,16 @@ for winner in ("InfoConnect · winning title", "❓ InfoConnect · winning title
     with patch.object(poster.urllib.request, "urlopen", read_thread):
         assert poster.ensure_topic_thread(payload, {}, home, lost_create) == thread_id
     assert poster.load_request_topic(payload, home)["topic_name"] == winner
+    assert poster.load_request_topic(payload, home)["creator"] == "adopted"
+    poster.save_request_thread(payload, thread_id, home)
+    assert poster.load_thread_record_by_id(thread_id, home)["creator"] == "adopted"
     renames.clear()
-    for state, prefix in (("done", "✅ "), ("needs-you", "❓ "), ("none", "")):
+    for state in ("done", "needs-you", "none"):
         marked = dict(payload, thread_state=state)
         poster.maybe_rename_topic_thread(marked, thread_id, home,
             rename_thread=lambda tid, name: renames.append(name))
-        assert renames[-1] == prefix + poster.state_thread_name(winner, "none")
+        assert renames == []
+        assert poster.load_request_topic(payload, home)["topic_name"] == winner
     poster.request_progress_path(payload, home).unlink()
 PY
   then fail "existing threads must retain their original or winning names"
@@ -893,7 +898,7 @@ for generation, title in enumerate(bad_titles, 1):
     with patch.object(poster.urllib.request, "urlopen", respond):
         assert poster.discord_create_thread(payload, title)["thread_id"] == "777777777777777777"
     poster.save_request_thread(payload, "777777777777777777", home,
-        topic_name=title, creating_title=title)
+        topic_name=title, creating_title=title, creator="firstmate")
     renames = []
     poster.maybe_rename_topic_thread(dict(payload, thread_state="done"), "777777777777777777", home,
         rename_thread=lambda tid, name: renames.append(name))
@@ -917,6 +922,257 @@ PY
   pass "16 emit and poster share title validation and strip nickname mentions"
 }
 
+# --- 17. a request inside a Firstmate-made topic thread marks its state ------
+#
+# The captain answers inside the thread, so that reply is its own in-thread
+# request: its thread_id is the topic thread and its channel_id the dedicated
+# channel. It must rename the very thread it arrived in - clearing the marker,
+# marking done, then needs-you again - never stacking prefixes, and leave the
+# name the creating request builds on next. A thread this home did not create,
+# in the dedicated channel or anywhere else, is never renamed; a rate-limited
+# rename still delivers the reply and records the receipt.
+
+test_17_in_thread_requests_mark_their_thread() {
+  local home slug out rid2 slug2
+  home="$TMP_ROOT/c17"
+  setup_home "$home"
+  slug=$(intake_as "$home" "InfoConnect v0.5.11 status" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Where are we on ic release?" \
+    "InfoConnect · v0.5.11 status" "needs-you" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/InfoConnect · v0.5.11 status" \
+    "the creating reply must open the thread"
+  assert_contains "$out" "thread-rename=777777777777777777/❓ InfoConnect · v0.5.11 status" \
+    "the creating reply must mark the thread needs-you"
+  jq -e '.creator == "firstmate"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "a Firstmate-created thread must record who created it"
+
+  rid2="discord:${GUILD}:${CHANNEL}:777777777777777777:999999999999999999"
+  slug2=$(intake_as "$home" "Yes" 999999999999999999 "777777777777777777" message)
+  emit_as "$home" "$rid2" ack 1 "Clearing the marker." "" "none" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "posted-to=777777777777777777 Clearing the marker." \
+    "an in-thread reply must post in its own thread"
+  assert_contains "$out" "thread-rename=777777777777777777/InfoConnect · v0.5.11 status" \
+    "an in-thread request must clear its own thread's marker"
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
+    || fail "an in-thread request must not create a thread: $out"
+
+  emit_as "$home" "$rid2" followup 2 "Blocked on your call." "" "needs-you" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ InfoConnect · v0.5.11 status" \
+    "a later in-thread marker must not stack on the previous one"
+
+  emit_as "$home" "$RID" followup 2 "Landed." "" "done" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/✅ InfoConnect · v0.5.11 status" \
+    "the creating request must build on the name the in-thread change left"
+
+  # A rate-limited rename must leave the reply delivered and receipted.
+  emit_as "$home" "$rid2" followup 3 "Still blocked." "" "needs-you" >/dev/null
+  out=$(
+    home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster as poster
+home = Path(sys.argv[1])
+os.environ["FM_HOME"] = str(home)
+posted = []
+def send(payload):
+    posted.append((payload["thread_id"], payload["text"]))
+    return {"ok": True, "discord_message_id": "999999999999999999"}
+def boom(thread_id, name):
+    raise RuntimeError("discord 429 rate limited")
+results = poster.drain_outbox(send=send, home=home, rename_thread=boom)
+print("results=" + ",".join(sorted(results)))
+for thread, text in posted:
+    print("posted-to=%s %s" % (thread, text))
+PY
+  )
+  assert_contains "$out" "results=sent" "a rate-limited rename must not fail the reply"
+  assert_contains "$out" "posted-to=777777777777777777 Still blocked." \
+    "a rate-limited in-thread rename must still deliver the reply"
+  [ -f "$home/state/ext-outbox/$slug2.followup.3.receipt.json" ] \
+    || fail "a rate-limited rename must still record the reply receipt"
+
+  # Only a thread this home created is ever renamed: a captain-made thread in
+  # the dedicated channel has no record, and any other channel or a DM is not
+  # the dedicated channel at all.
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug2" <<'PY'
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster as poster
+home, slug2 = Path(sys.argv[1]), sys.argv[2]
+os.environ["FM_HOME"] = str(home)
+context = json.loads((home / "state/ext-context" / (slug2 + ".json")).read_text())
+base = {"request_id": context["request_id"], "slug": slug2, "origin": "message",
+        "channel_id": context["channel_id"], "thread_id": context["thread_id"],
+        "message_id": context["message_id"], "thread_state": "needs-you"}
+calls = []
+def boom(thread_id, name):
+    calls.append(name)
+    raise RuntimeError("discord 429 rate limited")
+assert poster.maybe_rename_topic_thread(base, "", home, rename_thread=boom) == base["thread_id"]
+assert calls == ["❓ InfoConnect · v0.5.11 status"], calls
+for guarded in (dict(base, thread_id="444444444444444444"),
+                dict(base, channel_id="555555555555555555"),
+                dict(base, channel_id="666666666666666666", thread_id="666666666666666666")):
+    calls.clear()
+    poster.maybe_rename_topic_thread(guarded, "", home, rename_thread=boom)
+    assert calls == [], guarded
+# A tampered stored name never reaches Discord: the base is re-validated
+# through the creating request exactly as a create is, so the rename carries
+# the name the rules can produce, not the bytes in the record.
+record_path = sorted((home / "state/ext-outbox").glob("*.thread.json"))[0]
+record = json.loads(record_path.read_text())
+record["topic_name"] = "tampered thread name"
+record_path.write_text(json.dumps(record))
+calls.clear()
+poster.maybe_rename_topic_thread(base, "", home,
+    rename_thread=lambda tid, name: calls.append(name))
+assert calls == ["❓ InfoConnect · v0.5.11 status"], calls
+PY
+  then fail "in-thread renames must stay inside Firstmate threads"
+  fi
+  pass "17 an in-thread request marks the state of the thread it arrived in"
+}
+
+test_18_adopted_threads_never_take_state_markers() {
+  local home slug rid2 slug2 out state generation
+  home="$TMP_ROOT/c18"
+  setup_home "$home"
+  slug=$(intake_as "$home" "InfoConnect v0.5.11 status" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Using your thread." \
+    "InfoConnect · v0.5.11 status" "needs-you" >/dev/null
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import io, json, os, sys
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+os.environ["DISCORD_BOT_TOKEN"] = "fixture"
+path = home / "state/ext-outbox" / (slug + ".answer.1.json")
+payload = json.loads(path.read_text())
+thread_id = payload["message_id"]
+name = "InfoConnect · v0.5.11 status"
+posted, renames = [], []
+def create(request, title):
+    raise poster.DiscordSendError("permanent", "already exists", 400, {"code": 160004})
+def fetch(request, **kwargs):
+    assert request.get_method() == "GET"
+    assert request.full_url.endswith("/channels/" + thread_id)
+    return io.BytesIO(json.dumps({"id": thread_id, "name": name}).encode())
+def send(request):
+    posted.append((request["thread_id"], request["text"]))
+    return {"ok": True, "discord_message_id": "900000000000000001"}
+with patch.object(poster.urllib.request, "urlopen", fetch):
+    assert poster.deliver_one(path, send=send, home=home, create_thread=create,
+        rename_thread=lambda tid, title: renames.append(title)) == "sent"
+assert posted == [(thread_id, "Using your thread.")]
+assert renames == []
+record = poster.load_request_topic(payload, home)
+assert record["creator"] == "adopted"
+assert record["topic_name"] == name
+assert record["thread_state"] == ""
+assert (path.parent / (slug + ".answer.1.receipt.json")).is_file()
+PY
+  then fail "recovering a captain-made thread must route without renaming"
+  fi
+  rid2="discord:${GUILD}:${CHANNEL}:${MESSAGE}:999999999999999999"
+  slug2=$(intake_as "$home" "Yes" 999999999999999999 "$MESSAGE" message)
+  generation=1
+  for state in "needs-you" "done" "none"; do
+    emit_as "$home" "$rid2" followup "$generation" "In-thread reply." "" "$state" >/dev/null
+    emit_as "$home" "$RID" followup "$generation" "Top-level reply." "" "$state" >/dev/null
+    out=$(deliver "$home")
+    assert_contains "$out" "posted-to=$MESSAGE In-thread reply." "an adopted thread must deliver in-thread replies"
+    assert_contains "$out" "posted-to=$MESSAGE Top-level reply." "an adopted thread must deliver top-level replies"
+    [ "$(printf '%s\n' "$out" | grep -c '^thread-rename=')" = 0 ] \
+      || fail "neither path may mark an adopted thread: $out"
+    [ -f "$home/state/ext-outbox/$slug2.followup.$generation.receipt.json" ] \
+      || fail "an in-thread reply must retain its receipt"
+    [ -f "$home/state/ext-outbox/$slug.followup.$generation.receipt.json" ] \
+      || fail "a top-level reply must retain its receipt"
+    jq -e '.creator == "adopted" and .topic_name == "InfoConnect · v0.5.11 status" and .thread_state == ""' \
+      "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+      || fail "state changes must leave the adopted thread record untouched"
+    generation=$((generation + 1))
+  done
+  pass "18 adopted threads deliver replies without taking state markers"
+}
+
+# --- 19. a record without provenance needs proved ownership ------------------
+#
+# Records written before creator provenance was kept prove nothing about who
+# created the thread, so a state change may rename one only when Discord
+# reports this bot as that thread's owner. Another user's thread, an unknown
+# owner, and a failed lookup all leave the name alone.
+
+test_19_legacy_records_need_proved_ownership() {
+  local home slug
+  home="$TMP_ROOT/c19"
+  setup_home "$home"
+  slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import json, os, sys
+from pathlib import Path
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+os.environ["FM_HOME"] = str(home)
+os.environ["DISCORD_BOT_TOKEN"] = "fixture"
+context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
+payload = dict(context, origin="message", slug=slug)
+thread_id = payload["message_id"]
+poster._BOT_USER_ID = "111111111111111111"
+poster.save_request_thread(payload, thread_id, home, topic_name="ship the login fix")
+
+def legacy(state, owner):
+    # Rewrite the record as one written before provenance was kept.
+    path = poster.request_progress_path(payload, home)
+    data = json.loads(path.read_text())
+    data.pop("creator", None)
+    data["topic_name"] = "ship the login fix"
+    path.write_text(json.dumps(data))
+    renames = []
+    poster.maybe_rename_topic_thread(dict(payload, thread_state=state), thread_id, home,
+        rename_thread=lambda tid, name: renames.append(name), thread_owner=owner)
+    return renames
+
+# The bot owns the thread, so the marker lands and the record gains provenance.
+assert legacy("done", lambda tid: poster._BOT_USER_ID) == ["✅ ship the login fix"]
+record = json.loads(poster.request_progress_path(payload, home).read_text())
+assert record["creator"] == "firstmate" and record["topic_name"] == "✅ ship the login fix"
+# Another user's thread is never renamed.
+assert legacy("done", lambda tid: "222222222222222222") == []
+# An owner Discord does not report is not proof of anything.
+assert legacy("done", lambda tid: "") == []
+# A failed lookup leaves the thread alone instead of raising.
+def broken(tid):
+    raise OSError("discord offline")
+assert legacy("done", broken) == []
+# An adopted record never even asks.
+path = poster.request_progress_path(payload, home)
+data = json.loads(path.read_text())
+data["creator"] = "adopted"
+data["topic_name"] = "ship the login fix"
+path.write_text(json.dumps(data))
+asked = []
+def counted(tid):
+    asked.append(tid)
+    return poster._BOT_USER_ID
+def refuse(tid, name):
+    raise AssertionError("an adopted thread must never be renamed")
+assert poster.maybe_rename_topic_thread(dict(payload, thread_state="done"), thread_id, home,
+    rename_thread=refuse, thread_owner=counted) == thread_id
+assert asked == []
+PY
+  then fail "a record without provenance must need proved thread ownership"
+  fi
+  pass "19 a record without provenance needs proved thread ownership"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -935,5 +1191,8 @@ test_13_rename_never_blocks_and_never_leaves_home
 test_14_legacy_titles_markers_and_long_tokens
 test_15_existing_threads_keep_the_winning_name
 test_16_shared_title_screen_and_nickname_mentions
+test_17_in_thread_requests_mark_their_thread
+test_18_adopted_threads_never_take_state_markers
+test_19_legacy_records_need_proved_ownership
 
 echo "all fm-ext-topic-threads tests passed"
