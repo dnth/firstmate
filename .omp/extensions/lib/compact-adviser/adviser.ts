@@ -4,6 +4,9 @@
 // OMP 18.2.6 extension surface:
 //   - Pi's `agent_settled` maps to OMP `agent_end` gated on `willContinue !== true`
 //     so an auto-retry continuation is never treated as a settled checkpoint.
+//     OMP emits that event while the owning prompt is still in flight, so the
+//     settled check defers to a macrotask and retries briefly until ctx.isIdle()
+//     reports true; a newer turn or session change drops the stale checkpoint.
 //   - Pi's `session_before_fork` is covered by OMP `session_before_switch`
 //     (reason "fork"); OMP has no `model_select` event - an in-flight judgment
 //     is still invalidated by the sessionIdentity comparison, and a stale
@@ -264,9 +267,25 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
   pi.on("agent_end", (event, ctx) => {
     // willContinue marks an auto-retry continuation, not a settled checkpoint.
     if (event.willContinue === true) return;
-    void settled(ctx).catch(() =>
-      notice(ctx, "Compact adviser could not inspect this checkpoint; context left unchanged."),
-    );
+    // OMP emits agent_end before the owning prompt unwinds, so ctx.isIdle() is
+    // still false here and only turns true a macrotask later. Defer instead of
+    // reading that stale busy state; the bounded retry covers a slower unwind.
+    const epoch = generation;
+    const delays = [50, 250, 1000];
+    let tries = 0;
+    const attempt = () => {
+      // A newer turn (or session change) invalidated this checkpoint while it waited.
+      if (generation !== epoch) return;
+      if (!ctx.isIdle() && tries < delays.length) {
+        setTimeout(attempt, delays[tries++]);
+        return;
+      }
+      // eligible() still checks isIdle() and pending messages; it decides.
+      void settled(ctx).catch(() =>
+        notice(ctx, "Compact adviser could not inspect this checkpoint; context left unchanged."),
+      );
+    };
+    setTimeout(attempt, 0);
   });
   pi.on("session_start", (_event, ctx) => {
     invalidate(ctx);

@@ -103,6 +103,11 @@ function fakeCtx(over = {}, appendedEntries = []) {
   notifyCalls = [];
   sendMessageCalls = 0;
   const branch = over.branch ?? [];
+  // OMP emits agent_end while the owning prompt is still unwinding, so a
+  // faithful fake reports the prompt in flight during the synchronous handler
+  // and idle one macrotask later (the real 18.10.1 gap is about 2 ms).
+  let promptInFlight = over.idleAfterMacrotask === true;
+  if (promptInFlight) setTimeout(() => { promptInFlight = false; }, 0);
   return {
     mode: "tui",
     hasUI: true,
@@ -115,7 +120,7 @@ function fakeCtx(over = {}, appendedEntries = []) {
       getSessionFile: () => over.sessionFile,
     },
     getContextUsage: () => over.usage === "unknown" ? undefined : (over.usage ?? { tokens: 100000, contextWindow: 200000, percent: 50 }),
-    isIdle: () => over.idle ?? true,
+    isIdle: () => (over.idleAfterMacrotask ? !promptInFlight : (over.idle ?? true)),
     hasPendingMessages: () => over.pending ?? false,
     ui: {
       getEditorText: () => over.editorText ?? "",
@@ -165,9 +170,10 @@ function settledBranch() {
     msgEntry("e2", assistantMsg("done, PR opened")),
   ];
 }
-// agent_end fires settled() fire-and-forget; drain the microtask queue so the
-// stubbed judge and hint writes complete before asserting.
+// agent_end defers settled() to a macrotask; drain timers and the microtask
+// queue so the stubbed judge and hint writes complete before asserting.
 async function flush() {
+  await new Promise((r) => setTimeout(r, 0));
   for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
 }
 
@@ -380,6 +386,53 @@ console.log("AC1 inert-by-default gates: ok");
   assert.ok(widgetCalls.some(([k, c]) => k === "compact-adviser" && c === undefined),
     "input clears the hint widget");
   console.log("AC2 opt-in hint path: ok");
+}
+// ------------------------------- idle deferral: OMP emits agent_end mid-prompt
+{
+  // OMP 18.10.1 fires agent_end while the owning prompt is still in flight, so a
+  // synchronous eligibility check reads a stale busy state, `eligible()` refuses,
+  // and every checkpoint is skipped. The settled check must defer until idle.
+  const configDir = mkdtempSync(join(TMP, "cfg-idle-"));
+  const logDir = mkdtempSync(join(TMP, "log-idle-"));
+  writeConfig(configDir, { mode: "hint", minContextTokens: 40000, logRequests: false });
+  const pi = fakePi();
+  const judged = [];
+  installAdviser(pi, {
+    configDir, logDir, key: () => "k",
+    evaluate: async () => { judged.push(1); return qualifyingJudgment(); },
+  });
+  const ctx = fakeCtx({ branch: settledBranch(), idleAfterMacrotask: true });
+  await pi.handlers.get("agent_end")({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(judged.length, 0, "no judgment while OMP still reports the prompt in flight");
+  assert.equal(widgetCalls.length, 0, "no hint while the prompt is still in flight");
+  await flush();
+  assert.equal(judged.length, 1, "the deferred settled check judges once the session is idle");
+  assert.equal(widgetCalls.length, 1, "the hint appears once timers drain");
+  assert.ok(pi.appended.some((e) => e.type === STATE_TYPE), "deferred checkpoint persists state");
+  console.log("idle deferral: ok");
+}
+{
+  // A newer turn, input, or session change arriving before idle retires the
+  // stale checkpoint instead of judging a superseded one.
+  for (const event of ["before_agent_start", "input", "session_switch"]) {
+    const configDir = mkdtempSync(join(TMP, `cfg-stale-${event}-`));
+    const logDir = mkdtempSync(join(TMP, `log-stale-${event}-`));
+    writeConfig(configDir, { mode: "hint", minContextTokens: 40000, logRequests: false });
+    const pi = fakePi();
+    let calls = 0;
+    installAdviser(pi, {
+      configDir, logDir, key: () => "k",
+      evaluate: async () => { calls++; return qualifyingJudgment(); },
+    });
+    const ctx = fakeCtx({ branch: settledBranch(), idleAfterMacrotask: true });
+    await pi.handlers.get("agent_end")({ type: "agent_end", messages: [] }, ctx);
+    // The newer event lands synchronously, before the deferred idle check runs.
+    pi.handlers.get(event)({ type: event }, ctx);
+    await flush();
+    assert.equal(calls, 0, `a ${event} arriving before idle must retire the stale checkpoint`);
+    assert.equal(widgetCalls.length, 0, `a ${event} before idle must not show a hint`);
+  }
+  console.log("stale-checkpoint retirement: ok");
 }
 {
   // Non-qualifying judgment: no hint.
