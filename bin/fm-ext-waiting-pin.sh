@@ -119,7 +119,7 @@ print(re.sub(r"\s+", " ", " ".join(tokens)).strip(), end="")
 # `show --full` read, cleaned by waiting_pin_sanitize_title. The board listing
 # truncates long titles with a tool-generated helper (`... (truncated, N chars
 # total - use show <id> --full ...)`), which must never reach the public pin: it
-# leaks the task id and a command. Held calls therefore always read the full
+# leaks the task id and a command. Calls absent from the due report read the full
 # title here instead of reusing the listed one; the renderer's 200-character
 # call-line cap shortens it cleanly. Fails when the read fails so the refresh
 # defers rather than publishing a leak or a false all-clear.
