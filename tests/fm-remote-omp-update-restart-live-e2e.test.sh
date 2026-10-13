@@ -387,7 +387,9 @@ grep -Fqx "restarted: $ID on remote-mac (omp)" "$LAB/restart.out" \
   || fail "the live restart did not report the remote OMP mate as restarted"
 grep -q '^relayed original-session=running .*corr=' "$LAB/relay.log" \
   || fail "the live session did not answer the persist request before it stopped:"$'\n'"$(cat "$LAB/relay.log")"
-find "$CONTROL/$ID.inbox/handled" -name '*.msg' -exec grep -l 'Open-record persistence' {} + >/dev/null 2>&1 \
+persisted_records=$(find "$CONTROL/$ID.inbox/handled" -name '*.msg' -exec grep -l 'Open-record persistence' {} + 2>/dev/null) \
+  || fail "the live session never acknowledged the persist request record"
+[ -n "$persisted_records" ] \
   || fail "the live session never acknowledged the persist request record"
 kill -0 "$OLD_PID" 2>/dev/null && fail "the original OMP session is still running after the restart"
 wait_for 120 "the relaunched OMP session's marker" marker_owned_by_new_session "$OLD_PID"

@@ -155,6 +155,9 @@ C1=$(matrix_head)
 matrix_load "$(matrix_version_at "$C1")"
 matrix_send "steer before any update"
 expect_bound "an ordinary request to a current session"
+matrix_send /exit
+expect_bound "a slash command to a current session"
+assert_grep '/exit' "$M/notified" "the current session did not receive the slash command"
 
 # One update crosses an extension change while the session keeps running.
 matrix_update first-extension-change
@@ -163,6 +166,8 @@ C2=$(matrix_head)
   || fail "the matrix update did not change the extension closure"
 matrix_send "ordinary steer after the update"
 expect_refused "an ordinary request to a session the update superseded"
+matrix_send /exit
+expect_refused "a slash command to a session the update superseded"
 assert_grep 'loaded OMP primary extension does not match its tracked closure' "$M/send.out" \
   "an ordinary request after the update lost its exact refusal reason"
 matrix_send "persist request" restart-persist
@@ -190,6 +195,8 @@ matrix_send "persist request" restart-persist
 expect_refused "the restart persist request to a session no recorded update explains"
 assert_grep 'loaded OMP primary extension does not match its tracked closure' "$M/send.out" \
   "an unexplained closure lost its exact refusal reason"
+matrix_send /exit
+expect_refused "a slash command to a session no recorded update explains"
 
 # Tracked files that are not HEAD's committed closure leave the mismatch
 # unexplained even when the loaded closure is on the chain.
@@ -523,6 +530,8 @@ stopped_line=$(grep -n "^stopped $OLD_PID\$" "$OMP_EVENTS" | head -1 | cut -d: -
 [ -n "$stopped_line" ] || fail "the superseded session was never stopped:"$'\n'"$(cat "$OMP_EVENTS")"
 [ "$persisted_line" -lt "$stopped_line" ] \
   || fail "the session was stopped before its open work was persisted:"$'\n'"$(cat "$OMP_EVENTS")"
+grep -Fqx /exit "$E/remote-omp-typed-input" \
+  || fail "the persistence-gated restart never delivered /exit to the superseded session"
 NEW_PID=$(wait_for_listener "$OLD_PID") || fail "no replacement session came up after the restart"
 [ "$(loaded_field 2)" = "$NEW_PID" ] || fail "the replacement session did not publish its own marker"
 [ "$(loaded_field 1)" = "$(tracked_version)" ] \
@@ -540,6 +549,14 @@ printf '%s\n%s\n%s\n%s\n' "$(printf 'foreign extension bytes' | fm_version_hash_
 mv -f "$E/foreign.marker" "$OMP_HOME/state/.omp-primary-extension-loaded"
 records_before=$(find "$OMP_HOME/state/parent-route/$ID.inbox" -name '*.msg' | wc -l | tr -d ' ')
 sent_before=$(wc -l < "$OMP_SENT" | tr -d ' ')
+typed_before=$(wc -l < "$E/remote-omp-typed-input" | tr -d ' ')
+slash_rc=0
+remote_env "$ROOT/bin/fm-send.sh" "fm-$ID" /exit > "$E/unexplained-exit.out" 2>&1 \
+  || slash_rc=$?
+expect_code 9 "$slash_rc" "an unexplained mismatch accepted /exit: $(cat "$E/unexplained-exit.out")"
+[ "$(wc -l < "$E/remote-omp-typed-input" | tr -d ' ')" = "$typed_before" ] \
+  || fail "the refused /exit notified the remote pane"
+kill -0 "$NEW_PID" 2>/dev/null || fail "the refused /exit stopped the running session"
 unexplained_rc=0
 remote_env env FM_SECONDMATE_PERSIST_POLL=1 FM_SECONDMATE_PERSIST_WAIT=60 \
   "$ROOT/bin/fm-secondmate-restart.sh" "fm-$ID" > "$E/unexplained.out" 2>&1 || unexplained_rc=$?

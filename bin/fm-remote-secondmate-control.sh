@@ -477,6 +477,7 @@ cmd_send() {
     elif [[ "$relay_body" =~ ^corr=[[:xdigit:]]{16}[[:space:]]+(/.*)$ ]]; then
       relay_body=${BASH_REMATCH[1]}
     fi
+    remote_omp_delivery_binding "$id" "$delivery_mode"
     if [[ "$relay_body" = /* ]]; then
       # Slash commands retain the pre-inbox typed control path. In particular,
       # /exit must not be converted into a durable ordinary-text steer or carry
@@ -485,7 +486,6 @@ cmd_send() {
         "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "${send_args[@]}" "$relay_body"
       return
     fi
-    remote_omp_delivery_binding "$id" "$delivery_mode"
     FM_SEND_RECONCILE_AUTH=1 FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
       FM_DATA_OVERRIDE="$CONTROL_DATA" FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE=1 \
       FM_SEND_OMP_INBOX_DURABLE_RESULT=1 \

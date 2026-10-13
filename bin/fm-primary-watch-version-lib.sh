@@ -99,12 +99,10 @@ EOF
 # whose committed closure has <version> is printed and explains it. A rewind,
 # a non-fast-forward move, a missing or unreadable reflog, or a version that no
 # recorded position committed explains nothing, so the caller keeps refusing.
-# The walk is bounded by FM_OMP_PRIOR_CLOSURE_REFLOG_LIMIT distinct positions.
 fm_omp_primary_version_fast_forwarded_from() {  # <git-checkout> <version> -> prints the prior commit
-  local checkout=${1:-} version=${2:-} limit=${FM_OMP_PRIOR_CLOSURE_REFLOG_LIMIT:-64}
+  local checkout=${1:-} version=${2:-}
   local head positions prev commit seen=0
   [ -n "$checkout" ] && [ -n "$version" ] || return 1
-  case "$limit" in ''|*[!0-9]*) return 1 ;; esac
   head=$(git -C "$checkout" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null) || return 1
   positions=$(git -C "$checkout" log -g --format=%H HEAD 2>/dev/null) || return 1
   prev=$head
@@ -112,7 +110,7 @@ fm_omp_primary_version_fast_forwarded_from() {  # <git-checkout> <version> -> pr
     case "$commit" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "$commit" != "$prev" ] || continue
     seen=$((seen + 1))
-    [ "$seen" -le "$limit" ] || return 1
+    [ "$seen" -le 64 ] || return 1
     git -C "$checkout" merge-base --is-ancestor "$commit" "$prev" 2>/dev/null || return 1
     if [ "$(fm_omp_primary_version_at_commit "$checkout" "$commit" 2>/dev/null || true)" = "$version" ]; then
       printf '%s\n' "$commit"
