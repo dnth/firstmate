@@ -893,9 +893,14 @@ Anything else falls back to the fresh derivation.
 Once a thread exists, later titles do not replace its name; status changes preserve the original base name.
 A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
 The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name, only when the name changes.
-Both the request that created the thread and a later request that arrived inside it may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.
+Before trusting a stored name that already matches, the poster reads the name Discord shows, so a manual rename never wedges a later marker; when that name cannot be read it renames anyway.
+Both the request that created the thread and a later request of any origin that arrived inside it - a typed message, a decision-button click, or a `/fm` command - may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.
 Only a thread this home created in the dedicated channel is renamed; a captain-made thread, a non-dedicated channel, or a DM is never renamed, and once a thread's record has aged out it can no longer be identified and is left alone.
-A rename failure, including a rate limit, is logged and never blocks or loses the reply.
+A `needs-you` thread clears itself: once every decision post in it is closed in the ledgers - a click Firstmate recorded, a typed answer, or a captain call answered - the gateway's periodic decision sweep renames it to the bare name, so Firstmate never has to emit a separate `none`.
+Two open decisions keep the marker until the second one closes, and a `needs-you` marked after the thread's newest decision post was asked is a newer question that stands until a reply clears it.
+[`bin/fm-ext-decision.sh`](../bin/fm-ext-decision.sh) `threads` owns which decision posts count as open.
+A rename failure, including a rate limit, is logged, recorded, and never blocks or loses the reply.
+The record keeps the wanted state and the failure; the next reply in that thread retries any failed rename, and the periodic sweep also retries one that did not fail permanently.
 A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
 Slash commands are unchanged: `/fm` replies post to their originating thread (the channel itself for a top-level interaction) and never attempt thread creation.
 A thread-creation failure (such as missing permission) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
@@ -906,9 +911,9 @@ An adopted thread, another user's thread, an unknown owner, and a failed ownersh
 Once any chunk has posted, retries keep that generation's original destination even if another generation subsequently creates the topic thread.
 Creating a topic thread never widens who the allowlist admits.
 The [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) owns the unchanged public-safety rules for reply text.
-The intake records the fallback name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record (thread id, current name including any marker, last state, creating title, creator provenance) so every generation shares the same thread.
-A marker applied from inside the thread updates that same record rather than writing a second one, so the next change on either path builds on the same name.
-The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, marker, and unchanged-allowlist coverage.
+The intake records the fallback name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record (thread id, the name Discord was last seen showing, the last state asked for and when, the last rename outcome with any error, creating title, creator provenance) so every generation shares the same thread.
+A marker applied from inside the thread, or by the periodic sweep, updates that same record rather than writing a second one, so the next change on any path builds on the same name.
+The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, marker, auto-clear, drift, rename-retry, and unchanged-allowlist coverage.
 
 ### Delivery reactions
 
