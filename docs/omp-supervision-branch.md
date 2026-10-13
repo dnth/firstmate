@@ -49,6 +49,7 @@ The supervision branch is OMP-only by construction, while the shared status-span
 Ownership transitions happen at a clean boundary: a cold `session_start`, an OMP `session_switch` replacement, or killing the process and letting a fresh one re-arm - never by a synchronous handoff from a live or hung branch.
 A branch generation serializes each wake through a clean completion boundary, and the next wake re-prompts the same conversation within that main session.
 `session_start` and `session_switch` are the clean-boundary arm points. A `session_switch` replacement re-arms automatically without a foreground watcher command or a model turn; it starts a new branch conversation for the replacement main session.
+`session_start` arms the boundary synchronously, then queues ownership activation on the serialized delivery chain without awaiting it, so a busy chain does not delay the handler's return.
 
 Three capabilities are deliberately out of scope for this port and are a future iteration:
 
@@ -120,7 +121,10 @@ The live observation and the burst regression record are kept in [runtime-backen
 ## How the branch knows what the captain said
 
 Main's captain and assistant text - never tool calls, tool results, operational injections, or the branch's own merged notes - is mirrored into the branch as read-only `fm-main-mirror` messages at main's turn end, before the next wake is handed over.
-The mirror cursor is durable (`state/.branch-mirror-cursor`), so a restart replays only the not-yet-mirrored dialog from main's session file, and a replacement main session re-anchors from its start.
+The `turn_end` handler snapshots persisted dialog and the completed reply from the event synchronously and queues the ownership-gated collection, push, and flush on the serialized branch chain without awaiting it, so a busy delivery chain never holds main's turn end behind OMP's 30 s handler cap.
+The batch still lands before any later wake through that same branch chain; a generation change or lost ownership before collection drops the snapshot without rejecting the chain.
+The durable cursor (`state/.branch-mirror-cursor`) advances only after the complete pending batch reaches the branch, so a failed send leaves the remaining items queued for retry.
+Replies captured before persistence are suppressed when their persisted entries appear in a later snapshot; the cursor always counts actual persisted entries.
 The branch prompt frames mirrored text as context for judgment, never as instructions addressed to the branch; an authorization addressed to main (for example "you may merge when green") does not relax the branch's role limits.
 
 ## Two-stage noise filter

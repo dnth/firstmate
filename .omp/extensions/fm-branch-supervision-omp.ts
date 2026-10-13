@@ -416,13 +416,14 @@ type ReadonlyEntries = {
 };
 
 // Volatile mirror-collection state. Instance-scoped and cleared at the
-// process boundary, so a fresh extension instance
-// reconstructs EXCLUSIVELY from the durable cursor: dialog collected but not
-// yet delivered re-mirrors rather than dropping (the durable cursor advances
-// only in flushMirror after delivery).
+// process boundary. A fresh branch re-anchors to the current main session's
+// start rather than inheriting the previous branch's delivered frontier, so
+// dialog collected but not yet delivered re-mirrors rather than dropping.
 type MirrorCollectionState = {
   collectAnchor: MirrorCursor | null;
   pendingCursor: MirrorCursor | null;
+  // Completed replies captured from turn_end before OMP persists them.
+  unpersistedReplies: Set<number>;
   // Set at every main session boundary (session_start, session_switch), where
   // the branch conversation is replaced too (createBranch). The durable cursor
   // records what the PREVIOUS branch conversation already received, so the
@@ -434,7 +435,7 @@ type MirrorCollectionState = {
   reanchor: boolean;
 };
 
-function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCollectionState): MirrorItem[] {
+function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCollectionState, completedReply?: { role?: string; content?: unknown; timestamp: number }): MirrorItem[] {
   const file = sessionManager.getSessionFile() ?? "";
   const entries = sessionManager.getEntries();
   const anchor = collection.collectAnchor ?? readMirrorCursor();
@@ -443,13 +444,27 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
   const items: MirrorItem[] = [];
   for (const entry of entries.slice(start)) {
     if (entry.type !== "message") continue;
-    const message = (entry as { message?: { role?: string; content?: unknown } }).message;
+    const message = (entry as { message?: { role?: string; content?: unknown; timestamp?: number } }).message;
     if (!message) continue;
+    if (message.role === "assistant" && typeof message.timestamp === "number" && collection.unpersistedReplies.delete(message.timestamp)) continue;
     if (message.role !== "user" && message.role !== "assistant") continue;
     const text = textOfContent(message.content).trim();
     if (!text) continue;
     if (message.role === "user" && isOperationalUserText(text)) continue;
     items.push({ tag: message.role === "user" ? "captain" : "main", text: capMirrorText(text) });
+  }
+  // The event owns the completed reply even when message_end persistence is
+  // still pending. OMP preserves its message timestamp through persistence.
+  // Keep the cursor on real entries; suppress this same reply
+  // when a later snapshot first observes its persisted entry.
+  if (completedReply?.role === "assistant" && !entries.some((entry) =>
+    entry.type === "message" && (entry as { message?: { role?: string; timestamp?: number } }).message?.role === "assistant" &&
+      (entry as { message?: { timestamp?: number } }).message?.timestamp === completedReply.timestamp)) {
+    const text = textOfContent(completedReply.content).trim();
+    if (text && !collection.unpersistedReplies.has(completedReply.timestamp)) {
+      items.push({ tag: "main", text: capMirrorText(text) });
+      collection.unpersistedReplies.add(completedReply.timestamp);
+    }
   }
   collection.collectAnchor = { file, index: entries.length };
   collection.pendingCursor = collection.collectAnchor;
@@ -537,7 +552,7 @@ export default function (pi: ExtensionAPI) {
   // The first branch conversation of a process is new (see
   // branchSessionGeneration), so its first collection re-anchors too, even if
   // this instance never sees a session_start of its own.
-  const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null, reanchor: true };
+  const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null, unpersistedReplies: new Set(), reanchor: true };
   // Main's own current model and its live registry, tracked from the contexts
   // OMP already hands this extension, because createBranch runs at wake time
   // with no context of its own. mainModel is what "follow main" applies;
@@ -1543,21 +1558,50 @@ ${context.command}
     mainStreaming = false;
   });
 
-  // Mirror at main's turn_end: collect the new captain/assistant dialog into
-  // the volatile queue, then deliver it through the serialized chain so it
-  // lands before any later wake. The durable cursor advances only in
-  // flushMirror after the complete pending batch reaches the branch.
-  pi.on?.("turn_end", async (_event, ctx) => {
+  // Mirror at main's turn_end: snapshot this turn's dialog synchronously -
+  // ctx is not valid after the handler returns - then queue the
+  // ownership-gated push and flush on the serialized branch chain without
+  // awaiting it, so a busy delivery chain never holds main's turn end behind
+  // OMP's 30 s handler cap. The batch still lands before any later wake
+  // through that same chain, and the durable cursor still advances only in
+  // flushMirror after the complete batch reaches the branch. A generation
+  // change or lost ownership drops the batch, and the chain containment
+  // below swallows the drop so no rejection escapes the handler.
+  pi.on?.("turn_end", (event, ctx) => {
     rememberMainContext(ctx);
     const turnGeneration = generation;
-    if (!(await enqueueDelivery(() => actingAsOwner(turnGeneration)))) return;
-    if (turnGeneration !== generation) return;
+    const completedReply = event.message;
+    let snapshotFile: string;
+    let snapshotEntries: Array<{ type: string }>;
     try {
-      pendingMirror.push(...collectMainDialog(ctx.sessionManager, mirrorCollection));
+      const manager = ctx.sessionManager as ReadonlyEntries | undefined;
+      if (!manager || typeof manager.getSessionFile !== "function" || typeof manager.getEntries !== "function") return;
+      snapshotFile = manager.getSessionFile() ?? "";
+      snapshotEntries = manager.getEntries().slice();
     } catch {
       return;
     }
-    enqueueMirrorFlush();
+    const snapshotManager: ReadonlyEntries = {
+      getSessionFile: () => snapshotFile,
+      getEntries: () => snapshotEntries,
+    };
+    branchChain = branchChain
+      .then(async () => {
+        if (turnGeneration !== generation) return;
+        if (!(await enqueueDelivery(() => actingAsOwner(turnGeneration)))) return;
+        if (turnGeneration !== generation) return;
+        let items: MirrorItem[];
+        try {
+          items = collectMainDialog(snapshotManager, mirrorCollection, completedReply);
+        } catch {
+          return;
+        }
+        if (items.length > 0) pendingMirror.push(...items);
+        enqueueMirrorFlush();
+      })
+      .catch(() => {
+        // A dropped batch must never reject the chain or the handler.
+      });
   });
 
   // A synchronous live handoff from a branch, or hung-branch takeover, remains
@@ -1586,6 +1630,7 @@ ${context.command}
     redeliveryAttempted.clear();
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
+    mirrorCollection.unpersistedReplies.clear();
     mirrorCollection.reanchor = true;
     // The previous generation's branch conversation is never reopened; drop the
     // live handle so nothing queued after this boundary can reuse it. In-flight
@@ -1600,10 +1645,16 @@ ${context.command}
     }
   };
 
-  pi.on?.("session_start", async (_event, ctx) => {
+  pi.on?.("session_start", (_event, ctx) => {
     armSessionBoundary(ctx);
     const startedGeneration = generation;
-    await enqueueDelivery(() => actingAsOwner(startedGeneration));
+    // Same nonblocking treatment as turn_end: eagerly activating ownership
+    // here only warms the one-time per-generation marker/lease work, so it
+    // queues behind the chain instead of holding the handler past the cap.
+    void enqueueDelivery(() => actingAsOwner(startedGeneration)).catch(() => {
+      // Activation failure leaves ownership unevaluated; the next boundary
+      // re-evaluates it lazily exactly as before.
+    });
   });
 
   pi.on?.("session_switch", (_event, ctx) => {
@@ -1625,6 +1676,7 @@ ${context.command}
     pendingMirror.length = 0;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
+    mirrorCollection.unpersistedReplies.clear();
     mirrorCollection.reanchor = true;
     const stale = branch;
     branch = null;

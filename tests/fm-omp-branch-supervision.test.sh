@@ -428,7 +428,7 @@ test_omp_extension_establishes_main_actor_context() {
   printf '%s\n' 'export function createBashToolDefinition() {} export const Type = {};' > "$package_dir/coding-shim.js"
   printf '%s\n' 'export function clampThinkingLevel(_model, level) { return level; }' > "$package_dir/ai-shim.js"
 
-  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
     EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
     node --experimental-strip-types --input-type=module -e '
       await import(process.env.EXTENSION_PATH);
@@ -541,19 +541,39 @@ export async function createAgentSession(opts) {
   globalThis.__customTools = opts.customTools;
   return {
     session: {
-      async prompt() { await globalThis.__branchPrompt(); },
-      async sendCustomMessage() {},
+      async prompt() {
+        globalThis.__promptMirrorSends.push([...globalThis.__mirrorSends]);
+        await globalThis.__branchPrompt();
+      },
+      async sendCustomMessage(message) {
+        // Mirror sends are branch-visible delivery: record content in order.
+        // failMirrorSendsOnce throws once per listed substring, so a test
+        // can park a batch mid-flush and prove the cursor stays put.
+        globalThis.__mirrorSends = globalThis.__mirrorSends ?? [];
+        globalThis.__failMirrorOnce = globalThis.__failMirrorOnce ?? [];
+        const content = String(message?.content ?? "");
+        const index = globalThis.__failMirrorOnce.findIndex((m) => content.includes(m));
+        if (index >= 0) {
+          globalThis.__failMirrorOnce.splice(index, 1);
+          throw new Error("mirror send refused");
+        }
+        globalThis.__mirrorSends.push(content);
+      },
       beginDispose() {},
       async dispose() {},
     },
   };
 }
 export class SessionManager {
+  // The branch owns no dialog; MAIN dialog lives on this stubbed main
+  // session manager, so turn_end mirror scenarios can stage captain/assistant
+  // entries for collection.
+  static mainEntries = [];
   static async open() { return new SessionManager(); }
   static inMemory() { return new SessionManager(); }
   async persistCopy() { return this; }
-  getSessionFile() { return ""; }
-  getEntries() { return []; }
+  getSessionFile() { return `${process.env.FM_STATE_OVERRIDE}/main.session.jsonl`; }
+  getEntries() { return SessionManager.mainEntries; }
 }
 JS
   cat > "$package_dir/coding-shim.js" <<'JS'
@@ -574,9 +594,9 @@ const results = [];
 // each entry throws once, so a scenario can force a provably-failed merge
 // delivery and then let the replay succeed (issue #74 replay seam).
 const failOnce = [...(scenario.failSendsOnce ?? [])];
-// stepIndex tags each recorded send with the scenario step that produced it,
-// so a scenario can prove a send fired in a LATER pass rather than the one it
-// is asserting about.
+globalThis.__failMirrorOnce = [...(scenario.failMirrorSendsOnce ?? [])];
+globalThis.__mirrorSends = [];
+globalThis.__promptMirrorSends = [];
 let stepIndex = 0;
 const pi = {
   on(name, fn) { handlers.set(name, fn); },
@@ -593,16 +613,36 @@ const pi = {
   registerCommand() {},
   registerTool() {},
 };
+const sdk = await import("@oh-my-pi/pi-coding-agent");
 const { default: extension } = await import(process.env.EXTENSION_PATH);
 const { FM_BRANCH_DISPATCH_EVENT } = await import(process.env.DISPATCH_PATH);
 extension(pi);
+if (!handlers.has("turn_end") || !handlers.has(`evt:${FM_BRANCH_DISPATCH_EVENT}`)) {
+  console.log(JSON.stringify({ results, sends, fatal: "branch extension handlers not registered (worker env leak? FM_TASK_ID must be unset)" }));
+  process.exit(3);
+}
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
-await handlers.get("session_start")?.({}, {});
+const driverPid = process.pid;
 globalThis.__branchPrompt = async () => {
   const report = globalThis.__customTools.find((tool) => tool.name === "fm_branch_report");
   const actions = globalThis.__promptActions ?? scenario.prompt ?? [];
   for (const action of actions) {
-    if (action.exec) {
+    if (action.hold_delivery) {
+      // Hold the DELIVERY chain itself: overlay fm-branch-outcome.sh under
+      // the fixture root (the extension resolves it via FM_ROOT_OVERRIDE)
+      // with a wrapper that signals append entry, then parks until the
+      // release file appears. The queued report unit then occupies
+      // deliveryChain - exactly what the original turn_end handler awaited
+      // before collecting.
+      const fs = await import("node:fs");
+      const gate = action.hold_delivery;
+      fs.mkdirSync(`${gate.root}/bin`, { recursive: true });
+      // The busy fixture symlinks the whole real bin; remove the link first
+      // so the shadow below cannot follow it into the real worktree.
+      fs.rmSync(`${gate.root}/bin/fm-branch-outcome.sh`, { force: true });
+      fs.writeFileSync(`${gate.root}/bin/fm-branch-outcome.sh`, `#!/usr/bin/env bash\nset -u\nif [ "\${1:-}" = append ]; then\n  : > "${gate.dir}/append-entered"\n  for i in $(seq 1 1200); do [ -e "${gate.release}" ] && break; sleep 0.05; done\nfi\nexec "${gate.real}" "$@"\n`, { mode: 0o755 });
+      results.push({ delivery_held: true });
+    } else if (action.exec) {
       execSync(action.exec, { shell: "/bin/bash", stdio: "pipe" });
       results.push({ exec: action.exec });
     } else if (action.report) {
@@ -634,18 +674,101 @@ for (const step of scenario.steps) {
       rejected = error instanceof Error ? error.message : String(error);
     }
     results.push({ wake: step.wake, accepted: offer.accepted, rejected });
+  } else if (step.wake_bg) {
+    // Dispatch without awaiting settlement: the branch prompt parks on the
+    // scenario's gate file while the test proceeds to time turn_end against
+    // the busy chain, then releases the gate and drains below.
+    globalThis.__promptActions = step.prompt ?? (step.report ? [{ report: step.report }] : (scenario.prompt ?? []));
+    seq += 1;
+    const offer = {
+      message: step.wake_bg,
+      projects: [],
+      heartbeat: /^heartbeat($|:)/.test(step.wake_bg),
+      eligible: true,
+      accepted: false,
+      settlement: Promise.resolve(),
+      accept(settlement = Promise.resolve()) { this.accepted = true; this.settlement = settlement; },
+    };
+    handlers.get(`evt:${FM_BRANCH_DISPATCH_EVENT}`)?.(offer);
+    globalThis.__bgSettlements = globalThis.__bgSettlements ?? [];
+    globalThis.__bgSettlements.push(offer.settlement);
+    results.push({ wake_bg: step.wake_bg, accepted: offer.accepted });
+  } else if (step.yield) {
+    // Let already-queued chain work run to completion while the scenario
+    // holds its current lock state: this is what forces the dropped batch's
+    // ownership check to execute while ownership is still absent.
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 50));
+    results.push({ yielded: true });
+  } else if (step.assert_no_cursor) {
+    // Proves the cursor stayed put at the failure point itself, not merely
+    // in the final state: read the cursor file inside the run, right after
+    // the rejected wake settles and before any retry.
+    const { existsSync: existsCursor } = await import("node:fs");
+    results.push({ cursor_absent: !existsCursor(`${state}/.branch-mirror-cursor`) });
+  } else if (step.clear_mirror_failures) {
+    globalThis.__failMirrorOnce = [];
+    results.push({ mirror_failures_cleared: true });
+  } else if (step.drain_bg) {
+    const pending = globalThis.__bgSettlements ?? [];
+    globalThis.__bgSettlements = [];
+    for (const settlement of pending) {
+      let rejected = "";
+      try {
+        await settlement;
+      } catch (error) {
+        rejected = error instanceof Error ? error.message : String(error);
+      }
+      results.push({ wake_bg_settled: true, rejected });
+    }
+  } else if (step.wait_for_file) {
+    const { existsSync: existsForWait } = await import("node:fs");
+    for (let i = 0; i < 400 && !existsForWait(step.wait_for_file); i += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    results.push({ waited_for_file: existsForWait(step.wait_for_file) });
+  } else if (step.restore_lock) {
+    writeFileSync(`${state}/.lock`, `${driverPid}\n`);
+    results.push({ lock_restored: true });
   } else if (step.exec) {
     execSync(step.exec, { shell: "/bin/bash", stdio: "pipe" });
     results.push({ exec: step.exec });
+  } else if (step.turn_end) {
+    const turnEnd = handlers.get("turn_end");
+    const startedAt = Date.now();
+    const ctx = { sessionManager: new sdk.SessionManager() };
+    const reply = step.completed_reply ? { role: "assistant", content: step.completed_reply, timestamp: Date.now() } : undefined;
+    const returned = turnEnd?.({ message: reply }, ctx);
+    // OMP may persist message_end only after turn_end handlers return.
+    if (reply) sdk.SessionManager.mainEntries.push({ type: "message", message: reply });
+    if (returned instanceof Promise) {
+      const timeout = new Promise((resolve) => setTimeout(() => resolve("timeout"), step.turn_end_timeout_ms ?? 1000));
+      const outcome = await Promise.race([returned.then(() => "settled"), timeout]);
+      results.push({ turn_end: true, elapsed_ms: Date.now() - startedAt, outcome });
+    } else {
+      results.push({ turn_end: true, elapsed_ms: Date.now() - startedAt, outcome: "sync" });
+    }
+  } else if (step.session_switch) {
+    handlers.get("session_switch")?.({}, {});
+    results.push({ session_switch: true });
   } else if (step.consume_all) {
     handlers.get("before_agent_start")?.();
     results.push({ consumed: "all" });
   } else if (step.consume_content) {
     handlers.get("message_start")?.({ message: { role: "user", content: step.consume_content } });
     results.push({ consumed: "content" });
+  } else if (step.mirror) {
+    for (const item of step.mirror) {
+      sdk.SessionManager.mainEntries.push({ type: "message", message: { role: item.role, content: item.text } });
+    }
+    results.push({ mirrored: step.mirror.length });
+  } else {
+    // Hard error: a silently-ignored step invalidates the scenario that
+    // declared it (this once hid consume_content and broke redelivery).
+    throw new Error(`unknown driver step: ${JSON.stringify(step)}`);
   }
 }
-console.log(JSON.stringify({ results, sends }));
+console.log(JSON.stringify({ results, sends, mirrorSends: globalThis.__mirrorSends ?? [], promptMirrorSends: globalThis.__promptMirrorSends }));
 JS
 }
 
@@ -668,7 +791,7 @@ test_routine_verdict_on_granted_completion_opens_a_main_turn() {
 }
 JSON
 
-  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
     EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
     DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
@@ -708,7 +831,7 @@ test_mixed_grant_settle_rejects_an_unreported_completion() {
 }
 JSON
 
-  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
     EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
     DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
@@ -747,7 +870,7 @@ test_branch_merge_suppresses_a_resolved_decision_advisory() {
 }
 JSON
 
-  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
     EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
     DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
@@ -787,7 +910,7 @@ test_branch_merge_suppresses_a_stale_worker_advisory() {
 }
 JSON
 
-  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
     EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
     DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
@@ -845,7 +968,7 @@ JSON
 JSON
     fi
 
-    out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
       FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
       EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
       DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
@@ -872,6 +995,267 @@ JSON
   pass "a failed merge replays while current and is suppressed after a keyed resolution"
 }
 
+# turn_end must never wait on the serialized delivery chain: a branch wake
+# dispatched in the background parks its prompt on a gate file (chain busy),
+# and the handler invoked against that busy chain still resolves immediately
+# instead of timing out behind it. The gate then releases and the wake drains.
+test_turn_end_returns_without_waiting_for_a_busy_chain() {
+  local fixture state out gate_dir release entered
+  fixture="$TMP_ROOT/turnend-busy"
+  state="$fixture/state"
+  gate_dir="$fixture/gate"
+  release="$gate_dir/release"
+  entered="$gate_dir/append-entered"
+  make_omp_branch_driver_fixture "$fixture"
+  mkdir -p "$state" "$gate_dir" "$fixture/bin"
+  # The extension resolves every helper script via FM_ROOT_OVERRIDE, so point
+  # it at the fixture root overlaid with the real bin (plus the .agents tree
+  # the prompt generator reads): the hold_delivery prompt action below can
+  # then shadow fm-branch-outcome.sh to park the delivery chain in a report.
+  for f in "$ROOT"/bin/*; do ln -s "$f" "$fixture/bin/$(basename "$f")"; done
+  rm -f "$fixture/bin/fm-branch-outcome.sh"
+  ln -s "$ROOT/.agents" "$fixture/.agents"
+  git init -q -b main "$fixture"
+  : > "$fixture/AGENTS.md"
+  printf 'working: task-a started\n' > "$state/task-a.status"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+  cat > "$fixture/steps.json" <<JSON
+{
+  "steps": [
+    { "wake_bg": "signal: task-a",
+      "prompt": [
+        { "hold_delivery": { "root": "$fixture", "dir": "$gate_dir", "release": "$release", "real": "$ROOT/bin/fm-branch-outcome.sh" } },
+        { "report": { "task": "task-a", "verdict": "routine", "summary": "task-a handled after the gate" } }
+      ] },
+    { "wait_for_file": "$entered" },
+    { "mirror": [{ "role": "user", "text": "captain: ship it" }] },
+    { "turn_end": true, "turn_end_timeout_ms": 2000 },
+    { "exec": "touch $release" },
+    { "drain_bg": true }
+  ]
+}
+JSON
+
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    SCENARIO_PATH="$fixture/steps.json" \
+    node --experimental-strip-types --unhandled-rejections=strict "$fixture/driver.mjs" 2>&1) \
+    || fail "busy-chain turn_end driver failed: $out"
+
+  assert_contains "$out" '"wake_bg":"signal: task-a","accepted":true' "the background wake was not accepted: $out"
+  # The append-entered marker proves a delivery unit was in flight when the
+  # handler ran: the original code awaited exactly this queue before
+  # collecting, so timing out here is the reported defect, not shape.
+  assert_contains "$out" '"waited_for_file":true' "the delivery hold was never proven entered: $out"
+  assert_contains "$out" '"turn_end":true' "turn_end produced no result: $out"
+  ! printf '%s' "$out" | grep -F '"outcome":"timeout"' >/dev/null \
+    || fail "turn_end waited on the busy delivery chain: $out"
+  printf '%s' "$out" | grep -F '"outcome":"sync"' >/dev/null \
+    || fail "turn_end did not return synchronously: $out"
+  assert_contains "$out" '"wake_bg_settled":true,"rejected":""' "the held wake did not settle after release: $out"
+  pass "turn_end resolves without waiting while the delivery chain is busy"
+}
+# The mirror batch queued at turn_end still reaches the branch before any
+# wake queued after that turn: the branch-visible mirror sends land first in
+# order, and the cursor advances only after the full flush.
+test_turn_end_mirror_lands_before_a_later_wake() {
+  local fixture state out
+  fixture="$TMP_ROOT/turnend-order"
+  state="$fixture/state"
+  make_omp_branch_driver_fixture "$fixture"
+  mkdir -p "$state"
+  printf 'working: task-a started\n' > "$state/task-a.status"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+  cat > "$fixture/steps.json" <<'JSON'
+{
+  "steps": [
+    { "mirror": [
+      { "role": "user", "text": "captain: ship the first item" },
+      { "role": "assistant", "text": "main: first acknowledged" },
+      { "role": "user", "text": "captain: ship the second item" }
+    ] },
+    { "turn_end": true, "turn_end_timeout_ms": 2000, "completed_reply": "main: second acknowledged" },
+    { "wake": "signal: task-a",
+      "prompt": [
+        { "report": { "task": "task-a", "verdict": "routine", "summary": "saw the mirror" } }
+      ] }
+  ]
+}
+JSON
+
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    SCENARIO_PATH="$fixture/steps.json" \
+    node --experimental-strip-types --unhandled-rejections=strict "$fixture/driver.mjs" 2>&1) \
+    || fail "mirror-order driver failed: $out"
+
+  assert_contains "$out" '"accepted":true' "the wake after turn_end was not accepted: $out"
+  assert_contains "$out" '"rejected":""' "the wake after turn_end did not settle: $out"
+  assert_contains "$out" '"promptMirrorSends":[["[captain] captain: ship the first item","[main] main: first acknowledged","[captain] captain: ship the second item","[main] main: second acknowledged"]]' \
+    "the mirror batch was not visible in order at the later wake prompt entry: $out"
+  assert_equals '{"file":"'"$state"'/main.session.jsonl","index":3}' "$(cat "$state/.branch-mirror-cursor")" \
+    "the mirror cursor did not advance to the flushed batch"
+  pass "mirrored dialog from a turn reaches the branch before a later wake"
+}
+
+# Opt-in real-SDK event timing check; the provider is local and uses no credentials.
+test_turn_end_dialog_with_real_sdk() {
+  local fixture package_dir node_modules
+  package_dir=${FM_OMP_PACKAGE_DIR:-}
+  if [ -z "$package_dir" ]; then
+    echo "skip: set FM_OMP_PACKAGE_DIR for the real-SDK dialog regression"
+    return 0
+  fi
+  command -v bun >/dev/null 2>&1 || fail "bun is required for the real-SDK dialog regression"
+  [ -f "$package_dir/package.json" ] || fail "OMP SDK package is missing: $package_dir"
+  fixture="$TMP_ROOT/turnend-sdk"
+  mkdir -p "$fixture/.omp/extensions/lib" "$fixture/state" "$fixture/config"
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$fixture/.omp/extensions/"
+  cp "$ROOT/.omp/extensions/lib/"{fm-branch-dispatch,fm-async-exec,fm-branch-model-picker}.ts "$fixture/.omp/extensions/lib/"
+  cp "$ROOT/tests/fm-omp-branch-dialog-sdk.mjs" "$fixture/driver.mjs"
+  node_modules=$(cd "$package_dir/../.." && pwd)
+  ln -s "$node_modules" "$fixture/node_modules"
+  env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    PI_CODING_AGENT_DIR="$fixture/agent" FM_OMP_PACKAGE_DIR="$package_dir" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    bun "$fixture/driver.mjs" || fail "real-SDK completed reply regression failed"
+}
+
+# A mid-flush mirror failure keeps the cursor put: the first send lands, the
+# second throws, and the cursor file stays absent until a retry completes the
+# batch.
+test_turn_end_mirror_failure_holds_the_cursor() {
+  local fixture state out
+  fixture="$TMP_ROOT/turnend-mirror-fail"
+  state="$fixture/state"
+  make_omp_branch_driver_fixture "$fixture"
+  mkdir -p "$state"
+  printf 'working: task-a started\n' > "$state/task-a.status"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+  cat > "$fixture/steps.json" <<'JSON'
+{
+  "failMirrorSendsOnce": ["second item"],
+  "steps": [
+    { "mirror": [
+      { "role": "user", "text": "captain: ship the first item" },
+      { "role": "user", "text": "captain: ship the second item" }
+    ] },
+    { "turn_end": true, "turn_end_timeout_ms": 2000 },
+    { "wake": "signal: task-a",
+      "prompt": [
+        { "report": { "task": "task-a", "verdict": "routine", "summary": "first attempt, flush fails" } }
+      ] },
+    { "assert_no_cursor": true },
+    { "clear_mirror_failures": true },
+    { "wake": "signal: task-a",
+      "prompt": [
+        { "report": { "task": "task-a", "verdict": "routine", "summary": "retry after the failed flush" } }
+      ] }
+  ]
+}
+JSON
+
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    SCENARIO_PATH="$fixture/steps.json" \
+    node --experimental-strip-types --unhandled-rejections=strict "$fixture/driver.mjs" 2>&1) \
+    || fail "mirror-failure driver failed: $out"
+
+  assert_contains "$out" '"rejected":"mirror send refused"' "the failed flush did not reject the first wake: $out"
+  assert_contains "$out" '"cursor_absent":true' "the cursor file existed at the failure point, before any retry: $out"
+  # Same-process retry: the failed items stay in pendingMirror, so the second
+  # wake's pre-prompt flush retries them to completion and only then advances
+  # the cursor. Final branch-visible order: first, then the retried second.
+  assert_contains "$out" '"mirrorSends":["[captain] captain: ship the first item","[captain] captain: ship the second item"]' \
+    "the failed mirror batch was not retried to completion in order: $out"
+  assert_equals '{"file":"'"$state"'/main.session.jsonl","index":2}' "$(cat "$state/.branch-mirror-cursor")" \
+    "the mirror cursor advanced before the full batch reached the branch"
+  pass "a failed mirror send holds the cursor until the retry completes"
+}
+# A generation change or lost lock ownership between the turn end and the
+# chain run drops the batch: no mirror send, no cursor advance, no rejection.
+# A later wake then creates the branch and drains: the dropped text must never
+# arrive there, proving the drop rather than a lingering queue.
+test_turn_end_batch_drops_on_generation_change_or_lock_loss() {
+  local fixture state out mode
+  for mode in generation lock; do
+    fixture="$TMP_ROOT/turnend-drop-$mode"
+    state="$fixture/state"
+    make_omp_branch_driver_fixture "$fixture"
+    mkdir -p "$state"
+    printf 'working: task-a started\n' > "$state/task-a.status"
+    printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+    printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+    if [ "$mode" = generation ]; then
+      # session_switch fires before the queued chain run: the generation
+      # mismatch drops the batch, and the boundary also resets collection.
+      # The later wake builds a fresh branch in the new generation, proving
+      # the chain is not wedged by the drop.
+      cat > "$fixture/steps.json" <<'JSON'
+{
+  "steps": [
+    { "mirror": [{ "role": "user", "text": "captain: ship the dropped item" }] },
+    { "turn_end": true, "turn_end_timeout_ms": 2000 },
+    { "session_switch": true },
+    { "wake": "signal: task-a",
+      "prompt": [{ "report": { "task": "task-a", "verdict": "routine", "summary": "fresh generation wake" } }] }
+  ]
+}
+JSON
+    else
+      # The lock is removed before the queued chain run: the ownership check
+      # drops the batch before collection, so the anchor never advances.
+      # restore_lock then re-arms ownership so the later wake proves the
+      # chain still drains.
+      cat > "$fixture/steps.json" <<'JSON'
+{
+  "steps": [
+    { "mirror": [{ "role": "user", "text": "captain: ship the dropped item" }] },
+    { "turn_end": true, "turn_end_timeout_ms": 2000 },
+    { "exec": "rm -f \"$FM_STATE_OVERRIDE/.lock\"" },
+    { "yield": true },
+    { "restore_lock": true },
+    { "wake": "signal: task-a",
+      "prompt": [{ "report": { "task": "task-a", "verdict": "routine", "summary": "post-restore wake" } }] }
+  ]
+}
+JSON
+    fi
+
+    out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+      FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+      EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+      DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+      SCENARIO_PATH="$fixture/steps.json" \
+      node --experimental-strip-types --unhandled-rejections=strict "$fixture/driver.mjs" 2>&1) \
+      || fail "$mode drop driver failed: $out"
+    # No mirror send may carry the dropped turn's batch under the old
+    # ownership: the generation boundary resets collection, and the lock
+    # loss returns before collectMainDialog runs, so the dropped batch is
+    # never collected, never queued, and never sent. The later wake still
+    # settles, proving the drop left no rejection on the chain.
+    assert_contains "$out" '"turn_end":true,"elapsed_ms":' "the turn_end step produced no result: $out"
+    ! printf '%s' "$out" | grep -F '"outcome":"timeout"' >/dev/null \
+      || fail "$mode: turn_end awaited the chain instead of dropping: $out"
+    assert_contains "$out" '"wake":"signal: task-a","accepted":true,"rejected":""' \
+      "$mode: the later wake did not settle after the drop: $out"
+    ! printf '%s' "$out" | grep -F 'ship the dropped item' >/dev/null \
+      || fail "$mode: the dropped batch reached the branch on the later drain: $out"
+    [ ! -e "$state/.branch-mirror-cursor" ] \
+      || fail "$mode: the dropped batch advanced the cursor: $out"
+  done
+  pass "a generation change or lost ownership drops the queued mirror batch"
+}
 # The branch-side retry: a completion whose merge main already consumed is
 # re-sent once on the next wake's post-settle pass, then never again - the
 # durable receipt, not the send, is what discharges the obligation.
@@ -899,7 +1283,7 @@ test_consumed_completion_is_redelivered_once_per_generation() {
 }
 JSON
 
-  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
     EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
     DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
@@ -946,7 +1330,7 @@ test_delivered_completion_re_report_opens_no_main_turn() {
 }
 JSON
 
-  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
     EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
     DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
@@ -1068,7 +1452,7 @@ test_identical_repeat_routine_outcome_merges_silently() {
 }
 JSON
 
-  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+  out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
     EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
     DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
@@ -1805,3 +2189,9 @@ test_outcome_scans_stay_single_pass_on_a_large_store
 test_identical_repeat_routine_outcome_merges_silently
 test_decision_owned_wake_reaches_main_past_branch_and_episode
 test_decision_owned_wake_forces_turn_without_episode
+test_turn_end_returns_without_waiting_for_a_busy_chain
+test_turn_end_mirror_lands_before_a_later_wake
+test_turn_end_mirror_failure_holds_the_cursor
+test_turn_end_batch_drops_on_generation_change_or_lock_loss
+
+test_turn_end_dialog_with_real_sdk
