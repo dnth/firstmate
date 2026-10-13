@@ -320,5 +320,7 @@ bin/fm-test-run.sh tests/fm-remote-secondmate-update-restart.test.sh
 
 The account-level checks the doctor performs - a real Aqua login session, a real `launchctl` domain, and a real herdr server - are only ever exercised against fixtures here, so the readiness gate's behavior on a genuine Mac remains an operator-run smoke test.
 
+The opt-in `tests/fm-remote-omp-update-restart-live-e2e.test.sh` guard runs the update-then-restart path against a real OMP second mate and real Herdr in a guarded lab session; [the runtime verification record](verification/runtime-backends.md#remote-omp-update-and-restart) owns its latest result and scope.
+
 For a real-host smoke test, provision a disposable remote account and project, run the doctor and its repair against that account, launch the second mate, send one marked request, verify its correlated reply and structured fleet projection, simulate an unreachable host to confirm unknown-without-failover behavior, then retire only after the remote queue is empty.
 The deterministic suite is automated; real-host validation is still an operator-run smoke test and is not claimed by the repository tests.

@@ -227,27 +227,43 @@ OMP_SENT="$E/remote-omp-send-message.log"
 CLAIMS="$E/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 
+# The host's job worker is a supervisor plus its serving child. Stop both while
+# their state root still exists, so the child can release its ownership.
+stop_remote_job_worker() {
+  local pid supervisor='' waited=0
+  pid=$(cat "$E/remote-jobs/worker.pid" 2>/dev/null || true)
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$(ps -p "$pid" -o command= 2>/dev/null || true)" in
+    *"$REMOTE_ROOT/bin/fm-remote-job-worker.sh"*) ;;
+    *) return 0 ;;
+  esac
+  supervisor=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
+  case "$supervisor" in
+    ''|*[!0-9]*|0|1) supervisor='' ;;
+    *)
+      case "$(ps -p "$supervisor" -o command= 2>/dev/null || true)" in
+        *"$REMOTE_ROOT/bin/fm-remote-job-worker.sh"*) kill "$supervisor" 2>/dev/null || true ;;
+        *) supervisor='' ;;
+      esac
+      ;;
+  esac
+  kill "$pid" 2>/dev/null || true
+  while { [ -n "$supervisor" ] && kill -0 "$supervisor" 2>/dev/null; } || kill -0 "$pid" 2>/dev/null; do
+    waited=$((waited + 1))
+    [ "$waited" -lt 200 ] || return 1
+    sleep 0.05
+  done
+}
+
 cleanup() {
-  local pid worker_pid supervisor_pid supervisor_command
+  local pid
   if [ -s "$OMP_ACTIVE_PID" ]; then
     pid=$(cat "$OMP_ACTIVE_PID")
     kill -TERM "$pid" 2>/dev/null || true
   fi
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-  if [ -f "$E/remote-jobs/worker.pid" ]; then
-    worker_pid=$(cat "$E/remote-jobs/worker.pid")
-    supervisor_pid=$(ps -p "$worker_pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
-    supervisor_command=
-    case "$supervisor_pid" in
-      ''|*[!0-9]*|0|1) supervisor_pid='' ;;
-      *) supervisor_command=$(ps -p "$supervisor_pid" -o command= 2>/dev/null || true) ;;
-    esac
-    case "$supervisor_command" in
-      *"$REMOTE_ROOT/bin/fm-remote-job-worker.sh"*) kill "$supervisor_pid" 2>/dev/null || true ;;
-      *) kill "$worker_pid" 2>/dev/null || true ;;
-    esac
-  fi
+  stop_remote_job_worker || echo "warning: the fixture's remote job worker did not stop" >&2
   fm_test_cleanup
 }
 trap cleanup EXIT

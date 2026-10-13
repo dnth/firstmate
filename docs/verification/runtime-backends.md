@@ -952,6 +952,37 @@ The upstream [`kunchenguid/firstmate` issue #723](https://github.com/kunchenguid
 
 Blocked-state parsing, identical non-steering event rejection, unreadable-state preservation, and unsupported-backend preflight remain deterministic contract tests rather than claims about this live role-matrix run.
 
+### Remote OMP update and restart
+
+The remote OMP update-and-restart guard ran on 2026-10-13 against OMP 18.10.1 and Herdr 0.9.0 on Linux x86_64 in one guarded non-default lab session, with `openai-codex/gpt-5.6-luna` at low effort.
+It launched a real remote OMP second mate through the production SSH entrypoint, remote job worker, and host-local control, published an update that changed its primary-extension closure, ran the real update, and restarted the mate with `bin/fm-secondmate-restart.sh`.
+The real extension published, at load, exactly the committed closure version of the commit it started on.
+After the update the superseded session refused ordinary requests with exit 9, the restart's persist request reached it, it answered on its parent channel while still running, and the relaunched session loaded the updated closure.
+
+```sh
+env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+  HERDR_LAB_HELPER=/home/dnth/Desktop/firstmate/bin/fm-herdr-lab.sh \
+  FM_OMP_REMOTE_UPDATE_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-remote-omp-update-restart-live-e2e.test.sh
+```
+
+Observed bounded output:
+
+```text
+# harness: omp/18.10.1 (/home/dnth/.bun/bin/omp); herdr: herdr 0.9.0; model: openai-codex/gpt-5.6-luna
+ok - omp/18.10.1 publishes the committed closure version it loaded
+ok - the superseded live OMP session refuses ordinary requests after the update
+restarted: omp-upd-live-1275263 on remote-mac (omp)
+summary: 1 of 1 restarted, 0 nudged, 0 unreached
+ok - the live restart persists the superseded session's open work, stops it, and relaunches on the new closure
+ok - real remote OMP update and restart in a guarded Herdr lab (omp/18.10.1, herdr 0.9.0)
+```
+
+The same guard against the code before this binding rule existed failed at the restart with `the request to write down its open work could not be delivered: remote-omp-binding-refused: loaded OMP primary extension does not match its tracked closure` and `summary: 0 of 1 restarted, 0 nudged, 1 unreached`.
+The remote control pins Herdr session `fm-remote`, so the disposable code root's herdr wrapper maps that name and the lab's own name to the lab through the guarded helper and refuses every other session, server, or session-lifecycle command.
+Native OMP Herdr probes are quarantined, the SSH readiness doctor is answered by the deterministic boundary, and the parent's reply relay is modelled by copying the agent's own correlated reply into the parent status channel.
+This record therefore covers the loaded-closure binding, delivery into the live session, its persist answer, and the relaunch, but not macOS host readiness or the reply relay.
+
 ### Workspace-removal focus safety
 
 The focus-flash regression ran on 2026-07-28 against Herdr 0.7.5 protocol 17 on macOS aarch64:
