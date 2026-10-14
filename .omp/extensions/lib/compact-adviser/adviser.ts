@@ -81,7 +81,7 @@ function wrapWords(text: string, first: number, rest: number): string[] {
   return lines;
 }
 const clip = (text: string, width: number) =>
-  text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`;
+  width <= 0 ? "" : text.length <= width ? text : `${text.slice(0, width - 1)}…`;
 /**
  * Person-only sibling of OMP's Advisor card. Every colour and glyph comes from
  * the active theme; text is wrapped and clipped to the render width before it
@@ -104,11 +104,11 @@ export function hintCard(theme: HintTheme, usage: HintUsage | undefined, finishe
     invalidate() {},
     render(width: number): string[] {
       const w = Math.max(1, width);
-      // Too narrow for a rail row: keep just the clipped label.
-      if (w < 8) return [theme.fg(tone, theme.bold(clip(label, w)))];
-      const rail = theme.fg(tone, railGlyph);
       const prefixWidth = 2 + railGlyph.length;
-      const room = Math.max(1, w - prefixWidth);
+      if (w <= prefixWidth + badge.length + 1)
+        return [theme.fg(tone, theme.bold(clip(label, w)))];
+      const rail = theme.fg(tone, railGlyph);
+      const room = w - prefixWidth;
       const labelText = clip(label, w - 1);
       const metaRoom = w - 1 - labelText.length - 1;
       const header =

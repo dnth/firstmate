@@ -388,8 +388,19 @@ console.log("AC1 inert-by-default gates: ok");
     const noUsage = hintCard(fakeTheme(), undefined, 0.99).render(100);
     assert.doesNotMatch(noUsage[0], /context/, "no guessed usage when unknown");
     // Every line fits at narrow and wide widths.
-    for (const width of [1, 5, 12, 20, 30, 45, 80, 200]) {
-      for (const hint of [card, hintCard(fakeTheme(), undefined, 0.99)]) {
+    const longTheme = {
+      ...fakeTheme(),
+      symbol: (k) => ({ "status.running": "running", "context.compaction": "|||" })[k],
+      format: { bracketLeft: "[[", bracketRight: "]]" },
+    };
+    const hints = [
+      card,
+      hintCard(fakeTheme(), undefined, 0.99),
+      widgetCalls[0][1](undefined, longTheme),
+      hintCard(longTheme, undefined, 0.99),
+    ];
+    for (let width = 1; width <= 200; width++) {
+      for (const hint of hints) {
         for (const line of hint.render(width)) {
           const visible = line.replace(/<[a-zA-Z]+:|>/g, "");
           assert.ok(visible.length <= Math.max(1, width), `width ${width}: ${JSON.stringify(visible)}`);
