@@ -1132,6 +1132,70 @@ test_local_omp_restart_after_extension_closure_update() {
     || fail "the superseded local session was not asked to persist before it stopped"$'\n'"$(cat "$dir/stop.log")"
   pass "T18 a local OMP mate persists and restarts after an update changes its loaded closure"
 }
+
+# --- T19: watcher scratch churn in a mate's home never blocks its restart -----
+# A live home's watcher keeps creating and removing .hash-*/.count-*/.last-*
+# scratch files, so a directory walk of state/ can fail on an entry that vanished
+# mid-scan. The relaunch checkpoint's guarantee is that every child *.meta record
+# is readable, so a failing walk must not refuse while those records still count.
+test_vanished_scratch_file_does_not_block_restart() {
+  local dir out rc real_find
+  dir=$(new_case findrace)
+  add_local_mate "$dir" smf1
+  arm_answer "$dir" smf1
+  printf 'window=x:fm-c1\n' > "$dir/smf1-home/state/c1.meta"
+  printf 'window=x:fm-c2\n' > "$dir/smf1-home/state/c2.meta"
+  : > "$dir/smf1-home/state/.hash-0"
+  : > "$dir/smf1-home/state/.count-0"
+  : > "$dir/smf1-home/state/.last-0"
+  real_find=$(command -v find)
+  cat > "$dir/fakebin/find" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = "$dir/smf1-home/state" ]; then
+    echo "find: \$arg/.hash-0: No such file or directory" >&2
+    exit 1
+  fi
+done
+exec "$real_find" "\$@"
+SH
+  chmod +x "$dir/fakebin/find"
+
+  out=$(run_restart "$dir" smf1); rc=$?
+
+  expect_code 0 "$rc" "a vanished watcher scratch file must not refuse the restart"$'\n'"$out"
+  assert_contains "$out" "restarted: smf1" "readable child records must still allow the replacement launch"
+  assert_grep 'children=2' "$dir/home/state/smf1.control-relaunch" \
+    "readable child records must still be counted by the checkpoint"
+  pass "T19 a vanished watcher scratch file does not block a mate's restart"
+}
+
+# --- T20: a mate home whose state cannot be listed still refuses --------------
+test_unlistable_state_still_refuses_restart() {
+  local dir out rc before
+  if [ "$(id -u)" = 0 ]; then
+    pass "T20 unlistable state check skipped as root (mode 000 does not restrict root)"
+    return 0
+  fi
+  dir=$(new_case unlistable)
+  add_local_mate "$dir" smu1
+  arm_answer "$dir" smu1
+  printf 'window=x:fm-c1\n' > "$dir/smu1-home/state/c1.meta"
+  before=$(cat "$dir/fake/command")
+  chmod 000 "$dir/smu1-home/state"
+
+  out=$(run_restart "$dir" smu1); rc=$?
+  chmod 755 "$dir/smu1-home/state"
+
+  expect_code 3 "$rc" "an unlistable state directory must not be reported as a reload"$'\n'"$out"
+  assert_not_contains "$out" "restarted: smu1" "an unlistable home must not be reported as restarted"
+  assert_contains "$out" "no readable state directory" \
+    "the refusal should name the unlistable home state directory"
+  [ "$(cat "$dir/fake/command")" = "$before" ] \
+    || fail "an unlistable state refusal must leave the running agent exactly as it was"
+  assert_no_grep '^/exit$' "$dir/fake/literal" "an unlistable state refusal must not have stopped the agent"
+  pass "T20 a mate home whose state cannot be listed still refuses the restart"
+}
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
@@ -1155,4 +1219,6 @@ test_omp_secondmate_prepare_relaunch_clears_owned_markers
 test_omp_restart_stops_proves_cleans_then_relaunches
 test_local_omp_restart_after_extension_closure_update
 
+test_vanished_scratch_file_does_not_block_restart
+test_unlistable_state_still_refuses_restart
 echo "# all fm-secondmate-restart tests passed"

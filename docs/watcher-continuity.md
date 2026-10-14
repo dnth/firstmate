@@ -14,6 +14,7 @@ A failed follow-up never cancels continuity restoration.
 Same-process session replacement on Pi and OMP follows the generation-owner contract stated once in `bin/fm-primary-watch-core.ts`: an owning replacement activation arms without a model turn, and a state-scoped handoff carries every actionable close whose delivery overlaps replacement, including a follow-up not yet consumed and a retiring child that reports during shutdown.
 Compaction remains inside the active generation and does not trigger replacement shutdown, re-arm, or actionable handoff.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
+Do not run the hook as a manual arm from a tool turn: a short-lived tool process cannot own its arm; its header and help own the invocation contract.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
