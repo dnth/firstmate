@@ -83,8 +83,8 @@ function wrapWords(text: string, first: number, rest: number): string[] {
 const clip = (text: string, width: number) =>
   width <= 0 ? "" : text.length <= width ? text : `${text.slice(0, width - 1)}…`;
 /**
- * Person-only sibling of OMP's Advisor card. Every colour and glyph comes from
- * the active theme; text is wrapped and clipped to the render width before it
+ * Person-only sibling of OMP's Advisor card. Colours, header and rail symbols,
+ * and badge brackets come from the active theme; text is wrapped and clipped before it
  * is coloured, so escape codes never count against the width.
  */
 export function hintCard(theme: HintTheme, usage: HintUsage | undefined, finished: number) {
