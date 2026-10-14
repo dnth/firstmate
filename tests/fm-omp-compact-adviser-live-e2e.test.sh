@@ -6,7 +6,7 @@
 # tests/fm-omp-compact-adviser.test.sh pins the deferral logic with fakes, while
 # this guard proves the vendor's real ordering (agent_end fires while the owning
 # prompt is still in flight, idle one macrotask later) and that the shipped
-# adviser therefore renders its person-only hint.
+# adviser therefore renders its person-only sibling card.
 # It refuses to pass without a real OMP, and names the harness version on failure.
 #
 #   FM_OMP_COMPACT_ADVISER_LIVE_E2E=1 bash tests/fm-omp-compact-adviser-live-e2e.test.sh
@@ -25,7 +25,6 @@ fi
 
 MODEL=${FM_OMP_COMPACT_ADVISER_LIVE_MODEL:-anthropic/claude-haiku-4-5}
 WAIT_SECONDS=${FM_OMP_COMPACT_ADVISER_LIVE_TIMEOUT:-120}
-HINT_FRAGMENT="Run /compact to save tokens"
 
 command -v omp >/dev/null 2>&1 \
   || fail "no installed OMP binary: this guard proves the OMP harness only and refuses to pass without it"
@@ -199,11 +198,16 @@ assert_grep '"ev":"stub-judge-called"' "$TRACE" \
   "OMP $OMP_VERSION: the deferred settled check never reached the judge"
 assert_grep '"lastHintKey":"' "$TRACE" \
   "OMP $OMP_VERSION: the deferred checkpoint judged but never persisted a hint"
-case "$PANE" in
-  *"$HINT_FRAGMENT"*) : ;;
-  *)
-    fail "OMP $OMP_VERSION: the hint was decided and persisted but never rendered above the composer"
-    ;;
-esac
+# The themed sibling card: header label, heavy rail rows, badge, judged
+# confidence, and the action row, all read from the real rendered pane.
+for fragment in "Compact" "context" "ready" "Work looks finished (99% sure)." "now to start lighter." \
+  "┃ /compact-adviser snooze · dismiss"; do
+  case "$PANE" in
+    *"$fragment"*) : ;;
+    *)
+      fail "OMP $OMP_VERSION: the sibling hint card was persisted but its '$fragment' row never rendered above the composer: $PANE"
+      ;;
+  esac
+done
 
-pass "compact-adviser live: $OMP_VERSION defers the settled check to idle and shows the /compact hint"
+pass "compact-adviser live: $OMP_VERSION defers the settled check to idle and renders the Compact sibling card"

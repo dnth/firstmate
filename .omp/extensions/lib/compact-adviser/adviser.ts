@@ -52,7 +52,85 @@ import {
 } from "./state.ts";
 
 const LABEL = "compact-adviser";
-const HINT = "Compact adviser: work appears completed or recorded. Run /compact to save tokens.";
+interface HintTheme {
+  fg(color: string, text: string): string;
+  bold(text: string): string;
+  symbol(key: string): string;
+  format: { bracketLeft: string; bracketRight: string };
+  sep: { dot: string };
+}
+interface HintUsage {
+  tokens: number;
+  contextWindow: number;
+}
+const compactCount = (n: number) =>
+  n >= 1e6 ? `${Math.round(n / 1e5) / 10}M` : n >= 1000 ? `${Math.round(n / 1000)}K` : `${n}`;
+/** Greedy word wrap of plain text; the first line is `first` wide, the rest `rest`. */
+function wrapWords(text: string, first: number, rest: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  let max = Math.max(1, first);
+  for (const word of text.split(" ")) {
+    if (line && line.length + 1 + word.length > max) {
+      lines.push(line);
+      line = word;
+      max = Math.max(1, rest);
+    } else line = line ? `${line} ${word}` : word;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+const clip = (text: string, width: number) =>
+  width <= 0 ? "" : text.length <= width ? text : `${text.slice(0, width - 1)}…`;
+/**
+ * Person-only sibling of OMP's Advisor card. Colours, header and rail symbols,
+ * and badge brackets come from the active theme; text is wrapped and clipped before it
+ * is coloured, so escape codes never count against the width.
+ */
+export function hintCard(theme: HintTheme, usage: HintUsage | undefined, finished: number) {
+  const tone = "borderAccent";
+  const meta =
+    usage && usage.contextWindow > 0 && Number.isFinite(usage.tokens)
+      ? `${compactCount(usage.tokens)} / ${compactCount(usage.contextWindow)}${theme.sep.dot}${Math.round(
+          (usage.tokens / usage.contextWindow) * 100,
+        )}% context`
+      : "";
+  const label = `${theme.symbol("status.running")} Compact`;
+  const railGlyph = theme.symbol("context.compaction");
+  const badge = `${theme.format.bracketLeft}ready${theme.format.bracketRight}`;
+  const body = `Work looks finished (${Math.round(finished * 100)}% sure). /compact now to start lighter.`;
+  const actions = "/compact-adviser snooze · dismiss";
+  return {
+    invalidate() {},
+    render(width: number): string[] {
+      const w = Math.max(1, width);
+      const prefixWidth = 2 + railGlyph.length;
+      if (w <= prefixWidth + badge.length + 1)
+        return [theme.fg(tone, theme.bold(clip(label, w)))];
+      const rail = theme.fg(tone, railGlyph);
+      const room = w - prefixWidth;
+      const labelText = clip(label, w - 1);
+      const metaRoom = w - 1 - labelText.length - 1;
+      const header =
+        ` ${theme.fg(tone, theme.bold(labelText))}` +
+        (meta && metaRoom > 0 ? ` ${theme.fg("dim", clip(meta, metaRoom))}` : "");
+      const wrapped = wrapWords(body, room - badge.length - 1, room);
+      const rows = wrapped.map((line, i) => {
+        const lead = i === 0 ? badge.length + 1 : 0;
+        const text = clip(line, room - lead);
+        const at = text.indexOf("/compact");
+        const colored =
+          at < 0
+            ? theme.fg("customMessageText", text)
+            : theme.fg("customMessageText", text.slice(0, at)) +
+              theme.fg("accent", "/compact") +
+              theme.fg("customMessageText", text.slice(at + "/compact".length));
+        return ` ${rail} ${i === 0 ? `${theme.fg("success", badge)} ` : ""}${colored}`;
+      });
+      return [header, ...rows, ` ${rail} ${theme.fg("dim", clip(actions, room))}`];
+    },
+  };
+}
 const USAGE =
   "Use /compact-adviser hint, off, status, threshold <tokens|default>, snooze or dismiss.";
 interface Options {
@@ -238,7 +316,13 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
       diagnostic = "";
       state = { ...state, lastHintAt: state.completed, lastHintKey: view.checkpointKey };
       persist(state);
-      ctx.ui.setWidget(LABEL, [HINT]);
+      const usage = ctx.getContextUsage();
+      const shown =
+        usage && usage.tokens !== null && Number.isFinite(usage.tokens)
+          ? { tokens: usage.tokens, contextWindow: usage.contextWindow }
+          : undefined;
+      const finished = result.done.probabilities.finished ?? 0;
+      ctx.ui.setWidget(LABEL, (_tui: unknown, theme: HintTheme) => hintCard(theme, shown, finished));
       hintVisible = true;
     } catch (error) {
       if (!current()) return;

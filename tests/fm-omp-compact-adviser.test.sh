@@ -65,7 +65,7 @@ const WORKER = process.env.FM_WORKER;
 const SECONDMATE = process.env.FM_SECONDMATE;
 const TMP = process.env.FM_TMP;
 
-const { installAdviser } = await import(`${LIB}/adviser.ts`);
+const { installAdviser, hintCard } = await import(`${LIB}/adviser.ts`);
 const { ConfigStore } = await import(`${LIB}/config.ts`);
 const { disabledByEnv } = await import(`${LIB}/disable.ts`);
 const { snapshot, clipMiddle } = await import(`${LIB}/context.ts`);
@@ -93,6 +93,16 @@ function fakePi(appendedEntries = []) {
   };
 }
 
+// Tag-based theme: each styled span is wrapped as <color:text> so assertions read the rendered output.
+function fakeTheme() {
+  return {
+    fg: (c, t) => (t ? `<${c}:${t}>` : t),
+    bold: (t) => `<bold:${t}>`,
+    symbol: (k) => ({ "status.running": "⟳", "context.compaction": "┃" })[k],
+    format: { bracketLeft: "[", bracketRight: "]" },
+    sep: { dot: " · " },
+  };
+}
 let widgetCalls = [];
 let statusCalls = [];
 let notifyCalls = [];
@@ -363,7 +373,41 @@ console.log("AC1 inert-by-default gates: ok");
   assert.ok(body.state.recent.some((m) => m.role === "assistant"));
   assert.equal(widgetCalls.length, 1, "hint shown via setWidget");
   assert.equal(widgetCalls[0][0], "compact-adviser");
-  assert.ok(String(widgetCalls[0][1]).includes("/compact"));
+  assert.equal(typeof widgetCalls[0][1], "function", "hint is a themed component factory");
+  {
+    const card = widgetCalls[0][1](undefined, fakeTheme());
+    const lines = card.render(100);
+    assert.match(lines[0], /<borderAccent:<bold:\S Compact>>/, "bold coloured Compact header");
+    assert.match(lines[0], /<dim:100K \/ 200K · 50% context>/, "live context use in the header");
+    assert.match(lines[1], /<success:\[ready\]>/, "ready badge");
+    assert.match(lines[1], /^ <borderAccent:┃> /, "heavy rail tinted with the header colour");
+    assert.match(lines[1], /Work looks finished \(99% sure\)\./, "judged confidence");
+    assert.match(lines[1], /<accent:\/compact>/, "/compact highlighted");
+    assert.equal(lines.at(-1), " <borderAccent:┃> <dim:/compact-adviser snooze · dismiss>");
+    // Unknown usage omits the context segment.
+    const noUsage = hintCard(fakeTheme(), undefined, 0.99).render(100);
+    assert.doesNotMatch(noUsage[0], /context/, "no guessed usage when unknown");
+    // Every line fits at narrow and wide widths.
+    const longTheme = {
+      ...fakeTheme(),
+      symbol: (k) => ({ "status.running": "running", "context.compaction": "|||" })[k],
+      format: { bracketLeft: "[[", bracketRight: "]]" },
+    };
+    const hints = [
+      card,
+      hintCard(fakeTheme(), undefined, 0.99),
+      widgetCalls[0][1](undefined, longTheme),
+      hintCard(longTheme, undefined, 0.99),
+    ];
+    for (let width = 1; width <= 200; width++) {
+      for (const hint of hints) {
+        for (const line of hint.render(width)) {
+          const visible = line.replace(/<[a-zA-Z]+:|>/g, "");
+          assert.ok(visible.length <= Math.max(1, width), `width ${width}: ${JSON.stringify(visible)}`);
+        }
+      }
+    }
+  }
   assert.equal(sendMessageCalls, 0, "sendMessage is forbidden for hints");
   assert.ok(pi.appended.some((e) => e.type === STATE_TYPE), "state persisted via appendEntry");
 
