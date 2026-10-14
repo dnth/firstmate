@@ -82,7 +82,7 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
   printf 'The fix can go two ways.' > "$home/body.txt"
 
   slug=$(home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
-    --task "$TASK" --title "Pick the route" --repo sample --reason "route pending" \
+    --task "$TASK" --title "Pick the route" --repo sample --reason "route pending" --mode done \
     --text-file "$home/body.txt" \
     --option "North" --recommended --option "South" --option "Merge it" \
     --option "Hold" --confirm) || fail "fm-ext-ask refused a valid choice"
@@ -114,10 +114,10 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
 
   # A repeat of the same identity is a no-op; a refresh with a new generation re-holds cleanly.
   home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
-    --task "$TASK" --reason "route pending" --text-file "$home/body.txt" \
+    --task "$TASK" --reason "route pending" --mode done --text-file "$home/body.txt" \
     --option "North" --option "South" >/dev/null || fail "an exact repeat must succeed"
   home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 2 \
-    --task "$TASK" --reason "still pending" --text-file "$home/body.txt" \
+    --task "$TASK" --reason "still pending" --mode done --text-file "$home/body.txt" \
     --option "North" --option "South" >/dev/null || fail "refreshing an active hold must succeed"
   jq -e '.decision.options | length == 2' "$(payload_of "$home" followup 2)" >/dev/null \
     || fail "the refreshed post lost its buttons"
@@ -126,8 +126,8 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
 
 # --- 2. mode default and refusals before any hold ---
 
-test_2_mode_defaults_and_pre_hold_refusals() {
-  local home=$TMP_ROOT/c2 out rc
+test_2_mode_is_required_and_pre_hold_refusals() {
+  local home=$TMP_ROOT/c2 out rc show
   command -v tasks-axi >/dev/null 2>&1 || { echo "skip: 2 needs tasks-axi for the captain-call board"; return 0; }
   BASE_PATH="$(dirname "$(command -v tasks-axi)"):$BASE_PATH"
   setup_home "$home"
@@ -138,31 +138,52 @@ test_2_mode_defaults_and_pre_hold_refusals() {
   fm_fake_exit0 "$home/fakebin" treehouse no-mistakes gh gh-axi
   printf 'Pick one.' > "$home/body.txt"
 
-  fm_write_meta "$home/state/live-task.meta" "window=sess:fm-live-task" "kind=ship"
-  home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 1 \
-    --task live-task --title "Live work" --repo sample --reason "needs a call" \
-    --text-file "$home/body.txt" --option "A" --option "B" >/dev/null \
-    || fail "ask refused a live-task choice"
-  jq -e '.decision.mode == "release"' "$(payload_of "$home" answer 1)" >/dev/null \
-    || fail "a task with live worker metadata must default to release"
+  # No default mode: a missing --mode refuses before any hold or post.
+  out=$(home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 1 \
+    --task no-mode --title "No mode" --repo sample --reason "needs a call" \
+    --text-file "$home/body.txt" --option "A" --option "B" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "ask accepted a missing --mode"
+  assert_contains "$out" "--mode is required" "the refusal must name --mode"
+  assert_contains "$out" "release = lift the hold" "the refusal must explain done and release"
+  if home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open no-mode >/dev/null 2>&1; then
+    fail "a refused ask must not leave a hold behind"
+  fi
+  out=$(home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 1 \
+    --task no-mode --title "No mode" --repo sample --reason "needs a call" --mode close \
+    --text-file "$home/body.txt" --option "A" --option "B" 2>&1)
+  [ $? -ne 0 ] || fail "ask accepted an unknown mode"
 
   home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 2 \
-    --task idle-call --title "Idle call" --repo sample --reason "needs a call" \
+    --task idle-call --title "Idle call" --repo sample --reason "needs a call" --mode done \
     --text-file "$home/body.txt" --option "A" --option "B" >/dev/null \
-    || fail "ask refused a plain choice"
+    || fail "ask refused a done-mode choice"
   jq -e '.decision.mode == "done"' "$(payload_of "$home" answer 2)" >/dev/null \
-    || fail "a task without worker metadata must default to done"
+    || fail "--mode done must reach the decision block"
 
+  # A held, queued ship task has no worker metadata yet and must stay open.
+  (cd "$home" && PATH="$home/fakebin:$BASE_PATH" tasks-axi add queued-ship "Queued ship" --repo sample >/dev/null) \
+    || fail "could not create the queued ship task"
+  [ ! -e "$home/state/queued-ship.meta" ] || fail "fixture must have no worker metadata"
   home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 3 \
-    --task idle-call2 --title "Idle call" --repo sample --reason "needs a call" --mode release \
-    --text-file "$home/body.txt" --option "A" --option "B" >/dev/null \
-    || fail "ask refused an explicit mode"
+    --task queued-ship --reason "build waits on a call" --mode release \
+    --text-file "$home/body.txt" --option "North" --option "South" >/dev/null \
+    || fail "ask refused a release-mode choice on a queued ship"
   jq -e '.decision.mode == "release"' "$(payload_of "$home" answer 3)" >/dev/null \
-    || fail "--mode must override the default"
+    || fail "--mode release must reach the decision block"
+  printf '%s\t%s\t%s\t%s\n' queued-ship "North" "1. North" release \
+    | home_env "$home" "$ROOT/bin/fm-captain-hold.sh" answers --source "test button click" >/dev/null \
+    || fail "recording the release answer failed"
+  show=$(cd "$home" && PATH="$home/fakebin:$BASE_PATH" tasks-axi show queued-ship --full)
+  assert_contains "$show" "state: queued" "a release answer must leave the queued ship open"
+  assert_contains "$show" "held: no" "a release answer must lift the hold"
+  if home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open queued-ship >/dev/null 2>&1; then
+    fail "the hold must be lifted after a release answer"
+  fi
 
   printf 'Pick for idle-leak.' > "$home/leak.txt"
   out=$(home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 4 \
-    --task idle-leak --title "Leaky" --repo sample --reason "needs a call" \
+    --task idle-leak --title "Leaky" --repo sample --reason "needs a call" --mode done \
     --text-file "$home/leak.txt" --option "A" --option "B" 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "ask accepted text that names the task id"
@@ -171,11 +192,11 @@ test_2_mode_defaults_and_pre_hold_refusals() {
     fail "a refused ask must not leave a hold behind"
   fi
   out=$(home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 5 \
-    --task idle-six --title "Six" --repo sample --reason "needs a call" \
+    --task idle-six --title "Six" --repo sample --reason "needs a call" --mode done \
     --text-file "$home/body.txt" --option a --option b --option c --option d --option e --option f 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "ask accepted six options"
-  pass "2 ask picks release for live work, done otherwise, and refuses leaking text or too many options before holding"
+  pass "2 --mode is required, release keeps a held queued ship open, and leaking text or too many options are refused before holding"
 }
 
 # --- 3. the emit guard ---
@@ -237,7 +258,7 @@ test_6_choice_with_a_decision_file_is_unaffected() {
 }
 
 test_1_ask_holds_and_posts_buttons_in_text_order
-test_2_mode_defaults_and_pre_hold_refusals
+test_2_mode_is_required_and_pre_hold_refusals
 test_3_emit_refuses_a_choice_without_buttons
 test_4_no_buttons_posts_a_deliberate_plain_list
 test_5_ordinary_text_is_unaffected

@@ -51,7 +51,8 @@ Its header owns the flags, and the [decision buttons reference](../../../docs/co
 - Write the text without the numbered options; the script numbers them.
   Give short, concrete, public-safe labels such as "Merge" or "Hold" through `--option`.
 - Add `--recommended` after your recommended option and `--confirm` after any option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible; risky labels get the confirmation automatically.
-- Leave `--mode` alone unless needed: a task with live worker metadata defaults to `release`, so the answer lifts the hold, and any other defaults to `done`.
+- Always pass `--mode`; it has no default.
+  `release` lifts the hold so held work proceeds, including a queued build that has not spawned yet; `done` closes a question.
 - Never write the key or its task id into the text or a label; the script and emit both refuse it.
 - A deliberate plain list that merely looks like a choice, such as a status list that ends "reply with the number for details", posts with `bin/fm-ext-emit.sh --no-buttons "<reason>"`; the reason is recorded in the outbox payload.
   Use it only when no decision is being asked.

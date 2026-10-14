@@ -8,7 +8,7 @@
 #     (--text-file <path> | --text-file -)
 #     --option <label> [--recommended] [--confirm]
 #     [--option <label> [--recommended] [--confirm]] ... (1-5 options)
-#     [--mode done|release] [--thread-title <text>]
+#     --mode done|release [--thread-title <text>]
 #
 # This is the one way to post a choice. It does the three steps a choice post
 # needs, in order, so none can be skipped:
@@ -26,10 +26,11 @@
 # for a second click on the option just before it. Options whose label matches
 # FM_EXT_DECISION_CONFIRM_PATTERN in bin/fm-ext-lib.sh (merge, deploy, delete,
 # and other risky words) get the confirmation click automatically.
-# --mode chooses how a chosen option closes the call, as in
-# bin/fm-captain-hold.sh answers: release lifts the hold so held work resumes,
-# done closes the call. It defaults to release when the task has live worker
-# metadata (state/<task-id>.meta), else done.
+# --mode is required and has no default: it chooses how a chosen option closes
+# the call, as in bin/fm-captain-hold.sh answers. done closes a question;
+# release lifts the hold so held work proceeds. A held build task that has not
+# spawned yet has no worker metadata but still needs release, so the mode is
+# never inferred.
 #
 # Never write the task id or the key into the text or a label: the key rides
 # only in the button ids, and this script refuses such text before holding
@@ -53,7 +54,7 @@ usage: fm-ext-ask.sh --request-id discord:<guild>:<channel>:<thread>:<message>
          --task <task-id> [--title <title>] [--repo <repo>] --reason <reason>
          (--text-file <path> | --text-file -)
          --option <label> [--recommended] [--confirm] [--option <label> ...]
-         [--mode done|release] [--thread-title <text>]
+         --mode done|release [--thread-title <text>]
 EOF
 }
 
@@ -120,7 +121,8 @@ case "$KIND" in
 esac
 fm_ext_generation_valid "$GENERATION" || die "generation must be a positive integer"
 case "$MODE" in
-  ''|done|release) ;;
+  done|release) ;;
+  '') die "--mode is required: done = close a question, release = lift the hold so held work proceeds" ;;
   *) die "mode must be done or release" ;;
 esac
 case "$TASK" in
@@ -149,14 +151,6 @@ KEY="hold:$TASK"
 # The key and task id ride only in the button ids; refuse before holding.
 if { printf '%s\n' "$TEXT"; jq -r '.[].label' <<<"$OPTIONS_JSON"; } | grep -qiF -e "$TASK" -e "$KEY"; then
   die "the text and labels must not name the task id"
-fi
-
-if [ -z "$MODE" ]; then
-  if [ -f "$FM_HOME/state/$TASK.meta" ] && [ ! -L "$FM_HOME/state/$TASK.meta" ]; then
-    MODE=release
-  else
-    MODE=done
-  fi
 fi
 
 # Numbered lines in button order, with the same label the button shows.
