@@ -422,7 +422,7 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("before_agent_start", (event): BeforeAgentStartEventResult | undefined => {
-    watch.acknowledgeWake(event.prompt);
+    watch.acknowledgeWake(event.prompt, "before_agent_start");
     if (!pendingStartupNudge) return undefined;
     const content = pendingStartupNudge;
     pendingStartupNudge = "";
@@ -440,7 +440,7 @@ export default function (omp: ExtensionAPI) {
   omp.on("message_start", (event) => {
     const message = event.message;
     if (message.role === "user") {
-      watch.acknowledgeWake(userMessageText(message.content));
+      watch.acknowledgeWake(userMessageText(message.content), "message_start:user");
       return;
     }
     // An idle-main injection is delivered as this custom message inside an
@@ -450,7 +450,7 @@ export default function (omp: ExtensionAPI) {
       message.role === "custom" &&
       (message as { customType?: unknown }).customType === "firstmate-watcher-wake"
     ) {
-      watch.acknowledgeWake(userMessageText(message.content));
+      watch.acknowledgeWake(userMessageText(message.content), "message_start:custom");
     }
   });
 
