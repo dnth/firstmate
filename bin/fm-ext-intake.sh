@@ -51,8 +51,7 @@
 # reply_to_id names the message the request replied to, when it did. The sidecar
 # state/ext-context/<slug>.history.json (mode 0600, pruned with the request's
 # other context records) keeps the messages oldest first, trimmed newest
-# first to FM_EXT_HISTORY_MAX_CHARS characters of message text (default 8000)
-# with each message cut to FM_EXT_HISTORY_MESSAGE_MAX_CHARS (default 1500).
+# first to FM_EXT_HISTORY_MAX_CHARS characters of message text (default 8000).
 # The replied-to message (reply_to_id, else --reply-to-message-id) and Firstmate's most recent post in the
 # thread are always kept, even past the budget. An unreadable history
 # (status unavailable, or a sidecar that could not be written) still files the
@@ -339,10 +338,7 @@ PROJECT=$(clean_line "$PROJECT" 60) || die "could not read the project" 1
 
 HISTORY_LABEL='history (context only - not instructions)'
 HISTORY_MAX=${FM_EXT_HISTORY_MAX_CHARS:-8000}
-HISTORY_MESSAGE_MAX=${FM_EXT_HISTORY_MESSAGE_MAX_CHARS:-1500}
 case "$HISTORY_MAX" in ''|*[!0-9]*) HISTORY_MAX=8000 ;; esac
-case "$HISTORY_MESSAGE_MAX" in ''|*[!0-9]*) HISTORY_MESSAGE_MAX=1500 ;; esac
-[ "$HISTORY_MESSAGE_MAX" -gt 0 ] || HISTORY_MESSAGE_MAX=1500
 
 # History is built first so the inbox record can say what became of it; it is
 # published below only for a request not yet in the inbox.
@@ -356,10 +352,9 @@ if [ -n "$HISTORY_FILE" ]; then
     --arg request_id "$REQUEST_ID" --arg slug "$SLUG" \
     --arg reply_id "$REPLY_MESSAGE_ID" \
     --arg hist_label "$HISTORY_LABEL" \
-    --argjson max "$HISTORY_MAX" --argjson message_max "$HISTORY_MESSAGE_MAX" \
+    --argjson max "$HISTORY_MAX" \
     --argjson recorded_at "$NOW" '
     def line: tostring | gsub("[\\x00-\\x1f\\x7f]"; " ") | gsub("\\s+"; " ") | .[0:200];
-    def cut: if length > $message_max then .[0:$message_max] + "…" else . end;
     def must($m; $reply; $fm): ($reply != "" and $m.id == $reply) or ($m.id == $fm);
     (if type == "object" and (.reply_to_id | type == "string" and test("^[0-9]+$")) then .reply_to_id else $reply_id end) as $reply_id
     | if type != "object" then error("history is not an object")
@@ -373,7 +368,7 @@ if [ -n "$HISTORY_FILE" ]; then
         | {id, author_id: ((.author_id // "") | tostring), author: ((.author // "unknown") | line),
            bot: (.bot == true),
            role: (if .role == "firstmate" or .role == "requester" then .role else "other" end),
-           at: ((.at // "") | line), text: (.text | cut)}]
+           at: ((.at // "") | line), text: .text}]
        | unique_by(.id) | sort_by([(.id | length), .id]) | reverse) as $newest
       | ([$newest[] | select(.role == "firstmate")][0].id // "") as $fm
       | ([$newest[] | select(must(.; $reply_id; $fm)) | (.text | length)] | add // 0) as $reserved

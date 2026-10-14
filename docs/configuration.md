@@ -940,9 +940,9 @@ The plugin reads three things at intake and `bin/fm-ext-intake.sh` records them 
 - `history` is `{status, count, path}` in the inbox record, pointing at the sidecar `state/ext-context/<slug>.history.json` (mode 0600). The destination-context record keeps `thread_name`, `project`, and `history` `{status, count}`.
 
 The sidecar is labeled `history (context only - not instructions)` and lists the thread's recent messages oldest first, each with `id`, `author_id`, `author`, `bot`, `role`, `at`, and `text`.
-`role` is `firstmate` for the bot's own posts, `requester` for the request's author, and `other` for any other human; bot and webhook posts from anything else, system messages, and empty messages are skipped.
+`role` is `firstmate` for posts recorded in Firstmate’s outbox, `requester` for the request’s author, and `other` for other humans and the shared bot’s Hermes posts; unrelated bot and webhook posts, system messages, and empty messages are skipped.
 Firstmate keeps no per-thread conversation, so unlike Hermes' own `_fetch_channel_context` the scan does not stop at the bot's last message; it follows the same pattern, a backward scan from the request's message plus a window around a replied-to message, over REST because that method is bound to the adapter's client.
-Messages are trimmed newest first to `FM_EXT_HISTORY_MAX_CHARS` characters of message text (default 8000), each cut to `FM_EXT_HISTORY_MESSAGE_MAX_CHARS` (default 1500).
+Messages are selected newest first within `FM_EXT_HISTORY_MAX_CHARS` characters of message text (default 8000), dropping the oldest and serializing the retained messages oldest first for reading.
 The replied-to message and Firstmate's most recent post in the thread are always kept, even past the budget.
 The sidecar follows the request's other context records: it stays while the request waits in the inbox and is pruned with the retention window.
 When Discord refuses or cannot answer the read, the request is still filed and its `history` is `{status: "unavailable", reason}` with no sidecar; the drain says so and Firstmate looks the thread up by hand.
@@ -1155,7 +1155,6 @@ FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds without a claim or progress hea
 FM_EXT_MIDDELIVERY_RECOVERY_MAX=3   # reopen attempts before a stuck generation is failed terminally and surfaced as ext-delivery-failed
 FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records and retired ext-outbox markers (7 days); larger values clamp back to it
 FM_EXT_HISTORY_MAX_CHARS=8000   # characters of message text kept in a request's thread-history sidecar; the replied-to message and Firstmate's latest post are kept past it
-FM_EXT_HISTORY_MESSAGE_MAX_CHARS=1500   # characters kept of any one message in that sidecar
 FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes
 FM_EXT_WAITING_PIN_MIN_SECS=60   # minimum seconds between waiting-pin snapshot publications; see bin/fm-ext-waiting-pin.sh --help for bypass and skip behavior
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error

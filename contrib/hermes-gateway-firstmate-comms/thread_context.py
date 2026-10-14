@@ -40,7 +40,6 @@ PROJECT_UNKNOWN = "unknown"
 # needs it to know when it has fetched enough.
 HISTORY_DEFAULT_CHARS = 8000
 PAGE_SIZE = 100
-MAX_PAGES = 3
 REPLY_WINDOW = 10
 READ_TIMEOUT = 8
 
@@ -97,7 +96,7 @@ def project_from_name(name: str) -> str:
         if text.startswith(marker):
             text = text[len(marker):]
             break
-    head, separator, _topic = text.partition(_PROJECT_SEPARATOR.strip())
+    head, separator, _topic = text.partition(_PROJECT_SEPARATOR)
     head = head.strip()
     if not separator or not head or len(head) > 60:
         return ""
@@ -180,7 +179,7 @@ def _get(path: str, query: dict, token: str) -> list:
     return data
 
 
-def _entry(message: dict, bot_id: str, requester: str) -> dict | None:
+def _entry(message: dict, bot_id: str, requester: str, home: Path) -> dict | None:
     """One history entry for a Discord message object, or None to skip it."""
     if not isinstance(message, dict):
         return None
@@ -193,9 +192,11 @@ def _entry(message: dict, bot_id: str, requester: str) -> dict | None:
     author_id = str(author.get("id") or "")
     if message.get("webhook_id"):
         return None
-    is_bot = author_id == bot_id
-    if is_bot:
+    is_bot = bool(author.get("bot") or author_id == bot_id)
+    if _poster().firstmate_post_for(message_id, home) is not None:
         role = "firstmate"
+    elif author_id == bot_id:
+        role = "other"
     elif author.get("bot") or author.get("system"):
         return None
     elif author_id == requester:
@@ -224,27 +225,28 @@ def collect_history(
     dest: dict,
     reply_id: str = "",
     reply_text: str = "",
-    reply_is_firstmate: bool = False,
+    reply_message: dict | None = None,
     budget: int | None = None,
+    home: Path | None = None,
 ) -> dict:
     """The thread's recent conversation as the intake script's history file.
 
     Scans back from the request's message, both the captain's and Firstmate's
     messages, until it holds about ``budget`` characters of text and
-    Firstmate's latest post, or runs out of pages; adds a window around a
+    Firstmate's latest post, or reaches the thread start; adds a window around a
     replied-to message that lies further back. Returns
     {"status": "ok", "reply_to_id": ..., "messages": [...]} or {"status": "unavailable",
     "reason": ...}. Never raises.
     """
     try:
-        return _collect_history(dest, reply_id, reply_text, reply_is_firstmate, budget)
+        return _collect_history(dest, reply_id, reply_text, reply_message, budget, home or _poster().firstmate_home())
     except HistoryUnavailable as err:
         return {"status": "unavailable", "reason": str(err)}
     except Exception as err:  # best effort: never stop a request
         return {"status": "unavailable", "reason": f"history read failed ({type(err).__name__})"}
 
 
-def _collect_history(dest, reply_id, reply_text, reply_is_firstmate, budget) -> dict:
+def _collect_history(dest, reply_id, reply_text, reply_message, budget, home) -> dict:
     poster = _poster()
     token = poster._bot_token()
     if not token:
@@ -267,10 +269,10 @@ def _collect_history(dest, reply_id, reply_text, reply_is_firstmate, budget) -> 
     before = anchor
     chars = 0
     seen_firstmate = False
-    for _page in range(MAX_PAGES):
+    while True:
         page = _get(f"/channels/{thread}/messages", {"limit": PAGE_SIZE, "before": before}, token)
         for message in page:
-            entry = _entry(message, bot_id, requester)
+            entry = _entry(message, bot_id, requester, home)
             if entry is not None and entry["id"] not in entries:
                 entries[entry["id"]] = entry
                 chars += len(entry["text"])
@@ -286,17 +288,41 @@ def _collect_history(dest, reply_id, reply_text, reply_is_firstmate, budget) -> 
         for message in _get(
             f"/channels/{thread}/messages", {"limit": REPLY_WINDOW, "around": reply_id}, token,
         ):
-            entry = _entry(message, bot_id, requester)
+            entry = _entry(message, bot_id, requester, home)
             if entry is not None and entry["id"] not in entries and entry["id"] != anchor:
                 entries[entry["id"]] = entry
     if reply_id and reply_id not in entries and reply_text.strip():
-        # The replied-to message was deleted or is not readable, but Discord
-        # delivered its text with the reply.
-        entries[reply_id] = {
-            "id": reply_id, "author_id": "", "author": "unknown", "bot": reply_is_firstmate,
-            "role": "firstmate" if reply_is_firstmate else "other", "at": "", "text": reply_text,
+        message = reply_message or {
+            "id": reply_id, "type": _MESSAGE_REPLY, "content": reply_text, "author": {},
         }
+        entry = _entry(message, bot_id, requester, home)
+        if entry is not None:
+            entries[entry["id"]] = entry
     return {"status": "ok", "reply_to_id": reply_id, "messages": list(entries.values())}
+
+
+def resolved_reply(event: object, reply_id: str, reply_text: str) -> dict | None:
+    raw = getattr(event, "raw_message", None)
+    resolved = getattr(getattr(raw, "reference", None), "resolved", None)
+    if resolved is None or not reply_id:
+        return None
+    author = getattr(resolved, "author", None)
+    timestamp = getattr(resolved, "created_at", None)
+    return {
+        "id": str(getattr(resolved, "id", None) or reply_id),
+        "type": getattr(getattr(resolved, "type", None), "value", _MESSAGE_REPLY),
+        "content": getattr(resolved, "content", None) or reply_text,
+        "timestamp": timestamp.isoformat() if timestamp is not None else "",
+        "author": {
+            "id": str(getattr(author, "id", None) or ""),
+            "global_name": getattr(author, "global_name", None),
+            "username": getattr(author, "name", None),
+            "bot": getattr(author, "bot", False),
+            "system": getattr(author, "system", False),
+        },
+        "webhook_id": getattr(resolved, "webhook_id", None),
+        "attachments": getattr(resolved, "attachments", None),
+    }
 
 
 def gather(
@@ -306,7 +332,6 @@ def gather(
     event: object = None,
     reply_id: str = "",
     reply_text: str = "",
-    reply_is_firstmate: bool = False,
 ) -> dict:
     """Thread name, project, and history for one request, or {}.
 
@@ -320,7 +345,9 @@ def gather(
         return {
             "name": name,
             "project": resolve_project(name, dest["thread_id"], home),
-            "history": collect_history(dest, reply_id, reply_text, reply_is_firstmate),
+            "history": collect_history(
+                dest, reply_id, reply_text, resolved_reply(event, reply_id, reply_text), home=home,
+            ),
         }
     except Exception:
         return {}

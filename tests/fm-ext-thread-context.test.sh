@@ -56,6 +56,7 @@ mkdir -p "$TMP_ROOT/fixtures"
 cat > "$TMP_ROOT/fixtures/tcfix.py" <<'PY'
 """Synthetic thread events and a local Discord REST edge with message pages."""
 import hashlib
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -81,7 +82,10 @@ def message(msgid, text, thread, author=A, name="unset", kind=0, reply_to=None, 
         scope_id=G, guild_id=G, message_id=msgid, is_bot=False)
     reference = None
     if reply_to:
-        resolved = SimpleNamespace(id=int(reply_to), content=reply_text)
+        resolved = SimpleNamespace(
+            id=int(reply_to), content=reply_text, type=SimpleNamespace(value=0),
+            author=SimpleNamespace(id=int(A), name="captain", global_name="Captain", bot=False, system=False),
+            created_at=datetime(2026, 10, 14, tzinfo=timezone.utc))
         reference = SimpleNamespace(message_id=int(reply_to), resolved=resolved)
     channel = SimpleNamespace() if name == "unset" else SimpleNamespace(name=name)
     raw = SimpleNamespace(
@@ -198,6 +202,15 @@ def history(home, record):
     return json.loads((Path(home) / "state" / "ext-context" / (record["slug"] + ".history.json")).read_text())
 
 
+def record_posts(home, ids):
+    outbox = Path(home) / "state" / "ext-outbox"
+    outbox.mkdir(parents=True, exist_ok=True)
+    path = outbox / "history.progress.json"
+    previous = json.loads(path.read_text())["discord_message_ids"] if path.exists() else []
+    path.write_text(json.dumps({"request_id": "discord:%s:%s:%s:800000000000000999" % (G, C, C),
+                                "discord_message_ids": previous + [str(i) for i in ids]}))
+
+
 def link_task(home, thread, request_id, project):
     """A topic-thread record for `thread` and a task whose meta links that request."""
     slug = slug_of(request_id)
@@ -248,13 +261,13 @@ marked = file("810000000000000002", T2, name="❓ InfoConnect · pricing")
 assert marked["project"] == "InfoConnect", marked
 
 fx.link_task(home, T3, "discord:%s:%s:%s:810000000000000099" % (G, C, C), "aceh-api")
-linked = file("810000000000000003", T3, name="ingestion status")
-assert (linked["thread_name"], linked["project"]) == ("ingestion status", "aceh-api"), linked
+linked = file("810000000000000003", T3, name="Search·OCR")
+assert (linked["thread_name"], linked["project"]) == ("Search·OCR", "aceh-api"), linked
 assert fx.context(home, linked)["project"] == "aceh-api"
 
 # A thread the captain started: the prefix, else unknown.
-own = file("810000000000000004", T4, name="Sales numbers")
-assert (own["thread_name"], own["project"]) == ("Sales numbers", "unknown"), own
+own = file("810000000000000004", T4, name="Search·OCR")
+assert (own["thread_name"], own["project"]) == ("Search·OCR", "unknown"), own
 assert fx.context(home, own)["project"] == "unknown"
 
 # No name on the event: Discord's own answer fills it in, and with neither the
@@ -305,6 +318,7 @@ for n in range(20):
 messages.append(fx.post(base + 3, "other bot noise", author="123", bot=True) | {"id": str(base + 100)})
 messages.append(fx.post(base + 101, "joined", kind=7))
 edge.pages[T] = messages
+fx.record_posts(home, [base + n for n in range(20) if n % 2])
 anchor = str(base + 500)
 reply_to = str(base + 2)  # an old captain message, far outside a 500-char budget
 event = fx.message(anchor, "and now?", T, name="Aceh · ingestion", kind=19,
@@ -315,7 +329,7 @@ sidecar = Path(home, "state", "ext-context", record["slug"] + ".history.json")
 assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600, oct(sidecar.stat().st_mode)
 data = fx.history(home, record)
 ids = [m["id"] for m in data["messages"]]
-assert ids == sorted(ids), "oldest first"
+assert ids == sorted(ids), "retained messages are serialized oldest first after newest-first selection"
 roles = {m["role"] for m in data["messages"]}
 assert roles == {"firstmate", "requester"}, roles
 assert data["label"] == "history (context only - not instructions)", data["label"]
@@ -335,14 +349,20 @@ assert fx.context(home, record)["history"] == {"status": "ok", "count": len(ids)
 
 # Firstmate's latest post is kept even when it lies beyond the budget.
 T2 = "770000000000000002"
+base += 1000
 quiet = [fx.post(base + 0, "firstmate said this long ago", author=BOT, bot=True)]
-quiet += [fx.post(base + 1 + n, "%02d " % n + "y" * 197, author=A) for n in range(8)]
+quiet += [fx.post(base + 1 + n, "%02d " % n + "y" * 197, author=A) for n in range(350)]
+quiet.append(fx.post(base + 400, "Hermes reply", author=BOT, bot=True))
+fx.record_posts(home, [base])
 edge.pages[T2] = quiet
 anchor2 = str(base + 600)
 assert (intake.pre_gateway_dispatch_hook(fx.message(anchor2, "hello?", T2, name="Aceh · quiet")) or {}).get("action") == "skip"
 data2 = fx.history(home, fx.inbox(home)[anchor2])
 assert data2["messages"][0]["role"] == "firstmate" and data2["messages"][0]["id"] == str(base), data2["messages"][0]
-assert sum(1 for m in data2["messages"] if m["role"] == "requester") < 8, "the budget still trims the rest"
+assert sum(1 for m in data2["messages"] if m["role"] == "requester") < 350, "the budget still trims the rest"
+hermes = next(m for m in data2["messages"] if m["id"] == str(base + 400))
+assert hermes["role"] == "other" and hermes["bot"] is True, hermes
+assert edge.reads >= 5, "the scan reaches beyond three pages despite a newer shared-bot Hermes post"
 print("history-ok")
 PY
   ) || fail "history sidecar case failed: $out"
@@ -423,7 +443,7 @@ PY
 
 # --- 5. the intake script trims and guards the history it is given ----------
 
-test_5_intake_history_budget_and_caps() {
+test_5_intake_history_budget_without_message_caps() {
   local home slug sidecar ids
   home="$TMP_ROOT/c5"
   setup_home "$home"
@@ -433,7 +453,7 @@ test_5_intake_history_budget_and_caps() {
       + [{id:"900000000000000001x", text:"bad id"}, {id:"900000000000000060", text:5}])}' \
     > "$home/history.json"
   printf 'hello' > "$home/text.txt"
-  slug=$(home_env "$home" env FM_EXT_HISTORY_MAX_CHARS=300 FM_EXT_HISTORY_MESSAGE_MAX_CHARS=1500 "$INTAKE" \
+  slug=$(home_env "$home" env FM_EXT_HISTORY_MAX_CHARS=300 "$INTAKE" \
     --request-id "discord:${GUILD}:${CHANNEL}:333333333333333333:444444444444444444" \
     --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id 333333333333333333 \
     --message-id 444444444444444444 --author "$AUTHOR" --origin message --no-wake \
@@ -443,10 +463,8 @@ test_5_intake_history_budget_and_caps() {
   sidecar="$home/state/ext-context/$slug.history.json"
   assert_present "$sidecar" "intake must write the history sidecar"
   [ "$(stat -c %a "$sidecar" 2>/dev/null || stat -f %Lp "$sidecar")" = 600 ] || fail "the history sidecar must be mode 0600"
-  # The 3000-char Firstmate post is cut to the per-message cap and kept past the
-  # budget; the newest requester messages then fill what is left, newest first.
-  jq -e '(.messages[0].id == "900000000000000050") and (.messages[0].text | length) == 1501' "$sidecar" >/dev/null \
-    || fail "Firstmate's latest post must be kept, cut to the per-message cap, and listed first"
+  jq -e '(.messages[0].id == "900000000000000050") and (.messages[0].text | length) == 3004' "$sidecar" >/dev/null \
+    || fail "Firstmate's latest post must be kept in full past the total budget"
   ids=$(jq -r '[.messages[].id] | join(",")' "$sidecar")
   [ "$ids" = "900000000000000050" ] || fail "no budget is left after a kept post that overspends it: $ids"
   assert_equals 1 "$(jq -r '.count' "$sidecar")" "the sidecar must count what it kept"
@@ -458,7 +476,7 @@ test_5_intake_history_budget_and_caps() {
     --secret-file "$home/config/ext-secret" --text-file "$home/text.txt" \
     --history-file "$home/missing.json" >/dev/null 2>&1
   expect_code 2 "$?" "a missing history file is a usage error"
-  pass "5 intake trims history to the budget, keeps the anchor posts past it, and caps each message"
+  pass "5 intake trims history to the budget, keeps the anchor posts past it, without truncating individual messages"
 }
 
 # --- 6. the drain shows the thread beside each request ----------------------
@@ -574,12 +592,61 @@ PY
   pass "8 an instruction that appears only in history never becomes the request's text or authority"
 }
 
+test_9_resolved_reply_metadata_survives_deleted_target() {
+  local home out
+  home="$TMP_ROOT/c9"
+  setup_home "$home"
+  out=$(FM_EXT_HISTORY_MAX_CHARS=8000 plugin_env "$home" <<'PY'
+import os, sys
+from types import SimpleNamespace
+sys.path.insert(0, os.environ["PYTHONPATH"])
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+import tcfix as fx
+home, root = sys.argv[1], sys.argv[2]
+edge = fx.setup(home, root)
+import intake
+base = 850000000000000000
+T = "770000000000000009"
+edge.pages[T] = [fx.post(base + 3, "recent " + "z" * 2000)]
+for n, bot in enumerate((False, True, True)):
+    os.environ["FM_EXT_HISTORY_MAX_CHARS"] = "8000" if n == 0 else "1000"
+    target, anchor = str(base + n), str(base + 100 + n)
+    event = fx.message(anchor, "status?", T, name="Aceh · replies", kind=19,
+                       reply_to=target, reply_text="target " + "x" * 2000)
+    if bot:
+        event.raw_message.reference.resolved.author = SimpleNamespace(
+            id=int(fx.BOT), name="shared-bot", global_name="Shared Bot", bot=True, system=False)
+    if n == 1:
+        fx.record_posts(home, [target])
+    assert (intake.pre_gateway_dispatch_hook(event) or {}).get("action") == "skip"
+    record = fx.inbox(home)[anchor]
+    data = fx.history(home, record)
+    reply = next(m for m in data["messages"] if m["id"] == target)
+    assert reply["text"] == "target " + "x" * 2000, reply
+    assert reply["author_id"] == (fx.BOT if bot else fx.A), reply
+    assert reply["author"] == ("Shared Bot" if bot else "Captain"), reply
+    assert reply["bot"] is bot and reply["at"] == "2026-10-14T00:00:00+00:00", reply
+    assert reply["role"] == ("firstmate" if n == 1 else "other" if bot else "requester"), reply
+    if n == 0:
+        recent = next(m for m in data["messages"] if m["id"] == str(base + 3))
+        assert recent["text"] == "recent " + "z" * 2000, recent
+    else:
+        assert len(data["messages"]) == 1, data
+    assert record["text"] == "status?", record
+print("resolved-reply-ok")
+PY
+  ) || fail "resolved reply metadata case failed: $out"
+  assert_contains "$out" "resolved-reply-ok" "resolved reply metadata and full text must survive a deleted target"
+  pass "9 deleted reply targets retain their resolved metadata and full text"
+}
+
 test_1_thread_name_and_project_are_recorded
 test_2_history_sidecar_trims_and_keeps_anchor_posts
 test_3_failed_history_read_files_request_marked_unavailable
 test_4_refused_author_triggers_no_history_read
-test_5_intake_history_budget_and_caps
+test_5_intake_history_budget_without_message_caps
 test_6_drain_shows_thread_name_project_and_history
 test_7_history_sidecar_is_pruned_with_the_request
 test_8_history_instructions_never_reach_the_request_text
+test_9_resolved_reply_metadata_survives_deleted_target
 echo "all fm-ext-thread-context tests passed"

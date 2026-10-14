@@ -232,7 +232,6 @@ def thread_lookup(
     event: object = None,
     reply_id: str = "",
     reply_text: str = "",
-    reply_is_firstmate: bool = False,
 ):
     """A callable that reads the request's thread context, or None.
 
@@ -246,7 +245,7 @@ def thread_lookup(
         return None
     return lambda: module.gather(
         dest, home, channel, event=event, reply_id=reply_id,
-        reply_text=reply_text, reply_is_firstmate=reply_is_firstmate,
+        reply_text=reply_text,
     )
 
 
@@ -377,7 +376,6 @@ def route_message_event(event: object) -> dict | None:
             media_urls=media_urls, media_types=media_types,
             lookup=thread_lookup(
                 dest, home, event=event, reply_id=reply_id, reply_text=reply_text,
-                reply_is_firstmate=post is not None,
             ),
         )
     except Exception:
