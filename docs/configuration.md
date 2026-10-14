@@ -943,8 +943,8 @@ Firstmate can attach option buttons to an `answer`, `followup`, or `final`, so t
 Each decision post is bound to exactly one decision Firstmate already tracks, named by its key: `hold:<task-id>` for a captain call held on the board, or `key:<task-id>:<slug>` for a worker's keyed status decision.
 `bin/fm-ext-ask.sh` is the one command that asks the captain a choice: it places or refreshes the captain hold for the task, writes the decision file, appends the numbered option lines to the post text in button order so text and buttons always match, and posts through `bin/fm-ext-emit.sh --decision-file` with the thread marked needs-you; its header owns the flags.
 Its `--mode done|release` is required and never inferred: `done` closes a question and `release` lifts the hold so held work proceeds.
-`bin/fm-ext-emit.sh --decision-file` posts one to five options, numbered in the same order as the post's numbered text, and refuses a key that is not open at that moment; its header owns the file format.
-Emit also refuses an answer, followup, or final whose text looks like a choice (numbered or coded option lines with a reply cue, or a "reply with the number" line) when no decision file is given, and the error names `bin/fm-ext-ask.sh`.
+For a worker's existing keyed status decision, use `bin/fm-ext-emit.sh --decision-file` directly; its [header](../bin/fm-ext-emit.sh) owns the file format and validation.
+The [emit header's choice guard](../bin/fm-ext-emit.sh) owns detection of plain-text choices and routes refused posts to `bin/fm-ext-ask.sh`.
 `--no-buttons "<reason>"` posts a deliberate plain list anyway and records the reason in the outbox payload as `no_buttons_reason`; the emit header owns the exact detection rule.
 Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every decision post also carries a Discuss button, `fmd:<key>:d`.
 Channel members can read a `custom_id` through the Discord API, so the key is never written into a label or the post text, and emit refuses a post that names the key or its task id.

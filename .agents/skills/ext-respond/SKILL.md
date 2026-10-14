@@ -44,7 +44,7 @@ A missing or unrecognized `authority` value is treated as `confirm`.
 To ask the captain a choice, run `bin/fm-ext-ask.sh`; it is the one way to ask.
 It places or refreshes the captain hold, writes the decision file, appends the numbered option lines to your text in button order, and posts through `bin/fm-ext-emit.sh --decision-file` with the thread marked needs-you.
 Its header owns the flags, and the [decision buttons reference](../../../docs/configuration.md#decision-buttons) owns the contract.
-`bin/fm-ext-emit.sh` refuses a choice-shaped post (numbered or coded option lines with a reply cue) that has no decision file, so a choice cannot go out as plain text by mistake.
+The [emit header's choice guard](../../../bin/fm-ext-emit.sh) owns detection of plain-text choices and routes refused posts to `bin/fm-ext-ask.sh`.
 
 - Pass `--task` for the work the call gates, plus `--title` and `--repo` only when that task does not exist yet; the call is keyed `hold:<task-id>` for you.
   A worker's own open keyed decision (`key:<task-id>:<slug>`) is the one case outside it: post that with `bin/fm-ext-emit.sh --decision-file` directly, per the emit header.

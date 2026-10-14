@@ -56,23 +56,31 @@
 #
 # CHOICE GUARD. An answer, followup, or final whose text has the shape of a
 # choice is refused unless --decision-file is given, so a choice can never go
-# out as plain numbered text by mistake. The text is choice-shaped when it has
-# an option line and a cue:
+# out as plain numbered text by mistake. Detection uses these line-local,
+# case-insensitive patterns:
 #   option line - a line, after optional indent and a "-", "*", or bullet
 #     marker, that starts with a 1-2 digit number ended by ".", ")", or ":"
-#     ("1." / "2)" / "(3)"), or a code of one letter plus 1-2 digits with an
-#     optional ".", ")", or ":" ("A1." / "B2:" / "B2 text"), then text.
-#   cue - "reply/respond/answer/type/send/pick/choose/select/tap/click" within
-#     40 characters of "number/code/letter/option/choice" (singular or plural),
+#     and optionally prefixed by "(" ("1." / "2)" / "(3)"), or a code of one
+#     letter plus 1-2 digits with an optional ".", ")", or ":"
+#     ("A1." / "B2:" / "B2 text"). The token must be followed by whitespace
+#     and non-whitespace text, or immediately by the end of the line.
+#   cue - "reply/respond/answer/type/send/pick/choose/select/tap/click",
+#     1-40 intervening characters, then "number/code/letter/option/choice"
+#     (singular or plural), without crossing ".", "!", or "?",
 #     or "which one", "which option(s)", "pick one", or "choose one".
-#     Cue verbs and nouns match whole words, case-insensitively.
-# Two or more option lines plus a cue are refused. A "reply ... with/using ...
-# number/code/letter/option/choice" line (singular or plural) is refused on
-# its own, since it asks for a choice whatever else the text holds. A numbered list with no cue, and prose without
-# option lines, post normally. --no-buttons "<reason>" posts a deliberate plain
+#     Cue verbs and nouns match whole words (letters, digits, and underscore
+#     are word characters); intervening spans start and end with non-word
+#     characters. The fixed phrases use single spaces.
+# Two or more option lines plus a cue anywhere in the text are refused.
+# A standalone cue also suffices: "reply", 1-30 intervening characters,
+# "with/using", 1-20 intervening characters, then
+# "number/code/letter/option/choice" (singular or plural), with the same word
+# boundaries and punctuation restrictions. No option lines are needed for
+# this rule. A numbered list without a cue and prose satisfying neither rule
+# post normally. --no-buttons "<reason>" posts a deliberate plain
 # list anyway: the reason (one line, at most 200 characters) is recorded in the
 # outbox payload as no_buttons_reason. It cannot be combined with
-# --decision-file, and does not apply to an ack.
+# --decision-file. The guard never checks an ack.
 #
 # Discord text is untrusted: pass it with --text-file or stdin.
 set -u

@@ -515,11 +515,6 @@ FM_EXT_DECISION_TEXT_MAX=1000
 # Longest Discord component custom_id.
 # shellcheck disable=SC2034 # Read by the sourcing emit script.
 FM_EXT_DECISION_CUSTOM_ID_MAX=100
-# Option labels naming a merge, a deploy, a deletion, money, credentials, or
-# another destructive or irreversible action always need a second confirmation
-# click, whatever the emitter declared. Matched case-insensitively anywhere in
-# the label; an extra confirmation is harmless, a missing one is not.
-# shellcheck disable=SC2034 # Read by the sourcing emit script.
 # Choice-shaped text (bin/fm-ext-emit.sh header owns the rule): two or more
 # option lines plus a reply/choice cue, or a "reply ... with the number/code"
 # line on its own.
@@ -537,6 +532,11 @@ fm_ext_text_choice_shaped() {
   printf '%s\n' "$text" | grep -qiE -e "$FM_EXT_CHOICE_CUE_RE"
 }
 
+# Option labels naming a merge, a deploy, a deletion, money, credentials, or
+# another destructive or irreversible action always need a second confirmation
+# click, whatever the emitter declared. Matched case-insensitively anywhere in
+# the label; an extra confirmation is harmless, a missing one is not.
+# shellcheck disable=SC2034 # Read by the sourcing emit script.
 FM_EXT_DECISION_CONFIRM_PATTERN='merge|deploy|prod|ship|release|publish|push|delete|deletion|remove|destroy|discard|drop|wipe|purge|erase|reset|revert|roll ?back|force|overwrite|tear ?down|revoke|rotate|kill|money|pay|charge|refund|purchase|buy|invoice|billing|budget|credential|secret|token|password|api ?key'
 
 _fm_ext_decision_part_valid() {

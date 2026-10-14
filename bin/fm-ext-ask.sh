@@ -36,7 +36,11 @@
 # only in the button ids, and this script refuses such text before holding
 # anything. bin/fm-ext-emit.sh header owns the decision file format, the
 # buttons contract, and the choice guard that sends choice-shaped text here.
-# Re-running with the same request, kind, and generation is a no-op success.
+# Before mutating the hold, retries with the same request, kind, and generation
+# defer to emit's existing outbox identity: a receipt is a no-op success;
+# a posting marker without a receipt is refused as mid-delivery; otherwise an
+# existing payload is a no-op success. None of these retries changes the hold,
+# even after the captain has answered. See tests/fm-ext-ask.test.sh.
 #
 # Discord text is untrusted: pass it with --text-file or stdin.
 set -u
