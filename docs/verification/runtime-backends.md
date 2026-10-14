@@ -672,14 +672,15 @@ OMP emits its `agent_end` extension event before the owning prompt unwinds, so `
 The adapter now defers the settled check to a macrotask, retries while busy with bounded delays of 50/250/1000 ms, drops the deferred run when a newer turn or session change bumps the generation, and still leaves `eligible()`'s idle and pending-message checks as the final guard after idle or retry exhaustion.
 The shared `turn_start` boundary retires deferred checkpoints for agent-initiated notification turns, which do not emit `before_agent_start`.
 `tests/fm-omp-compact-adviser.test.sh` pins that ordering with a fake context whose `isIdle()` is false during the synchronous `agent_end` call and true one macrotask later, and pins that a `before_agent_start`, `turn_start`, `input`, or session change arriving before idle retires the stale checkpoint without consuming it; the notification turn's own settled checkpoint can still produce a hint.
-`tests/fm-omp-compact-adviser-live-e2e.test.sh` is the opt-in live guard for the harness-dependent half: it runs the shipped adviser against the real installed OMP in a disposable lab with a stubbed judge, asserts `idle:false` at `agent_end` and `idle:true` one macrotask later, and asserts the person-only hint is persisted and rendered.
+`tests/fm-omp-compact-adviser-live-e2e.test.sh` is the opt-in live guard for the harness-dependent half: it runs the shipped adviser against the real installed OMP in a disposable lab with a stubbed judge, asserts `idle:false` at `agent_end` and `idle:true` one macrotask later, and asserts the person-only hint is persisted and rendered as the themed sibling card (Compact header with live context use, heavy rail rows, ready badge, judged confidence, and the snooze and dismiss row).
 It refuses to pass without a real OMP binary and names the harness version on failure.
 
 ```sh
 FM_OMP_COMPACT_ADVISER_LIVE_E2E=1 bash tests/fm-omp-compact-adviser-live-e2e.test.sh
 ```
 
-The bounded live-guard output on OMP 18.10.1 was `ok - compact-adviser live: omp/18.10.1 defers the settled check to idle and shows the /compact hint`.
+The bounded live-guard output on OMP 18.10.1 was `ok - compact-adviser live: omp/18.10.1 defers the settled check to idle and renders the Compact sibling card`.
+The 2026-10-14 run rendered the card through the active theme's symbols and colour tokens, including that theme's own bracket characters, so the guard matches the badge text rather than a fixed bracket glyph.
 
 #### OMP main-fallback re-entry
 

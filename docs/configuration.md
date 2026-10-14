@@ -346,7 +346,7 @@ The compact-adviser closure is trusted for that launch but its attended-primary 
 Other harnesses do not run this preflight because they do not auto-execute OMP project extensions.
 
 The tracked `.omp/extensions/fm-compact-adviser-omp.ts` is inert unless the attended primary has an explicit `config/compact-adviser.json` opt-in record.
-It never runs for spawned agents, never auto-compacts, and shows advice only through the person-facing OMP widget or status surface; it does not send a model-context message.
+It never runs for spawned agents, never auto-compacts, and shows advice only through the person-facing OMP widget (a themed card in the style of OMP's Advisor card, with the judged confidence and live context use) or status surface; it does not send a model-context message.
 The record's `mode` supports `hint` or `off`, and its TypeSafe request is bounded and redacted before transmission.
 The current runtime-API verification and focused regression command are recorded in [`docs/verification/runtime-backends.md`](verification/runtime-backends.md#omp-compact-adviser-runtime-api-addendum).
 
