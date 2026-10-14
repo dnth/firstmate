@@ -1935,6 +1935,16 @@ await waitFor(() => wakes.length === 2, "session-switch durable wake");
 if (wakes.length !== 2) throw new Error(`expected two session-event notifications, got ${wakes.length}`);
 if (wakes[1].options?.deliverAs !== "followUp" || wakes[1].options?.triggerTurn !== true) throw new Error("decision-owned session wake did not force a turn");
 await consume(wakes[1]);
+const retained = wakes.length;
+for (let i = 0; i < 65; i += 1) {
+  await handlers.get("session_start")({ type: "session_start" }, context);
+  const wake = wakes[retained + i];
+  if (!wake) throw new Error(`missing outstanding notification ${i}`);
+  await handlers.get("before_agent_start")({ prompt: wake.message.content }, context);
+}
+for (const wake of wakes.slice(retained)) {
+  await handlers.get("message_start")({ message: { role: "custom", ...wake.message } }, context);
+}
 const events = readFileSync(`${state}/extensions/omp-primary-watch/main-wake-deliveries.log`, "utf8")
   .trim().split("\n").map((line) => {
     const [at, event, ...fields] = line.split("\t");
@@ -1946,6 +1956,12 @@ for (const wake of wakes) {
   if (!id || history.map((event) => event.event).join(",") !== "sent,consumed,turn" ||
       history.some((event) => event.after_ms !== undefined && !(Number(event.after_ms) >= 0))) {
     throw new Error(`direct delivery has incomplete evidence: ${JSON.stringify(history)}`);
+  }
+  const turn = history[2];
+  const elapsed = turn.at - wake.message.details.sentAtMs;
+  if (turn.close !== wake.message.details.close || !Number.isFinite(elapsed) ||
+      elapsed - Number(turn.after_ms) < 0 || elapsed - Number(turn.after_ms) > 1000) {
+    throw new Error(`turn lost its send metadata: ${JSON.stringify(turn)}`);
   }
 }
 if (wakes[0].message.details.wakeId === wakes[1].message.details.wakeId) throw new Error("session sends reused an identity");

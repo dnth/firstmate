@@ -173,6 +173,12 @@ export type ArmResult = {
   message: string;
 };
 
+export type WakeDeliveryEvidence = {
+  wakeId: string;
+  close: string;
+  sentAtMs: number;
+};
+
 export type PrimaryWatchCoreOptions = {
   runtime: string;
   runtimeLabel: string;
@@ -189,7 +195,7 @@ export type PrimaryWatchCoreOptions = {
   // starts an agent-initiated turn even while the session is streaming or
   // agent-initiated turns are deferred; the core requests it only for a stale
   // in-flight re-delivery or a decision-owned wake.
-  sendFollowUp: (content: string, options?: { forceTurn?: boolean; wakeId?: string }) => Promise<void> | void;
+  sendFollowUp: (content: string, options?: { forceTurn?: boolean; delivery?: WakeDeliveryEvidence }) => Promise<void> | void;
   // Optional supervision-branch dispatch handshake. A synchronous non-null
   // settlement means the branch accepted handling. The core never waits on it
   // inside its delivery loop: later closes, their successor arms, and main-only
@@ -217,7 +223,7 @@ export type PrimaryWatchCore = {
   acknowledgeWake: (content: string, evidence?: string, deliveryId?: string) => void;
   // The runtime started a model turn whose input carries this wake message.
   // Recorded in the delivery ledger only; consumption is acknowledgeWake's.
-  wakeEnteredTurn: (content: string, deliveryId?: string) => void;
+  wakeEnteredTurn: (content: string, deliveryId?: string, evidence?: WakeDeliveryEvidence) => void;
   notifyWake: (content: string, forceTurn?: boolean) => Promise<void> | void;
   hasPendingActionableHandoff: () => boolean;
   ownsLock: () => boolean;
@@ -812,7 +818,8 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     reason = closeReason(content),
   ): Promise<void> | void {
     const id = randomUUID();
-    owner.sentWakes.set(id, { content, close, sentAtMs: Date.now(), consumed: false });
+    const evidence = { wakeId: id, close, sentAtMs: Date.now() };
+    owner.sentWakes.set(id, { content, close, sentAtMs: evidence.sentAtMs, consumed: false });
     if (owner.sentWakes.size > 64) owner.sentWakes.delete(owner.sentWakes.keys().next().value as string);
     recordWakeEvent(owner, "sent", [
       ["wake", id], ["close", close], ["kind", kind], ["force", forceTurn ? 1 : 0], ["reason", reason],
@@ -825,7 +832,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       throw error;
     };
     try {
-      const result = sendFollowUp(content, { forceTurn, wakeId: id });
+      const result = sendFollowUp(content, { forceTurn, delivery: evidence });
       if (result) return result.catch(failed);
     } catch (error) {
       return failed(error);
@@ -1718,12 +1725,13 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // before_agent_start when it stages a hidden next-turn prompt behind a
   // streaming run - so the ledger also records when the wake message itself
   // enters a model turn. A hand-off with no such line never reached the model.
-  function wakeEnteredTurn(content: string, deliveryId?: string): void {
+  function wakeEnteredTurn(content: string, deliveryId?: string, evidence?: WakeDeliveryEvidence): void {
     const owner = generation;
     const delivery = [...owner.sentWakes].find(([id, sent]) =>
       sent.content === content && (!deliveryId || id === deliveryId));
-    if (!delivery) return;
-    const [id, sent] = delivery;
+    const id = delivery?.[0] ?? evidence?.wakeId;
+    const sent = delivery?.[1] ?? evidence;
+    if (!id || !sent) return;
     owner.sentWakes.delete(id);
     recordWakeEvent(owner, "turn", [["wake", id], ["close", sent.close], ["after_ms", Date.now() - sent.sentAtMs]]);
   }
