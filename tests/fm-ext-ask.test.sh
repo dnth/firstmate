@@ -82,7 +82,7 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
   printf 'The fix can go two ways.' > "$home/body.txt"
 
   slug=$(home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
-    --task "$TASK" --title "Pick the route" --repo sample --reason "route pending" --mode done \
+    --task "$TASK" --title "Pick the route" --repo sample --reason "route pending" --mode "done" \
     --text-file "$home/body.txt" \
     --option "North" --recommended --option "South" --option "Merge it" \
     --option "Hold" --confirm) || fail "fm-ext-ask refused a valid choice"
@@ -114,10 +114,10 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
 
   # A repeat of the same identity is a no-op; a refresh with a new generation re-holds cleanly.
   home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
-    --task "$TASK" --reason "route pending" --mode done --text-file "$home/body.txt" \
+    --task "$TASK" --reason "route pending" --mode "done" --text-file "$home/body.txt" \
     --option "North" --option "South" >/dev/null || fail "an exact repeat must succeed"
   home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 2 \
-    --task "$TASK" --reason "still pending" --mode done --text-file "$home/body.txt" \
+    --task "$TASK" --reason "still pending" --mode "done" --text-file "$home/body.txt" \
     --option "North" --option "South" >/dev/null || fail "refreshing an active hold must succeed"
   jq -e '.decision.options | length == 2' "$(payload_of "$home" followup 2)" >/dev/null \
     || fail "the refreshed post lost its buttons"
@@ -149,13 +149,14 @@ test_2_mode_is_required_and_pre_hold_refusals() {
   if home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open no-mode >/dev/null 2>&1; then
     fail "a refused ask must not leave a hold behind"
   fi
-  out=$(home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 1 \
+  if out=$(home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 1 \
     --task no-mode --title "No mode" --repo sample --reason "needs a call" --mode close \
-    --text-file "$home/body.txt" --option "A" --option "B" 2>&1)
-  [ $? -ne 0 ] || fail "ask accepted an unknown mode"
+    --text-file "$home/body.txt" --option "A" --option "B" 2>&1); then
+    fail "ask accepted an unknown mode"
+  fi
 
   home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 2 \
-    --task idle-call --title "Idle call" --repo sample --reason "needs a call" --mode done \
+    --task idle-call --title "Idle call" --repo sample --reason "needs a call" --mode "done" \
     --text-file "$home/body.txt" --option "A" --option "B" >/dev/null \
     || fail "ask refused a done-mode choice"
   jq -e '.decision.mode == "done"' "$(payload_of "$home" answer 2)" >/dev/null \
@@ -183,7 +184,7 @@ test_2_mode_is_required_and_pre_hold_refusals() {
 
   printf 'Pick for idle-leak.' > "$home/leak.txt"
   out=$(home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 4 \
-    --task idle-leak --title "Leaky" --repo sample --reason "needs a call" --mode done \
+    --task idle-leak --title "Leaky" --repo sample --reason "needs a call" --mode "done" \
     --text-file "$home/leak.txt" --option "A" --option "B" 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "ask accepted text that names the task id"
@@ -192,7 +193,7 @@ test_2_mode_is_required_and_pre_hold_refusals() {
     fail "a refused ask must not leave a hold behind"
   fi
   out=$(home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 5 \
-    --task idle-six --title "Six" --repo sample --reason "needs a call" --mode done \
+    --task idle-six --title "Six" --repo sample --reason "needs a call" --mode "done" \
     --text-file "$home/body.txt" --option a --option b --option c --option d --option e --option f 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "ask accepted six options"
@@ -269,7 +270,7 @@ test_7_settled_ask_retries_preserve_state() {
   fm_fake_exit0 "$home/fakebin" treehouse no-mistakes gh gh-axi
   printf 'Pick a route.' > "$home/body.txt"
   for kind in answer followup final; do
-    for mode in done release; do
+    for mode in "done" release; do
       generation=$((generation + 1))
       task="retry-$kind-$mode"
       slug=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
@@ -297,10 +298,11 @@ test_7_settled_ask_retries_preserve_state() {
       assert_contains "$out" "mid-delivery" "retry must preserve emit's posting refusal"
       cmp "$home/data/backlog.md" "$home/backlog-before" || fail "posting retry mutated the settled task"
       rm "$payload"
-      out=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
+      if out=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
         --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
-        --option "North" --option "South" 2>&1)
-      [ "$?" -ne 0 ] || fail "posting-only $kind/$mode retry succeeded"
+        --option "North" --option "South" 2>&1); then
+        fail "posting-only $kind/$mode retry succeeded"
+      fi
       assert_contains "$out" "mid-delivery" "posting-only retry must preserve emit's refusal"
       cmp "$home/data/backlog.md" "$home/backlog-before" || fail "posting-only retry mutated the settled task"
       printf '{}\n' > "${payload%.json}.receipt.json"
