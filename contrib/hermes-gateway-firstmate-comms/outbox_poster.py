@@ -1529,20 +1529,11 @@ def react_to_request(payload: dict, emoji: str, react: ReactFn | None = None) ->
     return True
 
 
-def firstmate_post_for(message_id: str, home: Path | None = None) -> dict | None:
-    """Return {"request_id": ...} when Firstmate's outbox posted message_id.
-    The chunk-progress records hold every Discord id the poster has sent,
-    including the leading chunks of a reply still being delivered, and they
-    follow the bridge's retention window. request_id is empty for a record
-    written before progress carried it. None means the message is not one of
-    Firstmate's own posts that this home still remembers.
-    """
-    if not _SNOWFLAKE.fullmatch(str(message_id or "")):
-        return None
-    home = home or firstmate_home()
+def firstmate_posts(home: Path) -> dict[str, dict]:
     outbox = state_dir(home) / "ext-outbox"
+    posts = {}
     if outbox.is_symlink() or not outbox.is_dir():
-        return None
+        return posts
     for path in sorted(outbox.glob("*.progress.json")):
         if path.is_symlink() or not path.is_file():
             continue
@@ -1553,10 +1544,24 @@ def firstmate_post_for(message_id: str, home: Path | None = None) -> dict | None
         if not isinstance(data, dict):
             continue
         posted = data.get("discord_message_ids")
-        if isinstance(posted, list) and str(message_id) in [str(item) for item in posted]:
+        if isinstance(posted, list):
             request_id = data.get("request_id")
-            return {"request_id": request_id if isinstance(request_id, str) else ""}
-    return None
+            for message_id in posted:
+                if _SNOWFLAKE.fullmatch(str(message_id or "")):
+                    posts.setdefault(str(message_id), {"request_id": request_id if isinstance(request_id, str) else ""})
+    return posts
+
+
+def firstmate_post_for(message_id: str, home: Path | None = None) -> dict | None:
+    """Return {"request_id": ...} when Firstmate's outbox posted message_id.
+
+    Chunk progress remembers every posted id during its retention window.
+    request_id is empty for legacy progress without it. None means this home
+    no longer has provenance for the message.
+    """
+    if not _SNOWFLAKE.fullmatch(str(message_id or "")):
+        return None
+    return firstmate_posts(home or firstmate_home()).get(str(message_id))
 
 
 WAITING_PIN_STATE = "ext-waiting-pin.json"

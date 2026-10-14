@@ -700,6 +700,11 @@ from unittest.mock import patch
 
 bridge = Path(home, "config", "ext-bridge")
 bridge_off = bridge.with_name("ext-bridge.off")
+# A thread under the dedicated channel also reads its context from the REST
+# edge, whose server threads would count against the patched Thread below.
+# Without a token that read stops before any request, which is the case
+# under test: the reaction machinery failing, not the context read.
+os.environ.pop("DISCORD_BOT_TOKEN", None)
 failures = (
     ("intake._poster", ImportError("poster unavailable")),
     ("intake._poster", RuntimeError("poster load failed")),

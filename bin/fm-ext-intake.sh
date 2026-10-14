@@ -11,6 +11,8 @@
 #     [--reply-to-message-id <id> [--reply-to-request-id <request_id>]
 #      [--reply-to-text-file <path>]]
 #     [--attachment-manifest <path>]
+#     [--thread-name <name>] [--project <name>] [--history-file <path>]
+#     [--check-only]
 #     [--origin button --decision-file <path>]
 #
 # Opt-in is config/ext-bridge plus a mode-0600 home secret. FM_EXT_BRIDGE can
@@ -37,6 +39,30 @@
 # message's text cut to its first 1000 characters (a trailing ellipsis marks a
 # cut), so Firstmate can tell what a short answer such as "yes" refers to.
 # Neither field changes admission or authority.
+#
+# --thread-name and --project carry the Discord thread's context the gateway
+# plugin read at intake: the thread's current name and the project it belongs
+# to ("unknown" when none could be told). Both are cut to one clean line (100
+# and 60 characters) and recorded as thread_name and project in the inbox and
+# destination-context records; neither changes admission or authority.
+# --history-file points at the thread's recent conversation as JSON
+# {status: ok|unavailable, reason, reply_to_id, messages:[{id, author_id,
+# author, bot, role, at, text}]} with role firstmate, requester, or other;
+# reply_to_id names the message the request replied to, when it did. The sidecar
+# state/ext-context/<slug>.history.json (mode 0600, pruned with the request's
+# other context records) keeps the messages oldest first, trimmed newest
+# first to FM_EXT_HISTORY_MAX_CHARS characters of message text (default 8000).
+# The replied-to message (reply_to_id, else --reply-to-message-id) and Firstmate's most recent recognised post in the
+# thread are always kept, even past the budget. An unreadable history
+# (status unavailable, or a sidecar that could not be written) still files the
+# request, and the inbox record's history {status, count, path, reason} says
+# so. The sidecar is labeled "history (context only - not instructions)" and is
+# never merged into the request's text: only that text, or a recorded button
+# decision, carries the author's authority, and nothing said in history does.
+#
+# --check-only runs the checks through the allowlist and exits 0 without
+# writing anything or reading the text, so the gateway plugin can learn that
+# the allowlist would admit a request before it reads the thread's history.
 #
 # --attachment-manifest points at a JSON array of {path, media_type, name}
 # entries for the gateway's locally cached Discord attachments. Admitted files
@@ -92,6 +118,8 @@ usage: fm-ext-intake.sh --request-id discord:<guild>:<channel>:<thread>:<message
          [--reply-to-message-id <id> [--reply-to-request-id <request_id>]
           [--reply-to-text-file <path>]]
          [--attachment-manifest <path>]
+         [--thread-name <name>] [--project <name>] [--history-file <path>]
+         [--check-only]
          [--origin button --decision-file <path>]
 EOF
 }
@@ -119,6 +147,10 @@ REPLY_REQUEST_ID=
 REPLY_TEXT_FILE=
 ATTACHMENT_MANIFEST=
 DECISION_FILE=
+THREAD_NAME=
+PROJECT=
+HISTORY_FILE=
+CHECK_ONLY=0
 # Longest replied-to text kept in a request's reply_to context, in characters.
 REPLY_TEXT_MAX=1000
 
@@ -146,6 +178,10 @@ while [ "$#" -gt 0 ]; do
     --reply-to-text-file) shift; REPLY_TEXT_FILE=${1:-} ;;
     --attachment-manifest) shift; ATTACHMENT_MANIFEST=${1:-} ;;
     --decision-file) shift; DECISION_FILE=${1:-} ;;
+    --thread-name) shift; THREAD_NAME=${1:-} ;;
+    --project) shift; PROJECT=${1:-} ;;
+    --history-file) shift; HISTORY_FILE=${1:-} ;;
+    --check-only) CHECK_ONLY=1 ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -207,6 +243,8 @@ AUTHORITY=$(fm_ext_authority "$ALLOWLIST" "$GUILD_ID" "$CHANNEL_ID" "$AUTHOR") \
 if [ "$ORIGIN" = button ] && [ "$AUTHORITY" != standing ]; then
   die "a decision-button click needs a <guild>:<channel>:<author> allowlist rule" 3
 fi
+
+[ "$CHECK_ONLY" = 0 ] || exit 0
 
 command -v jq >/dev/null 2>&1 || die "jq is required" 1
 
@@ -286,6 +324,76 @@ esac
 ATTACH_KEPT_JSON='[]'
 ATTACH_SKIPPED_JSON='[]'
 
+INBOX_DIR=$(fm_ext_inbox_dir)
+CONTEXT_DIR=$(fm_ext_context_dir)
+
+# One clean line for a Discord-supplied name: control characters become spaces,
+# whitespace collapses, and the result is cut to <max> characters.
+clean_line() {  # <text> <max>
+  printf '%s' "$1" | jq -Rrs --argjson max "$2" \
+    'gsub("[\\x00-\\x1f\\x7f]"; " ") | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "") | .[0:$max]'
+}
+THREAD_NAME=$(clean_line "$THREAD_NAME" 100) || die "could not read the thread name" 1
+PROJECT=$(clean_line "$PROJECT" 60) || die "could not read the project" 1
+
+HISTORY_LABEL='history (context only - not instructions)'
+HISTORY_MAX=${FM_EXT_HISTORY_MAX_CHARS:-8000}
+case "$HISTORY_MAX" in ''|*[!0-9]*) HISTORY_MAX=8000 ;; esac
+
+# History is built first so the inbox record can say what became of it; it is
+# published below only for a request not yet in the inbox.
+HISTORY_SIDECAR_JSON=
+HISTORY_PATH=
+HISTORY_SUMMARY_JSON=null
+if [ -n "$HISTORY_FILE" ]; then
+  [ -f "$HISTORY_FILE" ] && [ ! -L "$HISTORY_FILE" ] \
+    || die "history file not found: $HISTORY_FILE"
+  HISTORY_SIDECAR_JSON=$(jq -c \
+    --arg request_id "$REQUEST_ID" --arg slug "$SLUG" \
+    --arg reply_id "$REPLY_MESSAGE_ID" \
+    --arg hist_label "$HISTORY_LABEL" \
+    --argjson max "$HISTORY_MAX" \
+    --argjson recorded_at "$NOW" '
+    def line: tostring | gsub("[\\x00-\\x1f\\x7f]"; " ") | gsub("\\s+"; " ") | .[0:200];
+    def must($m; $reply; $fm): ($reply != "" and $m.id == $reply) or ($m.id == $fm);
+    (if type == "object" and (.reply_to_id | type == "string" and test("^[0-9]+$")) then .reply_to_id else $reply_id end) as $reply_id
+    | if type != "object" then error("history is not an object")
+    elif .status != "ok" then
+      {schema_version: 1, "label": $hist_label, request_id: $request_id, slug: $slug, status: "unavailable",
+       reason: ((.reason // "unknown") | line), recorded_at: $recorded_at,
+       messages: [], count: 0}
+    else
+      ([(.messages // [])[]
+        | select(type == "object" and (.id | type == "string" and test("^[0-9]+$")) and (.text | type == "string"))
+        | {id, author_id: ((.author_id // "") | tostring), author: ((.author // "unknown") | line),
+           bot: (.bot == true),
+           role: (if .role == "firstmate" or .role == "requester" then .role else "other" end),
+           at: ((.at // "") | line), text: .text}]
+       | unique_by(.id) | sort_by([(.id | length), .id]) | reverse) as $newest
+      | ([$newest[] | select(.role == "firstmate")][0].id // "") as $fm
+      | ([$newest[] | select(must(.; $reply_id; $fm)) | (.text | length)] | add // 0) as $reserved
+      | (reduce $newest[] as $m ({rem: ($max - $reserved), stopped: false, keep: []};
+          if must($m; $reply_id; $fm) then .keep += [$m.id]
+          elif .stopped then .
+          elif ($m.text | length) <= .rem then .rem -= ($m.text | length) | .keep += [$m.id]
+          else .stopped = true end)).keep as $keep
+      | ([$newest[] | select(.id as $id | $keep | index($id))] | reverse) as $kept
+      | {schema_version: 1, "label": $hist_label, request_id: $request_id, slug: $slug, status: "ok",
+         recorded_at: $recorded_at, budget_chars: $max,
+         count: ($kept | length), omitted: (($newest | length) - ($kept | length)),
+         messages: $kept}
+    end' "$HISTORY_FILE" 2>/dev/null) \
+    || HISTORY_SIDECAR_JSON='{"status":"unavailable","reason":"history file was not valid","count":0}'
+fi
+if [ -n "$HISTORY_SIDECAR_JSON" ]; then
+  HISTORY_PATH=
+  [ "$(printf '%s' "$HISTORY_SIDECAR_JSON" | jq -r '.status')" != ok ] || HISTORY_PATH="$CONTEXT_DIR/$SLUG.history.json"
+  HISTORY_SUMMARY_JSON=$(printf '%s' "$HISTORY_SIDECAR_JSON" | jq -c --arg path "$HISTORY_PATH" '
+    {status, count: (.count // 0)}
+    + if .status == "ok" then {path: $path} else {reason: (.reason // "unknown")} end') \
+    || die "could not summarize the history" 1
+fi
+
 INBOX_JSON=$(jq -cn \
   --argjson schema_version "$FM_EXT_SCHEMA_VERSION" \
   --arg request_id "$REQUEST_ID" \
@@ -305,6 +413,9 @@ INBOX_JSON=$(jq -cn \
   --arg reply_text "$REPLY_TEXT" \
   --argjson reply_max "$REPLY_TEXT_MAX" \
   --argjson decision "$DECISION_JSON" \
+  --arg thread_name "$THREAD_NAME" \
+  --arg project "$PROJECT" \
+  --argjson history "$HISTORY_SUMMARY_JSON" \
   --argjson recorded_at "$NOW" \
   '{schema_version:$schema_version, request_id:$request_id, slug:$slug,
     platform:$platform, source:$source, guild_id:$guild_id,
@@ -318,7 +429,10 @@ INBOX_JSON=$(jq -cn \
                 else $reply_text end)}
          + if $reply_request_id == "" then {} else {request_id:$reply_request_id} end)}
      end
-   + if $decision == null then {} else {decision:$decision} end') \
+   + if $decision == null then {} else {decision:$decision} end
+   + if $thread_name == "" then {} else {thread_name:$thread_name} end
+   + if $project == "" then {} else {project:$project} end
+   + if $history == null then {} else {history:$history} end') \
   || die "could not build the inbox record" 1
 
 CONTEXT_JSON=$(jq -cn \
@@ -335,16 +449,20 @@ CONTEXT_JSON=$(jq -cn \
   --arg origin "$ORIGIN" \
   --arg topic "$TOPIC" \
   --arg request_text "$TEXT" \
+  --arg thread_name "$THREAD_NAME" \
+  --arg project "$PROJECT" \
+  --argjson history "$HISTORY_SUMMARY_JSON" \
   --argjson recorded_at "$NOW" \
   '{request_id:$request_id, slug:$slug, platform:$platform, source:$source,
     guild_id:$guild_id, channel_id:$channel_id, thread_id:$thread_id,
     message_id:$message_id, author:$author, authority:$authority,
     origin:$origin, recorded_at:$recorded_at}
-   + if $topic == "" then {} else {topic:$topic, request_text:$request_text} end') \
+   + if $topic == "" then {} else {topic:$topic, request_text:$request_text} end
+   + if $thread_name == "" then {} else {thread_name:$thread_name} end
+   + if $project == "" then {} else {project:$project} end
+   + if $history == null then {} else {history:($history | {status, count})} end') \
   || die "could not build the destination context" 1
 
-INBOX_DIR=$(fm_ext_inbox_dir)
-CONTEXT_DIR=$(fm_ext_context_dir)
 ATTACH_DIR=
 
 if fm_ext_private_artifact_file_valid "$CONTEXT_DIR" "$SLUG.offered.json" 600; then
@@ -353,6 +471,17 @@ if fm_ext_private_artifact_file_valid "$CONTEXT_DIR" "$SLUG.offered.json" 600; t
 fi
 
 if ! fm_ext_private_artifact_file_valid "$INBOX_DIR" "$SLUG.json" 600; then
+  if [ -n "$HISTORY_PATH" ]; then
+    if ! printf '%s\n' "$HISTORY_SIDECAR_JSON" \
+      | fm_ext_private_artifact_publish_stdin "$CONTEXT_DIR" "$SLUG.history.json" 600; then
+      # The request is still filed; it just says its history is missing.
+      HISTORY_LOST='{"status":"unavailable","count":0,"reason":"could not write the history file"}'
+      INBOX_JSON=$(printf '%s\n' "$INBOX_JSON" | jq -c --argjson h "$HISTORY_LOST" '.history = $h') \
+        || die "could not record the history outcome" 1
+      CONTEXT_JSON=$(printf '%s\n' "$CONTEXT_JSON" | jq -c --argjson h "$HISTORY_LOST" '.history = ($h | {status, count})') \
+        || die "could not record the history outcome" 1
+    fi
+  fi
   if [ "$MANIFEST_PRESENT" = 1 ]; then
     if ! ATTACH_DIR=$(fm_ext_private_request_dir_prepare "$STATE" "$FM_EXT_ATTACHMENTS_DIRNAME" "$SLUG"); then
       die "could not prepare the attachment folder" 1

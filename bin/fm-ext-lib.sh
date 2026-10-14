@@ -1827,8 +1827,8 @@ fm_ext_attachment_cache_match() {
   return 1
 }
 
-# fm_ext_context_prune <state>: drop destination-context and offer records past
-# the retention window so state/ext-context stays bounded. Both record kinds are
+# fm_ext_context_prune <state>: drop destination-context, thread-history, and offer records past
+# the retention window so state/ext-context stays bounded. Every record kind is
 # kept while their request is still sitting unhandled in the inbox: expiring the
 # offer marker would re-offer queued work, and expiring the destination context
 # would leave a request that can no longer be replied to. Follow-ups after the
@@ -1848,6 +1848,7 @@ fm_ext_context_prune() {
     base=${file##*/}
     case "$base" in
       *.offered.json) slug=${base%.offered.json} ;;
+      *.history.json) slug=${base%.history.json} ;;
       *) slug=${base%.json} ;;
     esac
     if fm_ext_private_artifact_file_valid "$inbox" "$slug.json" 600; then
