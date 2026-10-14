@@ -35,8 +35,8 @@
 // Consuming a wake also releases the successor grant it spent, so a row that
 // lands while that wake's own turn runs earns the next boundary's successor
 // instead of waiting for a turn end that finds the queue empty. Every
-// main-bound hand-off, suppression, grant, consumption, and the turn that
-// finally carries the wake is appended to a bounded delivery ledger;
+// OMP main-bound hand-off, suppression, grant, consumption, and the turn that
+// finally carries the wake is recorded best-effort in a bounded delivery ledger;
 // docs/omp-supervision-branch.md owns how to read it.
 //
 // Branch settlement runs outside the serialized delivery loop; the handoff
@@ -1724,7 +1724,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // Consumption can be recorded before the wake's turn runs - OMP raises
   // before_agent_start when it stages a hidden next-turn prompt behind a
   // streaming run - so the ledger also records when the wake message itself
-  // enters a model turn. A hand-off with no such line never reached the model.
+  // enters a model turn. Consumption alone does not prove model entry.
   function wakeEnteredTurn(content: string, deliveryId?: string, evidence?: WakeDeliveryEvidence): void {
     const owner = generation;
     const delivery = [...owner.sentWakes].find(([id, sent]) =>
@@ -1771,10 +1771,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // A main turn opened. An idle-main injection drives agent.prompt() directly,
   // which emits no before_agent_start and arrives as a custom-role message, so
   // the first turn boundary after an accepted send is itself the consumption
-  // evidence: the runtime only starts a turn for a message it has accepted into
-  // the prompt. A turn that was already streaming when its wake was queued
-  // emitted its turn_start before the send, so this can only clear a marker
-  // whose own turn (or a later one) has actually begun.
+  // evidence for retiring the marker. OMP emits turn_start per model call, so
+  // a later call in the streaming run can consume the marker before the hidden
+  // wake enters its own turn. wakeEnteredTurn records that distinct evidence.
   function turnStart(): void {
     const owner = generation;
     owner.lastTurnStartAtMs = Date.now();

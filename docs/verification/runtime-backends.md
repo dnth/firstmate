@@ -704,12 +704,10 @@ ok - OMP coalesces fallback wakes into one in-flight notification per handling e
 `test_native_omp_unacknowledged_wake_keeps_successor_chain` proves the boundary path for a wake the runtime queued without consumption: the next close is coalesced and its single successor is delivered at the turn boundary while the queue row stays unread.
 Issue [#82](https://github.com/dnth/firstmate/issues/82) is distinct from issue [#74](https://github.com/dnth/firstmate/issues/74), which covers stale advisory freshness after durable state supersedes prose rather than reentrant delivery of current valid operational notifications.
 
-On 2026-10-14 the live primary on OMP 18.10.1 (the running process was the installed binary) received no watcher wake from 12:48:53 to 13:00:18 +08 while eight actionable closes were delivered to its extension.
-A synthetic successor's handling turn had acknowledged its rows, a close appended row 55090 before that turn ended, no wake rode the next captain prompt, and the undelivered main-wake alarm named row 55090 after 329 s.
 At base `2ec2c819` a turn boundary granted a successor only while `mainFallbackSuccessorGranted` was clear (`bin/fm-primary-watch-core.ts:1734`, synthetic successor at `:1753`), consumption cleared the in-flight marker but not the grant (`:801-821`), and only a boundary that found the queue empty reset it (`:1767`).
 Every later close was therefore suppressed behind the open episode (`:915`), and an idle main has no turn boundary to recover at.
-Consumption now releases the grant, and a synthetic successor takes the rows it re-presents as its baseline.
-The deterministic regression ran under Node v25.2.1 against the tracked OMP primary extension:
+The current grant and baseline invariant is owned by [Main-fallback re-entry coalescing](../omp-supervision-branch.md#main-fallback-re-entry-coalescing).
+On 2026-10-14 the deterministic regression ran under Node v25.2.1 against the tracked OMP primary extension:
 
 ```sh
 bash tests/fm-omp-primary.test.sh
@@ -720,7 +718,7 @@ ok - OMP coalesces fallback wakes into one in-flight notification per handling e
 ok - OMP delivers a mid-turn wake once main is idle, after further captain turns
 ```
 
-`test_native_omp_mid_turn_wake_reaches_idle_main` models OMP 18.x delivery: one `turn_start`/`turn_end` pair per model call, a hidden next-turn wake prompted through `before_agent_start` after the streaming run ends, and an idle send opening an agent-initiated turn.
+`test_native_omp_mid_turn_wake_reaches_idle_main` uses a simplified delivery model: one `turn_start`/`turn_end` pair per model call, a hidden next-turn wake prompted through `before_agent_start` after the streaming run ends, and an idle send opening an agent-initiated turn.
 A close that lands inside a successor's own handling turn, followed by two queued captain messages and a fresh captain prompt, must reach main as exactly one wake turn; at base it fails with `close 3, delivered mid-turn, never reached main after further captain turns`.
 The same test proves that a consumed synthetic successor is not re-granted before its drain, that every `sent` line in the delivery ledger has `consumed` and `turn` lines, that a coalesced close reads `suppressed,covered` or `suppressed,granted,sent:successor,consumed,turn`, and that an oversized ledger is trimmed to its newest 2000 lines.
 
