@@ -2624,9 +2624,8 @@ while [ ! -e "$state/watch-stop" ]; do
 done
 SH
   chmod +x "$fixture/bin/fm-watch-arm.sh"
-  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
-    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
-    node --input-type=module 2>&1 <<'JS'
+  # Keep this heredoc outside command substitution for the Bash 3.2 parser.
+  cat > "$fixture/mid-turn-wake.mjs" <<'JS'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const state = process.env.FM_STATE_OVERRIDE;
@@ -2864,7 +2863,9 @@ writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
 console.log("omp-mid-turn-wake-ok");
 JS
-  ) || status=$?
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module < "$fixture/mid-turn-wake.mjs" 2>&1) || status=$?
   printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
   assert_contains "$out" omp-mid-turn-wake-ok "a wake delivered mid-turn never reached idle main"
   expect_code 0 "$status" "OMP mid-turn wake delivery"
