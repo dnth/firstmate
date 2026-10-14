@@ -5,7 +5,12 @@
 #   fm-ext-emit.sh --request-id discord:<guild>:<channel>:<thread>:<message>
 #     --kind ack|answer|followup|final --generation <n>
 #     (--text-file <path> | --text-file -) [--decision-file <path>]
+#     [--no-buttons "<reason>"]
 #     [--thread-title <text>] [--thread-state needs-you|done|none]
+#
+# To ask the captain a choice, use bin/fm-ext-ask.sh: it holds the call, writes
+# the decision file, numbers the options in the text, and posts through this
+# script, so text and buttons always match.
 #
 # --thread-title names the request's topic thread ("<Project> · <topic>", one
 # line, at most 60 characters, screened like reply text) on the reply that
@@ -49,6 +54,25 @@
 # the decision's current lifecycle (fm_ext_decision_key_occurrence in
 # bin/fm-ext-lib.sh), so the post can only ever answer that lifecycle.
 #
+# CHOICE GUARD. An answer, followup, or final whose text has the shape of a
+# choice is refused unless --decision-file is given, so a choice can never go
+# out as plain numbered text by mistake. The text is choice-shaped when it has
+# an option line and a cue:
+#   option line - a line, after optional indent and a "-", "*", or bullet
+#     marker, that starts with a 1-2 digit number ended by ".", ")", or ":"
+#     ("1." / "2)" / "(3)"), or a code of one letter plus 1-2 digits with an
+#     optional ".", ")", or ":" ("A1." / "B2:" / "B2 text"), then text.
+#   cue - "reply/respond/answer/type/send/pick/choose/select/tap/click" within
+#     40 characters of "number/code/letter/option/choice", or "which one",
+#     "which option", "pick one", or "choose one".
+# Two or more option lines plus a cue are refused. A "reply ... with the
+# number/code/letter" line is refused on its own, since it asks for a choice
+# whatever else the text holds. A numbered list with no cue, and prose without
+# option lines, post normally. --no-buttons "<reason>" posts a deliberate plain
+# list anyway: the reason (one line, at most 200 characters) is recorded in the
+# outbox payload as no_buttons_reason. It cannot be combined with
+# --decision-file, and does not apply to an ack.
+#
 # Discord text is untrusted: pass it with --text-file or stdin.
 set -u
 
@@ -63,6 +87,7 @@ usage() {
 usage: fm-ext-emit.sh --request-id discord:<guild>:<channel>:<thread>:<message>
          --kind ack|answer|followup|final --generation <n>
          (--text-file <path> | --text-file -) [--decision-file <path>]
+         [--no-buttons "<reason>"]
          [--thread-title <text>] [--thread-state needs-you|done|none]
 EOF
 }
@@ -78,6 +103,8 @@ KIND=
 GENERATION=
 TEXT_FILE=
 DECISION_FILE=
+NO_BUTTONS=
+NO_BUTTONS_SET=
 THREAD_TITLE=
 THREAD_STATE=
 
@@ -93,6 +120,7 @@ while [ "$#" -gt 0 ]; do
     --generation) shift; GENERATION=${1:-} ;;
     --text-file) shift; TEXT_FILE=${1:-} ;;
     --decision-file) shift; DECISION_FILE=${1:-} ;;
+    --no-buttons) shift; NO_BUTTONS=${1:-}; NO_BUTTONS_SET=1 ;;
     --thread-title) shift; THREAD_TITLE=${1:-} ;;
     --thread-state) shift; THREAD_STATE=${1:-} ;;
     --help|-h) help; exit 0 ;;
@@ -122,6 +150,14 @@ if [ -n "$DECISION_FILE" ]; then
     answer|followup|final) ;;
     *) die "a decision can only post with an answer, followup, or final" ;;
   esac
+fi
+if [ -n "$NO_BUTTONS_SET" ]; then
+  [ -n "$NO_BUTTONS" ] || die "--no-buttons needs a reason"
+  [ -z "$DECISION_FILE" ] || die "--no-buttons cannot be combined with --decision-file"
+  case "$NO_BUTTONS" in
+    *$'\n'*|*$'\r'*) die "--no-buttons reason must be one line" ;;
+  esac
+  [ "${#NO_BUTTONS}" -le 200 ] || die "--no-buttons reason must be at most 200 characters"
 fi
 fm_ext_active "$FM_HOME" || die "local ext-bridge is not active" 1
 command -v jq >/dev/null 2>&1 || die "jq is required" 1
@@ -153,6 +189,17 @@ else
   TEXT=$(cat -- "$TEXT_FILE")
 fi
 [ -n "$TEXT" ] || die "text is empty"
+
+# Choice guard (see the header): a choice-shaped post needs buttons.
+if [ -z "$DECISION_FILE" ] && [ -z "$NO_BUTTONS_SET" ]; then
+  case "$KIND" in
+    answer|followup|final)
+      if fm_ext_text_choice_shaped "$TEXT"; then
+        die "the text looks like a choice (numbered or coded options with a reply cue); post it with bin/fm-ext-ask.sh so the options become buttons, or pass --no-buttons \"<reason>\" to post a deliberate plain list"
+      fi
+      ;;
+  esac
+fi
 
 CTX=
 if fm_ext_private_artifact_file_valid "$CONTEXT_DIR" "$SLUG.json" 600; then
@@ -266,6 +313,7 @@ OUTBOX_JSON=$(jq -cn \
   --arg text "$TEXT" \
   --arg thread_title "$THREAD_TITLE" \
   --arg thread_state "$THREAD_STATE" \
+  --arg no_buttons "$NO_BUTTONS" \
   --argjson decision "$DECISION_JSON" \
   --argjson recorded_at "$NOW" \
   '{schema_version:$schema_version, request_id:$request_id, slug:$slug,
@@ -275,6 +323,7 @@ OUTBOX_JSON=$(jq -cn \
     recorded_at:$recorded_at}
    + if $thread_title == "" then {} else {thread_title:$thread_title} end
    + if $thread_state == "" then {} else {thread_state:$thread_state} end
+   + if $no_buttons == "" then {} else {no_buttons_reason:$no_buttons} end
    + if $decision == null then {} else {decision:$decision} end') \
   || die "could not build the outbox payload" 1
 

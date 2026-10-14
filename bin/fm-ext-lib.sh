@@ -520,6 +520,23 @@ FM_EXT_DECISION_CUSTOM_ID_MAX=100
 # click, whatever the emitter declared. Matched case-insensitively anywhere in
 # the label; an extra confirmation is harmless, a missing one is not.
 # shellcheck disable=SC2034 # Read by the sourcing emit script.
+# Choice-shaped text (bin/fm-ext-emit.sh header owns the rule): two or more
+# option lines plus a reply/choice cue, or a "reply ... with the number/code"
+# line on its own.
+FM_EXT_CHOICE_OPTION_RE='^[[:space:]]*((-|\*|•)[[:space:]]+)?(\(?[0-9]{1,2}[.):]|[A-Za-z][0-9]{1,2}[.):]?)([[:space:]]+[^[:space:]]|$)'
+FM_EXT_CHOICE_CUE_RE='(reply|respond|answer|type|send|pick|choose|select|tap|click)[^.!?]{0,40}(number|code|letter|option|choice)|which (one|option)|(pick|choose) one'
+FM_EXT_CHOICE_REPLY_RE='reply[^.!?]{0,30}(with|using)[^.!?]{0,20}(number|code|letter)'
+
+fm_ext_text_choice_shaped() {
+  local text=$1 options
+  if printf '%s\n' "$text" | grep -qiE -e "$FM_EXT_CHOICE_REPLY_RE"; then
+    return 0
+  fi
+  options=$(printf '%s\n' "$text" | grep -cE -e "$FM_EXT_CHOICE_OPTION_RE")
+  [ "${options:-0}" -ge 2 ] || return 1
+  printf '%s\n' "$text" | grep -qiE -e "$FM_EXT_CHOICE_CUE_RE"
+}
+
 FM_EXT_DECISION_CONFIRM_PATTERN='merge|deploy|prod|ship|release|publish|push|delete|deletion|remove|destroy|discard|drop|wipe|purge|erase|reset|revert|roll ?back|force|overwrite|tear ?down|revoke|rotate|kill|money|pay|charge|refund|purchase|buy|invoice|billing|budget|credential|secret|token|password|api ?key'
 
 _fm_ext_decision_part_valid() {
@@ -1253,6 +1270,7 @@ fm_ext_outbox_schema_valid() {
     and (.text | type == "string")
     and (if has("thread_title") then (.thread_title | type == "string" and length >= 1 and length <= 60) else true end)
     and (if has("thread_state") then (.thread_state == "needs-you" or .thread_state == "done" or .thread_state == "none") else true end)
+    and (if has("no_buttons_reason") then (.no_buttons_reason | type == "string" and length >= 1 and length <= 200) else true end)
     and (if has("decision") then
       (.decision | type == "object"
         and (.key | type == "string" and test("^(hold|key):"))
