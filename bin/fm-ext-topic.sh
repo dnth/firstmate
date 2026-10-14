@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-ext-topic.sh --check-title --title-file <path>
-#   fm-ext-topic.sh --text-file <path> --origin slash|message
+#   fm-ext-topic.sh --text-file <path> --origin slash|message|open
 #     --thread-id <id> --channel-id <id> --message-id <id>
 #     [--title-file <path>] [--validate-name --stored-file <path>]
 #
@@ -12,7 +12,10 @@
 # Naming, in priority order: Firstmate's title, the request-text fallback, the
 # label-plus-time last fallback. Admission and authority stay owned by
 # bin/fm-ext-intake.sh; docs/configuration.md owns the contract.
-# Only top-level message requests in config/ext-channel receive a name.
+# Only top-level message requests in config/ext-channel receive a name, plus
+# threads bin/fm-ext-open.sh opens there (origin open), whose name is
+# Firstmate's title alone: an open has no request text, so an unusable title
+# prints nothing rather than falling back.
 # Slash requests, existing threads, and other channels print nothing.
 # --message-id supplies the Discord snowflake containing the message timestamp.
 # --title-file carries Firstmate's "<Project> · <topic>" title: one line, at
@@ -34,7 +37,7 @@
 set -u
 
 usage() {
-  echo "usage: fm-ext-topic.sh --check-title --title-file <path> | --text-file <path> --origin slash|message --thread-id <id> --channel-id <id> --message-id <id> [--title-file <path>] [--validate-name --stored-file <path>]" >&2
+  echo "usage: fm-ext-topic.sh --check-title --title-file <path> | --text-file <path> --origin slash|message|open --thread-id <id> --channel-id <id> --message-id <id> [--title-file <path>] [--validate-name --stored-file <path>]" >&2
 }
 
 help() {
@@ -86,13 +89,13 @@ if [ "$CHECK_TITLE" = 0 ]; then
   esac
 
   case "$ORIGIN" in
-    slash|message) ;;
-    *) die "origin must be slash or message" ;;
+    slash|message|open) ;;
+    *) die "origin must be slash, message, or open" ;;
   esac
 
   # A request that already arrived inside a thread stays in that thread: there is
   # nothing to name, so print nothing and succeed.
-  if [ "$ORIGIN" != message ] || [ "$THREAD_ID" != "$CHANNEL_ID" ]; then
+  if [ "$ORIGIN" = slash ] || [ "$THREAD_ID" != "$CHANNEL_ID" ]; then
     exit 0
   fi
 
@@ -129,7 +132,7 @@ fi
 
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 FM_HOME=${FM_HOME:-$FM_ROOT}
-python3 - "$FM_ROOT" "$FM_HOME" "$CHANNEL_ID" "${MESSAGE_ID:-0}" "$VALIDATE" "$CHECK_TITLE" 3<<< "$TEXT" 4<<< "$TITLE_TEXT" 5<<< "$STORED" <<'PY'
+python3 - "$FM_ROOT" "$FM_HOME" "$CHANNEL_ID" "${MESSAGE_ID:-0}" "$VALIDATE" "$CHECK_TITLE" "${ORIGIN:-}" 3<<< "$TEXT" 4<<< "$TITLE_TEXT" 5<<< "$STORED" <<'PY'
 import os
 import re
 import sys
@@ -216,6 +219,15 @@ if sys.argv[6] == "1":
     if not title:
         sys.exit(2)
     print(title)
+    sys.exit(0)
+
+if sys.argv[7] == "open":
+    # An opened thread has no request text: its title is its only name.
+    # A stored name is accepted only by equalling it, so validation prints the
+    # title either way, like a fresh derivation replacing a tampered name.
+    fresh = clean_title(title_raw)
+    if fresh:
+        print(fresh)
     sys.exit(0)
 
 fresh = derive()

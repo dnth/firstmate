@@ -21,9 +21,9 @@
 # refused (mid-delivery), matching public-follow-up delivery-posting behavior.
 # Destination fields come from the durable per-request context, so a delayed
 # follow-up still works after the inbox file is gone. The payload also carries
-# the request's origin (slash, message, or button; slash when the context
-# predates it), which tells the gateway poster whether it can react to the
-# original message.
+# the request's origin (slash, message, button, or open for a thread
+# bin/fm-ext-open.sh opened; slash when the context predates it), which tells
+# the gateway poster whether it can react to the original message.
 #
 # --decision-file attaches option buttons to an answer, followup, or final.
 # The file is JSON:
@@ -173,8 +173,8 @@ ORIGIN=$(jq -r '.origin // "slash"' "$CTX")
 [ "$PLATFORM" = discord ] || die "context platform must be discord"
 [ "$SOURCE" = hermes-gateway ] || die "context source must be hermes-gateway"
 case "$ORIGIN" in
-  slash|message|button) ;;
-  *) die "context origin must be slash, message, or button" ;;
+  slash|message|button|open) ;;
+  *) die "context origin must be slash, message, button, or open" ;;
 esac
 [ -n "$GUILD" ] && [ -n "$CHANNEL" ] && [ -n "$THREAD" ] && [ -n "$MESSAGE" ] \
   || die "destination context is incomplete"

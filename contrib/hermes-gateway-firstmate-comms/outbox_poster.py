@@ -572,7 +572,8 @@ def load_thread_record_by_id(thread_id: str, home: Path) -> dict:
 
 def save_request_thread(payload: dict, thread_id: str, home: Path,
                         topic_name: str = "", thread_state: str = "",
-                        creating_title: str = "", creator: str = "") -> None:
+                        creating_title: str = "", creator: str = "",
+                        opening_posted: bool | None = None) -> None:
     """Record this request's topic-thread id for every later generation.
 
     The record is the request-wide one beside its outbox payload. A rename
@@ -581,14 +582,16 @@ def save_request_thread(payload: dict, thread_id: str, home: Path,
     """
     save_thread_record(request_progress_path(payload, home), payload.get("request_id"),
                        thread_id, topic_name=topic_name, thread_state=thread_state,
-                       creating_title=creating_title, creator=creator)
+                       creating_title=creating_title, creator=creator, opening_posted=opening_posted)
 
 
 def save_thread_record(path: Path, request_id: object, thread_id: str,
                        topic_name: str = "", thread_state: str = "",
                        creating_title: str = "", creator: str = "",
                        state_at: float | None = None, rename: dict | None = None,
-                       marked_open: bool | None = None) -> None:
+                       marked_open: bool | None = None,
+                       open_attempt: bool | None = None,
+                       opening_posted: bool | None = None) -> None:
     """Write one thread record atomically, preserving any prior unset field.
 
     ``creator`` is the provenance that authorises a later rename: ``firstmate``
@@ -640,6 +643,10 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
         record["rename"] = kept_rename
     if (marked_open if marked_open is not None else prior.get("marked_open")) is True:
         record["marked_open"] = True
+    if (open_attempt if open_attempt is not None else prior.get("open_attempt")) is True:
+        record["open_attempt"] = True
+    if (opening_posted if opening_posted is not None else prior.get("opening_posted")) is True:
+        record["opening_posted"] = True
     body = json.dumps(record)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
@@ -701,9 +708,11 @@ def thread_name_for(payload: dict, home: Path) -> str:
     re-derived from the request text the intake recorded, never trusted from
     the stored string alone, so later follow-ups reuse the exact name the
     first reply used. Anything unusable - no context, no recorded name, an
-    already-threaded request - means no thread is created.
+    already-threaded request - means no thread is created. A thread
+    bin/fm-ext-open.sh opened is named by its context's origin, so its title
+    is its only name even when the caller stands in as a message request.
     """
-    if payload.get("origin") != "message":
+    if payload.get("origin") not in ("message", "open"):
         return ""
     if str(payload.get("thread_id") or "") != str(payload.get("channel_id") or ""):
         return ""
@@ -714,6 +723,11 @@ def thread_name_for(payload: dict, home: Path) -> str:
         return ""
     if not isinstance(context, dict):
         return ""
+    opened = context.get("origin") == "open"
+    if payload.get("origin") == "open" and not opened:
+        return ""
+    if opened:
+        payload = dict(payload, origin="open")
     name = context.get("topic") or ""
     request_text = context.get("request_text") or ""
     if not isinstance(name, str) or not name or not isinstance(request_text, str):
@@ -988,8 +1002,9 @@ def maybe_rename_topic_thread(
         return thread_id
     thread_field = str(payload.get("thread_id") or "")
     if thread_field == str(payload.get("channel_id") or ""):
-        # Only a top-level message request ever creates a topic thread.
-        if payload.get("origin") != "message":
+        # Only a top-level message request or an opened thread ever creates
+        # a topic thread.
+        if payload.get("origin") not in ("message", "open"):
             return thread_id
         recorded = load_request_topic(payload, home)
         if not thread_id or recorded.get("topic_thread_id") != thread_id:
@@ -1113,9 +1128,50 @@ def discord_create_thread(payload: dict, name: str) -> dict:
         raise DiscordSendError("permanent", "thread parent is not a Discord message id")
     if str(payload.get("thread_id") or "") != channel:
         raise DiscordSendError("permanent", "thread parent is not the request channel")
-    body = json.dumps({"name": name, "auto_archive_duration": 1440}).encode("utf-8")
+    return _post_thread(f"{DISCORD_API_BASE}/channels/{channel}/messages/{message}/threads",
+                        {"name": name, "auto_archive_duration": 1440}, token)
+
+
+# Discord's public-thread channel type, for a thread started without a message.
+_PUBLIC_THREAD = 11
+# Discord refusals that mean the bot lacks a permission in the channel.
+_MISSING_ACCESS = {50001, 50013}
+
+
+def discord_open_thread(payload: dict, name: str) -> dict:
+    """Start a public thread with no parent message in the dedicated channel.
+
+    This is how a thread bin/fm-ext-open.sh asked for comes into being. It
+    needs the same Create Public Threads permission as a thread on a request
+    message; a refusal for a missing permission says so in its reason.
+    """
+    name = public_topic_name(payload, name, None, "", _title_for(payload))
+    if not name:
+        raise DiscordSendError("permanent", "opened thread has no valid title")
+    token = _bot_token()
+    if not token:
+        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
+    channel = str(payload.get("channel_id") or "")
+    if not _SNOWFLAKE.fullmatch(channel) or str(payload.get("thread_id") or "") != channel:
+        raise DiscordSendError("permanent", "opened thread parent is not the request channel")
+    try:
+        return _post_thread(f"{DISCORD_API_BASE}/channels/{channel}/threads",
+                            {"name": name, "type": _PUBLIC_THREAD, "auto_archive_duration": 1440}, token)
+    except DiscordSendError as err:
+        if err.http_code == 403 or err.api_error.get("code") in _MISSING_ACCESS:
+            raise DiscordSendError(
+                err.outcome,
+                f"{err}: the bot lacks permission to open threads in the dedicated channel "
+                "(needs View Channel, Create Public Threads, and Send Messages in Threads)",
+                err.http_code, err.api_error) from err
+        raise
+
+
+def _post_thread(url: str, body_fields: dict, token: str) -> dict:
+    """POST one thread-create request and return its thread id."""
+    body = json.dumps(body_fields).encode("utf-8")
     request = urllib.request.Request(
-        f"{DISCORD_API_BASE}/channels/{channel}/messages/{message}/threads",
+        url,
         data=body,
         method="POST",
         headers={
@@ -1227,6 +1283,67 @@ def ensure_topic_thread(
                             creator=creator_provenance)
     except Exception:
         return thread_id
+    return thread_id
+
+
+def ensure_open_thread(
+    payload: dict,
+    progress: dict,
+    home: Path,
+    create_thread: ThreadFn | None = None,
+) -> str:
+    """Return the opened topic's shared destination or create its initial thread."""
+    initial = dict(payload, kind="answer", generation=1)
+    path = request_progress_path(payload, home)
+    try:
+        shared = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        shared = {}
+    if not isinstance(shared, dict):
+        raise DiscordSendError("permanent", "opened thread record is invalid")
+    if payload.get("kind") != "answer" or payload.get("generation") != 1:
+        directory = progress_path(initial, home).parent
+        receipt = directory / f"{payload['slug']}.answer.1.receipt.json"
+        failed = directory / f"{payload['slug']}.answer.1.failed.json"
+        if receipt.is_symlink() or not receipt.is_file():
+            if failed.is_file() and not failed.is_symlink():
+                raise DiscordSendError("permanent", "the opening answer failed; cannot post later updates")
+            if shared.get("opening_posted") is not True:
+                raise DiscordSendError("transient", "waiting for the opening answer to post")
+    initial_progress = load_progress(initial, home) or {}
+    recorded = (str(progress.get("topic_thread_id") or "")
+                or load_request_thread(payload, home)
+                or str(initial_progress.get("topic_thread_id") or ""))
+    if recorded:
+        return recorded
+    if shared.get("open_attempt") or progress.get("open_attempt") or initial_progress.get("open_attempt"):
+        raise DiscordSendError("permanent", "an earlier attempt to open this thread has an unknown "
+                               "outcome; refusing to open a second thread")
+    if payload.get("kind") != "answer" or payload.get("generation") != 1:
+        raise DiscordSendError("transient", "the opening answer has no recorded thread")
+    channel = str(payload.get("channel_id") or "")
+    if str(payload.get("thread_id") or "") != channel or channel != dedicated_channel(home):
+        raise DiscordSendError("permanent", "an opened thread may only start in the dedicated channel")
+    name = thread_name_for(payload, home)
+    if not name:
+        raise DiscordSendError("permanent", "opened thread has no valid title")
+    save_thread_record(path, payload.get("request_id"), "", open_attempt=True)
+    progress["open_attempt"] = True
+    write_progress(payload, progress, home)
+    try:
+        receipt = (create_thread or discord_open_thread)(payload, name)
+    except Exception as err:
+        if classify_send_failure(err) != "ambiguous":
+            save_thread_record(path, payload.get("request_id"), "", open_attempt=False)
+            progress["open_attempt"] = False
+            write_progress(payload, progress, home)
+        raise
+    thread_id = str((receipt or {}).get("thread_id") or "")
+    if not _SNOWFLAKE.fullmatch(thread_id):
+        raise DiscordSendError("ambiguous", "discord thread open returned no thread id")
+    thread_state = payload.get("thread_state") if isinstance(payload.get("thread_state"), str) else ""
+    save_request_thread(payload, thread_id, home, topic_name=name, thread_state=thread_state,
+                        creating_title=_title_for(payload), creator="firstmate")
     return thread_id
 
 
@@ -1643,7 +1760,20 @@ def deliver_one(
     if int(progress.get("total") or 0) != len(chunks):
         release_inflight(payload, home=home)
         return "mid-delivery"
-    thread_id = ensure_topic_thread(payload, progress, home, create_thread)
+    if payload.get("origin") == "open":
+        try:
+            thread_id = ensure_open_thread(payload, progress, home, create_thread)
+        except Exception as err:
+            outcome = classify_send_failure(err)
+            if outcome == "transient":
+                abort_status = abort_delivery(payload, home=home)
+                return abort_status if abort_status == "already-receipted" else "failed"
+            if outcome == "permanent":
+                fail_status = record_failed(payload, failure_reason(err), home=home)
+                return fail_status if fail_status == "already-receipted" else "terminal-failed"
+            return "mid-delivery"
+    else:
+        thread_id = ensure_topic_thread(payload, progress, home, create_thread)
     progress["topic_thread_id"] = thread_id
     write_progress(payload, progress, home)
     start = int(progress.get("posted_count") or 0)
@@ -1697,6 +1827,8 @@ def deliver_one(
         },
         home=home,
     )
+    if payload.get("origin") == "open" and payload.get("kind") == "answer" and payload.get("generation") == 1:
+        save_request_thread(payload, thread_id, home, opening_posted=True)
     if payload.get("kind") in ("answer", "final"):
         react_to_request(payload, REACT_DONE, react)
     # Renaming is not tied to this generation's destination: an in-thread

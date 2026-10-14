@@ -21,6 +21,8 @@ TMP_ROOT=$(fm_test_tmproot fm-ext-topic-threads)
 
 INTAKE="$ROOT/bin/fm-ext-intake.sh"
 EMIT="$ROOT/bin/fm-ext-emit.sh"
+OPEN="$ROOT/bin/fm-ext-open.sh"
+OUTBOX="$ROOT/bin/fm-ext-outbox.sh"
 LINK="$ROOT/bin/fm-ext-link.sh"
 PLUGIN="$ROOT/contrib/hermes-gateway-firstmate-comms"
 
@@ -1530,6 +1532,326 @@ PY
   pass "25 unpublished decisions do not keep the marker"
 }
 
+# --- 26. Firstmate opens a thread no request started ------------------------
+#
+# fm-ext-open.sh opens one titled thread in the dedicated channel, prints a
+# stable request id, and later follow-ups, state renames, and captain replies
+# in that thread all route through the ordinary request-thread path.
+
+open_as() {
+  local home=$1 key=$2 title=$3 text=$4 textfile
+  textfile="$home/open-$key.txt"
+  write_text "$textfile" "$text"
+  home_env "$home" "$OPEN" --key "$key" --thread-title "$title" --text-file "$textfile"
+}
+
+test_26_opened_threads_route_like_request_threads() {
+  local home rid rid2 slug out title opened captain
+  home="$TMP_ROOT/c26"
+  setup_home "$home"
+  title="InfoConnect · #532 handbok ranking"
+  opened=888888888888888888
+  rid=$(open_as "$home" "infoconnect-532" "$title" "Tracking the ranking fix here.") \
+    || fail "open must succeed in the dedicated channel"
+  case "$rid" in
+    "discord:${GUILD}:${CHANNEL}:${CHANNEL}:"[0-9]*) ;;
+    *) fail "open must print a dedicated-channel request id, got '$rid'" ;;
+  esac
+  slug=$(slug_of "$rid")
+  jq -e --arg key infoconnect-532 --arg title "$title" \
+    '.origin == "open" and .open_key == $key and .topic == $title' \
+    "$home/state/ext-context/$slug.json" >/dev/null \
+    || fail "the open must be recorded durably with its key and title"
+  out=$(home_env "$home" "$OPEN" --key infoconnect-532 --lookup)
+  assert_equals "$(printf '%s\n' "$out" | sed -n 1p)" "$rid" "lookup must print the key's request id"
+  assert_equals "$(printf '%s\n' "$out" | sed -n 2p)" "pending" "an undelivered open must look pending"
+  rid2=$(open_as "$home" "infoconnect-532" "$title" "A second first message.")
+  assert_equals "$rid2" "$rid" "the same key must map to the same request id"
+  [ "$(find "$home/state/ext-outbox" -name "$slug.*.json" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "re-running an open must not queue a second post"
+  [ "$(open_as "$home" "another-item" "$title" "x")" != "$rid" ] \
+    || fail "a different key must open a different thread"
+  rm -f "$home/state/ext-outbox/$(slug_of "$(home_env "$home" "$OPEN" --key another-item --lookup | sed -n 1p)").answer.1.json"
+
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$rid"'","thread_id":"'"$opened"'"}')
+  assert_contains "$out" "thread-create=$CHANNEL/${rid##*:}/$title" "the open must create one titled thread"
+  assert_contains "$out" "posted-to=$opened Tracking the ranking fix here." \
+    "the first message must post inside the opened thread"
+  out=$(home_env "$home" "$OPEN" --key infoconnect-532 --lookup)
+  assert_equals "$(printf '%s\n' "$out" | sed -n 2p)" "posted thread=$opened messages=9000000001" \
+    "lookup must report the thread and message ids from the receipt"
+
+  # A follow-up and a state change land in the same thread.
+  emit_as "$home" "$rid" followup 1 "Ranking fix is in review." "" "needs-you" >/dev/null \
+    || fail "a follow-up must emit against the opened request id"
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$rid"'","thread_id":"999999999999999999"}')
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
+    || fail "a follow-up must never open a second thread: $out"
+  assert_contains "$out" "posted-to=$opened Ranking fix is in review." "the follow-up must post in the opened thread"
+  assert_contains "$out" "thread-rename=$opened/❓ $title" "needs-you must rename the opened thread"
+
+  # Re-running the open after delivery stays a no-op.
+  open_as "$home" "infoconnect-532" "$title" "Again." >/dev/null
+  out=$(deliver "$home")
+  assert_not_contains "$out" "posted-to=" "a delivered open must not post again"
+
+  # A captain reply inside the opened thread is an ordinary in-thread request.
+  captain=$(intake_as "$home" "looks good, ship it" 123456789012345678 "$opened" message) \
+    || fail "a captain reply inside the opened thread must be admitted"
+  jq -e --arg t "$opened" '.thread_id == $t and .channel_id == "'"$CHANNEL"'"' \
+    "$home/state/ext-inbox/$captain.json" >/dev/null \
+    || fail "the in-thread reply must record the opened thread"
+  emit_as "$home" "discord:${GUILD}:${CHANNEL}:${opened}:123456789012345678" answer 1 \
+    "Shipping it." "" "done" >/dev/null || fail "the in-thread reply must be answerable"
+  out=$(deliver "$home")
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
+    || fail "an in-thread reply must not open a thread: $out"
+  assert_contains "$out" "posted-to=$opened Shipping it." "the answer must stay in the opened thread"
+  assert_contains "$out" "thread-rename=$opened/✅ $title" "the in-thread request must mark the opened thread"
+  pass "26 opened threads route like request threads"
+}
+
+# --- 27. opens refuse unsafe titles and anything but the dedicated channel ---
+
+test_27_opens_refuse_unsafe_titles_and_other_channels() {
+  local home rid slug out rc
+  home="$TMP_ROOT/c27"
+  setup_home "$home"
+  open_as "$home" k1 "fm-ship-login status" "x" >/dev/null 2>&1; rc=$?
+  expect_code 2 "$rc" "a title naming a task id"
+  open_as "$home" k1 "$(printf 'A%.0s' $(seq 61))" "x" >/dev/null 2>&1; rc=$?
+  expect_code 2 "$rc" "an over-long title"
+  home_env "$home" "$OPEN" --key k1 --text-file /dev/null >/dev/null 2>&1; rc=$?
+  expect_code 2 "$rc" "an open without a title"
+  open_as "$home" "../escape" "Firstmate · safe" "x" >/dev/null 2>&1; rc=$?
+  expect_code 2 "$rc" "a key with path characters"
+  [ ! -d "$home/state/ext-context" ] || [ -z "$(ls -A "$home/state/ext-context")" ] \
+    || fail "refused opens must record nothing"
+
+  printf '%s\n' "$GUILD:999999999999999990:$AUTHOR" > "$home/config/ext-allowlist"
+  open_as "$home" k1 "Firstmate · safe" "x" >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "an allowlist naming no guild for the dedicated channel"
+  printf '%s\n%s\n' "$GUILD:$CHANNEL:$AUTHOR" "121212121212121212:$CHANNEL" > "$home/config/ext-allowlist"
+  open_as "$home" k1 "Firstmate · safe" "x" >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "an allowlist naming two guilds for the dedicated channel"
+  printf '%s\n' "$GUILD:$CHANNEL:$AUTHOR" > "$home/config/ext-allowlist"
+  rm -f "$home/config/ext-channel"
+  open_as "$home" k1 "Firstmate · safe" "x" >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "an open with no dedicated channel"
+
+  # The poster re-checks the channel: a payload whose channel stopped being
+  # the dedicated one fails terminally instead of opening a thread anywhere.
+  printf '%s\n' "$CHANNEL" > "$home/config/ext-channel"
+  rid=$(open_as "$home" k1 "Firstmate · safe" "Hello.") || fail "a safe open must succeed"
+  slug=$(slug_of "$rid")
+  printf '%s\n' 999999999999999990 > "$home/config/ext-channel"
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$rid"'","thread_id":"888888888888888888"}')
+  assert_contains "$out" "results=terminal-failed" "a non-dedicated open must fail terminally"
+  assert_not_contains "$out" "thread-create=" "a non-dedicated open must not create a thread"
+  assert_not_contains "$out" "posted-to=" "a non-dedicated open must not post in place"
+  printf '%s\n' "$CHANNEL" > "$home/config/ext-channel"
+  out=$(home_env "$home" "$OPEN" --key k1 --lookup | sed -n 2p)
+  assert_contains "$out" "failed an opened thread may only start in the dedicated channel" \
+    "lookup must report why the open failed"
+  pass "27 opens refuse unsafe titles and other channels"
+}
+
+# --- 28. open delivery is idempotent and reports a missing permission -------
+
+test_28_open_delivery_is_idempotent_and_reports_permissions() {
+  local home rid slug out rc err
+  home="$TMP_ROOT/c28"
+  setup_home "$home"
+  rid=$(open_as "$home" mid "Firstmate · thread smoke test" "Hello.") || fail "open must succeed"
+  slug=$(slug_of "$rid")
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null
+  err="$home/mid.err"
+  open_as "$home" mid "Firstmate · thread smoke test" "Hello." >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "re-running an open while it is mid-delivery"
+  assert_grep "mid-delivery" "$err" "a posting marker without a receipt must refuse the open"
+
+  rid=$(open_as "$home" perm "Firstmate · permissions" "Hello.") || fail "open must succeed"
+  slug=$(slug_of "$rid")
+  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" DISCORD_BOT_TOKEN=test "$PYTHON_BIN" - "$home" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home = Path(sys.argv[1])
+os.environ["FM_HOME"] = str(home)
+calls = []
+def refuse(url, body, token):
+    calls.append(url)
+    raise outbox_poster.DiscordSendError("permanent", "discord HTTP 403", 403, {"code": 50013})
+outbox_poster._post_thread = refuse
+def send(payload):
+    raise RuntimeError("nothing may post without the thread")
+print("results=" + ",".join(outbox_poster.drain_outbox(send=send, home=home)))
+print("calls=" + ",".join(calls))
+# An unknown create outcome must never be retried into a second thread.
+payload = {"slug": "0" * 64, "request_id": "discord:1:2:2:3", "origin": "open",
+           "channel_id": "2", "thread_id": "2", "kind": "answer", "generation": 1}
+try:
+    outbox_poster.ensure_open_thread(payload, {"open_attempt": True}, home,
+                                     create_thread=lambda p, n: {"thread_id": "5"})
+except outbox_poster.DiscordSendError as err:
+    print("retry=" + err.outcome + " " + str(err))
+PY
+  )
+  assert_contains "$out" "results=terminal-failed" "a missing permission must fail the open terminally"
+  assert_contains "$out" "/threads" "the open must start a thread without a parent message"
+  assert_contains "$out" "retry=permanent an earlier attempt to open this thread has an unknown outcome" \
+    "an unknown create outcome must refuse a second thread"
+  out=$(home_env "$home" "$OPEN" --key perm --lookup | sed -n 2p)
+  assert_contains "$out" "the bot lacks permission to open threads in the dedicated channel" \
+    "lookup must name the missing permission"
+  pass "28 open delivery is idempotent and reports permissions"
+}
+
+test_29_open_creation_proof_survives_generations_and_failures() {
+  local home rid scenario
+  for scenario in ambiguous legacy legacy-known record-failure send-failure transient unopened in-flight create-permanent send-permanent; do
+    home="$TMP_ROOT/c29-$scenario"
+    setup_home "$home"
+    rid=$(open_as "$home" item "Firstmate · creation proof" "Hello.") || fail "open must succeed"
+    emit_as "$home" "$rid" followup 1 "Update." "Firstmate · creation proof" "" >/dev/null
+    emit_as "$home" "$rid" final 1 "Done." "Firstmate · creation proof" "done" >/dev/null
+    if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$scenario" <<'PYTEST'
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+home, scenario = Path(sys.argv[1]), sys.argv[2]
+path = next((home / "state/ext-outbox").glob("*.answer.1.json"))
+payload = json.loads(path.read_text())
+creates, sent = [], []
+thread = "888888888888888888"
+def create(payload, name):
+    creates.append(name)
+    if scenario == "ambiguous":
+        raise poster.DiscordSendError("ambiguous", "create timed out")
+    if scenario == "create-permanent":
+        raise poster.DiscordSendError("permanent", "discord HTTP 403", 403)
+    if scenario == "transient" and len(creates) == 1:
+        raise poster.DiscordSendError("transient", "discord HTTP 429", 429)
+    return {"thread_id": thread}
+def send(payload):
+    if scenario == "in-flight" and not sent:
+        wait_for_open()
+    sent.append(payload["thread_id"])
+    if scenario == "send-permanent":
+        raise poster.DiscordSendError("permanent", "discord HTTP 403", 403)
+    if scenario == "send-failure" and len(sent) == 1:
+        raise poster.DiscordSendError("transient", "discord HTTP 429", 429)
+    return {"discord_message_id": "900000000000000001"}
+def deliver(path):
+    return poster.deliver_one(path, send=send, create_thread=create,
+                              home=home, react=lambda *args: None,
+                              rename_thread=lambda *args: {"ok": True})
+def wait_for_open():
+    before = (len(creates), len(sent))
+    for kind in ("followup", "final"):
+        sibling = path.with_name(f"{payload['slug']}.{kind}.1.json")
+        assert deliver(sibling) == "failed"
+        assert sibling.is_file()
+        assert not sibling.with_name(sibling.stem + ".failed.json").exists()
+    assert (len(creates), len(sent)) == before
+if scenario == "unopened":
+    wait_for_open()
+    assert not creates and not sent
+    assert deliver(path) == "sent"
+    completion = json.loads(poster.request_progress_path(payload, home).read_text())
+    assert completion["opening_posted"] is True
+    path.with_name(f"{payload['slug']}.answer.1.receipt.json").unlink()
+    poster.progress_path(payload, home).unlink()
+elif scenario == "legacy-known":
+    poster.write_progress(payload, {"open_attempt": True, "topic_thread_id": thread,
+                                   "total": 1, "posted_count": 0}, home)
+    assert deliver(path) == "sent"
+elif scenario == "legacy":
+    poster.write_progress(payload, {"open_attempt": True, "total": 1, "posted_count": 0}, home)
+    assert deliver(path) == "terminal-failed"
+elif scenario == "record-failure":
+    save = poster.save_request_thread
+    def refuse_record(*args, **kwargs):
+        raise OSError("thread record write failed")
+    poster.save_request_thread = refuse_record
+    assert deliver(path) == "mid-delivery"
+    poster.save_request_thread = save
+    assert not sent
+    wait_for_open()
+elif scenario == "ambiguous":
+    assert deliver(path) == "mid-delivery"
+    poster.progress_path(payload, home).unlink()
+    try:
+        poster.ensure_open_thread(payload, {}, home, create)
+    except poster.DiscordSendError as err:
+        assert err.outcome == "permanent"
+    else:
+        raise AssertionError("request-wide guard must survive lost generation progress")
+    wait_for_open()
+elif scenario in ("create-permanent", "send-permanent"):
+    assert deliver(path) == "terminal-failed"
+elif scenario == "in-flight":
+    assert deliver(path) == "sent"
+else:
+    assert deliver(path) == "failed"
+    if scenario == "send-failure":
+        assert poster.load_progress(payload, home) is None
+        assert poster.load_request_thread(payload, home) == thread
+    wait_for_open()
+    assert deliver(path) == "sent"
+for kind in ("followup", "final"):
+    sibling = path.with_name(f"{payload['slug']}.{kind}.1.json")
+    result = deliver(sibling)
+    expected = ("failed" if scenario in ("ambiguous", "record-failure") else
+                "terminal-failed" if scenario in ("legacy", "create-permanent", "send-permanent") else "sent")
+    assert result == expected, result
+assert len(creates) == (0 if scenario in ("legacy", "legacy-known") else 2 if scenario == "transient" else 1), creates
+assert all(destination == thread for destination in sent), sent
+if scenario in ("ambiguous", "record-failure"):
+    shared = json.loads(poster.request_progress_path(payload, home).read_text())
+    assert shared["open_attempt"] is True
+    assert not sent
+    poster.record_failed(payload, {"ok": False, "reason": "opening outcome unresolved"}, home)
+    for kind in ("followup", "final"):
+        sibling = path.with_name(f"{payload['slug']}.{kind}.1.json")
+        assert deliver(sibling) == "terminal-failed"
+    assert len(creates) == 1
+PYTEST
+    then fail "creation proof must survive $scenario across all generations"
+    fi
+  done
+  pass "29 open creation proof survives generations and failures"
+}
+
+test_30_open_guilds_use_shared_allowlist_grammar() {
+  local home rule rid scenario
+  home="$TMP_ROOT/c30"
+  setup_home "$home"
+  for rule in "$GUILD:$CHANNEL:" ":$CHANNEL:$AUTHOR" "$GUILD::$AUTHOR" "$GUILD:$CHANNEL:$AUTHOR:extra" "$GUILD"; do
+    printf '%s\n' "$rule" > "$home/config/ext-allowlist"
+    if open_as "$home" malformed "Firstmate · grammar" "Hello." >/dev/null 2>&1; then
+      fail "a rule without a well-formed dedicated-channel admission must refuse: $rule"
+    fi
+    [ ! -d "$home/state/ext-context" ] || [ -z "$(ls -A "$home/state/ext-context")" ] \
+      || fail "refused allowlist rules must publish no context"
+    [ ! -d "$home/state/ext-outbox" ] || [ -z "$(ls -A "$home/state/ext-outbox")" ] \
+      || fail "refused allowlist rules must queue no post"
+  done
+  for scenario in scoped channel; do
+    rule="$GUILD:$CHANNEL"
+    [ "$scenario" = channel ] || rule="$rule:$AUTHOR"
+    printf '%s\n%s\n' "$rule" "121212121212121212:$CHANNEL:" > "$home/config/ext-allowlist"
+    rid=$(open_as "$home" "$scenario" "Firstmate · grammar" "Hello.") \
+      || fail "valid $scenario rules must admit despite a malformed second guild"
+    case "$rid" in
+      "discord:$GUILD:$CHANNEL:$CHANNEL:"*) ;;
+      *) fail "only the valid rule's guild may own the open: $rid" ;;
+    esac
+  done
+  pass "30 open guilds use the shared allowlist grammar"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -1557,5 +1879,10 @@ test_22_drifted_names_reconcile_with_discord
 test_23_rename_failures_are_recorded_and_retried
 test_24_reminders_while_a_decision_is_open_clear_with_it
 test_25_unpublished_decisions_do_not_keep_the_marker
+test_26_opened_threads_route_like_request_threads
+test_27_opens_refuse_unsafe_titles_and_other_channels
+test_28_open_delivery_is_idempotent_and_reports_permissions
+test_29_open_creation_proof_survives_generations_and_failures
+test_30_open_guilds_use_shared_allowlist_grammar
 
 echo "all fm-ext-topic-threads tests passed"
