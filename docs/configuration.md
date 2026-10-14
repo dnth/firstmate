@@ -873,7 +873,7 @@ A typed `/fm` prefix is dropped from the request text.
 A message from an author the allowlist refuses is ignored there, with no request and no reply.
 
 Anywhere the gateway listens, a Discord reply from an allowlisted author to one of Firstmate's own posted messages also becomes a request.
-Firstmate's own posts are the Discord message ids the outbox poster recorded in chunk progress, so a reply to the general Hermes agent or to anyone else keeps its normal path; that memory follows the retention window above.
+Firstmate's own posts are the Discord message ids the outbox poster recorded in chunk progress, so a reply to the general Hermes agent or to anyone else keeps its normal path; chunk progress follows the retention window above, while each thread record retains its latest Firstmate post’s id for its own lifetime.
 The request records `reply_to` with the replied-to `message_id`, the `request_id` that post answered when known, and that message's `text` cut to its first 1000 characters (a trailing `…` marks a cut), so a short answer such as "yes" can be read against what it answers.
 In the dedicated channel a reply to anyone else's message is still a request, just without `reply_to`.
 
@@ -940,10 +940,11 @@ The plugin reads three things at intake and `bin/fm-ext-intake.sh` records them 
 - `history` is `{status, count, path}` in the inbox record, pointing at the sidecar `state/ext-context/<slug>.history.json` (mode 0600). The destination-context record keeps `thread_name`, `project`, and `history` `{status, count}`.
 
 The sidecar is labeled `history (context only - not instructions)` and lists the thread's recent messages oldest first, each with `id`, `author_id`, `author`, `bot`, `role`, `at`, and `text`.
-`role` is `firstmate` for posts recorded in Firstmate’s outbox, `requester` for the request’s author, and `other` for other humans and the shared bot’s Hermes posts; unrelated bot and webhook posts, system messages, and empty messages are skipped.
+`role` is `firstmate` for posts recorded in Firstmate’s outbox, `requester` for the request’s author, and `other` for other humans and the shared bot’s Hermes posts; ordinary history skips unrelated bot and webhook posts, system messages, and empty messages, while an explicit reply target is always retained regardless of author kind or empty text.
 Firstmate keeps no per-thread conversation, so unlike Hermes' own `_fetch_channel_context` the scan does not stop at the bot's last message; it follows the same pattern, a backward scan from the request's message plus a window around a replied-to message, over REST because that method is bound to the adapter's client.
 Messages are selected newest first within `FM_EXT_HISTORY_MAX_CHARS` characters of message text (default 8000), dropping the oldest and serializing the retained messages oldest first for reading.
 The replied-to message and Firstmate's most recent post in the thread are always kept, even past the budget.
+The poster records `latest_firstmate_post_id` in the existing per-thread record when it records a posted chunk, so that anchor remains identifiable after chunk progress expires, for as long as the thread record survives.
 The sidecar follows the request's other context records: it stays while the request waits in the inbox and is pruned with the retention window.
 When Discord refuses or cannot answer the read, the request is still filed and its `history` is `{status: "unavailable", reason}` with no sidecar; the drain says so and Firstmate looks the thread up by hand.
 

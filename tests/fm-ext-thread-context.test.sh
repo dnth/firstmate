@@ -640,6 +640,139 @@ PY
   pass "9 deleted reply targets retain their resolved metadata and full text"
 }
 
+test_10_explicit_reply_targets_bypass_history_filters() {
+  local home out
+  home="$TMP_ROOT/c10"
+  setup_home "$home"
+  out=$(FM_EXT_HISTORY_MAX_CHARS=500 plugin_env "$home" <<'PY'
+import os, sys
+from types import SimpleNamespace
+sys.path.insert(0, os.environ["PYTHONPATH"])
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+import tcfix as fx
+home, root = sys.argv[1], sys.argv[2]
+edge = fx.setup(home, root)
+import intake
+base = 860000000000000000
+T = "770000000000000010"
+latest = base + 1000
+fx.record_posts(home, [latest])
+for path_index, path in enumerate(("backward", "around", "resolved")):
+    for case, (author, bot, webhook, kind, text, attachments) in enumerate((
+        ("123", True, None, 0, "other bot", []),
+        ("124", True, "987", 0, "webhook", []),
+        (fx.A, False, None, 0, "", [SimpleNamespace()]),
+        (fx.A, False, None, 0, "", []),
+        (fx.A, False, None, 7, "system", []),
+    )):
+        target = str(base + (900 if path == "backward" else 0) + case)
+        anchor = str(base + 2000 + path_index * 10 + case)
+        target_message = fx.post(target, text, author=author, bot=bot, kind=kind)
+        target_message["author"]["global_name"] = "Target"
+        target_message["webhook_id"] = webhook
+        target_message["attachments"] = [{} for item in attachments]
+        edge.pages[T] = [fx.post(base + 100 + n, "recent " + "z" * 100) for n in range(120)]
+        edge.pages[T].append(fx.post(latest, "latest Firstmate", author=fx.BOT, bot=True))
+        if path != "resolved":
+            edge.pages[T].append(target_message)
+        event = fx.message(anchor, "status?", T, name="Aceh · target", kind=19,
+                           reply_to=target, reply_text=text)
+        resolved = event.raw_message.reference.resolved
+        resolved.author = SimpleNamespace(id=int(author), name="target", global_name="Target", bot=bot, system=False)
+        resolved.webhook_id = webhook
+        resolved.type = SimpleNamespace(value=kind)
+        resolved.attachments = attachments
+        assert (intake.pre_gateway_dispatch_hook(event) or {}).get("action") == "skip"
+        record = fx.inbox(home)[anchor]
+        messages = fx.history(home, record)["messages"]
+        kept = next(m for m in messages if m["id"] == target)
+        assert kept["text"] == ("(attachment)" if attachments else text), kept
+        assert (kept["author_id"], kept["author"], kept["bot"], kept["at"]) == (
+            author, "Target", bot, "2026-10-14T00:00:00+00:00"), kept
+        assert record["text"] == "status?", record
+print("explicit-targets-ok")
+PY
+  ) || fail "explicit reply targets case failed: $out"
+  assert_contains "$out" "explicit-targets-ok" "every explicit target must survive all three collection paths"
+  pass "10 bot, webhook, empty, attachment-only, and system reply targets survive every collection path"
+}
+
+test_11_latest_post_survives_progress_retention() {
+  local home out
+  home="$TMP_ROOT/c11"
+  setup_home "$home"
+  out=$(FM_EXT_HISTORY_MAX_CHARS=500 plugin_env "$home" <<'PY'
+import json, os, stat, subprocess, sys, time
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, os.environ["PYTHONPATH"])
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+import tcfix as fx
+home, root = sys.argv[1], sys.argv[2]
+edge = fx.setup(home, root)
+import intake, outbox_poster as poster, thread_context
+T = "770000000000000011"
+base = 870000000000000000
+root, home = Path(root), Path(home)
+created = []
+for n in range(2):
+    anchor = str(base + n)
+    assert (intake.pre_gateway_dispatch_hook(fx.message(anchor, "status?", T, name="Aceh · durable")) or {}).get("action") == "skip"
+    record = fx.inbox(home)[anchor]
+    answer = home / "answer.txt"
+    answer.write_text("answer " + "x" * 3000)
+    subprocess.run(["bash", str(root / "bin/fm-ext-emit.sh"),
+                    "--request-id", record["request_id"], "--kind", "answer", "--generation", "1",
+                    "--text-file", str(answer)], env=poster._env_for(home), check=True, capture_output=True)
+    payload = home / "state/ext-outbox" / (record["slug"] + ".answer.1.json")
+    def send(chunk):
+        message_id = str(base + 10 + len(created))
+        created.append(fx.post(message_id, chunk["text"], author=fx.BOT, bot=True))
+        return {"discord_message_id": message_id}
+    assert poster.deliver_one(payload, home=home, send=send, react=lambda *_: None) == "sent"
+    thread = poster.load_thread_record_by_id(T, home)
+    assert thread["latest_firstmate_post_id"] == created[-1]["id"], thread
+    assert stat.S_IMODE(thread["path"].stat().st_mode) == 0o600
+thread_files = list((home / "state/ext-outbox").glob("*.thread.json"))
+assert len(thread_files) == 1, thread_files
+poster.save_thread_record(thread["path"], thread["request_id"], T, topic_name="renamed")
+latest = created[-1]["id"]
+assert poster.load_thread_record_by_id(T, home)["latest_firstmate_post_id"] == latest
+old = time.time() - 8 * 86400
+outbox = home / "state/ext-outbox"
+for path in outbox.glob("*.json"):
+    os.utime(path, (old, old))
+keep = outbox / (thread["path"].name.removesuffix(".thread.json") + ".answer.2.receipt.json")
+keep.write_text("{}")
+subprocess.run(["bash", "-c", '. "$1/bin/fm-ext-lib.sh"; fm_ext_outbox_prune "$2/state"',
+                "_", str(root), str(home)], env=poster._env_for(home), check=True)
+assert not list(outbox.glob("*.progress.json")), list(outbox.glob("*.progress.json"))
+assert thread["path"].exists()
+edge.pages[T] = created + [fx.post(base + 100 + n, "recent " + "z" * 100) for n in range(350)]
+anchor = str(base + 1000)
+assert (intake.pre_gateway_dispatch_hook(fx.message(anchor, "status?", T, name="Aceh · durable")) or {}).get("action") == "skip"
+messages = fx.history(home, fx.inbox(home)[anchor])["messages"]
+kept = next(m for m in messages if m["id"] == latest)
+assert kept["role"] == "firstmate" and kept["text"] == created[-1]["content"], kept
+reads = {}
+original = Path.read_text
+for n in range(20):
+    (outbox / ("extra%d.progress.json" % n)).write_text(json.dumps({"discord_message_ids": [str(base + 2000 + n)]}))
+def read(path, *args, **kwargs):
+    if path.parent == outbox and path.name.endswith((".progress.json", ".thread.json")):
+        reads[path] = reads.get(path, 0) + 1
+    return original(path, *args, **kwargs)
+with patch.object(Path, "read_text", read):
+    result = thread_context.collect_history(intake.destination_from_event(fx.message(anchor, "status?", T)), home=home)
+assert result["status"] == "ok", result
+assert len(reads) == 21 and all(count == 1 for count in reads.values()), reads
+print("durable-anchor-ok")
+PY
+  ) || fail "durable latest post case failed: $out"
+  assert_contains "$out" "durable-anchor-ok" "thread provenance must survive progress pruning and load once per collection"
+  pass "11 latest-post provenance survives pruning and loads once per collection"
+}
+
 test_1_thread_name_and_project_are_recorded
 test_2_history_sidecar_trims_and_keeps_anchor_posts
 test_3_failed_history_read_files_request_marked_unavailable
@@ -649,4 +782,6 @@ test_6_drain_shows_thread_name_project_and_history
 test_7_history_sidecar_is_pruned_with_the_request
 test_8_history_instructions_never_reach_the_request_text
 test_9_resolved_reply_metadata_survives_deleted_target
+test_10_explicit_reply_targets_bypass_history_filters
+test_11_latest_post_survives_progress_retention
 echo "all fm-ext-thread-context tests passed"

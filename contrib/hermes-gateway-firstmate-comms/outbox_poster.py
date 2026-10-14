@@ -382,6 +382,19 @@ def write_progress(payload: dict, progress: dict, home: Path) -> None:
         )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "progress failed")
+    posted = [str(item) for item in (progress.get("discord_message_ids") or [])
+              if _SNOWFLAKE.fullmatch(str(item or ""))]
+    thread_id = str(progress.get("topic_thread_id") or payload.get("thread_id") or "")
+    if (posted and _SNOWFLAKE.fullmatch(thread_id)
+            and thread_id != str(payload.get("channel_id") or "")
+            and str(payload.get("channel_id") or "") == dedicated_channel(home)):
+        recorded = load_thread_record_by_id(thread_id, home)
+        save_thread_record(
+            recorded.get("path") or request_progress_path(payload, home),
+            recorded.get("request_id") or payload.get("request_id"), thread_id,
+            creator=recorded.get("creator") or "adopted",
+            latest_firstmate_post_id=max(posted, key=lambda value: (len(value), value)),
+        )
 
 
 def _chunk_payload(payload: dict, text: str, index: int, total: int) -> dict:
@@ -491,6 +504,7 @@ def _read_thread_record(path: Path) -> dict:
     return {"path": path,
             "request_id": request_id if isinstance(request_id, str) else "",
             "topic_thread_id": thread_id,
+            "latest_firstmate_post_id": str(data.get("latest_firstmate_post_id") or ""),
             "topic_name": name if isinstance(name, str) else "",
             "thread_state": state if isinstance(state, str) else "",
             "creator": creator if isinstance(creator, str) else "",
@@ -591,7 +605,8 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
                        state_at: float | None = None, rename: dict | None = None,
                        marked_open: bool | None = None,
                        open_attempt: bool | None = None,
-                       opening_posted: bool | None = None) -> None:
+                       opening_posted: bool | None = None,
+                       latest_firstmate_post_id: str = "") -> None:
     """Write one thread record atomically, preserving any prior unset field.
 
     ``creator`` is the provenance that authorises a later rename: ``firstmate``
@@ -605,6 +620,8 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     rename stays visible and can be retried. It keeps ``name``, ``at``, and
     ``outcome`` (applied, unchanged, or failed); a failure also keeps ``error``,
     ``retryable``, and ``attempts`` (consecutive failed attempts).
+    ``latest_firstmate_post_id`` is the newest Discord message id recorded
+    for a chunk posted in this thread.
     ``marked_open`` records whether the marker was associated with an open
     decision, preserving that association when a reminder postdates it.
 
@@ -647,6 +664,10 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
         record["open_attempt"] = True
     if (opening_posted if opening_posted is not None else prior.get("opening_posted")) is True:
         record["opening_posted"] = True
+    post_ids = [str(item) for item in (latest_firstmate_post_id, prior.get("latest_firstmate_post_id"))
+                if _SNOWFLAKE.fullmatch(str(item or ""))]
+    if post_ids:
+        record["latest_firstmate_post_id"] = max(post_ids, key=lambda value: (len(value), value))
     body = json.dumps(record)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
@@ -1529,20 +1550,11 @@ def react_to_request(payload: dict, emoji: str, react: ReactFn | None = None) ->
     return True
 
 
-def firstmate_post_for(message_id: str, home: Path | None = None) -> dict | None:
-    """Return {"request_id": ...} when Firstmate's outbox posted message_id.
-    The chunk-progress records hold every Discord id the poster has sent,
-    including the leading chunks of a reply still being delivered, and they
-    follow the bridge's retention window. request_id is empty for a record
-    written before progress carried it. None means the message is not one of
-    Firstmate's own posts that this home still remembers.
-    """
-    if not _SNOWFLAKE.fullmatch(str(message_id or "")):
-        return None
-    home = home or firstmate_home()
+def firstmate_posts(home: Path) -> dict[str, dict]:
     outbox = state_dir(home) / "ext-outbox"
+    posts = {}
     if outbox.is_symlink() or not outbox.is_dir():
-        return None
+        return posts
     for path in sorted(outbox.glob("*.progress.json")):
         if path.is_symlink() or not path.is_file():
             continue
@@ -1553,10 +1565,30 @@ def firstmate_post_for(message_id: str, home: Path | None = None) -> dict | None
         if not isinstance(data, dict):
             continue
         posted = data.get("discord_message_ids")
-        if isinstance(posted, list) and str(message_id) in [str(item) for item in posted]:
+        if isinstance(posted, list):
             request_id = data.get("request_id")
-            return {"request_id": request_id if isinstance(request_id, str) else ""}
-    return None
+            for message_id in posted:
+                if _SNOWFLAKE.fullmatch(str(message_id or "")):
+                    posts.setdefault(str(message_id), {"request_id": request_id if isinstance(request_id, str) else ""})
+    for path in sorted(outbox.glob(f"*{_THREAD_RECORD_SUFFIX}")):
+        record = _read_thread_record(path)
+        message_id = record.get("latest_firstmate_post_id") or ""
+        if _SNOWFLAKE.fullmatch(message_id):
+            posts.setdefault(message_id, {"request_id": record["request_id"]})
+    return posts
+
+
+def firstmate_post_for(message_id: str, home: Path | None = None) -> dict | None:
+    """Return {"request_id": ...} when Firstmate's outbox posted message_id.
+
+    Chunk progress remembers every posted id during its retention window;
+    the thread record remembers its latest post for that record's lifetime.
+    request_id is empty for legacy progress without it. None means this home
+    no longer has provenance for the message.
+    """
+    if not _SNOWFLAKE.fullmatch(str(message_id or "")):
+        return None
+    return firstmate_posts(home or firstmate_home()).get(str(message_id))
 
 
 WAITING_PIN_STATE = "ext-waiting-pin.json"

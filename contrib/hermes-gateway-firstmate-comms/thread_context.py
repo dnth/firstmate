@@ -179,25 +179,26 @@ def _get(path: str, query: dict, token: str) -> list:
     return data
 
 
-def _entry(message: dict, bot_id: str, requester: str, home: Path) -> dict | None:
+def _entry(message: dict, bot_id: str, requester: str, posts: dict, reply_id: str) -> dict | None:
     """One history entry for a Discord message object, or None to skip it."""
     if not isinstance(message, dict):
         return None
-    if message.get("type") not in (_MESSAGE_DEFAULT, _MESSAGE_REPLY):
-        return None
     message_id = str(message.get("id") or "")
+    explicit_reply = bool(reply_id) and message_id == reply_id
+    if not explicit_reply and message.get("type") not in (_MESSAGE_DEFAULT, _MESSAGE_REPLY):
+        return None
     author = message.get("author")
     if not _SNOWFLAKE.fullmatch(message_id) or not isinstance(author, dict):
         return None
     author_id = str(author.get("id") or "")
-    if message.get("webhook_id"):
+    if message.get("webhook_id") and not explicit_reply:
         return None
     is_bot = bool(author.get("bot") or author_id == bot_id)
-    if _poster().firstmate_post_for(message_id, home) is not None:
+    if message_id in posts:
         role = "firstmate"
     elif author_id == bot_id:
         role = "other"
-    elif author.get("bot") or author.get("system"):
+    elif (author.get("bot") or author.get("system")) and not explicit_reply:
         return None
     elif author_id == requester:
         role = "requester"
@@ -207,7 +208,7 @@ def _entry(message: dict, bot_id: str, requester: str, home: Path) -> dict | Non
     text = text if isinstance(text, str) else ""
     if not text.strip() and message.get("attachments"):
         text = "(attachment)"
-    if not text.strip():
+    if not text.strip() and not explicit_reply:
         return None
     name = author.get("global_name") or author.get("username") or "unknown"
     return {
@@ -265,6 +266,7 @@ def _collect_history(dest, reply_id, reply_text, reply_message, budget, home) ->
         except ValueError:
             budget = HISTORY_DEFAULT_CHARS
 
+    posts = poster.firstmate_posts(home)
     entries: dict[str, dict] = {}
     before = anchor
     chars = 0
@@ -272,7 +274,7 @@ def _collect_history(dest, reply_id, reply_text, reply_message, budget, home) ->
     while True:
         page = _get(f"/channels/{thread}/messages", {"limit": PAGE_SIZE, "before": before}, token)
         for message in page:
-            entry = _entry(message, bot_id, requester, home)
+            entry = _entry(message, bot_id, requester, posts, reply_id)
             if entry is not None and entry["id"] not in entries:
                 entries[entry["id"]] = entry
                 chars += len(entry["text"])
@@ -288,14 +290,14 @@ def _collect_history(dest, reply_id, reply_text, reply_message, budget, home) ->
         for message in _get(
             f"/channels/{thread}/messages", {"limit": REPLY_WINDOW, "around": reply_id}, token,
         ):
-            entry = _entry(message, bot_id, requester, home)
+            entry = _entry(message, bot_id, requester, posts, reply_id)
             if entry is not None and entry["id"] not in entries and entry["id"] != anchor:
                 entries[entry["id"]] = entry
-    if reply_id and reply_id not in entries and reply_text.strip():
+    if reply_id and reply_id not in entries and (reply_message is not None or reply_text.strip()):
         message = reply_message or {
             "id": reply_id, "type": _MESSAGE_REPLY, "content": reply_text, "author": {},
         }
-        entry = _entry(message, bot_id, requester, home)
+        entry = _entry(message, bot_id, requester, posts, reply_id)
         if entry is not None:
             entries[entry["id"]] = entry
     return {"status": "ok", "reply_to_id": reply_id, "messages": list(entries.values())}
