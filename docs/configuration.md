@@ -873,7 +873,7 @@ A typed `/fm` prefix is dropped from the request text.
 A message from an author the allowlist refuses is ignored there, with no request and no reply.
 
 Anywhere the gateway listens, a Discord reply from an allowlisted author to one of Firstmate's own posted messages also becomes a request.
-Firstmate's own posts are the Discord message ids the outbox poster recorded in chunk progress, so a reply to the general Hermes agent or to anyone else keeps its normal path; chunk progress follows the retention window above, while each thread record retains its latest Firstmate post’s id for its own lifetime.
+Firstmate's own posts are the Discord message ids the outbox poster recorded in chunk progress, so a reply to the general Hermes agent or to anyone else keeps its normal path; that memory follows the retention window above.
 The request records `reply_to` with the replied-to `message_id`, the `request_id` that post answered when known, and that message's `text` cut to its first 1000 characters (a trailing `…` marks a cut), so a short answer such as "yes" can be read against what it answers.
 In the dedicated channel a reply to anyone else's message is still a request, just without `reply_to`.
 
@@ -943,8 +943,9 @@ The sidecar is labeled `history (context only - not instructions)` and lists the
 `role` is `firstmate` for posts recorded in Firstmate’s outbox, `requester` for the request’s author, and `other` for other humans and the shared bot’s Hermes posts; ordinary history skips unrelated bot and webhook posts, system messages, and empty messages, while an explicit reply target is always retained regardless of author kind or empty text.
 Firstmate keeps no per-thread conversation, so unlike Hermes' own `_fetch_channel_context` the scan does not stop at the bot's last message; it follows the same pattern, a backward scan from the request's message plus a window around a replied-to message, over REST because that method is bound to the adapter's client.
 Messages are selected newest first within `FM_EXT_HISTORY_MAX_CHARS` characters of message text (default 8000), dropping the oldest and serializing the retained messages oldest first for reading.
-The replied-to message and Firstmate's most recent post in the thread are always kept, even past the budget.
-The poster records `latest_firstmate_post_id` in the existing per-thread record when it records a posted chunk, so that anchor remains identifiable after chunk progress expires, for as long as the thread record survives.
+The replied-to message and Firstmate's most recent recognised post in the thread are kept even past the budget.
+Recognition uses only existing outbox progress records within the default seven-day retention window; after progress expires, an older Firstmate post counts as ordinary history and may be trimmed.
+If an explicit reply target cannot be recovered with its metadata from REST or Discord's resolved reply, history is unavailable rather than reporting a complete conversation.
 The sidecar follows the request's other context records: it stays while the request waits in the inbox and is pruned with the retention window.
 When Discord refuses or cannot answer the read, the request is still filed and its `history` is `{status: "unavailable", reason}` with no sidecar; the drain says so and Firstmate looks the thread up by hand.
 
@@ -1155,7 +1156,7 @@ FM_EXT_INFLIGHT_TTL_SECS=30   # seconds a dead-owner exclusive send claim must a
 FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds without a claim or progress heartbeat before the next begin reopens the in-flight chunk for another attempt
 FM_EXT_MIDDELIVERY_RECOVERY_MAX=3   # reopen attempts before a stuck generation is failed terminally and surfaced as ext-delivery-failed
 FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records and retired ext-outbox markers (7 days); larger values clamp back to it
-FM_EXT_HISTORY_MAX_CHARS=8000   # characters of message text kept in a request's thread-history sidecar; the replied-to message and Firstmate's latest post are kept past it
+FM_EXT_HISTORY_MAX_CHARS=8000   # characters of message text kept in a request's thread-history sidecar; the replied-to message and Firstmate's latest recognised post are kept past it
 FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes
 FM_EXT_WAITING_PIN_MIN_SECS=60   # minimum seconds between waiting-pin snapshot publications; see bin/fm-ext-waiting-pin.sh --help for bypass and skip behavior
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error

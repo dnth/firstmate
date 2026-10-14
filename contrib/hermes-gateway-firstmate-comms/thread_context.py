@@ -13,7 +13,8 @@ patching Hermes, so this module follows the same pattern over Discord's REST
 API with the bot token the outbox poster already uses. It differs on purpose:
 Firstmate keeps no per-thread conversation, so the scan does not stop at the
 bot's own last message; it collects both sides and leaves trimming to the
-intake script, which keeps the replied-to message and Firstmate's latest post.
+intake script, which keeps the replied-to message and latest recognised
+Firstmate post (the outbox progress retention window bounds recognition).
 
 Everything here is best effort. A failed read never stops a request: it is
 reported as an unavailable history with its reason.
@@ -191,6 +192,13 @@ def _entry(message: dict, bot_id: str, requester: str, posts: dict, reply_id: st
     if not _SNOWFLAKE.fullmatch(message_id) or not isinstance(author, dict):
         return None
     author_id = str(author.get("id") or "")
+    name = author.get("global_name") or author.get("username")
+    timestamp = message.get("timestamp")
+    if explicit_reply and not (
+        _SNOWFLAKE.fullmatch(author_id) and isinstance(name, str) and name.strip()
+        and isinstance(author.get("bot"), bool) and isinstance(timestamp, str) and timestamp.strip()
+    ):
+        return None
     if message.get("webhook_id") and not explicit_reply:
         return None
     is_bot = bool(author.get("bot") or author_id == bot_id)
@@ -210,7 +218,7 @@ def _entry(message: dict, bot_id: str, requester: str, posts: dict, reply_id: st
         text = "(attachment)"
     if not text.strip() and not explicit_reply:
         return None
-    name = author.get("global_name") or author.get("username") or "unknown"
+    name = name or "unknown"
     return {
         "id": message_id,
         "author_id": author_id,
@@ -225,7 +233,6 @@ def _entry(message: dict, bot_id: str, requester: str, posts: dict, reply_id: st
 def collect_history(
     dest: dict,
     reply_id: str = "",
-    reply_text: str = "",
     reply_message: dict | None = None,
     budget: int | None = None,
     home: Path | None = None,
@@ -234,20 +241,20 @@ def collect_history(
 
     Scans back from the request's message, both the captain's and Firstmate's
     messages, until it holds about ``budget`` characters of text and
-    Firstmate's latest post, or reaches the thread start; adds a window around a
+    Firstmate's latest recognised post, or reaches the thread start; adds a window around a
     replied-to message that lies further back. Returns
     {"status": "ok", "reply_to_id": ..., "messages": [...]} or {"status": "unavailable",
     "reason": ...}. Never raises.
     """
     try:
-        return _collect_history(dest, reply_id, reply_text, reply_message, budget, home or _poster().firstmate_home())
+        return _collect_history(dest, reply_id, reply_message, budget, home or _poster().firstmate_home())
     except HistoryUnavailable as err:
         return {"status": "unavailable", "reason": str(err)}
     except Exception as err:  # best effort: never stop a request
         return {"status": "unavailable", "reason": f"history read failed ({type(err).__name__})"}
 
 
-def _collect_history(dest, reply_id, reply_text, reply_message, budget, home) -> dict:
+def _collect_history(dest, reply_id, reply_message, budget, home) -> dict:
     poster = _poster()
     token = poster._bot_token()
     if not token:
@@ -293,13 +300,11 @@ def _collect_history(dest, reply_id, reply_text, reply_message, budget, home) ->
             entry = _entry(message, bot_id, requester, posts, reply_id)
             if entry is not None and entry["id"] not in entries and entry["id"] != anchor:
                 entries[entry["id"]] = entry
-    if reply_id and reply_id not in entries and (reply_message is not None or reply_text.strip()):
-        message = reply_message or {
-            "id": reply_id, "type": _MESSAGE_REPLY, "content": reply_text, "author": {},
-        }
-        entry = _entry(message, bot_id, requester, posts, reply_id)
-        if entry is not None:
-            entries[entry["id"]] = entry
+    if reply_id and reply_id not in entries:
+        entry = _entry(reply_message, bot_id, requester, posts, reply_id)
+        if entry is None or entry["id"] != reply_id:
+            raise HistoryUnavailable("the replied-to message could not be recovered with its metadata")
+        entries[entry["id"]] = entry
     return {"status": "ok", "reply_to_id": reply_id, "messages": list(entries.values())}
 
 
@@ -319,7 +324,7 @@ def resolved_reply(event: object, reply_id: str, reply_text: str) -> dict | None
             "id": str(getattr(author, "id", None) or ""),
             "global_name": getattr(author, "global_name", None),
             "username": getattr(author, "name", None),
-            "bot": getattr(author, "bot", False),
+            "bot": getattr(author, "bot", None),
             "system": getattr(author, "system", False),
         },
         "webhook_id": getattr(resolved, "webhook_id", None),
@@ -348,7 +353,7 @@ def gather(
             "name": name,
             "project": resolve_project(name, dest["thread_id"], home),
             "history": collect_history(
-                dest, reply_id, reply_text, resolved_reply(event, reply_id, reply_text), home=home,
+                dest, reply_id, resolved_reply(event, reply_id, reply_text), home=home,
             ),
         }
     except Exception:

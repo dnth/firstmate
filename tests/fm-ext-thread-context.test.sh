@@ -697,7 +697,7 @@ PY
   pass "10 bot, webhook, empty, attachment-only, and system reply targets survive every collection path"
 }
 
-test_11_latest_post_survives_progress_retention() {
+test_11_post_recognition_expires_with_progress() {
   local home out
   home="$TMP_ROOT/c11"
   setup_home "$home"
@@ -715,6 +715,9 @@ T = "770000000000000011"
 base = 870000000000000000
 root, home = Path(root), Path(home)
 created = []
+creator_request = "discord:%s:%s:%s:%s" % (fx.G, fx.C, fx.C, base - 1)
+poster.save_request_thread({"slug": fx.slug_of(creator_request), "request_id": creator_request},
+                           T, home, creator="firstmate")
 for n in range(2):
     anchor = str(base + n)
     assert (intake.pre_gateway_dispatch_hook(fx.message(anchor, "status?", T, name="Aceh · durable")) or {}).get("action") == "skip"
@@ -731,13 +734,17 @@ for n in range(2):
         return {"discord_message_id": message_id}
     assert poster.deliver_one(payload, home=home, send=send, react=lambda *_: None) == "sent"
     thread = poster.load_thread_record_by_id(T, home)
-    assert thread["latest_firstmate_post_id"] == created[-1]["id"], thread
+    assert "latest_firstmate_post_id" not in thread, thread
+    assert poster.firstmate_post_for(created[-1]["id"], home)["request_id"] == record["request_id"]
     assert stat.S_IMODE(thread["path"].stat().st_mode) == 0o600
 thread_files = list((home / "state/ext-outbox").glob("*.thread.json"))
 assert len(thread_files) == 1, thread_files
 poster.save_thread_record(thread["path"], thread["request_id"], T, topic_name="renamed")
 latest = created[-1]["id"]
-assert poster.load_thread_record_by_id(T, home)["latest_firstmate_post_id"] == latest
+assert poster.load_thread_record_by_id(T, home)["request_id"] == creator_request
+legacy = json.loads(thread["path"].read_text())
+legacy["latest_firstmate_post_id"] = latest
+thread["path"].write_text(json.dumps(legacy))
 old = time.time() - 8 * 86400
 outbox = home / "state/ext-outbox"
 for path in outbox.glob("*.json"):
@@ -748,12 +755,15 @@ subprocess.run(["bash", "-c", '. "$1/bin/fm-ext-lib.sh"; fm_ext_outbox_prune "$2
                 "_", str(root), str(home)], env=poster._env_for(home), check=True)
 assert not list(outbox.glob("*.progress.json")), list(outbox.glob("*.progress.json"))
 assert thread["path"].exists()
+assert poster.firstmate_post_for(latest, home) is None
 edge.pages[T] = created + [fx.post(base + 100 + n, "recent " + "z" * 100) for n in range(350)]
 anchor = str(base + 1000)
 assert (intake.pre_gateway_dispatch_hook(fx.message(anchor, "status?", T, name="Aceh · durable")) or {}).get("action") == "skip"
 messages = fx.history(home, fx.inbox(home)[anchor])["messages"]
-kept = next(m for m in messages if m["id"] == latest)
-assert kept["role"] == "firstmate" and kept["text"] == created[-1]["content"], kept
+assert latest not in {m["id"] for m in messages}, messages
+result = thread_context.collect_history(intake.destination_from_event(fx.message(anchor, "status?", T)), budget=80000, home=home)
+kept = next(m for m in result["messages"] if m["id"] == latest)
+assert kept["role"] == "other" and kept["bot"] is True, kept
 reads = {}
 original = Path.read_text
 for n in range(20):
@@ -765,12 +775,70 @@ def read(path, *args, **kwargs):
 with patch.object(Path, "read_text", read):
     result = thread_context.collect_history(intake.destination_from_event(fx.message(anchor, "status?", T)), home=home)
 assert result["status"] == "ok", result
-assert len(reads) == 21 and all(count == 1 for count in reads.values()), reads
-print("durable-anchor-ok")
+assert len(reads) == 20 and all(count == 1 for count in reads.values()), reads
+print("retention-limit-ok")
 PY
-  ) || fail "durable latest post case failed: $out"
-  assert_contains "$out" "durable-anchor-ok" "thread provenance must survive progress pruning and load once per collection"
-  pass "11 latest-post provenance survives pruning and loads once per collection"
+  ) || fail "post recognition retention case failed: $out"
+  assert_contains "$out" "retention-limit-ok" "post recognition must expire with progress and ignore legacy thread anchors"
+  pass "11 old posts become ordinary history after progress pruning without incorrect reply linkage"
+}
+
+test_12_missing_reply_metadata_marks_history_unavailable() {
+  local home out
+  home="$TMP_ROOT/c12"
+  setup_home "$home"
+  out=$(plugin_env "$home" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+import tcfix as fx
+home, root = sys.argv[1], sys.argv[2]
+edge = fx.setup(home, root)
+import intake
+base = 880000000000000000
+T = "770000000000000012"
+for n in range(7):
+    target, anchor = str(base + n), str(base + 100 + n)
+    event = fx.message(anchor, "status?", T, name="Aceh · missing target", kind=19,
+                       reply_to=target, reply_text="old text" if n != 1 else None)
+    resolved = event.raw_message.reference.resolved
+    edge.pages[T] = [fx.post(base + 50, "recent")]
+    if n in (0, 1, 6):
+        event.raw_message.reference.resolved = None
+    elif n == 2:
+        resolved.author = None
+    elif n == 3:
+        del resolved.author.bot
+    elif n == 4:
+        resolved.created_at = None
+    elif n == 5:
+        resolved.author.global_name = None
+        resolved.author.name = None
+    if n == 6:
+        incomplete = fx.post(target, "old text")
+        incomplete["timestamp"] = ""
+        edge.pages[T].append(incomplete)
+    assert (intake.pre_gateway_dispatch_hook(event) or {}).get("action") == "skip"
+    record = fx.inbox(home)[anchor]
+    assert record["text"] == "status?", record
+    assert record["history"]["status"] == "unavailable", record
+    assert "replied-to message" in record["history"]["reason"], record
+    assert fx.context(home, record)["history"]["status"] == "unavailable"
+    assert not Path(home, "state/ext-context", record["slug"] + ".history.json").exists()
+target, anchor = str(base + 10), str(base + 200)
+event = fx.message(anchor, "status?", T, name="Aceh · recovered target", kind=19, reply_to=target)
+event.raw_message.reference.resolved = None
+edge.pages[T] = [fx.post(target, "recovered from REST")]
+assert (intake.pre_gateway_dispatch_hook(event) or {}).get("action") == "skip"
+record = fx.inbox(home)[anchor]
+assert record["history"]["status"] == "ok", record
+assert fx.history(home, record)["messages"][0]["id"] == target
+print("missing-target-ok")
+PY
+  ) || fail "missing reply metadata case failed: $out"
+  assert_contains "$out" "missing-target-ok" "missing reply metadata must mark history unavailable without blocking intake"
+  pass "12 missing reply metadata marks history unavailable while complete REST targets remain readable"
 }
 
 test_1_thread_name_and_project_are_recorded
@@ -783,5 +851,6 @@ test_7_history_sidecar_is_pruned_with_the_request
 test_8_history_instructions_never_reach_the_request_text
 test_9_resolved_reply_metadata_survives_deleted_target
 test_10_explicit_reply_targets_bypass_history_filters
-test_11_latest_post_survives_progress_retention
+test_11_post_recognition_expires_with_progress
+test_12_missing_reply_metadata_marks_history_unavailable
 echo "all fm-ext-thread-context tests passed"

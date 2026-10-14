@@ -52,7 +52,7 @@
 # state/ext-context/<slug>.history.json (mode 0600, pruned with the request's
 # other context records) keeps the messages oldest first, trimmed newest
 # first to FM_EXT_HISTORY_MAX_CHARS characters of message text (default 8000).
-# The replied-to message (reply_to_id, else --reply-to-message-id) and Firstmate's most recent post in the
+# The replied-to message (reply_to_id, else --reply-to-message-id) and Firstmate's most recent recognised post in the
 # thread are always kept, even past the budget. An unreadable history
 # (status unavailable, or a sidecar that could not be written) still files the
 # request, and the inbox record's history {status, count, path, reason} says
