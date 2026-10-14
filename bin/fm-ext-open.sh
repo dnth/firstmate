@@ -8,14 +8,15 @@
 #
 # Firstmate opens one titled thread in the dedicated channel (config/ext-channel)
 # and posts its first message there through the ordinary outbox and gateway
-# poster. --key is a private stable name for the tracked item, 1-80 characters
-# of letters, digits, dot, underscore, or dash; it never reaches Discord.
+# poster. --key is a private stable name for the tracked item, 1-80 characters,
+# starting with a letter or digit and otherwise containing letters, digits,
+# dot, underscore, or dash; it never reaches Discord.
 # The same key always maps to the same request id,
 #   discord:<guild>:<channel>:<channel>:<synthetic>
-# whose last part is derived from the key, so re-running an open is a no-op
+# whose last part is derived from the key, so re-running a recorded open is a no-op
 # and a posting marker without a receipt refuses exactly as fm-ext-emit.sh
-# does. The guild is the one the allowlist names for the dedicated channel;
-# no allowlist rule for that channel, or rules naming more than one guild,
+# does. The guild is the one valid allowlist rules name for the dedicated channel;
+# no valid allowlist rule for that channel, or rules naming more than one guild,
 # refuses. There is no channel argument: only the dedicated channel can host
 # an opened thread, and the poster re-checks that before creating it.
 #

@@ -910,12 +910,14 @@ It opens a titled public thread directly in the dedicated channel and posts its 
 A private key names the tracked item and maps to one stable request id, printed on success and recorded in the destination context, so re-running the same open never opens a second thread and later `followup`/`final` emits and thread states land in that thread exactly as for a request-created one.
 The title is required and passes the shared title screen; an opened thread has no request text, so its title is its only name.
 The open has no channel argument, and the poster re-checks the dedicated channel before creating the thread: a payload whose channel is no longer dedicated fails terminally rather than opening a thread anywhere else.
-The guild is the one the allowlist names for the dedicated channel, and an open refuses when the allowlist names none or more than one, so it never reaches a guild the bridge does not already admit.
+The guild is the one valid allowlist rules name for the dedicated channel, and an open refuses when those rules name none or more than one; malformed rules admit nothing.
 Unlike a request thread, an opened thread never falls back to posting in place: a create refused for a missing permission fails the first message with a reason naming the permissions the bot needs, and a create with an unknown outcome is never retried into a second thread.
+Later updates stay queued and retryable until the opening message has posted, including during retries or an unresolved creation outcome; they never create a thread or post ahead of the opening message.
+An opening that fails terminally also terminally fails its waiting updates.
 A captain message inside an opened thread is an ordinary in-thread request.
 An opened thread follows the bridge retention window, but its key stays bound to that thread while any of its bridge records remain; reopening with that key returns that thread.
 Slash commands are unchanged: `/fm` replies post to their originating thread (the channel itself for a top-level interaction) and never attempt thread creation.
-A thread-creation failure (such as missing permission) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
+For request-created threads, a thread-creation failure (such as missing permission) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
 On that existing-thread path, the poster fetches and validates the winning name before recording the thread as adopted for reply routing.
 If that lookup or validation fails, replies still route to the existing thread but no new naming record is saved.
 A thread is renamed only with positive evidence that this home created it: a record that says so, or, for a record written before that provenance was kept, a Discord reply naming this bot as the thread's owner.
