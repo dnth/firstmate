@@ -524,8 +524,8 @@ FM_EXT_DECISION_CUSTOM_ID_MAX=100
 # option lines plus a reply/choice cue, or a "reply ... with the number/code"
 # line on its own.
 FM_EXT_CHOICE_OPTION_RE='^[[:space:]]*((-|\*|•)[[:space:]]+)?(\(?[0-9]{1,2}[.):]|[A-Za-z][0-9]{1,2}[.):]?)([[:space:]]+[^[:space:]]|$)'
-FM_EXT_CHOICE_CUE_RE='(reply|respond|answer|type|send|pick|choose|select|tap|click)[^.!?]{0,40}(number|code|letter|option|choice)|which (one|option)|(pick|choose) one'
-FM_EXT_CHOICE_REPLY_RE='reply[^.!?]{0,30}(with|using)[^.!?]{0,20}(number|code|letter)'
+FM_EXT_CHOICE_CUE_RE='(^|[^[:alnum:]_])((reply|respond|answer|type|send|pick|choose|select|tap|click)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,38}[^[:alnum:]_.!?])(number|code|letter|option|choice)|which (one|option)|(pick|choose) one)([^[:alnum:]_]|$)'
+FM_EXT_CHOICE_REPLY_RE='(^|[^[:alnum:]_])reply([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,28}[^[:alnum:]_.!?])(with|using)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,18}[^[:alnum:]_.!?])(number|code|letter)([^[:alnum:]_]|$)'
 
 fm_ext_text_choice_shaped() {
   local text=$1 options

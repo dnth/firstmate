@@ -257,9 +257,105 @@ test_6_choice_with_a_decision_file_is_unaffected() {
   pass "6 a choice posted with a decision file is unaffected by the guard"
 }
 
+test_7_settled_ask_retries_preserve_state() {
+  local home=$TMP_ROOT/c7 kind mode task generation=0 slug payload out rc
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: 7 needs tasks-axi for the captain-call board"; return 0; }
+  BASE_PATH="$(dirname "$(command -v tasks-axi)"):$BASE_PATH"
+  setup_home "$home"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  mkdir -p "$home/data"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  ln -sf "$(command -v tasks-axi)" "$home/fakebin/tasks-axi"
+  fm_fake_exit0 "$home/fakebin" treehouse no-mistakes gh gh-axi
+  printf 'Pick a route.' > "$home/body.txt"
+  for kind in answer followup final; do
+    for mode in done release; do
+      generation=$((generation + 1))
+      task="retry-$kind-$mode"
+      slug=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
+        --task "$task" --title "Pick route" --repo sample --reason "needs a call" --mode "$mode" \
+        --text-file "$home/body.txt" --option "North" --option "South") || fail "initial $kind/$mode ask failed"
+      payload=$(payload_of "$home" "$kind" "$generation")
+      printf '%s\t%s\t%s\t%s\n' "$task" "North" "1. North" "$mode" \
+        | home_env "$home" "$ROOT/bin/fm-captain-hold.sh" answers --source "test button click" >/dev/null \
+        || fail "settling $kind/$mode failed"
+      cp "$home/data/backlog.md" "$home/backlog-before"
+      cp "$payload" "$home/payload-before"
+      out=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
+        --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
+        --option "North" --option "South") || fail "payload retry of $kind/$mode failed"
+      [ "$out" = "$slug" ] || fail "payload retry changed slug"
+      cmp "$payload" "$home/payload-before" || fail "retry changed the existing payload"
+      cmp "$home/data/backlog.md" "$home/backlog-before" || fail "payload retry mutated the settled task"
+      printf '{}\n' > "${payload%.json}.posting"
+      chmod 600 "${payload%.json}.posting"
+      out=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
+        --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
+        --option "North" --option "South" 2>&1)
+      rc=$?
+      [ "$rc" -ne 0 ] || fail "mid-delivery $kind/$mode retry succeeded"
+      assert_contains "$out" "mid-delivery" "retry must preserve emit's posting refusal"
+      cmp "$home/data/backlog.md" "$home/backlog-before" || fail "posting retry mutated the settled task"
+      rm "$payload"
+      out=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
+        --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
+        --option "North" --option "South" 2>&1)
+      [ "$?" -ne 0 ] || fail "posting-only $kind/$mode retry succeeded"
+      assert_contains "$out" "mid-delivery" "posting-only retry must preserve emit's refusal"
+      cmp "$home/data/backlog.md" "$home/backlog-before" || fail "posting-only retry mutated the settled task"
+      printf '{}\n' > "${payload%.json}.receipt.json"
+      chmod 600 "${payload%.json}.receipt.json"
+      out=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
+        --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
+        --option "North" --option "South") || fail "receipt must beat posting for $kind/$mode"
+      [ "$out" = "$slug" ] || fail "receipt retry changed slug"
+      cmp "$home/data/backlog.md" "$home/backlog-before" || fail "receipt retry mutated the settled task"
+      [ ! -e "$payload" ] || fail "receipt retry republished the ask"
+      rm "${payload%.json}.posting"
+      home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
+        --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
+        --option "North" --option "South" >/dev/null || fail "receipt-only retry failed"
+      cmp "$home/data/backlog.md" "$home/backlog-before" || fail "receipt-only retry mutated the settled task"
+    done
+  done
+  pass "7 settled asks preserve task state across payload, posting, and receipt retries"
+}
+
+test_8_choice_cues_match_whole_words() {
+  local home=$TMP_ROOT/c8 text generation=0
+  setup_home "$home"
+  for text in \
+    $'1. Build passed\n2. Tests passed\nI will send the report after optional checks finish.' \
+    $'1. Build passed\n2. Tests passed\nThe types of options are documented.' \
+    $'1. Build passed\n2. Tests passed\nWe will send the decoded report.' \
+    $'1. Build passed\n2. Tests passed\nWe will send the renumbered report.' \
+    'Reply with the newsletter attached.' \
+    'Reply without the number.' \
+    'Preply with the number.' \
+    $'1. Build passed\n2. Tests passed\nWhich ones passed?'; do
+    generation=$((generation + 1))
+    emit_text "$home" "$generation" "$text"
+    [ "$RC" -eq 0 ] || fail "ordinary words triggered the choice guard: $text: $OUT"
+  done
+  for text in \
+    $'1. North\n2. South\nSend an OPTION.' \
+    $'1. North\n2. South\nWhich option?' \
+    $'1. North\n2. South\nChoose one.' \
+    'Reply using a LETTER.' \
+    'Reply with the code.'; do
+    generation=$((generation + 1))
+    emit_text "$home" "$generation" "$text"
+    [ "$RC" -ne 0 ] || fail "whole-word choice cue bypassed the guard: $text"
+    assert_contains "$OUT" "fm-ext-ask.sh" "choice refusal must name ask"
+  done
+  pass "8 cue verbs and nouns match whole words while genuine choices remain guarded"
+}
+
 test_1_ask_holds_and_posts_buttons_in_text_order
 test_2_mode_is_required_and_pre_hold_refusals
 test_3_emit_refuses_a_choice_without_buttons
 test_4_no_buttons_posts_a_deliberate_plain_list
 test_5_ordinary_text_is_unaffected
 test_6_choice_with_a_decision_file_is_unaffected
+test_7_settled_ask_retries_preserve_state
+test_8_choice_cues_match_whole_words

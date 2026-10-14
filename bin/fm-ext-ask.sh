@@ -165,13 +165,24 @@ jq -n --arg key "$KEY" --arg mode "$MODE" --argjson options "$OPTIONS_JSON" \
   '{key: $key, mode: $mode, options: $options}' > "$WORK/decision.json" \
   || die "could not write the decision file" 1
 
+emit=("$SCRIPT_DIR/fm-ext-emit.sh" --request-id "$REQUEST_ID" --kind "$KIND"
+  --generation "$GENERATION" --text-file - --decision-file "$WORK/decision.json"
+  --thread-state needs-you)
+[ -z "$THREAD_TITLE" ] || emit+=(--thread-title "$THREAD_TITLE")
+
+SLUG=$(fm_ext_request_slug "$REQUEST_ID") || die "could not derive request slug" 1
+OUTBOX=$(fm_ext_outbox_dir)
+for identity in fm_ext_outbox_basename fm_ext_outbox_receipt_basename fm_ext_outbox_posting_basename; do
+  artifact=$("$identity" "$SLUG" "$KIND" "$GENERATION") || die "invalid outbox identity" 1
+  if fm_ext_private_artifact_file_valid "$OUTBOX" "$artifact" 600; then
+    printf '%s\n' "$FULL_TEXT" | "${emit[@]}"
+    exit "$?"
+  fi
+done
+
 hold=("$SCRIPT_DIR/fm-captain-hold.sh" hold "$TASK" --reason "$REASON")
 [ -z "$TITLE" ] || hold+=(--title "$TITLE")
 [ -z "$REPO" ] || hold+=(--repo "$REPO")
 "${hold[@]}" >&2 || die "could not hold task $TASK for the captain" 1
 
-emit=("$SCRIPT_DIR/fm-ext-emit.sh" --request-id "$REQUEST_ID" --kind "$KIND"
-  --generation "$GENERATION" --text-file - --decision-file "$WORK/decision.json"
-  --thread-state needs-you)
-[ -z "$THREAD_TITLE" ] || emit+=(--thread-title "$THREAD_TITLE")
 printf '%s\n' "$FULL_TEXT" | "${emit[@]}"
