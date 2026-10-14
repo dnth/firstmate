@@ -823,7 +823,7 @@ A payload whose generation has reached a receipt or a terminal failed marker is 
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
 Local bridge records expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
-Each poll drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping an offer marker whose request is still sitting unhandled in the inbox.
+Each poll drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.
 It drops the leftover markers of already retired outbox generations.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
@@ -935,9 +935,12 @@ The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the cre
 A request filed from a thread under the dedicated channel carries where it was filed, so Firstmate does not answer it blind.
 The plugin reads three things at intake and `bin/fm-ext-intake.sh` records them (`--thread-name`, `--project`, `--history-file`; the script header owns the flags and trimming):
 
-- `thread_name` is the thread's current name, read from the event's own channel and otherwise from Discord over REST. It is omitted when neither answers.
-- `project` comes from the `<Project> · <topic>` prefix of that name, ignoring a `❓ ` or `✅ ` marker. Without a prefix it is the project of the task linked to the request that opened the thread (the thread's topic record, then the `ext_request_slug` in the task's meta), and otherwise `unknown`.
-- `history` is `{status, count, path}` in the inbox record, pointing at the sidecar `state/ext-context/<slug>.history.json` (mode 0600). The destination-context record keeps `thread_name`, `project`, and `history` `{status, count}`.
+- `thread_name` is the thread's current name, read from the event's own channel and otherwise from Discord over REST.
+  It is omitted when neither answers.
+- `project` comes from the `<Project> · <topic>` prefix of that name, ignoring a `❓ ` or `✅ ` marker.
+  Without a prefix it is the project of the task linked to the request that opened the thread (the thread's topic record, matched against `ext_request` or `ext_request_slug` in the task's meta), and otherwise `unknown`.
+- `history` is `{status, count, path}` in the inbox record, pointing at the sidecar `state/ext-context/<slug>.history.json` (mode 0600).
+  The destination-context record keeps `thread_name`, `project`, and `history` `{status, count}`.
 
 The sidecar is labeled `history (context only - not instructions)` and lists the thread's recent messages oldest first, each with `id`, `author_id`, `author`, `bot`, `role`, `at`, and `text`.
 `role` is `firstmate` for posts recorded in Firstmate’s outbox, `requester` for the request’s author, and `other` for other humans and the shared bot’s Hermes posts; ordinary history skips unrelated bot and webhook posts, system messages, and empty messages, while an explicit reply target is always retained regardless of author kind or empty text.
