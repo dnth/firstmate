@@ -1710,7 +1710,7 @@ PY
 
 test_29_open_creation_proof_survives_generations_and_failures() {
   local home rid scenario
-  for scenario in ambiguous legacy legacy-known record-failure send-failure transient unopened; do
+  for scenario in ambiguous legacy legacy-known record-failure send-failure transient unopened in-flight create-permanent send-permanent; do
     home="$TMP_ROOT/c29-$scenario"
     setup_home "$home"
     rid=$(open_as "$home" item "Firstmate · creation proof" "Hello.") || fail "open must succeed"
@@ -1729,11 +1729,17 @@ def create(payload, name):
     creates.append(name)
     if scenario == "ambiguous":
         raise poster.DiscordSendError("ambiguous", "create timed out")
+    if scenario == "create-permanent":
+        raise poster.DiscordSendError("permanent", "discord HTTP 403", 403)
     if scenario == "transient" and len(creates) == 1:
         raise poster.DiscordSendError("transient", "discord HTTP 429", 429)
     return {"thread_id": thread}
 def send(payload):
+    if scenario == "in-flight" and not sent:
+        wait_for_open()
     sent.append(payload["thread_id"])
+    if scenario == "send-permanent":
+        raise poster.DiscordSendError("permanent", "discord HTTP 403", 403)
     if scenario == "send-failure" and len(sent) == 1:
         raise poster.DiscordSendError("transient", "discord HTTP 429", 429)
     return {"discord_message_id": "900000000000000001"}
@@ -1741,13 +1747,26 @@ def deliver(path):
     return poster.deliver_one(path, send=send, create_thread=create,
                               home=home, react=lambda *args: None,
                               rename_thread=lambda *args: {"ok": True})
+def wait_for_open():
+    before = (len(creates), len(sent))
+    for kind in ("followup", "final"):
+        sibling = path.with_name(f"{payload['slug']}.{kind}.1.json")
+        assert deliver(sibling) == "failed"
+        assert sibling.is_file()
+        assert not sibling.with_name(sibling.stem + ".failed.json").exists()
+    assert (len(creates), len(sent)) == before
 if scenario == "unopened":
-    sibling = path.with_name(f"{payload['slug']}.followup.1.json")
-    assert deliver(sibling) == "terminal-failed"
+    wait_for_open()
     assert not creates and not sent
     assert deliver(path) == "sent"
+    completion = json.loads(poster.request_progress_path(payload, home).read_text())
+    assert completion["opening_posted"] is True
+    path.with_name(f"{payload['slug']}.answer.1.receipt.json").unlink()
+    poster.progress_path(payload, home).unlink()
 elif scenario == "legacy-known":
-    poster.write_progress(payload, {"open_attempt": True, "topic_thread_id": thread}, home)
+    poster.write_progress(payload, {"open_attempt": True, "topic_thread_id": thread,
+                                   "total": 1, "posted_count": 0}, home)
+    assert deliver(path) == "sent"
 elif scenario == "legacy":
     poster.write_progress(payload, {"open_attempt": True, "total": 1, "posted_count": 0}, home)
     assert deliver(path) == "terminal-failed"
@@ -1759,6 +1778,7 @@ elif scenario == "record-failure":
     assert deliver(path) == "mid-delivery"
     poster.save_request_thread = save
     assert not sent
+    wait_for_open()
 elif scenario == "ambiguous":
     assert deliver(path) == "mid-delivery"
     poster.progress_path(payload, home).unlink()
@@ -1768,18 +1788,23 @@ elif scenario == "ambiguous":
         assert err.outcome == "permanent"
     else:
         raise AssertionError("request-wide guard must survive lost generation progress")
+    wait_for_open()
+elif scenario in ("create-permanent", "send-permanent"):
+    assert deliver(path) == "terminal-failed"
+elif scenario == "in-flight":
+    assert deliver(path) == "sent"
 else:
     assert deliver(path) == "failed"
     if scenario == "send-failure":
         assert poster.load_progress(payload, home) is None
         assert poster.load_request_thread(payload, home) == thread
+    wait_for_open()
     assert deliver(path) == "sent"
 for kind in ("followup", "final"):
     sibling = path.with_name(f"{payload['slug']}.{kind}.1.json")
     result = deliver(sibling)
-    expected = "sent" if scenario in ("send-failure", "transient", "legacy-known", "unopened") else "terminal-failed"
-    if scenario == "unopened" and kind == "followup":
-        expected = "retired"
+    expected = ("failed" if scenario in ("ambiguous", "record-failure") else
+                "terminal-failed" if scenario in ("legacy", "create-permanent", "send-permanent") else "sent")
     assert result == expected, result
 assert len(creates) == (0 if scenario in ("legacy", "legacy-known") else 2 if scenario == "transient" else 1), creates
 assert all(destination == thread for destination in sent), sent
@@ -1787,11 +1812,44 @@ if scenario in ("ambiguous", "record-failure"):
     shared = json.loads(poster.request_progress_path(payload, home).read_text())
     assert shared["open_attempt"] is True
     assert not sent
+    poster.record_failed(payload, {"ok": False, "reason": "opening outcome unresolved"}, home)
+    for kind in ("followup", "final"):
+        sibling = path.with_name(f"{payload['slug']}.{kind}.1.json")
+        assert deliver(sibling) == "terminal-failed"
+    assert len(creates) == 1
 PYTEST
     then fail "creation proof must survive $scenario across all generations"
     fi
   done
   pass "29 open creation proof survives generations and failures"
+}
+
+test_30_open_guilds_use_shared_allowlist_grammar() {
+  local home rule rid scenario
+  home="$TMP_ROOT/c30"
+  setup_home "$home"
+  for rule in "$GUILD:$CHANNEL:" ":$CHANNEL:$AUTHOR" "$GUILD::$AUTHOR" "$GUILD:$CHANNEL:$AUTHOR:extra" "$GUILD"; do
+    printf '%s\n' "$rule" > "$home/config/ext-allowlist"
+    if open_as "$home" malformed "Firstmate · grammar" "Hello." >/dev/null 2>&1; then
+      fail "a rule without a well-formed dedicated-channel admission must refuse: $rule"
+    fi
+    [ ! -d "$home/state/ext-context" ] || [ -z "$(ls -A "$home/state/ext-context")" ] \
+      || fail "refused allowlist rules must publish no context"
+    [ ! -d "$home/state/ext-outbox" ] || [ -z "$(ls -A "$home/state/ext-outbox")" ] \
+      || fail "refused allowlist rules must queue no post"
+  done
+  for scenario in scoped channel; do
+    rule="$GUILD:$CHANNEL"
+    [ "$scenario" = channel ] || rule="$rule:$AUTHOR"
+    printf '%s\n%s\n' "$rule" "121212121212121212:$CHANNEL:" > "$home/config/ext-allowlist"
+    rid=$(open_as "$home" "$scenario" "Firstmate · grammar" "Hello.") \
+      || fail "valid $scenario rules must admit despite a malformed second guild"
+    case "$rid" in
+      "discord:$GUILD:$CHANNEL:$CHANNEL:"*) ;;
+      *) fail "only the valid rule's guild may own the open: $rid" ;;
+    esac
+  done
+  pass "30 open guilds use the shared allowlist grammar"
 }
 
 test_1_top_level_replies_share_one_thread
@@ -1825,5 +1883,6 @@ test_26_opened_threads_route_like_request_threads
 test_27_opens_refuse_unsafe_titles_and_other_channels
 test_28_open_delivery_is_idempotent_and_reports_permissions
 test_29_open_creation_proof_survives_generations_and_failures
+test_30_open_guilds_use_shared_allowlist_grammar
 
 echo "all fm-ext-topic-threads tests passed"

@@ -572,7 +572,8 @@ def load_thread_record_by_id(thread_id: str, home: Path) -> dict:
 
 def save_request_thread(payload: dict, thread_id: str, home: Path,
                         topic_name: str = "", thread_state: str = "",
-                        creating_title: str = "", creator: str = "") -> None:
+                        creating_title: str = "", creator: str = "",
+                        opening_posted: bool | None = None) -> None:
     """Record this request's topic-thread id for every later generation.
 
     The record is the request-wide one beside its outbox payload. A rename
@@ -581,7 +582,7 @@ def save_request_thread(payload: dict, thread_id: str, home: Path,
     """
     save_thread_record(request_progress_path(payload, home), payload.get("request_id"),
                        thread_id, topic_name=topic_name, thread_state=thread_state,
-                       creating_title=creating_title, creator=creator)
+                       creating_title=creating_title, creator=creator, opening_posted=opening_posted)
 
 
 def save_thread_record(path: Path, request_id: object, thread_id: str,
@@ -589,7 +590,8 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
                        creating_title: str = "", creator: str = "",
                        state_at: float | None = None, rename: dict | None = None,
                        marked_open: bool | None = None,
-                       open_attempt: bool | None = None) -> None:
+                       open_attempt: bool | None = None,
+                       opening_posted: bool | None = None) -> None:
     """Write one thread record atomically, preserving any prior unset field.
 
     ``creator`` is the provenance that authorises a later rename: ``firstmate``
@@ -643,6 +645,8 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
         record["marked_open"] = True
     if (open_attempt if open_attempt is not None else prior.get("open_attempt")) is True:
         record["open_attempt"] = True
+    if (opening_posted if opening_posted is not None else prior.get("opening_posted")) is True:
+        record["opening_posted"] = True
     body = json.dumps(record)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
@@ -1290,12 +1294,6 @@ def ensure_open_thread(
 ) -> str:
     """Return the opened topic's shared destination or create its initial thread."""
     initial = dict(payload, kind="answer", generation=1)
-    initial_progress = load_progress(initial, home) or {}
-    recorded = (str(progress.get("topic_thread_id") or "")
-                or load_request_thread(payload, home)
-                or str(initial_progress.get("topic_thread_id") or ""))
-    if recorded:
-        return recorded
     path = request_progress_path(payload, home)
     try:
         shared = json.loads(path.read_text(encoding="utf-8"))
@@ -1303,11 +1301,26 @@ def ensure_open_thread(
         shared = {}
     if not isinstance(shared, dict):
         raise DiscordSendError("permanent", "opened thread record is invalid")
+    if payload.get("kind") != "answer" or payload.get("generation") != 1:
+        directory = progress_path(initial, home).parent
+        receipt = directory / f"{payload['slug']}.answer.1.receipt.json"
+        failed = directory / f"{payload['slug']}.answer.1.failed.json"
+        if receipt.is_symlink() or not receipt.is_file():
+            if failed.is_file() and not failed.is_symlink():
+                raise DiscordSendError("permanent", "the opening answer failed; cannot post later updates")
+            if shared.get("opening_posted") is not True:
+                raise DiscordSendError("transient", "waiting for the opening answer to post")
+    initial_progress = load_progress(initial, home) or {}
+    recorded = (str(progress.get("topic_thread_id") or "")
+                or load_request_thread(payload, home)
+                or str(initial_progress.get("topic_thread_id") or ""))
+    if recorded:
+        return recorded
     if shared.get("open_attempt") or progress.get("open_attempt") or initial_progress.get("open_attempt"):
         raise DiscordSendError("permanent", "an earlier attempt to open this thread has an unknown "
                                "outcome; refusing to open a second thread")
     if payload.get("kind") != "answer" or payload.get("generation") != 1:
-        raise DiscordSendError("permanent", "the initial answer must open this thread before later posts")
+        raise DiscordSendError("transient", "the opening answer has no recorded thread")
     channel = str(payload.get("channel_id") or "")
     if str(payload.get("thread_id") or "") != channel or channel != dedicated_channel(home):
         raise DiscordSendError("permanent", "an opened thread may only start in the dedicated channel")
@@ -1814,6 +1827,8 @@ def deliver_one(
         },
         home=home,
     )
+    if payload.get("origin") == "open" and payload.get("kind") == "answer" and payload.get("generation") == 1:
+        save_request_thread(payload, thread_id, home, opening_posted=True)
     if payload.get("kind") in ("answer", "final"):
         react_to_request(payload, REACT_DONE, react)
     # Renaming is not tied to this generation's destination: an in-thread

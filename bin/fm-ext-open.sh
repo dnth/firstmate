@@ -112,7 +112,13 @@ esac
 
 # The allowlist is the only record of which guild owns the dedicated channel.
 GUILDS=$(fm_ext_allowlist_read "$(fm_ext_allowlist_path)" 2>/dev/null \
-  | awk -F: -v c="$CHANNEL" 'NF >= 2 && NF <= 3 && $2 == c && $1 ~ /^[0-9]+$/ { print $1 }' \
+  | while IFS= read -r rule; do
+      case "$rule" in *:*) ;; *) continue ;; esac
+      rule_guild=${rule%%:*}
+      case "$rule_guild" in ''|*[!0-9]*) continue ;; esac
+      fm_ext_rule_authority "$rule" "$rule_guild" "$CHANNEL" "${rule##*:}" >/dev/null \
+        && printf '%s\n' "$rule_guild"
+    done \
   | sort -u)
 case "$(printf '%s\n' "$GUILDS" | grep -c .)" in
   1) GUILD=$GUILDS ;;
