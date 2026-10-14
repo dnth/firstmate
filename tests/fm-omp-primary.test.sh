@@ -1923,12 +1923,48 @@ await handlers.get("session_start")({ type: "session_start" }, context);
 await waitFor(() => count() === 1, "initial arm");
 await waitFor(() => wakes.length === 1, "session-start durable wake");
 if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) throw new Error("session-start wake used the wrong delivery mode");
+const consume = async (wake) => {
+  await handlers.get("before_agent_start")({ prompt: wake.message.content }, context);
+  await handlers.get("message_start")({ message: { role: "custom", ...wake.message } }, context);
+};
+await consume(wakes[0]);
 writeFileSync(`${state}/.wake-queue.seq`, "2\n");
 appendFileSync(`${state}/.wake-queue`, "0\t2\tsignal\ttask-d.status\tneeds-decision: task-d.status\n");
 await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
 await waitFor(() => wakes.length === 2, "session-switch durable wake");
 if (wakes.length !== 2) throw new Error(`expected two session-event notifications, got ${wakes.length}`);
 if (wakes[1].options?.deliverAs !== "followUp" || wakes[1].options?.triggerTurn !== true) throw new Error("decision-owned session wake did not force a turn");
+await consume(wakes[1]);
+const retained = wakes.length;
+for (let i = 0; i < 65; i += 1) {
+  await handlers.get("session_start")({ type: "session_start" }, context);
+  const wake = wakes[retained + i];
+  if (!wake) throw new Error(`missing outstanding notification ${i}`);
+  await handlers.get("before_agent_start")({ prompt: wake.message.content }, context);
+}
+for (const wake of wakes.slice(retained)) {
+  await handlers.get("message_start")({ message: { role: "custom", ...wake.message } }, context);
+}
+const events = readFileSync(`${state}/extensions/omp-primary-watch/main-wake-deliveries.log`, "utf8")
+  .trim().split("\n").map((line) => {
+    const [at, event, ...fields] = line.split("\t");
+    return { at: Number(at), event, ...Object.fromEntries(fields.map((field) => field.split("="))) };
+  });
+for (const wake of wakes) {
+  const id = wake.message.details?.wakeId;
+  const history = events.filter((event) => event.wake === id);
+  if (!id || history.map((event) => event.event).join(",") !== "sent,consumed,turn" ||
+      history.some((event) => event.after_ms !== undefined && !(Number(event.after_ms) >= 0))) {
+    throw new Error(`direct delivery has incomplete evidence: ${JSON.stringify(history)}`);
+  }
+  const turn = history[2];
+  const elapsed = turn.at - wake.message.details.sentAtMs;
+  if (turn.close !== wake.message.details.close || !Number.isFinite(elapsed) ||
+      elapsed - Number(turn.after_ms) < 0 || elapsed - Number(turn.after_ms) > 1000) {
+    throw new Error(`turn lost its send metadata: ${JSON.stringify(turn)}`);
+  }
+}
+if (wakes[0].message.details.wakeId === wakes[1].message.details.wakeId) throw new Error("session sends reused an identity");
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
 console.log("omp-durable-queue-session-notifications-ok");
@@ -2563,6 +2599,279 @@ JS
   pass "OMP ignores already-delivered handoffs when notifying queued wakes"
 }
 
+# A close that lands while main is mid-turn must still reach main once main is
+# idle, even after further captain turns. Regression for the 2026-10-12 and
+# 2026-10-14 drops: a granted successor's handling turn acknowledged its rows,
+# a new row landed before the turn ended, and the spent grant then suppressed
+# every later close until a captain-prompted drain emptied the queue.
+test_native_omp_mid_turn_wake_reaches_idle_main() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-mid-turn-wake)
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-stop" ]; do
+  if [ -e "$state/wake-now-$count" ]; then
+    printf 'signal: mid-turn-close-%s\n' "$count"
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  # Keep this heredoc outside command substitution for the Bash 3.2 parser.
+  cat > "$fixture/mid-turn-wake.mjs" <<'JS'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const handlers = new Map();
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+// A minimal model of OMP 18.x delivery (pi-coding-agent session/agent-session.ts):
+// a hidden next-turn send while a run streams is prompted once that run ends,
+// through before_agent_start with the wake text; a send while idle starts an
+// agent-initiated run that emits no before_agent_start. A run emits one
+// turn_start/turn_end pair per model call, not one per prompt.
+let streaming = false;
+const pendingPrompts = [];
+const wakes = [];
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message, options) {
+    if (message?.customType !== "firstmate-watcher-wake") return;
+    const content = String(message.content ?? "");
+    wakes.push({ content, options, details: message.details });
+    pendingPrompts.push({ content, details: message.details, idle: !streaming });
+  },
+};
+const queue = `${state}/.wake-queue`;
+const seqFile = `${state}/.wake-queue.seq`;
+let seq = 0;
+const rows = new Map();
+const appendRow = (kind, key) => {
+  seq += 1;
+  const line = `0\t${seq}\t${kind}\t${key}\t${kind}: ${key}`;
+  rows.set(seq, line);
+  writeFileSync(seqFile, `${seq}\n`);
+  appendFileSync(queue, `${line}\n`);
+};
+// The model's drain presents every main-owned row; its acknowledgement retires
+// exactly the presented rows, so a row appended after the drain stays unread.
+const drain = () => Math.max(0, ...rows.keys());
+const ackThrough = (cutoff) => {
+  for (const s of [...rows.keys()]) if (s <= cutoff) rows.delete(s);
+  writeFileSync(queue, [...rows.values()].map((line) => `${line}\n`).join(""));
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8").trim()) : 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await sleep(10); }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const emit = async (name, event = {}) => {
+  const handler = handlers.get(name);
+  if (handler) await handler({ type: name, ...event }, context);
+};
+// A watcher close lands mid-call: its row is appended, the watcher cycle ends,
+// and the core restores a successor arm and delivers or coalesces the close.
+let closes = 0;
+const closeLands = async (key) => {
+  closes += 1;
+  appendRow("signal", key);
+  writeFileSync(`${state}/wake-now-${closes}`, "go\n");
+  await waitFor(() => count() === closes + 1, `successor arm after close ${closes}`);
+  await sleep(250);
+};
+// One OMP run. Each step is one model call; a step may carry a captain message
+// the TUI queued while the run streamed.
+async function run(opening, steps) {
+  streaming = true;
+  if (opening.beforeAgentStart !== undefined) await emit("before_agent_start", { prompt: opening.beforeAgentStart });
+  for (let i = 0; i < steps.length; i += 1) {
+    await emit("turn_start");
+    if (i === 0) await emit("message_start", { message: opening.message });
+    if (steps[i].user) await emit("message_start", { message: { role: "user", content: steps[i].user } });
+    await steps[i].act?.();
+    await emit("turn_end");
+    await sleep(250);
+  }
+  streaming = false;
+}
+const wakeMessage = (content, details) => ({ role: "custom", customType: "firstmate-watcher-wake", content, details });
+const captainRun = (text, steps) => run({ beforeAgentStart: text, message: { role: "user", content: text } }, steps);
+const closeStep = (key) => ({ act: () => closeLands(key) });
+const userStep = (text) => ({ user: text });
+// Idle main: OMP prompts each wake waiting for it, in order. Each wake turn
+// follows its script; "drain" presents every unread row and "ack" retires
+// exactly the rows that drain presented. Unscripted wake turns drain, ack, and
+// reply.
+async function idle(scripts = []) {
+  await sleep(250);
+  while (pendingPrompts.length > 0) {
+    const { content, details, idle: idleSend } = pendingPrompts.shift();
+    let presented = 0;
+    const steps = (scripts.shift() ?? ["drain", "ack", {}]).map((step) =>
+      step === "drain" ? { act: () => { presented = drain(); } }
+        : step === "ack" ? { act: () => ackThrough(presented) }
+          : step);
+    await run(idleSend ? { message: wakeMessage(content, details) } : { beforeAgentStart: content, message: wakeMessage(content, details) }, steps);
+    await sleep(250);
+  }
+}
+const wakeFor = (close) => wakes.filter((wake) => wake.content.includes(`signal: mid-turn-close-${close}\n`));
+const wakeList = () => wakes.map((wake) => (wake.content.match(/signal: [^\n]*/) || [""])[0]).join(" | ");
+// The delivery ledger: one tab-separated event per line, at_ms and event name
+// first, then key=value fields.
+const ledgerFile = `${state}/extensions/omp-primary-watch/main-wake-deliveries.log`;
+const ledger = () => (existsSync(ledgerFile) ? readFileSync(ledgerFile, "utf8") : "").split("\n").filter(Boolean)
+  .map((line) => {
+    const [at, event, ...fields] = line.split("\t");
+    return { at: Number(at), event, ...Object.fromEntries(fields.map((field) => [field.slice(0, field.indexOf("=")), field.slice(field.indexOf("=") + 1)])) };
+  });
+// Pre-seed an oversized ledger: the first new event must trim it to its newest
+// lines rather than letting it grow without bound.
+mkdirSync(`${state}/extensions/omp-primary-watch`, { recursive: true });
+writeFileSync(ledgerFile, Array.from({ length: 2600 }, (_, n) => `0\tseed\tn=${n}\tpad=${"x".repeat(200)}\n`).join(""));
+
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?mid-turn=${Date.now()}`);
+module.default(api);
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+
+// Close 1 lands while the captain's turn streams, so its wake waits for main
+// to go idle. Close 2 lands inside that wake turn after its drain, so the turn
+// boundary grants it one successor wake. Close 3 lands inside the successor's
+// own wake turn after its drain - main is mid-turn - and the captain then
+// queues two more messages, with close 4 landing between them.
+await captainRun("captain: ship the release", [closeStep("crew-a.turn-ended"), {}, {}]);
+await idle([
+  ["drain", closeStep("crew-b.turn-ended"), "ack", {}],
+  [
+    "drain", closeStep("crew-c.turn-ended"), "ack", {},
+    userStep("captain: anything from discord?"), closeStep("crew-d.turn-ended"), userStep("captain: and the build?"),
+  ],
+]);
+if (wakeFor(1).length !== 1 || wakeFor(2).length !== 1) {
+  throw new Error(`closes 1 and 2 did not each reach main once: ${wakeList()}`);
+}
+// The captain then starts a fresh prompt, and main goes idle afterwards.
+await captainRun("captain: status?", [{}, {}]);
+await idle();
+
+// Close 3, delivered mid-turn, must have reached main as exactly one wake
+// turn, whose drain also covered close 4; nothing stays unread or repeats.
+if (wakeFor(3).length !== 1) {
+  throw new Error(
+    `close 3, delivered mid-turn, never reached main after further captain turns: ` +
+    `wakes [${wakeList()}], unread rows ${[...rows.keys()].join(",")}`,
+  );
+}
+if (rows.size !== 0) throw new Error(`rows stayed unread after the wake turn: ${[...rows.keys()].join(",")}`);
+await sleep(300);
+if (wakes.length !== 3 || wakeFor(4).length !== 0) {
+  throw new Error(`expected exactly one wake per handling turn, got [${wakeList()}]`);
+}
+
+// Rows that outlive every close record earn one synthetic successor. When it
+// is consumed while the granting turn still runs, the next boundary must not
+// grant a second one before its own drain retires those rows.
+await closeLands("crew-e.turn-ended");
+await idle([["drain", { act: () => appendRow("check", "inbox-note-1") }, "ack", {}, {}]]);
+const synthetic = wakes.filter((wake) => wake.content.includes("signal: watcher wakes remain queued"));
+if (wakeFor(5).length !== 1 || synthetic.length !== 1 || wakes.length !== 5) {
+  throw new Error(`expected one wake for close 5 and one synthetic successor, got [${wakeList()}]`);
+}
+if (rows.size !== 0) throw new Error(`synthetic successor left rows unread: ${[...rows.keys()].join(",")}`);
+
+await captainRun("captain: continue while notifications wait", [
+  closeStep("crew-overlap.turn-ended"),
+  { act: async () => {
+    const initial = pendingPrompts.shift();
+    await emit("before_agent_start", { prompt: initial.content });
+    await emit("message_start", { message: wakeMessage(initial.content, initial.details) });
+    ackThrough(drain());
+    appendRow("check", "overlap-a");
+  } },
+  { act: async () => {
+    await emit("before_agent_start", { prompt: pendingPrompts[0].content });
+    ackThrough(drain());
+    appendRow("check", "overlap-b");
+  } },
+  { act: async () => {
+    await emit("before_agent_start", { prompt: pendingPrompts[1].content });
+    ackThrough(drain());
+  } },
+]);
+if (pendingPrompts.length !== 2 || pendingPrompts[0].content !== pendingPrompts[1].content) {
+  throw new Error("fixture did not stage overlapping identical notifications");
+}
+const overlapping = pendingPrompts.map((wake) => wake.details?.wakeId);
+if (!overlapping[0] || overlapping[0] === overlapping[1]) throw new Error("identical sends reused a delivery identity");
+pendingPrompts.reverse();
+await idle();
+const entered = ledger().filter((event) => event.event === "turn" && overlapping.includes(event.wake));
+if (entered.length !== 2 || entered[0].wake !== overlapping[1] || entered[1].wake !== overlapping[0]) {
+  throw new Error(`overlapping deliveries lost their turn identities: ${JSON.stringify(entered)}`);
+}
+
+// The ledger stays bounded, records every hand-off with its consumption, and
+// tells a coalesced close apart from a dropped one.
+const events = ledger();
+const seeds = events.filter((event) => event.event === "seed");
+if (seeds.length !== 1999 || seeds[0].n !== "601") {
+  throw new Error(`oversized ledger was not trimmed to its newest 2000 lines: ${seeds.length} seed lines from n=${seeds[0]?.n}`);
+}
+const sent = events.filter((event) => event.event === "sent");
+if (sent.length !== wakes.length) throw new Error(`ledger recorded ${sent.length} hand-offs for ${wakes.length} wakes`);
+for (const hand of sent) {
+  const read = events.find((event) => event.event === "consumed" && event.wake === hand.wake && event.at >= hand.at);
+  if (!read || !(Number(read.after_ms) >= 0) || !read.by) {
+    throw new Error(`hand-off ${hand.wake} (${hand.reason}) has no consumption record: ${JSON.stringify(read)}`);
+  }
+  const turn = events.find((event) => event.event === "turn" && event.wake === hand.wake && event.at >= hand.at);
+  if (!turn || turn.close !== hand.close || !(Number(turn.after_ms) >= 0)) {
+    throw new Error(`hand-off ${hand.wake} (${hand.reason}) never recorded the turn that carried it: ${JSON.stringify(turn)}`);
+  }
+}
+const history = (close) => {
+  const first = events.find((event) => event.reason === `signal: mid-turn-close-${close}`);
+  if (!first) throw new Error(`ledger never recorded close ${close}`);
+  return events.filter((event) => event.close === first.close).map((event) =>
+    event.event === "sent" ? `sent:${event.kind}` : event.event);
+};
+const expectHistory = (close, expected) => {
+  const actual = history(close).join(",");
+  if (actual !== expected) throw new Error(`close ${close} ledger history ${actual}, expected ${expected}`);
+};
+expectHistory(1, "sent:close,consumed,turn");
+expectHistory(3, "suppressed,granted,sent:successor,consumed,turn");
+expectHistory(4, "suppressed,covered");
+if (!events.some((event) => event.event === "granted" && event.kind === "synthetic")) {
+  throw new Error("ledger did not record the synthetic successor grant");
+}
+
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
+console.log("omp-mid-turn-wake-ok");
+JS
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module < "$fixture/mid-turn-wake.mjs" 2>&1) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  assert_contains "$out" omp-mid-turn-wake-ok "a wake delivered mid-turn never reached idle main"
+  expect_code 0 "$status" "OMP mid-turn wake delivery"
+  pass "OMP delivers a mid-turn wake once main is idle, after further captain turns"
+}
+
 # fm-guard.sh reads the persisted episode mirror and must warn exactly when an
 # in-flight wake has outlived a recorded turn boundary.
 test_fm_guard_warns_on_stale_omp_inflight_wake() {
@@ -2641,4 +2950,5 @@ test_native_omp_main_fallback_coalesces_burst
 test_native_omp_idle_main_wake_consumption_and_stale_bound
 test_native_omp_unconsumed_inflight_wake_forces_turn_after_bound
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification
+test_native_omp_mid_turn_wake_reaches_idle_main
 test_fm_guard_warns_on_stale_omp_inflight_wake

@@ -12,7 +12,7 @@ import type {
   SessionStopEvent,
   SessionStopEventResult,
 } from "@oh-my-pi/pi-coding-agent";
-import { createPrimaryWatchCore, ompNativeProcessIdentity } from "../../bin/fm-primary-watch-core.ts";
+import { createPrimaryWatchCore, ompNativeProcessIdentity, type WakeDeliveryEvidence } from "../../bin/fm-primary-watch-core.ts";
 import {
   createBranchDispatchOffer,
   FM_BRANCH_DISPATCH_EVENT,
@@ -226,7 +226,7 @@ export default function (omp: ExtensionAPI) {
   // stranding an idle session, and every notification queued during that turn
   // is consumed by the one continuation. The message never enters the editable
   // pending-message UI, so the captain's draft is untouched.
-  const sendWakeNotification = (content: string, forceTurn = false): void => {
+  const sendWakeNotification = (content: string, forceTurn = false, delivery?: WakeDeliveryEvidence): void => {
     // A forced send reserves deliverAs "followUp" for a hidden next-turn wake
     // that went unconsumed past its wall-clock bound, or a decision-owned wake
     // that would otherwise be coalesced behind one: OMP queues that send
@@ -240,7 +240,7 @@ export default function (omp: ExtensionAPI) {
         content,
         display: false,
         attribution: "agent",
-        details: { kind: "watcher", runtime: "omp" },
+        details: { kind: "watcher", runtime: "omp", ...delivery },
       },
       forceTurn ? { deliverAs: "followUp", triggerTurn: true } : { deliverAs: "nextTurn", triggerTurn: true },
     );
@@ -273,7 +273,7 @@ export default function (omp: ExtensionAPI) {
     // the locked session-start path presents these durable rows itself.
     if (!watch.ownsLock() || coreOwnsDelivery || !durableWakeQueueHasRows()) return;
     const queuedScope = scopeForUnreadWake(state, false);
-    sendWakeNotification(encodeOperationalInput(
+    watch.notifyWake(encodeOperationalInput(
       "watcher",
       "Durable watcher wakes are queued. Run `bin/fm-wake-drain.sh` first to present and acknowledge them.",
     ), queuedScope.needsDecisionKeys.length > 0);
@@ -334,7 +334,7 @@ export default function (omp: ExtensionAPI) {
     armReadyTimeoutEnv: "FM_OMP_ARM_READY_TIMEOUT_MS",
     repairToolName: "fm_watch_arm_omp",
     encodeOperationalInput,
-    sendFollowUp: async (content, options) => sendWakeNotification(content, options?.forceTurn === true),
+    sendFollowUp: (content, options) => sendWakeNotification(content, options?.forceTurn === true, options?.delivery),
     offerWakeToBranch,
     // Main-fallback burst coalescing (docs/omp-supervision-branch.md
     // "Main-fallback re-entry"): OMP reports main turn boundaries, so while one
@@ -422,7 +422,7 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("before_agent_start", (event): BeforeAgentStartEventResult | undefined => {
-    watch.acknowledgeWake(event.prompt);
+    watch.acknowledgeWake(event.prompt, "before_agent_start");
     if (!pendingStartupNudge) return undefined;
     const content = pendingStartupNudge;
     pendingStartupNudge = "";
@@ -440,7 +440,7 @@ export default function (omp: ExtensionAPI) {
   omp.on("message_start", (event) => {
     const message = event.message;
     if (message.role === "user") {
-      watch.acknowledgeWake(userMessageText(message.content));
+      watch.acknowledgeWake(userMessageText(message.content), "message_start:user");
       return;
     }
     // An idle-main injection is delivered as this custom message inside an
@@ -450,7 +450,13 @@ export default function (omp: ExtensionAPI) {
       message.role === "custom" &&
       (message as { customType?: unknown }).customType === "firstmate-watcher-wake"
     ) {
-      watch.acknowledgeWake(userMessageText(message.content));
+      const details = (message as { details?: { wakeId?: unknown; close?: unknown; sentAtMs?: unknown } }).details;
+      const deliveryId = typeof details?.wakeId === "string" ? details.wakeId : undefined;
+      watch.acknowledgeWake(userMessageText(message.content), "message_start:custom", deliveryId);
+      const evidence = deliveryId && typeof details?.close === "string" &&
+        typeof details.sentAtMs === "number" && Number.isFinite(details.sentAtMs)
+        ? { wakeId: deliveryId, close: details.close, sentAtMs: details.sentAtMs } : undefined;
+      watch.wakeEnteredTurn(userMessageText(message.content), deliveryId, evidence);
     }
   });
 
