@@ -1923,12 +1923,32 @@ await handlers.get("session_start")({ type: "session_start" }, context);
 await waitFor(() => count() === 1, "initial arm");
 await waitFor(() => wakes.length === 1, "session-start durable wake");
 if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) throw new Error("session-start wake used the wrong delivery mode");
+const consume = async (wake) => {
+  await handlers.get("before_agent_start")({ prompt: wake.message.content }, context);
+  await handlers.get("message_start")({ message: { role: "custom", ...wake.message } }, context);
+};
+await consume(wakes[0]);
 writeFileSync(`${state}/.wake-queue.seq`, "2\n");
 appendFileSync(`${state}/.wake-queue`, "0\t2\tsignal\ttask-d.status\tneeds-decision: task-d.status\n");
 await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
 await waitFor(() => wakes.length === 2, "session-switch durable wake");
 if (wakes.length !== 2) throw new Error(`expected two session-event notifications, got ${wakes.length}`);
 if (wakes[1].options?.deliverAs !== "followUp" || wakes[1].options?.triggerTurn !== true) throw new Error("decision-owned session wake did not force a turn");
+await consume(wakes[1]);
+const events = readFileSync(`${state}/extensions/omp-primary-watch/main-wake-deliveries.log`, "utf8")
+  .trim().split("\n").map((line) => {
+    const [at, event, ...fields] = line.split("\t");
+    return { at: Number(at), event, ...Object.fromEntries(fields.map((field) => field.split("="))) };
+  });
+for (const wake of wakes) {
+  const id = wake.message.details?.wakeId;
+  const history = events.filter((event) => event.wake === id);
+  if (!id || history.map((event) => event.event).join(",") !== "sent,consumed,turn" ||
+      history.some((event) => event.after_ms !== undefined && !(Number(event.after_ms) >= 0))) {
+    throw new Error(`direct delivery has incomplete evidence: ${JSON.stringify(history)}`);
+  }
+}
+if (wakes[0].message.details.wakeId === wakes[1].message.details.wakeId) throw new Error("session sends reused an identity");
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
 console.log("omp-durable-queue-session-notifications-ok");
@@ -2612,8 +2632,8 @@ const api = {
   sendMessage(message, options) {
     if (message?.customType !== "firstmate-watcher-wake") return;
     const content = String(message.content ?? "");
-    wakes.push({ content, options });
-    pendingPrompts.push({ content, idle: !streaming });
+    wakes.push({ content, options, details: message.details });
+    pendingPrompts.push({ content, details: message.details, idle: !streaming });
   },
 };
 const queue = `${state}/.wake-queue`;
@@ -2669,7 +2689,7 @@ async function run(opening, steps) {
   }
   streaming = false;
 }
-const wakeMessage = (content) => ({ role: "custom", customType: "firstmate-watcher-wake", content });
+const wakeMessage = (content, details) => ({ role: "custom", customType: "firstmate-watcher-wake", content, details });
 const captainRun = (text, steps) => run({ beforeAgentStart: text, message: { role: "user", content: text } }, steps);
 const closeStep = (key) => ({ act: () => closeLands(key) });
 const userStep = (text) => ({ user: text });
@@ -2680,13 +2700,13 @@ const userStep = (text) => ({ user: text });
 async function idle(scripts = []) {
   await sleep(250);
   while (pendingPrompts.length > 0) {
-    const { content, idle: idleSend } = pendingPrompts.shift();
+    const { content, details, idle: idleSend } = pendingPrompts.shift();
     let presented = 0;
     const steps = (scripts.shift() ?? ["drain", "ack", {}]).map((step) =>
       step === "drain" ? { act: () => { presented = drain(); } }
         : step === "ack" ? { act: () => ackThrough(presented) }
           : step);
-    await run(idleSend ? { message: wakeMessage(content) } : { beforeAgentStart: content, message: wakeMessage(content) }, steps);
+    await run(idleSend ? { message: wakeMessage(content, details) } : { beforeAgentStart: content, message: wakeMessage(content, details) }, steps);
     await sleep(250);
   }
 }
@@ -2756,6 +2776,37 @@ if (wakeFor(5).length !== 1 || synthetic.length !== 1 || wakes.length !== 5) {
   throw new Error(`expected one wake for close 5 and one synthetic successor, got [${wakeList()}]`);
 }
 if (rows.size !== 0) throw new Error(`synthetic successor left rows unread: ${[...rows.keys()].join(",")}`);
+
+await captainRun("captain: continue while notifications wait", [
+  closeStep("crew-overlap.turn-ended"),
+  { act: async () => {
+    const initial = pendingPrompts.shift();
+    await emit("before_agent_start", { prompt: initial.content });
+    await emit("message_start", { message: wakeMessage(initial.content, initial.details) });
+    ackThrough(drain());
+    appendRow("check", "overlap-a");
+  } },
+  { act: async () => {
+    await emit("before_agent_start", { prompt: pendingPrompts[0].content });
+    ackThrough(drain());
+    appendRow("check", "overlap-b");
+  } },
+  { act: async () => {
+    await emit("before_agent_start", { prompt: pendingPrompts[1].content });
+    ackThrough(drain());
+  } },
+]);
+if (pendingPrompts.length !== 2 || pendingPrompts[0].content !== pendingPrompts[1].content) {
+  throw new Error("fixture did not stage overlapping identical notifications");
+}
+const overlapping = pendingPrompts.map((wake) => wake.details?.wakeId);
+if (!overlapping[0] || overlapping[0] === overlapping[1]) throw new Error("identical sends reused a delivery identity");
+pendingPrompts.reverse();
+await idle();
+const entered = ledger().filter((event) => event.event === "turn" && overlapping.includes(event.wake));
+if (entered.length !== 2 || entered[0].wake !== overlapping[1] || entered[1].wake !== overlapping[0]) {
+  throw new Error(`overlapping deliveries lost their turn identities: ${JSON.stringify(entered)}`);
+}
 
 // The ledger stays bounded, records every hand-off with its consumption, and
 // tells a coalesced close apart from a dropped one.

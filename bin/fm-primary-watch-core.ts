@@ -87,7 +87,6 @@ type PendingActionableClose = {
 type UnconsumedWake = {
   content: string;
   pending: PendingActionableClose;
-  sentAtMs: number;
 };
 
 type ReplacementActionableHandoff = {
@@ -166,7 +165,7 @@ type SessionGeneration = {
   lastTurnEndAtMs: number | null;
   // Recent main hand-offs by ledger wake id, so the turn that finally carries
   // a wake can be tied back to its close and hand-off time. Diagnostic only.
-  sentWakes: Map<string, { close: string; sentAtMs: number }>;
+  sentWakes: Map<string, { content: string; close: string; sentAtMs: number; consumed: boolean }>;
 };
 
 export type ArmResult = {
@@ -190,7 +189,7 @@ export type PrimaryWatchCoreOptions = {
   // starts an agent-initiated turn even while the session is streaming or
   // agent-initiated turns are deferred; the core requests it only for a stale
   // in-flight re-delivery or a decision-owned wake.
-  sendFollowUp: (content: string, options?: { forceTurn?: boolean }) => Promise<void>;
+  sendFollowUp: (content: string, options?: { forceTurn?: boolean; wakeId?: string }) => Promise<void> | void;
   // Optional supervision-branch dispatch handshake. A synchronous non-null
   // settlement means the branch accepted handling. The core never waits on it
   // inside its delivery loop: later closes, their successor arms, and main-only
@@ -215,10 +214,11 @@ export type PrimaryWatchCore = {
   armAndWait: () => Promise<ArmResult>;
   // evidence names the runtime surface that showed the wake being read; it is
   // recorded in the delivery ledger and never changes the consumption match.
-  acknowledgeWake: (content: string, evidence?: string) => void;
+  acknowledgeWake: (content: string, evidence?: string, deliveryId?: string) => void;
   // The runtime started a model turn whose input carries this wake message.
   // Recorded in the delivery ledger only; consumption is acknowledgeWake's.
-  wakeEnteredTurn: (content: string) => void;
+  wakeEnteredTurn: (content: string, deliveryId?: string) => void;
+  notifyWake: (content: string, forceTurn?: boolean) => Promise<void> | void;
   hasPendingActionableHandoff: () => boolean;
   ownsLock: () => boolean;
   markLoaded: () => void;
@@ -655,7 +655,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     }
   }
 
-  const wakeId = (content: string): string => createHash("sha256").update(content).digest("hex").slice(0, 12);
   const closeReason = (message: string): string => message.split(/\r?\n/, 1)[0] ?? "";
 
   function lockOwnership(): LockOwnership {
@@ -804,6 +803,35 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     };
   }
 
+  function notifyWake(
+    content: string,
+    forceTurn = false,
+    owner = generation,
+    close = "-",
+    kind = "notice",
+    reason = closeReason(content),
+  ): Promise<void> | void {
+    const id = randomUUID();
+    owner.sentWakes.set(id, { content, close, sentAtMs: Date.now(), consumed: false });
+    if (owner.sentWakes.size > 64) owner.sentWakes.delete(owner.sentWakes.keys().next().value as string);
+    recordWakeEvent(owner, "sent", [
+      ["wake", id], ["close", close], ["kind", kind], ["force", forceTurn ? 1 : 0], ["reason", reason],
+    ]);
+    const failed = (error: unknown): never => {
+      owner.sentWakes.delete(id);
+      recordWakeEvent(owner, "send-failed", [
+        ["wake", id], ["close", close], ["error", error instanceof Error ? error.message : String(error)],
+      ]);
+      throw error;
+    };
+    try {
+      const result = sendFollowUp(content, { forceTurn, wakeId: id });
+      if (result) return result.catch(failed);
+    } catch (error) {
+      return failed(error);
+    }
+  }
+
   // Deliver a wake to main. The runtime accepting the follow-up is the
   // delivery; consumption is a separate event observed by the adapter (see the
   // delivery-versus-consumption contract at the top of this file). Until
@@ -822,7 +850,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
     const sentAtMs = Date.now();
-    if (pending) owner.unconsumedWakes.set(pending.token, { content, pending, sentAtMs });
+    if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     if (trackMainFallback) {
       owner.mainFallbackWakeInFlight = content;
       owner.mainFallbackInFlightTurnEnds = 0;
@@ -836,25 +864,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       : pending.fallbackOnly ? "synthetic"
         : owner.mainFallbackSuccessor ? "successor"
           : "close";
-    const id = wakeId(content);
-    owner.sentWakes.delete(id);
-    owner.sentWakes.set(id, { close: pending?.token ?? "-", sentAtMs });
-    if (owner.sentWakes.size > 64) owner.sentWakes.delete(owner.sentWakes.keys().next().value as string);
-    recordWakeEvent(owner, "sent", [
-      ["wake", id],
-      ["close", pending?.token ?? "-"],
-      ["kind", kind],
-      ["force", forceTurn ? 1 : 0],
-      ["reason", closeReason(message)],
-    ]);
     try {
-      await sendFollowUp(content, { forceTurn });
+      await notifyWake(content, forceTurn, owner, pending?.token ?? "-", kind, closeReason(message));
     } catch (error) {
-      recordWakeEvent(owner, "send-failed", [
-        ["wake", id],
-        ["close", pending?.token ?? "-"],
-        ["error", error instanceof Error ? error.message : String(error)],
-      ]);
       if (pending) owner.unconsumedWakes.delete(pending.token);
       if (trackMainFallback && owner.mainFallbackWakeInFlight === content) {
         owner.mainFallbackWakeInFlight = null;
@@ -879,14 +891,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // the marker also releases the successor grant that wake spent: its rows
   // have now reached main, and the baseline check in turnEnd keeps a new grant
   // waiting until the drain that wake asked for has retired them.
-  function consumeWake(owner: SessionGeneration, text: string, evidence: string): void {
-    let close = "";
-    let sentAtMs: number | null = null;
+  function consumeWake(owner: SessionGeneration, text: string, evidence: string, deliveryId?: string): void {
     for (const [token, wake] of owner.unconsumedWakes) {
       if (wake.content !== text) continue;
       owner.unconsumedWakes.delete(token);
-      close = token;
-      sentAtMs = wake.sentAtMs;
       wake.pending.delivered = true;
       try {
         finishPendingActionable(owner, wake.pending);
@@ -898,7 +906,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     }
     const inFlight = owner.mainFallbackWakeInFlight === text;
     if (inFlight) {
-      sentAtMs ??= owner.mainFallbackWakeSentAtMs;
       owner.mainFallbackWakeInFlight = null;
       owner.mainFallbackInFlightRows = null;
       owner.mainFallbackInFlightTurnEnds = 0;
@@ -906,12 +913,13 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       owner.mainFallbackWakeConsumedAtMs = Date.now();
       persistEpisodeState(owner);
     }
-    if (!close && !inFlight) return;
+    const delivery = [...owner.sentWakes].find(([id, sent]) =>
+      sent.content === text && !sent.consumed && (!deliveryId || id === deliveryId));
+    if (!delivery) return;
+    const [id, sent] = delivery;
+    sent.consumed = true;
     recordWakeEvent(owner, "consumed", [
-      ["wake", wakeId(text)],
-      ["close", close || "-"],
-      ["by", evidence],
-      ["after_ms", sentAtMs === null ? "?" : Date.now() - sentAtMs],
+      ["wake", id], ["close", sent.close], ["by", evidence], ["after_ms", Date.now() - sent.sentAtMs],
     ]);
   }
 
@@ -1702,19 +1710,20 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     }
   }
 
-  function acknowledgeWake(content: string, evidence = "runtime"): void {
-    consumeWake(generation, content, evidence);
+  function acknowledgeWake(content: string, evidence = "runtime", deliveryId?: string): void {
+    consumeWake(generation, content, evidence, deliveryId);
   }
 
   // Consumption can be recorded before the wake's turn runs - OMP raises
   // before_agent_start when it stages a hidden next-turn prompt behind a
   // streaming run - so the ledger also records when the wake message itself
   // enters a model turn. A hand-off with no such line never reached the model.
-  function wakeEnteredTurn(content: string): void {
+  function wakeEnteredTurn(content: string, deliveryId?: string): void {
     const owner = generation;
-    const id = wakeId(content);
-    const sent = owner.sentWakes.get(id);
-    if (!sent) return;
+    const delivery = [...owner.sentWakes].find(([id, sent]) =>
+      sent.content === content && (!deliveryId || id === deliveryId));
+    if (!delivery) return;
+    const [id, sent] = delivery;
     owner.sentWakes.delete(id);
     recordWakeEvent(owner, "turn", [["wake", id], ["close", sent.close], ["after_ms", Date.now() - sent.sentAtMs]]);
   }
@@ -1942,6 +1951,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     armAndWait,
     acknowledgeWake,
     wakeEnteredTurn,
+    notifyWake,
     hasPendingActionableHandoff,
     ownsLock: () => lockOwnership() === "owned",
     markLoaded,
