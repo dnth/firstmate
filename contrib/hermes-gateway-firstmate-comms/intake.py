@@ -218,6 +218,38 @@ def _poster():
     return outbox_poster
 
 
+def _thread_context():
+    try:
+        from . import thread_context
+    except ImportError:  # loaded from sys.path in hermetic tests
+        import thread_context
+    return thread_context
+
+
+def thread_lookup(
+    dest: dict[str, str],
+    home: Path,
+    event: object = None,
+    reply_id: str = "",
+    reply_text: str = "",
+    reply_is_firstmate: bool = False,
+):
+    """A callable that reads the request's thread context, or None.
+
+    None unless the request was filed from a thread under the dedicated
+    channel, so no other request pays for a Discord read. The callable runs
+    only after the allowlist has admitted the request (see _run_intake).
+    """
+    module = _thread_context()
+    channel = dedicated_channel(home)
+    if not module.in_dedicated_thread(dest, channel):
+        return None
+    return lambda: module.gather(
+        dest, home, channel, event=event, reply_id=reply_id,
+        reply_text=reply_text, reply_is_firstmate=reply_is_firstmate,
+    )
+
+
 def _message_type(raw: object) -> int | None:
     kind = getattr(raw, "type", None)
     value = getattr(kind, "value", kind)
@@ -343,6 +375,10 @@ def route_message_event(event: object) -> dict | None:
         code = _run_intake(
             home, dest, text, origin="message", reply_to=reply_to,
             media_urls=media_urls, media_types=media_types,
+            lookup=thread_lookup(
+                dest, home, event=event, reply_id=reply_id, reply_text=reply_text,
+                reply_is_firstmate=post is not None,
+            ),
         )
     except Exception:
         code = -1
@@ -452,7 +488,7 @@ def handle_fm_command(raw_args: str, context: dict | None = None) -> str:
     if not request_text:
         return "Aye. Use `/fm` followed by the order you want Firstmate to take."
     try:
-        code = _run_intake(home, dest, request_text)
+        code = _run_intake(home, dest, request_text, lookup=thread_lookup(dest, home))
     except Exception:
         return "Firstmate could not record that request locally. Try again from this thread."
     if code == INTAKE_REFUSED:
@@ -485,7 +521,7 @@ def attachment_manifest_entries(
     return entries
 
 
-def _write_manifest(entries: list[dict[str, str]]) -> str:
+def _write_manifest(entries: object) -> str:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as handle:
         json.dump(entries, handle)
         return handle.name
@@ -499,7 +535,16 @@ def _run_intake(
     reply_to: dict[str, str] | None = None,
     media_urls: list[str] | None = None,
     media_types: list[str] | None = None,
+    lookup=None,
 ) -> int:
+    """Run bin/fm-ext-intake.sh once for one request and return its exit code.
+
+    ``lookup`` reads the thread's name, project, and history for a request
+    filed from a dedicated-channel thread. It runs only after a check-only pass
+    of the intake script's own allowlist admitted the request, so a refused
+    author's message never causes a Discord read, and its result becomes the
+    intake script's --thread-name, --project, and --history-file.
+    """
     intake = firstmate_root() / "bin" / "fm-ext-intake.sh"
     secret = secret_path(home)
     env = os.environ.copy()
@@ -542,6 +587,20 @@ def _run_intake(
             manifest = _write_manifest(entries)
             temp_paths.append(manifest)
             args += ["--attachment-manifest", manifest]
+        if lookup is not None:
+            checked = subprocess.run(
+                args + ["--check-only"], check=False, env=env, capture_output=True, text=True,
+            )
+            if checked.returncode != 0:
+                return checked.returncode
+            found = lookup() or {}
+            if found.get("name"):
+                args += ["--thread-name", found["name"]]
+            if found.get("project"):
+                args += ["--project", found["project"]]
+            if isinstance(found.get("history"), dict):
+                temp_paths.append(_write_manifest(found["history"]))
+                args += ["--history-file", temp_paths[-1]]
         result = subprocess.run(args, check=False, env=env, capture_output=True, text=True)
         return result.returncode
     finally:

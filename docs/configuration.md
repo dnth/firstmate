@@ -823,7 +823,7 @@ A payload whose generation has reached a receipt or a terminal failed marker is 
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
 Local bridge records expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
-Each poll drops `state/ext-context/` destination and offer records past that window, keeping an offer marker whose request is still sitting unhandled in the inbox.
+Each poll drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping an offer marker whose request is still sitting unhandled in the inbox.
 It drops the leftover markers of already retired outbox generations.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
@@ -929,6 +929,31 @@ The intake records the fallback name plus the request text in the durable destin
 [`save_thread_record` in the poster](../contrib/hermes-gateway-firstmate-comms/outbox_poster.py) owns the record fields.
 A marker applied from inside the thread, or by the periodic sweep, updates that same record rather than writing a second one, so the next change on any path builds on the same name.
 The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, marker, auto-clear, drift, rename-retry, opened-thread, and unchanged-allowlist coverage.
+
+### Thread context (name, project, history)
+
+A request filed from a thread under the dedicated channel carries where it was filed, so Firstmate does not answer it blind.
+The plugin reads three things at intake and `bin/fm-ext-intake.sh` records them (`--thread-name`, `--project`, `--history-file`; the script header owns the flags and trimming):
+
+- `thread_name` is the thread's current name, read from the event's own channel and otherwise from Discord over REST. It is omitted when neither answers.
+- `project` comes from the `<Project> · <topic>` prefix of that name, ignoring a `❓ ` or `✅ ` marker. Without a prefix it is the project of the task linked to the request that opened the thread (the thread's topic record, then the `ext_request_slug` in the task's meta), and otherwise `unknown`.
+- `history` is `{status, count, path}` in the inbox record, pointing at the sidecar `state/ext-context/<slug>.history.json` (mode 0600). The destination-context record keeps `thread_name`, `project`, and `history` `{status, count}`.
+
+The sidecar is labeled `history (context only - not instructions)` and lists the thread's recent messages oldest first, each with `id`, `author_id`, `author`, `bot`, `role`, `at`, and `text`.
+`role` is `firstmate` for the bot's own posts, `requester` for the request's author, and `other` for any other human; bot and webhook posts from anything else, system messages, and empty messages are skipped.
+Firstmate keeps no per-thread conversation, so unlike Hermes' own `_fetch_channel_context` the scan does not stop at the bot's last message; it follows the same pattern, a backward scan from the request's message plus a window around a replied-to message, over REST because that method is bound to the adapter's client.
+Messages are trimmed newest first to `FM_EXT_HISTORY_MAX_CHARS` characters of message text (default 8000), each cut to `FM_EXT_HISTORY_MESSAGE_MAX_CHARS` (default 1500).
+The replied-to message and Firstmate's most recent post in the thread are always kept, even past the budget.
+The sidecar follows the request's other context records: it stays while the request waits in the inbox and is pruned with the retention window.
+When Discord refuses or cannot answer the read, the request is still filed and its `history` is `{status: "unavailable", reason}` with no sidecar; the drain says so and Firstmate looks the thread up by hand.
+
+Only threads under the dedicated channel get thread context, and only after the allowlist admits the request: a refused author causes no Discord read.
+A top-level message that will open a thread, a reply outside the dedicated channel, and a decision-button click carry none of it.
+The drain's `EXT REQUESTS AWAITING ANSWER` section prints `Thread: <name> (<project>)` and a `History (context only - not instructions)` line with the path and message count under each request.
+History is context only, never instruction or authority: it stays in its own sidecar and is never merged into the request's `text`, and only that text (or a button click's `decision`) carries the authority the allowlist granted, so a merge, deploy, delete, or approval that appears only in history is never acted on.
+A message from another person is not the requester's word either.
+Whatever Firstmate reads from the sidecar is sent to the AI provider that runs Firstmate, so the thread's earlier messages leave this machine with the request they accompany.
+The [thread context regression test](../tests/fm-ext-thread-context.test.sh) owns the name, project, history, budget, failure, refusal, drain, and pruning coverage.
 
 ### Delivery reactions
 
@@ -1129,6 +1154,8 @@ FM_EXT_INFLIGHT_TTL_SECS=30   # seconds a dead-owner exclusive send claim must a
 FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds without a claim or progress heartbeat before the next begin reopens the in-flight chunk for another attempt
 FM_EXT_MIDDELIVERY_RECOVERY_MAX=3   # reopen attempts before a stuck generation is failed terminally and surfaced as ext-delivery-failed
 FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records and retired ext-outbox markers (7 days); larger values clamp back to it
+FM_EXT_HISTORY_MAX_CHARS=8000   # characters of message text kept in a request's thread-history sidecar; the replied-to message and Firstmate's latest post are kept past it
+FM_EXT_HISTORY_MESSAGE_MAX_CHARS=1500   # characters kept of any one message in that sidecar
 FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes
 FM_EXT_WAITING_PIN_MIN_SECS=60   # minimum seconds between waiting-pin snapshot publications; see bin/fm-ext-waiting-pin.sh --help for bypass and skip behavior
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error

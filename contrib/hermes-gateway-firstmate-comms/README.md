@@ -89,6 +89,7 @@ The same hook turns a dedicated-channel message or a reply to a Firstmate post i
 It recognises Firstmate's posts by the Discord ids the outbox poster recorded, not by the bot's author id, because the general agent posts as the same bot.
 Message and reply cases are covered by [the destination regression test](../../tests/fm-ext-plugin-dest.test.sh).
 It writes Discord text to a temp file and execs `bin/fm-ext-intake.sh --text-file`.
+For a request from a thread under the dedicated channel, `thread_context.py` also reads the thread's name, derives its project, and fetches the thread's recent messages over REST with the bot token, after the allowlist has admitted the request; the [thread context reference](../../docs/configuration.md#thread-context-name-project-history) owns the records.
 For a message carrying attachments it passes the adapter's cached paths as `--attachment-manifest`.
 It prefers `raw_message.content`, including an empty string, so the adapter's attachment-enriched text is not used when raw content is available.
 If raw content is unavailable, it preserves `event.text` unchanged; it never cuts human text using attachment-content markers.
