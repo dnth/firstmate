@@ -234,6 +234,7 @@ The existing typed `/exit` path keeps its separate `delivered-no-turn` exit 4 an
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
+The remote charter also names its steering inbox as `state/parent-route/<id>.inbox` in the remote home, the durable inbox the routed OMP transport writes to, so it never names a parent-home path the remote host cannot reach.
 A process-event source performs a non-destructive, cursor-anchored delta read; the runner's `autohandle` seam then ingests, acknowledges, and re-arms each capture deterministically - no agent turn is required - and `ensure-armed` converges the same invariant for a live route that lost its registration inside the watcher cycle.
 Ingest validates each payload line independently: a bounded lifecycle status line must be well-formed UTF-8 without controls (except TAB), invisible or reordering format characters, or Unicode line or paragraph separators, and carries zero or more space-delimited `[key=...]` or `[corr=...]` tokens before the colon.
 A rejected line's exact bytes are kept under `state/remote-replies/<id>.quarantine/` and reported once with a parent-authored `blocked` line naming the reason, byte count, and SHA-256; rejected bytes never reach the status channel and the cursor still advances past them, so one malformed line cannot wedge later replies.

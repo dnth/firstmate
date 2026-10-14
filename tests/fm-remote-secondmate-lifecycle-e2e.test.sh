@@ -27,6 +27,9 @@ TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 OMP_ACTIVE_PID="$TMP_ROOT/remote-omp-active.pid"
 HERDR_FORCE_IDLE="$TMP_ROOT/remote-herdr-force-idle"
 OMP_TYPED_INPUT="$TMP_ROOT/remote-omp-typed-input"
+# The remote route's host-local steering-inbox surface, which the charter
+# render must name instead of the parent-home inbox path.
+PARENT_ROUTE_INBOX="$REMOTE_HOME/state/parent-route/ios.inbox"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
@@ -514,6 +517,9 @@ assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not p
 assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
 assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
 assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local status path"
+assert_grep "$PARENT_ROUTE_INBOX" "$REMOTE_HOME/data/charter.md" "remote charter did not name its host-local steering inbox"
+assert_no_grep "$PARENT/state/ios.inbox" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local steering inbox path"
+assert_grep "$PARENT_ROUTE_INBOX'/NNN.msg '$PARENT_ROUTE_INBOX'/handled/" "$REMOTE_HOME/data/charter.md" "remote charter did not render the inbox acknowledgement move host-local"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$TMP_ROOT/other-home" alpha \
