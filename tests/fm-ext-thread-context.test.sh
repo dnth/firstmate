@@ -841,6 +841,51 @@ PY
   pass "12 missing reply metadata marks history unavailable while complete REST targets remain readable"
 }
 
+test_13_rest_reply_target_optional_bot_flag() {
+  local home out
+  home="$TMP_ROOT/c13"
+  setup_home "$home"
+  out=$(FM_EXT_HISTORY_MAX_CHARS=500 plugin_env "$home" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["PYTHONPATH"])
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+import tcfix as fx
+home, root = sys.argv[1], sys.argv[2]
+edge = fx.setup(home, root)
+import intake
+base = 890000000000000000
+T = "770000000000000013"
+latest = base + 1000
+fx.record_posts(home, [latest])
+for direction, path in enumerate(("backward", "around")):
+    for n, flag in enumerate(("omitted", False, True, None, 0, "false", [])):
+        target = str(base + (900 if path == "backward" else 0) + n)
+        anchor = str(base + 2000 + direction * 10 + n)
+        message = fx.post(target, "target")
+        if flag == "omitted":
+            del message["author"]["bot"]
+        else:
+            message["author"]["bot"] = flag
+        edge.pages[T] = [fx.post(base + 100 + i, "recent " + "z" * 100) for i in range(120)]
+        edge.pages[T] += [fx.post(latest, "Firstmate", author=fx.BOT, bot=True), message]
+        event = fx.message(anchor, "status?", T, name="Aceh · optional flag", kind=19, reply_to=target)
+        event.raw_message.reference.resolved = None
+        assert (intake.pre_gateway_dispatch_hook(event) or {}).get("action") == "skip"
+        record = fx.inbox(home)[anchor]
+        if n < 3:
+            assert record["history"]["status"] == "ok", record
+            kept = next(m for m in fx.history(home, record)["messages"] if m["id"] == target)
+            assert kept["bot"] is (True if flag is True else False), kept
+            assert kept["author_id"] == fx.A and kept["at"], kept
+        else:
+            assert record["history"]["status"] == "unavailable", record
+print("optional-bot-ok")
+PY
+  ) || fail "optional REST bot flag case failed: $out"
+  assert_contains "$out" "optional-bot-ok" "omitted bot flags must mean human while malformed flags stay invalid"
+  pass "13 both REST reply-target paths accept omitted bot flags and reject malformed flags"
+}
+
 test_1_thread_name_and_project_are_recorded
 test_2_history_sidecar_trims_and_keeps_anchor_posts
 test_3_failed_history_read_files_request_marked_unavailable
@@ -853,4 +898,5 @@ test_9_resolved_reply_metadata_survives_deleted_target
 test_10_explicit_reply_targets_bypass_history_filters
 test_11_post_recognition_expires_with_progress
 test_12_missing_reply_metadata_marks_history_unavailable
+test_13_rest_reply_target_optional_bot_flag
 echo "all fm-ext-thread-context tests passed"

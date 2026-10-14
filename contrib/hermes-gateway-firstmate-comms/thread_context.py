@@ -192,21 +192,22 @@ def _entry(message: dict, bot_id: str, requester: str, posts: dict, reply_id: st
     if not _SNOWFLAKE.fullmatch(message_id) or not isinstance(author, dict):
         return None
     author_id = str(author.get("id") or "")
+    author_bot = author.get("bot", False)
     name = author.get("global_name") or author.get("username")
     timestamp = message.get("timestamp")
     if explicit_reply and not (
         _SNOWFLAKE.fullmatch(author_id) and isinstance(name, str) and name.strip()
-        and isinstance(author.get("bot"), bool) and isinstance(timestamp, str) and timestamp.strip()
+        and isinstance(author_bot, bool) and isinstance(timestamp, str) and timestamp.strip()
     ):
         return None
     if message.get("webhook_id") and not explicit_reply:
         return None
-    is_bot = bool(author.get("bot") or author_id == bot_id)
+    is_bot = bool(author_bot or author_id == bot_id)
     if message_id in posts:
         role = "firstmate"
     elif author_id == bot_id:
         role = "other"
-    elif (author.get("bot") or author.get("system")) and not explicit_reply:
+    elif (author_bot or author.get("system")) and not explicit_reply:
         return None
     elif author_id == requester:
         role = "requester"
