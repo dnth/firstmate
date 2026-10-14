@@ -515,6 +515,23 @@ FM_EXT_DECISION_TEXT_MAX=1000
 # Longest Discord component custom_id.
 # shellcheck disable=SC2034 # Read by the sourcing emit script.
 FM_EXT_DECISION_CUSTOM_ID_MAX=100
+# Choice-shaped text (bin/fm-ext-emit.sh header owns the rule): two or more
+# option lines plus a reply/choice cue, or a "reply ... with the number/code"
+# line on its own.
+FM_EXT_CHOICE_OPTION_RE='^[[:space:]]*((-|\*|•)[[:space:]]+)?(\(?[0-9]{1,2}[.):]|[A-Za-z][0-9]{1,2}[.):]?)([[:space:]]+[^[:space:]]|$)'
+FM_EXT_CHOICE_CUE_RE='(^|[^[:alnum:]_])((reply|respond|answer|type|send|pick|choose|select|tap|click)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,38}[^[:alnum:]_.!?])(number|code|letter|option|choice)s?|which (one|options?)|(pick|choose) one)([^[:alnum:]_]|$)'
+FM_EXT_CHOICE_REPLY_RE='(^|[^[:alnum:]_])reply([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,28}[^[:alnum:]_.!?])(with|using)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,18}[^[:alnum:]_.!?])(number|code|letter|option|choice)s?([^[:alnum:]_]|$)'
+
+fm_ext_text_choice_shaped() {
+  local text=$1 options
+  if printf '%s\n' "$text" | grep -qiE -e "$FM_EXT_CHOICE_REPLY_RE"; then
+    return 0
+  fi
+  options=$(printf '%s\n' "$text" | grep -cE -e "$FM_EXT_CHOICE_OPTION_RE")
+  [ "${options:-0}" -ge 2 ] || return 1
+  printf '%s\n' "$text" | grep -qiE -e "$FM_EXT_CHOICE_CUE_RE"
+}
+
 # Option labels naming a merge, a deploy, a deletion, money, credentials, or
 # another destructive or irreversible action always need a second confirmation
 # click, whatever the emitter declared. Matched case-insensitively anywhere in
@@ -1253,6 +1270,7 @@ fm_ext_outbox_schema_valid() {
     and (.text | type == "string")
     and (if has("thread_title") then (.thread_title | type == "string" and length >= 1 and length <= 60) else true end)
     and (if has("thread_state") then (.thread_state == "needs-you" or .thread_state == "done" or .thread_state == "none") else true end)
+    and (if has("no_buttons_reason") then (.no_buttons_reason | type == "string" and length >= 1 and length <= 200) else true end)
     and (if has("decision") then
       (.decision | type == "object"
         and (.key | type == "string" and test("^(hold|key):"))

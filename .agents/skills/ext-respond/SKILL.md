@@ -41,15 +41,21 @@ A missing or unrecognized `authority` value is treated as `confirm`.
 
 ## Decisions with buttons
 
-When a reply asks the captain to settle a decision Firstmate already tracks, attach its options as buttons with `bin/fm-ext-emit.sh --decision-file`.
-The emit header owns the file format, and the [decision buttons reference](../../../docs/configuration.md#decision-buttons) owns the contract.
+To ask the captain a choice, run `bin/fm-ext-ask.sh`; it is the one way to ask.
+It places or refreshes the captain hold, writes the decision file, appends the numbered option lines to your text in button order, and posts through `bin/fm-ext-emit.sh --decision-file` with the thread marked needs-you.
+Its header owns the flags, and the [decision buttons reference](../../../docs/configuration.md#decision-buttons) owns the contract.
+The [emit header's choice guard](../../../bin/fm-ext-emit.sh) owns detection of plain-text choices and routes refused posts to `bin/fm-ext-ask.sh`.
 
-- Key a captain call held on the board `hold:<task-id>`, and a worker's open keyed decision `key:<task-id>:<slug>`; emit refuses a key that is not open.
-- List the options in the order the post's own text numbers them, so a typed number and a button name the same option, and write short, concrete, public-safe labels such as "Merge" or "Hold".
-- Set `"confirm": true` on every option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible.
-- Mark your recommended choice using the emit header's `recommended` field; the [decision buttons reference](../../../docs/configuration.md#decision-buttons) owns its display and confirmation behavior.
-- For a captain call that gates held work, set `"mode": "release"` so the answer lifts the hold instead of closing the task.
-- Never write the key or its task id into the post text or a label; only the button ids carry it.
+- Pass `--task` for the work the call gates, plus `--title` and `--repo` only when that task does not exist yet; the call is keyed `hold:<task-id>` for you.
+  A worker's own open keyed decision (`key:<task-id>:<slug>`) is the one case outside it: post that with `bin/fm-ext-emit.sh --decision-file` directly, per the emit header.
+- Write the text without the numbered options; the script numbers them.
+  Give short, concrete, public-safe labels such as "Merge" or "Hold" through `--option`.
+- Add `--recommended` after your recommended option and `--confirm` after any option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible; risky labels get the confirmation automatically.
+- Always pass `--mode`; it has no default.
+  `release` lifts the hold so held work proceeds, including a queued build that has not spawned yet; `done` closes a question.
+- Never write the key or its task id into the text or a label; the script and emit both refuse it.
+- A deliberate plain list that merely looks like a choice, such as a status list that ends "reply with the number for details", posts with `bin/fm-ext-emit.sh --no-buttons "<reason>"`; the reason is recorded in the outbox payload.
+  Use it only when no decision is being asked.
 
 A click arrives as a request with `origin` `button` and `authority` `standing`; the plugin recorded nothing, so you record it, exactly like a typed reply naming that option.
 Its `decision` field carries the key, the post's `occurrence`, the option, any confirmation, and the audit (`by`, `author`, `at`).
