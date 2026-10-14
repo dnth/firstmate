@@ -332,6 +332,8 @@ test_8_choice_cues_match_whole_words() {
     'Reply with the newsletter attached.' \
     'Reply without the number.' \
     'Preply with the number.' \
+    'Reply using the codeset.' \
+    $'1. Build passed\n2. Tests passed\nSend the choicescript tomorrow.' \
     $'1. Build passed\n2. Tests passed\nWhich ones passed?'; do
     generation=$((generation + 1))
     emit_text "$home" "$generation" "$text"
@@ -340,6 +342,7 @@ test_8_choice_cues_match_whole_words() {
   for text in \
     $'1. North\n2. South\nSend an OPTION.' \
     $'1. North\n2. South\nWhich option?' \
+    $'1. North\n2. South\nWhich options?' \
     $'1. North\n2. South\nChoose one.' \
     'Reply using a LETTER.' \
     'Reply with the code.'; do
@@ -351,6 +354,32 @@ test_8_choice_cues_match_whole_words() {
   pass "8 cue verbs and nouns match whole words while genuine choices remain guarded"
 }
 
+test_9_plural_choice_cues_require_buttons() {
+  local home=$TMP_ROOT/c9 kind noun cue text out rc generation=0
+  setup_home "$home"
+  for kind in answer followup final; do
+    for noun in options choices numbers codes letters; do
+      for cue in "Choose from these $noun:" "Reply using the $noun." "Reply with the $noun."; do
+        generation=$((generation + 1))
+        case "$cue" in
+          Choose*) text=$(printf '%s\n1. Merge\n2. Hold' "$cue") ;;
+          *) text=$cue ;;
+        esac
+        printf '%s' "$text" > "$home/post.txt"
+        out=$(home_env "$home" "$EMIT" --request-id "$RID" --kind "$kind" --generation "$generation" \
+          --text-file "$home/post.txt" 2>&1)
+        rc=$?
+        [ "$rc" -ne 0 ] || fail "plural $kind choice bypassed the guard: $text"
+        assert_contains "$out" "fm-ext-ask.sh" "plural choice refusal must name ask"
+        if compgen -G "$home/state/ext-outbox/*.$kind.$generation.json" >/dev/null; then
+          fail "refused plural choice published a payload"
+        fi
+      done
+    done
+  done
+  pass "9 plural options, choices, numbers, codes, and letters require buttons for every guarded post kind"
+}
+
 test_1_ask_holds_and_posts_buttons_in_text_order
 test_2_mode_is_required_and_pre_hold_refusals
 test_3_emit_refuses_a_choice_without_buttons
@@ -359,3 +388,4 @@ test_5_ordinary_text_is_unaffected
 test_6_choice_with_a_decision_file_is_unaffected
 test_7_settled_ask_retries_preserve_state
 test_8_choice_cues_match_whole_words
+test_9_plural_choice_cues_require_buttons

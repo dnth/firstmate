@@ -63,11 +63,12 @@
 #     ("1." / "2)" / "(3)"), or a code of one letter plus 1-2 digits with an
 #     optional ".", ")", or ":" ("A1." / "B2:" / "B2 text"), then text.
 #   cue - "reply/respond/answer/type/send/pick/choose/select/tap/click" within
-#     40 characters of "number/code/letter/option/choice", or "which one",
-#     "which option", "pick one", or "choose one".
-# Two or more option lines plus a cue are refused. A "reply ... with the
-# number/code/letter" line is refused on its own, since it asks for a choice
-# whatever else the text holds. A numbered list with no cue, and prose without
+#     40 characters of "number/code/letter/option/choice" (singular or plural),
+#     or "which one", "which option(s)", "pick one", or "choose one".
+#     Cue verbs and nouns match whole words, case-insensitively.
+# Two or more option lines plus a cue are refused. A "reply ... with/using ...
+# number/code/letter/option/choice" line (singular or plural) is refused on
+# its own, since it asks for a choice whatever else the text holds. A numbered list with no cue, and prose without
 # option lines, post normally. --no-buttons "<reason>" posts a deliberate plain
 # list anyway: the reason (one line, at most 200 characters) is recorded in the
 # outbox payload as no_buttons_reason. It cannot be combined with
