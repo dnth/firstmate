@@ -35,8 +35,9 @@
 // Consuming a wake also releases the successor grant it spent, so a row that
 // lands while that wake's own turn runs earns the next boundary's successor
 // instead of waiting for a turn end that finds the queue empty. Every
-// main-bound hand-off, suppression, grant, and consumption is appended to a
-// bounded delivery ledger; docs/omp-supervision-branch.md owns how to read it.
+// main-bound hand-off, suppression, grant, consumption, and the turn that
+// finally carries the wake is appended to a bounded delivery ledger;
+// docs/omp-supervision-branch.md owns how to read it.
 //
 // Branch settlement runs outside the serialized delivery loop; the handoff
 // and rejection contract is owned by docs/omp-supervision-branch.md under
@@ -163,6 +164,9 @@ type SessionGeneration = {
   mainFallbackWakeConsumedAtMs: number | null;
   lastTurnStartAtMs: number | null;
   lastTurnEndAtMs: number | null;
+  // Recent main hand-offs by ledger wake id, so the turn that finally carries
+  // a wake can be tied back to its close and hand-off time. Diagnostic only.
+  sentWakes: Map<string, { close: string; sentAtMs: number }>;
 };
 
 export type ArmResult = {
@@ -212,6 +216,9 @@ export type PrimaryWatchCore = {
   // evidence names the runtime surface that showed the wake being read; it is
   // recorded in the delivery ledger and never changes the consumption match.
   acknowledgeWake: (content: string, evidence?: string) => void;
+  // The runtime started a model turn whose input carries this wake message.
+  // Recorded in the delivery ledger only; consumption is acknowledgeWake's.
+  wakeEnteredTurn: (content: string) => void;
   hasPendingActionableHandoff: () => boolean;
   ownsLock: () => boolean;
   markLoaded: () => void;
@@ -341,6 +348,7 @@ function createGeneration(): SessionGeneration {
     mainFallbackWakeConsumedAtMs: null,
     lastTurnStartAtMs: null,
     lastTurnEndAtMs: null,
+    sentWakes: new Map(),
   };
 }
 
@@ -828,8 +836,12 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       : pending.fallbackOnly ? "synthetic"
         : owner.mainFallbackSuccessor ? "successor"
           : "close";
+    const id = wakeId(content);
+    owner.sentWakes.delete(id);
+    owner.sentWakes.set(id, { close: pending?.token ?? "-", sentAtMs });
+    if (owner.sentWakes.size > 64) owner.sentWakes.delete(owner.sentWakes.keys().next().value as string);
     recordWakeEvent(owner, "sent", [
-      ["wake", wakeId(content)],
+      ["wake", id],
       ["close", pending?.token ?? "-"],
       ["kind", kind],
       ["force", forceTurn ? 1 : 0],
@@ -839,7 +851,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       await sendFollowUp(content, { forceTurn });
     } catch (error) {
       recordWakeEvent(owner, "send-failed", [
-        ["wake", wakeId(content)],
+        ["wake", id],
         ["close", pending?.token ?? "-"],
         ["error", error instanceof Error ? error.message : String(error)],
       ]);
@@ -1694,6 +1706,19 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     consumeWake(generation, content, evidence);
   }
 
+  // Consumption can be recorded before the wake's turn runs - OMP raises
+  // before_agent_start when it stages a hidden next-turn prompt behind a
+  // streaming run - so the ledger also records when the wake message itself
+  // enters a model turn. A hand-off with no such line never reached the model.
+  function wakeEnteredTurn(content: string): void {
+    const owner = generation;
+    const id = wakeId(content);
+    const sent = owner.sentWakes.get(id);
+    if (!sent) return;
+    owner.sentWakes.delete(id);
+    recordWakeEvent(owner, "turn", [["wake", id], ["close", sent.close], ["after_ms", Date.now() - sent.sentAtMs]]);
+  }
+
   // Unread rows main can still present or retire - exactly the set a main drain
   // would act on (bin/fm-wake-lib.sh's fm_wake_actor_pending_count owns the
   // per-actor count, including live branch-grant exclusion). An uncountable
@@ -1916,6 +1941,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     arm: () => activateOwnedWatch(generation),
     armAndWait,
     acknowledgeWake,
+    wakeEnteredTurn,
     hasPendingActionableHandoff,
     ownsLock: () => lockOwnership() === "owned",
     markLoaded,

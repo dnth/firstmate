@@ -451,6 +451,7 @@ export default function (omp: ExtensionAPI) {
       (message as { customType?: unknown }).customType === "firstmate-watcher-wake"
     ) {
       watch.acknowledgeWake(userMessageText(message.content), "message_start:custom");
+      watch.wakeEnteredTurn(userMessageText(message.content));
     }
   });
 

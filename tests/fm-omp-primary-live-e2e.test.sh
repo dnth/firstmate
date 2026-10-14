@@ -376,6 +376,46 @@ resume_watch_pid=$(wait_pid_change "$WATCH_LOCK" "$second_watch_pid") \
   || fail "OMP process resume did not add exactly one fresh startup instruction"
 kill -0 "$resume_watch_pid" 2>/dev/null || fail "OMP resume watcher is not live"
 
+wait_idle || fail "OMP $OMP_VERSION did not reach an idle boundary after resume"
+
+# A wake delivered while a captain turn is still streaming must get its own
+# handling turn once that run ends, and the delivery ledger must record its
+# hand-off, its consumption, and the turn that carried it.
+mid_status="$HOME_DIR/state/omp-mid-turn-wake-$$.status"
+mid_offset=$(wc -c < "$session_file" | tr -d '[:space:]')
+submit_omp "Run this exact bash command: sleep 20. Then reply exactly OMP_MID_TURN_DONE." \
+  || fail "OMP $OMP_VERSION did not accept the mid-turn probe prompt"
+mid_running=0
+for _ in $(seq 1 240); do
+  if tail -c "+$((mid_offset + 1))" "$session_file" | grep -F 'sleep 20' | grep -F '"toolCall"' >/dev/null 2>&1; then
+    mid_running=1
+    break
+  fi
+  sleep 0.25
+done
+[ "$mid_running" -eq 1 ] || { capture >&2; fail "OMP $OMP_VERSION never started the mid-turn probe command"; }
+printf 'done: omp mid-turn wake probe\n' > "$mid_status"
+mid_handled=0
+for _ in $(seq 1 720); do
+  if session_handled_watcher_wake_after "$session_file" "$mid_offset" "$mid_status"; then
+    mid_handled=1
+    break
+  fi
+  sleep 0.25
+done
+[ "$mid_handled" -eq 1 ] \
+  || { capture >&2; fail "OMP $OMP_VERSION never ran a turn for a wake delivered while a captain turn streamed"; }
+mid_ledger="$HOME_DIR/state/extensions/omp-primary-watch/main-wake-deliveries.log"
+mid_wake=$(grep -F -- "$mid_status" "$mid_ledger" 2>/dev/null \
+  | awk -F '\t' '$2 == "sent" { for (i = 3; i <= NF; i++) if ($i ~ /^wake=/) { print substr($i, 6); exit } }')
+[ -n "$mid_wake" ] || fail "OMP $OMP_VERSION delivery ledger recorded no hand-off for the mid-turn wake"
+for mid_event in consumed turn; do
+  awk -F '\t' -v event="$mid_event" -v wake="wake=$mid_wake" \
+    '$2 == event { for (i = 3; i <= NF; i++) if ($i == wake) found = 1 } END { exit !found }' "$mid_ledger" \
+    || fail "OMP $OMP_VERSION delivery ledger has no $mid_event record for the mid-turn wake"
+done
+printf 'ok - OMP %s primary E2E proved a wake delivered mid-turn gets its own handling turn and consumed and turn ledger records\n' "$OMP_VERSION"
+
 touch "$HOME_DIR/state/.afk"
 away_offset=$(wc -c < "$session_file" | tr -d '[:space:]')
 PATH="$WRAPPER_BIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$PROJECT" \

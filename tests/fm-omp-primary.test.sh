@@ -2771,6 +2771,10 @@ for (const hand of sent) {
   if (!read || !(Number(read.after_ms) >= 0) || !read.by) {
     throw new Error(`hand-off ${hand.wake} (${hand.reason}) has no consumption record: ${JSON.stringify(read)}`);
   }
+  const turn = events.find((event) => event.event === "turn" && event.wake === hand.wake && event.at >= hand.at);
+  if (!turn || turn.close !== hand.close || !(Number(turn.after_ms) >= 0)) {
+    throw new Error(`hand-off ${hand.wake} (${hand.reason}) never recorded the turn that carried it: ${JSON.stringify(turn)}`);
+  }
 }
 const history = (close) => {
   const first = events.find((event) => event.reason === `signal: mid-turn-close-${close}`);
@@ -2782,8 +2786,8 @@ const expectHistory = (close, expected) => {
   const actual = history(close).join(",");
   if (actual !== expected) throw new Error(`close ${close} ledger history ${actual}, expected ${expected}`);
 };
-expectHistory(1, "sent:close,consumed");
-expectHistory(3, "suppressed,granted,sent:successor,consumed");
+expectHistory(1, "sent:close,consumed,turn");
+expectHistory(3, "suppressed,granted,sent:successor,consumed,turn");
 expectHistory(4, "suppressed,covered");
 if (!events.some((event) => event.event === "granted" && event.kind === "synthetic")) {
   throw new Error("ledger did not record the synthetic successor grant");

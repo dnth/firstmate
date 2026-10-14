@@ -722,7 +722,23 @@ ok - OMP delivers a mid-turn wake once main is idle, after further captain turns
 
 `test_native_omp_mid_turn_wake_reaches_idle_main` models OMP 18.x delivery: one `turn_start`/`turn_end` pair per model call, a hidden next-turn wake prompted through `before_agent_start` after the streaming run ends, and an idle send opening an agent-initiated turn.
 A close that lands inside a successor's own handling turn, followed by two queued captain messages and a fresh captain prompt, must reach main as exactly one wake turn; at base it fails with `close 3, delivered mid-turn, never reached main after further captain turns`.
-The same test proves that a consumed synthetic successor is not re-granted before its drain, that every `sent` line in the delivery ledger has a `consumed` line, that a coalesced close reads `suppressed,covered` or `suppressed,granted,sent:successor,consumed`, and that an oversized ledger is trimmed to its newest 2000 lines.
+The same test proves that a consumed synthetic successor is not re-granted before its drain, that every `sent` line in the delivery ledger has `consumed` and `turn` lines, that a coalesced close reads `suppressed,covered` or `suppressed,granted,sent:successor,consumed,turn`, and that an oversized ledger is trimmed to its newest 2000 lines.
+
+The live guard ran the mid-turn phase on 2026-10-14 against OMP 18.10.1 on Linux x86_64 with `openai-codex/gpt-5.6-luna` at low effort:
+
+```sh
+FM_OMP_PRIMARY_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh
+```
+
+```text
+ok - OMP omp/18.10.1 primary E2E proved a wake delivered mid-turn gets its own handling turn and consumed and turn ledger records
+ok - OMP omp/18.10.1 primary E2E proved fresh no-state and ordinary native discovery, exact ownership, once-only startup, guarded watcher startup, repeated /new continuity, shutdown, resume, and away-mode delivery
+not ok - OMP omp/18.10.1 did not render the exact editable draft before the watcher wake
+```
+
+The phase fires a watcher close while a captain turn runs `sleep 20`; in the diagnostic runs the ledger recorded `consumed by=before_agent_start` 3-4 ms after `sent`, because OMP raises `before_agent_start` when it stages the hidden prompt, and the handling turn ran after the captain turn ended.
+The draft-preservation failure reproduces identically at base `2ec2c819` on OMP 18.10.1: the composer capture reads the typed draft with one extra trailing character, so that assertion needs its own fix.
+With only the two composer-draft assertions removed, the same run also passed `ok - OMP omp/18.10.1 primary E2E proved an idle session runs the watcher wake turn itself with an intact editable draft`.
 
 ## Herdr
 
