@@ -1708,6 +1708,92 @@ PY
   pass "28 open delivery is idempotent and reports permissions"
 }
 
+test_29_open_creation_proof_survives_generations_and_failures() {
+  local home rid scenario
+  for scenario in ambiguous legacy legacy-known record-failure send-failure transient unopened; do
+    home="$TMP_ROOT/c29-$scenario"
+    setup_home "$home"
+    rid=$(open_as "$home" item "Firstmate · creation proof" "Hello.") || fail "open must succeed"
+    emit_as "$home" "$rid" followup 1 "Update." "Firstmate · creation proof" "" >/dev/null
+    emit_as "$home" "$rid" final 1 "Done." "Firstmate · creation proof" "done" >/dev/null
+    if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$scenario" <<'PYTEST'
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+home, scenario = Path(sys.argv[1]), sys.argv[2]
+path = next((home / "state/ext-outbox").glob("*.answer.1.json"))
+payload = json.loads(path.read_text())
+creates, sent = [], []
+thread = "888888888888888888"
+def create(payload, name):
+    creates.append(name)
+    if scenario == "ambiguous":
+        raise poster.DiscordSendError("ambiguous", "create timed out")
+    if scenario == "transient" and len(creates) == 1:
+        raise poster.DiscordSendError("transient", "discord HTTP 429", 429)
+    return {"thread_id": thread}
+def send(payload):
+    sent.append(payload["thread_id"])
+    if scenario == "send-failure" and len(sent) == 1:
+        raise poster.DiscordSendError("transient", "discord HTTP 429", 429)
+    return {"discord_message_id": "900000000000000001"}
+def deliver(path):
+    return poster.deliver_one(path, send=send, create_thread=create,
+                              home=home, react=lambda *args: None,
+                              rename_thread=lambda *args: {"ok": True})
+if scenario == "unopened":
+    sibling = path.with_name(f"{payload['slug']}.followup.1.json")
+    assert deliver(sibling) == "terminal-failed"
+    assert not creates and not sent
+    assert deliver(path) == "sent"
+elif scenario == "legacy-known":
+    poster.write_progress(payload, {"open_attempt": True, "topic_thread_id": thread}, home)
+elif scenario == "legacy":
+    poster.write_progress(payload, {"open_attempt": True, "total": 1, "posted_count": 0}, home)
+    assert deliver(path) == "terminal-failed"
+elif scenario == "record-failure":
+    save = poster.save_request_thread
+    def refuse_record(*args, **kwargs):
+        raise OSError("thread record write failed")
+    poster.save_request_thread = refuse_record
+    assert deliver(path) == "mid-delivery"
+    poster.save_request_thread = save
+    assert not sent
+elif scenario == "ambiguous":
+    assert deliver(path) == "mid-delivery"
+    poster.progress_path(payload, home).unlink()
+    try:
+        poster.ensure_open_thread(payload, {}, home, create)
+    except poster.DiscordSendError as err:
+        assert err.outcome == "permanent"
+    else:
+        raise AssertionError("request-wide guard must survive lost generation progress")
+else:
+    assert deliver(path) == "failed"
+    if scenario == "send-failure":
+        assert poster.load_progress(payload, home) is None
+        assert poster.load_request_thread(payload, home) == thread
+    assert deliver(path) == "sent"
+for kind in ("followup", "final"):
+    sibling = path.with_name(f"{payload['slug']}.{kind}.1.json")
+    result = deliver(sibling)
+    expected = "sent" if scenario in ("send-failure", "transient", "legacy-known", "unopened") else "terminal-failed"
+    if scenario == "unopened" and kind == "followup":
+        expected = "retired"
+    assert result == expected, result
+assert len(creates) == (0 if scenario in ("legacy", "legacy-known") else 2 if scenario == "transient" else 1), creates
+assert all(destination == thread for destination in sent), sent
+if scenario in ("ambiguous", "record-failure"):
+    shared = json.loads(poster.request_progress_path(payload, home).read_text())
+    assert shared["open_attempt"] is True
+    assert not sent
+PYTEST
+    then fail "creation proof must survive $scenario across all generations"
+    fi
+  done
+  pass "29 open creation proof survives generations and failures"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -1738,5 +1824,6 @@ test_25_unpublished_decisions_do_not_keep_the_marker
 test_26_opened_threads_route_like_request_threads
 test_27_opens_refuse_unsafe_titles_and_other_channels
 test_28_open_delivery_is_idempotent_and_reports_permissions
+test_29_open_creation_proof_survives_generations_and_failures
 
 echo "all fm-ext-topic-threads tests passed"

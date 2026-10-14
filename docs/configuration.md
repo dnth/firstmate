@@ -913,7 +913,7 @@ The open has no channel argument, and the poster re-checks the dedicated channel
 The guild is the one the allowlist names for the dedicated channel, and an open refuses when the allowlist names none or more than one, so it never reaches a guild the bridge does not already admit.
 Unlike a request thread, an opened thread never falls back to posting in place: a create refused for a missing permission fails the first message with a reason naming the permissions the bot needs, and a create with an unknown outcome is never retried into a second thread.
 A captain message inside an opened thread is an ordinary in-thread request.
-An opened thread stays addressable for the bridge retention window; once its context ages out, the same key opens a fresh thread.
+An opened thread follows the bridge retention window, but its key stays bound to that thread while any of its bridge records remain; reopening with that key returns that thread.
 Slash commands are unchanged: `/fm` replies post to their originating thread (the channel itself for a top-level interaction) and never attempt thread creation.
 A thread-creation failure (such as missing permission) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
 On that existing-thread path, the poster fetches and validates the winning name before recording the thread as adopted for reply routing.

@@ -29,8 +29,9 @@
 #
 # On success the request id is printed on stdout and the open is recorded in
 # state/ext-context/<slug>.json (origin "open", open_key <key>), which keeps it
-# addressable for the bridge retention window; once that context ages out the
-# key opens a fresh thread.
+# addressable for the bridge retention window. The key stays bound to its
+# thread while any bridge records remain; reopening with that key returns
+# that thread.
 #
 # --lookup prints the key's request id and the first message's delivery on a
 # second line: "pending", "posted thread=<id> messages=<id>[,<id>...]", or

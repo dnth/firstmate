@@ -588,7 +588,8 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
                        topic_name: str = "", thread_state: str = "",
                        creating_title: str = "", creator: str = "",
                        state_at: float | None = None, rename: dict | None = None,
-                       marked_open: bool | None = None) -> None:
+                       marked_open: bool | None = None,
+                       open_attempt: bool | None = None) -> None:
     """Write one thread record atomically, preserving any prior unset field.
 
     ``creator`` is the provenance that authorises a later rename: ``firstmate``
@@ -640,6 +641,8 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
         record["rename"] = kept_rename
     if (marked_open if marked_open is not None else prior.get("marked_open")) is True:
         record["marked_open"] = True
+    if (open_attempt if open_attempt is not None else prior.get("open_attempt")) is True:
+        record["open_attempt"] = True
     body = json.dumps(record)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
@@ -1285,35 +1288,40 @@ def ensure_open_thread(
     home: Path,
     create_thread: ThreadFn | None = None,
 ) -> str:
-    """Return the thread an opened topic posts into, creating it once.
-
-    An opened topic has no message to post beside, so unlike
-    ensure_topic_thread it never falls back to posting in place: it raises
-    DiscordSendError, classified like a send, when no thread can be had. The
-    thread may only start in the dedicated channel. ``open_attempt`` in chunk
-    progress marks a create whose outcome is not known; a later attempt
-    refuses rather than risk a second thread, because only the receipt of a
-    create proves no thread exists.
-    """
-    recorded = str(progress.get("topic_thread_id") or "") or load_request_thread(payload, home)
+    """Return the opened topic's shared destination or create its initial thread."""
+    initial = dict(payload, kind="answer", generation=1)
+    initial_progress = load_progress(initial, home) or {}
+    recorded = (str(progress.get("topic_thread_id") or "")
+                or load_request_thread(payload, home)
+                or str(initial_progress.get("topic_thread_id") or ""))
     if recorded:
         return recorded
-    if progress.get("open_attempt"):
+    path = request_progress_path(payload, home)
+    try:
+        shared = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        shared = {}
+    if not isinstance(shared, dict):
+        raise DiscordSendError("permanent", "opened thread record is invalid")
+    if shared.get("open_attempt") or progress.get("open_attempt") or initial_progress.get("open_attempt"):
         raise DiscordSendError("permanent", "an earlier attempt to open this thread has an unknown "
                                "outcome; refusing to open a second thread")
+    if payload.get("kind") != "answer" or payload.get("generation") != 1:
+        raise DiscordSendError("permanent", "the initial answer must open this thread before later posts")
     channel = str(payload.get("channel_id") or "")
     if str(payload.get("thread_id") or "") != channel or channel != dedicated_channel(home):
         raise DiscordSendError("permanent", "an opened thread may only start in the dedicated channel")
     name = thread_name_for(payload, home)
     if not name:
         raise DiscordSendError("permanent", "opened thread has no valid title")
+    save_thread_record(path, payload.get("request_id"), "", open_attempt=True)
     progress["open_attempt"] = True
     write_progress(payload, progress, home)
     try:
         receipt = (create_thread or discord_open_thread)(payload, name)
     except Exception as err:
         if classify_send_failure(err) != "ambiguous":
-            # Discord answered, so no thread exists and a retry is safe.
+            save_thread_record(path, payload.get("request_id"), "", open_attempt=False)
             progress["open_attempt"] = False
             write_progress(payload, progress, home)
         raise
@@ -1321,11 +1329,8 @@ def ensure_open_thread(
     if not _SNOWFLAKE.fullmatch(thread_id):
         raise DiscordSendError("ambiguous", "discord thread open returned no thread id")
     thread_state = payload.get("thread_state") if isinstance(payload.get("thread_state"), str) else ""
-    try:
-        save_request_thread(payload, thread_id, home, topic_name=name, thread_state=thread_state,
-                            creating_title=_title_for(payload), creator="firstmate")
-    except Exception as err:
-        print(f"fm-ext-poster: opened thread record skipped: {err}", file=sys.stderr)
+    save_request_thread(payload, thread_id, home, topic_name=name, thread_state=thread_state,
+                        creating_title=_title_for(payload), creator="firstmate")
     return thread_id
 
 
