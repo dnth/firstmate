@@ -9,8 +9,9 @@ last fallback) and the validation the poster applies before every create and
 rename.
 Unsent payloads (no posting marker, no receipt, no terminal failed marker)
 are retried after restart.
-Oversized replies are split with the X-mode Discord budget pattern
-(``FM_EXT_DISCORD_REPLY_MAX_CHARS``, default 1900) and posted in order.
+Oversized replies are split by ``discord_split``, which keeps the reply's own
+lines and list nesting (``FM_EXT_DISCORD_REPLY_MAX_CHARS``, default 1900), and
+posted in order.
 A later-chunk transient failure records progress so earlier chunks are not
 sent again, then releases the exclusive inflight send marker so only one
 poster can resume the next chunk. A pre-send split failure or chunk-count
@@ -61,9 +62,11 @@ from typing import Callable
 
 try:
     from . import decisions
+    from . import discord_split
     from .intake import dedicated_channel, firstmate_home, firstmate_root
 except ImportError:  # loaded from sys.path in hermetic tests
     import decisions
+    import discord_split
     from intake import dedicated_channel, firstmate_home, firstmate_root
 
 SendFn = Callable[[dict], dict]
@@ -309,14 +312,45 @@ def record_failed(payload: dict, reason: dict, home: Path | None = None) -> str:
     raise RuntimeError(result.stderr.strip() or "fail failed")
 
 
+def reply_limits(home: Path) -> dict:
+    """Resolve the configured Discord split budget from its shell owner."""
+    result = subprocess.run(
+        [str(outbox_cli()), "limits"],
+        check=False,
+        env=_env_for(home),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "limits failed")
+    data = json.loads(result.stdout)
+    return {"limit": int(data["limit"]), "cap": int(data["cap"])}
+
+
 def split_reply(
     text: str,
     home: Path | None = None,
     limit: int | None = None,
     cap: int | None = None,
+    legacy: bool = False,
 ) -> dict:
+    """Split a reply into Discord chunks.
+
+    discord_split owns new splits, so the Discord path no longer shells out to
+    jq. A legacy resume - a generation that was already partially posted before
+    chunk plans were persisted - keeps the pre-change splitter through
+    `fm-ext-outbox.sh split --legacy`, so it finishes the chunks it started with.
+    """
     home = home or firstmate_home()
-    args = [str(outbox_cli()), "split"]
+    if not legacy:
+        resolved = reply_limits(home) if limit is None or cap is None else None
+        used_limit = limit if limit is not None else resolved["limit"]
+        used_cap = cap if cap is not None else resolved["cap"]
+        texts = discord_split.split_discord(text, used_limit, used_cap)
+        if not texts:
+            texts = [text]
+        return {"limit": used_limit, "cap": used_cap, "texts": [str(item) for item in texts]}
+    args = [str(outbox_cli()), "split", "--legacy"]
     if limit is not None:
         args.extend(["--max", str(limit)])
     if cap is not None:
@@ -1737,12 +1771,16 @@ def deliver_one(
     sender = send or discord_send
     stored = load_progress(payload, home)
     try:
-        split = split_reply(
-            payload.get("text") or "",
-            home=home,
-            limit=stored.get("limit") if stored else None,
-            cap=stored.get("cap") if stored else None,
-        )
+        if stored and "texts" in stored:
+            split = {"texts": stored["texts"], "limit": stored["limit"], "cap": stored["cap"]}
+        else:
+            split = split_reply(
+                payload.get("text") or "",
+                home=home,
+                limit=stored.get("limit") if stored else None,
+                cap=stored.get("cap") if stored else None,
+                legacy=bool(stored),
+            )
     except Exception:
         if stored and int(stored.get("posted_count") or 0) > 0:
             release_inflight(payload, home=home)
@@ -1759,6 +1797,7 @@ def deliver_one(
         "limit": split["limit"],
         "cap": split["cap"],
     }
+    progress["texts"] = chunks
     if isinstance(payload.get("decision"), dict):
         # The post record a click and a later edit find this decision by.
         progress["decision"] = payload["decision"]

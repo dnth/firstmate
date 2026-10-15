@@ -1153,6 +1153,8 @@ fm_ext_discord_reply_max_chars() {
   case "$raw" in
     ''|*[!0-9]*) raw=1900 ;;
   esac
+  raw=${raw#"${raw%%[!0]*}"}
+  raw=${raw:-0}
   [ "$raw" -ge 50 ] 2>/dev/null || raw=50
   [ "$raw" -le 2000 ] 2>/dev/null || raw=1900
   printf '%s\n' "$raw"
@@ -1165,14 +1167,20 @@ fm_ext_discord_thread_max() {
   case "$raw" in
     ''|*[!0-9]*) raw=25 ;;
   esac
+  raw=${raw#"${raw%%[!0]*}"}
+  raw=${raw:-0}
   [ "$raw" -ge 1 ] 2>/dev/null || raw=25
   printf '%s\n' "$raw"
 }
 
-# Split a reply into a numbered thread of <=<max>-codepoint chunks.
-# Copied from fmx_split_thread in bin/fm-x-lib.sh; do not source that file.
-# Reads the reply text on stdin and prints a compact JSON array of chunks.
-fm_ext_split_thread() {
+# Legacy Discord splitter: the joined, "(k/n)"-numbered splitter that shipped
+# before Discord replies kept their line structure.
+# It is retained only so a generation that was already partially posted when the
+# Python splitter landed can resume with the exact chunks it started with, which
+# is why fm-ext-outbox.sh exposes it as `split --legacy`.
+# New splits never come here: contrib/hermes-gateway-firstmate-comms/discord_split.py
+# owns the Discord splitter, and its module docstring owns the rules.
+fm_ext_split_thread_legacy() {
   jq -Rsc --argjson limit "$1" --argjson cap "$2" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def fence_marker: test("^[[:space:]]*```");
