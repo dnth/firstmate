@@ -2748,6 +2748,9 @@ texts = json.load(open(split_path, encoding="utf-8"))["texts"]
 assert len(texts) > 1, "a reply over the limit must split: %r" % (texts,)
 for chunk in texts:
     assert len(chunk) <= limit, "chunk over the %d limit: %d" % (limit, len(chunk))
+    assert sum(line.startswith("```") for line in chunk.split("\n")) % 2 == 0, (
+        "unbalanced fences in chunk: %r" % chunk
+    )
 for chunk in texts:
     assert not any(
         part.startswith("(") and part.endswith(")") and "/" in part
@@ -2808,9 +2811,10 @@ bin/eval-run.sh --set golden --report out/report.json
   [ "$(jq -r '.texts | length' "$home/tight.json")" -gt 2 ] \
     || fail "a code block over the budget must span chunks: $tight"
   jq -r '.texts[]' "$home/tight.json" > "$home/tight.txt"
-  awk 'length($0)>60{exit 1}' "$home/tight.txt" \
+  jq -e 'all(.texts[]; length <= 60)' "$home/tight.json" > /dev/null \
     || fail "every chunk must stay within the tight budget: $(cat "$home/tight.txt")"
-  awk 'BEGIN{n=0} /^```/{n++} END{exit (n%2)}' "$home/tight.txt" \
+  jq -e 'all(.texts[]; (split("\n") | map(select(startswith("```"))) | length) % 2 == 0)' \
+    "$home/tight.json" > /dev/null \
     || fail "every chunk must carry balanced fences: $(cat "$home/tight.txt")"
   [ "$(grep -c '^```bash$' "$home/tight.txt")" -gt 1 ] \
     || fail "a reopened code block must keep its language tag: $(cat "$home/tight.txt")"
@@ -2822,12 +2826,10 @@ bin/eval-run.sh --set golden --report out/report.json
   out=$(home_env "$home" "$OUTBOX" split --max 60 < "$home/word.md") \
     || fail "split refused an over-long single line"
   printf '%s' "$out" > "$home/word.json"
-  jq -r '.texts[]' "$home/word.json" > "$home/word.txt"
-  awk 'length($0)>60{exit 1}' "$home/word.txt" \
-    || fail "an over-long single line must stay within the limit: $out"
   "$PYTHON_BIN" - "$home/word.json" <<'PY'
 import json, sys
 texts = json.load(open(sys.argv[1], encoding="utf-8"))["texts"]
+assert all(len(chunk) <= 60 for chunk in texts), "chunk over the 60 limit: %r" % texts
 assert "".join(texts) == "a" * 200, "a hard split must not lose characters: %r" % texts
 PY
 
