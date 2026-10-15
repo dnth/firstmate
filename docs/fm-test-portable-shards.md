@@ -104,8 +104,8 @@ Recent green `fm-watch-triage.test.sh` measurements provide the comparison for a
 | [38746979839 attempt 2](https://github.com/dnth/firstmate/actions/runs/38746979839/attempts/2) | 410,055 |
 | [PR 38774522507](https://github.com/dnth/firstmate/actions/runs/38774522507) | 428,164 |
 
-The 446,890 ms result exceeds the latest passing measurement in this table, 428,164 ms, by 18,726 ms (about 4.4%), so it is not a large outlier.
-PR run 38774522507 measured `fm-watch-triage.test.sh` at 428,164 ms (7m08.164s), within the observed range.
+The 446,890 ms result exceeds the maximum of the five preceding green runs, 421,505 ms, by 25,385 ms (about 6%), so it is not a large outlier.
+Against the newer passing measurement in the final row, the difference narrows to 18,726 ms (about 4.4%).
 Separately, [run 38759616524](https://github.com/dnth/firstmate/actions/runs/38759616524) failed the stale-suppressor assertion after 100,083 ms.
 That is a separate correctness signal, not evidence that a 447-second `fm-watch-triage` run caused the timeout; the test assertions remain unchanged.
 
