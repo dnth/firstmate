@@ -2835,6 +2835,10 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
   pid=$!
   wait_numeric_file "$state/.stale-since-$key" 30 \
     || { reap "$pid"; fail "the corrupt idle-window timer was not repaired"; }
+  # Timer publication precedes chain cleanup; observe a completed poll before
+  # asserting the rest of the repair's bookkeeping.
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail "the timer-repair poll did not complete"; }
   [ ! -e "$state/.writing-since-$key" ] \
     || { reap "$pid"; fail "an idle-window timer repair kept a finished write-deferral chain"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the idle-window timer repair enqueued a wake"; }
