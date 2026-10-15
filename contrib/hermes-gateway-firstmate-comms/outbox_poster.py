@@ -315,9 +315,12 @@ def split_reply(
     home: Path | None = None,
     limit: int | None = None,
     cap: int | None = None,
+    legacy: bool = False,
 ) -> dict:
     home = home or firstmate_home()
     args = [str(outbox_cli()), "split"]
+    if legacy:
+        args.append("--legacy")
     if limit is not None:
         args.extend(["--max", str(limit)])
     if cap is not None:
@@ -1738,12 +1741,16 @@ def deliver_one(
     sender = send or discord_send
     stored = load_progress(payload, home)
     try:
-        split = split_reply(
-            payload.get("text") or "",
-            home=home,
-            limit=stored.get("limit") if stored else None,
-            cap=stored.get("cap") if stored else None,
-        )
+        if stored and "texts" in stored:
+            split = {"texts": stored["texts"], "limit": stored["limit"], "cap": stored["cap"]}
+        else:
+            split = split_reply(
+                payload.get("text") or "",
+                home=home,
+                limit=stored.get("limit") if stored else None,
+                cap=stored.get("cap") if stored else None,
+                legacy=bool(stored),
+            )
     except Exception:
         if stored and int(stored.get("posted_count") or 0) > 0:
             release_inflight(payload, home=home)
@@ -1760,6 +1767,7 @@ def deliver_one(
         "limit": split["limit"],
         "cap": split["cap"],
     }
+    progress["texts"] = chunks
     if isinstance(payload.get("decision"), dict):
         # The post record a click and a later edit find this decision by.
         progress["decision"] = payload["decision"]

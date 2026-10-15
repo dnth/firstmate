@@ -14,7 +14,7 @@
 #   fm-ext-outbox.sh progress --slug <slug> --kind <kind> --generation <n>
 #     --progress-file <path>
 #   fm-ext-outbox.sh release --slug <slug> --kind <kind> --generation <n>
-#   fm-ext-outbox.sh split [--max <n>] [--cap <n>]
+#   fm-ext-outbox.sh split [--max <n>] [--cap <n>] [--legacy]
 #
 # pending lists dedicated waiting-pin snapshots and ordinary reply generations
 # that are still genuinely pending. For ordinary replies, a payload
@@ -84,7 +84,7 @@ usage: fm-ext-outbox.sh pending
        fm-ext-outbox.sh fail --slug <slug> --kind <kind> --generation <n> --reason-file <path>
        fm-ext-outbox.sh progress --slug <slug> --kind <kind> --generation <n> --progress-file <path>
        fm-ext-outbox.sh release --slug <slug> --kind <kind> --generation <n>
-       fm-ext-outbox.sh split [--max <n>] [--cap <n>]
+       fm-ext-outbox.sh split [--max <n>] [--cap <n>] [--legacy]
 EOF
 }
 
@@ -109,6 +109,7 @@ REASON_FILE=
 PROGRESS_FILE=
 MAX_CHARS=
 THREAD_CAP=
+LEGACY=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -120,6 +121,7 @@ while [ "$#" -gt 0 ]; do
     --progress-file) shift; PROGRESS_FILE=${1:-} ;;
     --max) shift; MAX_CHARS=${1:-} ;;
     --cap) shift; THREAD_CAP=${1:-} ;;
+    --legacy) LEGACY=1 ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -131,7 +133,11 @@ case "$cmd" in
     command -v jq >/dev/null 2>&1 || die "jq is required" 1
     max=$(fm_ext_discord_reply_max_chars "$MAX_CHARS")
     cap=$(fm_ext_discord_thread_max "$THREAD_CAP")
-    texts=$(fm_ext_split_thread "$max" "$cap") || die "could not split the reply" 2
+    if [ -n "$LEGACY" ]; then
+      texts=$(fm_ext_split_thread_legacy "$max" "$cap") || die "could not split the reply" 2
+    else
+      texts=$(fm_ext_split_thread "$max" "$cap") || die "could not split the reply" 2
+    fi
     jq -cn --argjson limit "$max" --argjson cap "$cap" --argjson texts "$texts" \
       '{limit:$limit, cap:$cap, texts:$texts}' \
       || die "could not encode the split result" 2

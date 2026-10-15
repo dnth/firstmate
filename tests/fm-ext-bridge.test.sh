@@ -802,6 +802,9 @@ sys.path.insert(0, os.environ["PYTHONPATH"])
 import outbox_poster
 home, sent = sys.argv[1], sys.argv[2]
 os.environ["FM_HOME"] = home
+def changed_splitter(*args, **kwargs):
+    raise AssertionError("resuming stored chunks must not invoke a changed splitter")
+outbox_poster.split_reply = changed_splitter
 def send(payload):
     with open(sent, "a", encoding="utf-8") as fh:
         fh.write(payload["text"] + "\n")
@@ -1042,6 +1045,9 @@ test_22_presend_release_and_abort_inflight_first() {
   progress="$home/state/ext-outbox/${slug}.answer.1.progress.json"
   inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
   payload="$home/state/ext-outbox/${slug}.answer.1.json"
+  jq 'del(.texts)' "$progress" > "$home/legacy-progress.json"
+  home_env "$home" "$OUTBOX" progress --slug "$slug" --kind answer --generation 1 \
+    --progress-file "$home/legacy-progress.json" >/dev/null
   out=$(home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
     PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$payload" <<'PY'
 import os, sys
@@ -2844,4 +2850,137 @@ PY
 }
 
 test_47_discord_splitter_keeps_structure
+test_48_discord_splitter_boundaries() {
+  local home
+  home="$TMP_ROOT/c48"
+  mkdir -p "$home"
+  home_env "$home" "$PYTHON_BIN" - "$OUTBOX" <<'PYTEST' || fail "splitter boundary regressions"
+import json
+import subprocess
+import sys
+
+
+def split(text, limit=60, cap=25):
+    result = subprocess.run(
+        [sys.argv[1], "split", "--max", str(limit), "--cap", str(cap)],
+        input=text, text=True, capture_output=True, check=True,
+    )
+    chunks = json.loads(result.stdout)["texts"]
+    assert all(len(chunk) <= limit for chunk in chunks), chunks
+    assert all(sum(line.startswith("```") for line in chunk.split("\n")) % 2 == 0
+               for chunk in chunks), chunks
+    return chunks
+
+line = '  print("a  b")  ' * 12
+assert "".join(split(line)) == line
+code = "```python\n" + line + "\n```"
+chunks = split(code)
+assert "".join("\n".join(chunk.split("\n")[1:-1]) for chunk in chunks) == line
+text = "  first  line\n \t \n  second  line\n\n" + "z" * 60
+chunks = split(text)
+assert chunks[0] == "  first  line\n \t \n  second  line", chunks
+assert split("  short  line\n \t \n  end  ") == ["  short  line\n \t \n  end  "]
+
+bullets = "- 12345678\n- abcdefgh\n- ijklmnop"
+assert split("p" * 1875 + "\n\n" + bullets, 1900) == ["p" * 1875, bullets]
+item = "- parent\n  - child\n  - sibling"
+chunks = split("a" * 45 + "\n" + item)
+assert item in chunks, chunks
+
+code = "```bash\n" + "\n".join(["x" * 20] * 6) + "\n```"
+chunks = split(code, cap=1)
+assert len(chunks) == 1 and chunks[0].endswith("…\n```"), chunks
+assert split("x" * 120, cap=1) == ["x" * 59 + "…"]
+
+for opener, expected in [
+    ('```typescript title="src/components/Example.tsx"', "```typescript"),
+    ("```" + "x" * 100, "```"),
+]:
+    chunks = split(opener + "\n" + "a" * 100 + "\n```", limit=50)
+    assert all(chunk.split("\n")[0] == expected for chunk in chunks), chunks
+    assert "".join("\n".join(chunk.split("\n")[1:-1]) for chunk in chunks) == "a" * 100
+print("ok - 48 whitespace, paragraphs, capped fences, and long openers")
+PYTEST
+}
+
+test_49_split_plan_survives_restart() {
+  local home slug mode
+  for mode in current legacy; do
+    home="$TMP_ROOT/c49-$mode"
+    setup_home "$home"
+    slug=$(intake_ok "$home" "resume original split plan")
+    "$PYTHON_BIN" -c 'print("0123456789" * 200, end="")' > "$home/ans.txt"
+    home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+      --text-file "$home/ans.txt" >/dev/null
+    home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$mode" <<'PYTEST' \
+      || fail "resume must preserve the $mode split plan"
+import json
+import sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, slug, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+path = home / "state" / "ext-outbox" / f"{slug}.answer.1.json"
+text = (home / "ans.txt").read_text()
+original_split = poster.split_reply
+plan = original_split(text, home=home, legacy=mode == "legacy")["texts"]
+if mode == "legacy":
+    def old_split(*args, **kwargs):
+        kwargs["legacy"] = True
+        return original_split(*args, **kwargs)
+    poster.split_reply = old_split
+
+sent = []
+def send(payload):
+    if payload["chunk_index"] > 0:
+        raise poster.DiscordSendError("transient", "retry later")
+    sent.append(payload["text"])
+    return {"discord_message_id": "490"}
+
+assert poster.deliver_one(path, send=send, home=home) == "failed"
+assert sent == plan[:1]
+payload = json.loads(path.read_text())
+progress = poster.load_progress(payload, home)
+assert progress["texts"] == plan
+if mode == "legacy":
+    del progress["texts"]
+    poster.write_progress(payload, progress, home)
+(home / "sent.json").write_text(json.dumps(sent))
+(home / "plan.json").write_text(json.dumps(plan))
+PYTEST
+    home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$mode" <<'PYTEST' \
+      || fail "restart must complete the $mode split plan"
+import json
+import re
+import sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, slug, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+path = home / "state" / "ext-outbox" / f"{slug}.answer.1.json"
+sent = json.loads((home / "sent.json").read_text())
+plan = json.loads((home / "plan.json").read_text())
+original_split = poster.split_reply
+def changed_split(*args, **kwargs):
+    assert mode == "legacy" and kwargs.get("legacy"), "must not recompute stored chunks"
+    return original_split(*args, **kwargs)
+poster.split_reply = changed_split
+
+def send(payload):
+    progress = poster.load_progress(json.loads(path.read_text()), home)
+    assert progress["texts"] == plan
+    sent.append(payload["text"])
+    return {"discord_message_id": str(490 + payload["chunk_index"])}
+
+assert poster.deliver_one(path, send=send, home=home) == "sent"
+assert sent == plan
+content = [re.sub(r" \(\d+/\d+\)$", "", chunk) for chunk in sent] if mode == "legacy" else sent
+assert "".join(content) == (home / "ans.txt").read_text()
+print("ok - 49", mode, "split plan survives restart without content loss or duplication")
+PYTEST
+  done
+}
+
+test_48_discord_splitter_boundaries
+test_49_split_plan_survives_restart
 echo "all fm-ext-bridge tests passed"
