@@ -324,8 +324,8 @@ PY
             {"type":2,"style":4,"label":"Merge it","custom_id":("fmd:" + $key + ":2"),"disabled":false}]},
           {"type":1,"components":[
             {"type":2,"style":1,"label":"Discuss","custom_id":("fmd:" + $key + ":d"),"disabled":false}]}])
-    and (map(select(.body.content | endswith("(1/2)")))[0].body | has("components") | not)
-    and (map(select(.body.content | endswith("(2/2)")))[0].body.components | length == 2)
+    and (all(.[1:-1][]; .body | has("components") | not))
+    and (.[-1].body.components | length == 2)
     and all(.[]; .body.content | contains("route-fix") | not)
   ' >/dev/null || fail "buttons must carry the key and option ids, on the last chunk, in the request's thread: $out"
 

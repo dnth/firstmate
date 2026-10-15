@@ -14,7 +14,8 @@
 #   fm-ext-outbox.sh progress --slug <slug> --kind <kind> --generation <n>
 #     --progress-file <path>
 #   fm-ext-outbox.sh release --slug <slug> --kind <kind> --generation <n>
-#   fm-ext-outbox.sh split [--max <n>] [--cap <n>]
+#   fm-ext-outbox.sh split [--max <n>] [--cap <n>] [--legacy]
+#   fm-ext-outbox.sh limits [--max <n>] [--cap <n>]
 #
 # pending lists dedicated waiting-pin snapshots and ordinary reply generations
 # that are still genuinely pending. For ordinary replies, a payload
@@ -58,9 +59,16 @@
 # release drops the exclusive inflight send marker after a later-chunk
 # transient failure so another poster may resume remaining chunks. The
 # posting marker and progress stay in place.
-# split reads reply text on stdin and prints {limit,cap,texts} using
-# FM_EXT_DISCORD_REPLY_MAX_CHARS (default 1900) and FM_EXT_DISCORD_THREAD_MAX
-# (default 25). It does not require FMX_PAIRING_TOKEN or the hosted relay.
+# limits prints {limit,cap}, the resolved FM_EXT_DISCORD_REPLY_MAX_CHARS
+# (default 1900) and FM_EXT_DISCORD_THREAD_MAX (default 25) budget, so the
+# gateway poster reads that clamp contract from here instead of copying it.
+# split reads reply text on stdin and prints {limit,cap,texts}: the Discord
+# splitter lives in contrib/hermes-gateway-firstmate-comms/discord_split.py,
+# whose module docstring owns its rules, and this command runs it through
+# `uv run --no-project`, the same convention bin/fm-boat.sh uses.
+# split --legacy keeps the pre-change splitter for a generation that was already
+# partially posted when Discord chunk plans were persisted.
+# Neither command requires FMX_PAIRING_TOKEN or the hosted relay.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,7 +90,8 @@ usage: fm-ext-outbox.sh pending
        fm-ext-outbox.sh fail --slug <slug> --kind <kind> --generation <n> --reason-file <path>
        fm-ext-outbox.sh progress --slug <slug> --kind <kind> --generation <n> --progress-file <path>
        fm-ext-outbox.sh release --slug <slug> --kind <kind> --generation <n>
-       fm-ext-outbox.sh split [--max <n>] [--cap <n>]
+       fm-ext-outbox.sh split [--max <n>] [--cap <n>] [--legacy]
+       fm-ext-outbox.sh limits [--max <n>] [--cap <n>]
 EOF
 }
 
@@ -107,6 +116,7 @@ REASON_FILE=
 PROGRESS_FILE=
 MAX_CHARS=
 THREAD_CAP=
+LEGACY=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -118,6 +128,7 @@ while [ "$#" -gt 0 ]; do
     --progress-file) shift; PROGRESS_FILE=${1:-} ;;
     --max) shift; MAX_CHARS=${1:-} ;;
     --cap) shift; THREAD_CAP=${1:-} ;;
+    --legacy) LEGACY=1 ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -125,14 +136,31 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$cmd" in
+  limits)
+    printf '{"limit":%s,"cap":%s}\n' \
+      "$(fm_ext_discord_reply_max_chars "$MAX_CHARS")" \
+      "$(fm_ext_discord_thread_max "$THREAD_CAP")"
+    exit 0
+    ;;
   split)
-    command -v jq >/dev/null 2>&1 || die "jq is required" 1
     max=$(fm_ext_discord_reply_max_chars "$MAX_CHARS")
     cap=$(fm_ext_discord_thread_max "$THREAD_CAP")
-    texts=$(fm_ext_split_thread "$max" "$cap") || die "could not split the reply" 2
-    jq -cn --argjson limit "$max" --argjson cap "$cap" --argjson texts "$texts" \
-      '{limit:$limit, cap:$cap, texts:$texts}' \
-      || die "could not encode the split result" 2
+    if [ -n "$LEGACY" ]; then
+      # The pre-change splitter, reachable only to resume a generation that was
+      # already partially posted before Discord chunk plans were persisted.
+      command -v jq >/dev/null 2>&1 || die "jq is required" 1
+      texts=$(fm_ext_split_thread_legacy "$max" "$cap") || die "could not split the reply" 2
+      jq -cn --argjson limit "$max" --argjson cap "$cap" --argjson texts "$texts" \
+        '{limit:$limit, cap:$cap, texts:$texts}' \
+        || die "could not encode the split result" 2
+      exit 0
+    fi
+    # discord_split.py owns the splitter and prints the same {limit,cap,texts} JSON.
+    command -v uv >/dev/null 2>&1 \
+      || die "uv is required to run the Discord splitter (see bin/fm-boat.sh for the same convention)" 1
+    uv run --no-project python3 "$SCRIPT_DIR/../contrib/hermes-gateway-firstmate-comms/discord_split.py" \
+      --limit "$max" --cap "$cap" \
+      || die "could not split the reply" 2
     exit 0
     ;;
 esac

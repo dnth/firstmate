@@ -16,6 +16,11 @@ JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_DIR=$(dirname "$PYTHON_BIN")
 BASE_PATH="$PYTHON_DIR:$BASE_PATH"
+# The Discord splitter is Python, which bin/fm-ext-outbox.sh runs through uv the
+# same way bin/fm-boat.sh does.
+UV_BIN=$(command -v uv) || fail "test needs uv to run the Discord splitter"
+UV_DIR=$(dirname "$UV_BIN")
+BASE_PATH="$UV_DIR:$BASE_PATH"
 TMP_ROOT=$(fm_test_tmproot fm-ext-bridge)
 
 INTAKE="$ROOT/bin/fm-ext-intake.sh"
@@ -701,7 +706,7 @@ PY
 # --- 19. text over the budget posts ordered chunks without X pairing --------
 
 test_19_over_limit_posts_chunks_in_order_without_fmx_token() {
-  local home slug sent out n first last
+  local home slug sent out n
   home="$TMP_ROOT/c19"
   setup_home "$home"
   slug=$(intake_ok "$home" "long reply")
@@ -735,10 +740,12 @@ PY
   assert_contains "$out" "result=sent" "over-limit reply must send after split"
   n=$(wc -l < "$sent" | tr -d ' ')
   [ "$n" -gt 1 ] || fail "over-limit reply must post more than one message, got $n"
-  first=$(sed -n '1p' "$sent")
-  last=$(tail -n 1 "$sent")
-  case "$first" in *" (1/$n)") : ;; *) fail "first chunk must be numbered (1/$n): $first" ;; esac
-  case "$last" in *" ($n/$n)") : ;; *) fail "last chunk must be numbered ($n/$n): $last" ;; esac
+  grep -Eq '\([0-9]+/[0-9]+\)' "$sent" \
+    && fail "Discord chunks must not carry a (k/n) counter: $(cat "$sent")"
+  # The reply is one over-long line, so it splits on word boundaries; no word
+  # may be lost or reordered across the chunks.
+  [ "$(tr '\n' ' ' < "$sent" | tr -s ' ' | sed 's/ $//')" = "$(cat "$home/ans.txt")" ] \
+    || fail "word-boundary split must keep every word: $(cat "$sent")"
   awk -v lim=50 'length($0)>lim{exit 1}' "$sent" \
     || fail "every Discord chunk must stay within the 50-character budget"
   assert_present "$home/state/ext-outbox/${slug}.answer.1.receipt.json" \
@@ -800,6 +807,9 @@ sys.path.insert(0, os.environ["PYTHONPATH"])
 import outbox_poster
 home, sent = sys.argv[1], sys.argv[2]
 os.environ["FM_HOME"] = home
+def changed_splitter(*args, **kwargs):
+    raise AssertionError("resuming stored chunks must not invoke a changed splitter")
+outbox_poster.split_reply = changed_splitter
 def send(payload):
     with open(sent, "a", encoding="utf-8") as fh:
         fh.write(payload["text"] + "\n")
@@ -1040,6 +1050,9 @@ test_22_presend_release_and_abort_inflight_first() {
   progress="$home/state/ext-outbox/${slug}.answer.1.progress.json"
   inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
   payload="$home/state/ext-outbox/${slug}.answer.1.json"
+  jq 'del(.texts)' "$progress" > "$home/legacy-progress.json"
+  home_env "$home" "$OUTBOX" progress --slug "$slug" --kind answer --generation 1 \
+    --progress-file "$home/legacy-progress.json" >/dev/null
   out=$(home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
     PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$payload" <<'PY'
 import os, sys
@@ -2675,4 +2688,571 @@ test_46_attachment_recovery() {
 }
 
 test_46_attachment_recovery
+
+# --- 47. the Discord splitter keeps line structure, fences, and the budget -
+
+test_47_discord_splitter_keeps_structure() {
+  local home out tight
+  home="$TMP_ROOT/c47"
+  mkdir -p "$home"
+  # The shape of a real metrics-list post: a 21-item numbered list, headings,
+  # nested bullets, inline code, bold labels, and a fenced code block.
+  cat > "$home/post.md" <<'TXT'
+**Evaluation readiness** - the numbers an acceptance test still needs.
+
+Answer quality:
+1. Answer correctness: "the answer matches the source", target >=99%
+2. Faithfulness: every claim traces to a cited passage, target >=99%
+3. Fabrication rate, target <=1%
+4. Retrieval hit rate: must be reported with the scored set
+5. Mean reciprocal rank: must be reported with the scored set
+6. Scan accuracy: "the scan was read", target >=95%
+
+Citations:
+7. Citation correctness: the cited passage matches and its link resolves, target 100%
+8. Citation coverage: at least one citation in every answer
+
+Pipeline checks that need a scored set to prove them:
+9. Chunking fidelity: every chunk matches the source text
+10. Retrieval correctness: the executor returns the expected chunk for the query, ranked first
+11. Router intent accuracy: picks the right intent, with no hard-coded intent list anywhere
+12. Planner tool selection: picks the right tools for the request
+13. Score per answer: the check must output a valid score for each answer
+14. Conversation memory: answers stay correct on follow-up questions, including pronouns from an earlier turn
+15. Policy guard: off-topic questions blocked, with no false blocks on legitimate questions
+16. Prompt-injection guard: attack prompts blocked
+17. Response time within 8 s for a single question
+18. Search within 4 s
+19. Upload within 25 s
+20. Login within 2 s
+21. Concurrency: 10 / 25 / 50 / 100 users pass with no failed request
+
+Ownership and status:
+- **Owner:** platform team, with one reviewer per section
+- **Status:** the scored set is still missing
+  - the runner starts the scored set
+  - the report lands in the evaluation folder
+  - the runner writes one report per run
+  - the report lists every failed case
+
+Next step: agree a measurable target, then run the scored set end to end before the next rehearsal.
+
+Fix the runner first:
+
+```bash
+bin/eval-run.sh --set golden --report out/report.json
+```
+TXT
+  [ "$(wc -c < "$home/post.md")" -gt 1900 ] \
+    || fail "the fixture must exceed the default Discord budget"
+
+  # The alignment checker: every original line recurs byte-for-byte and in
+  # order, allowing only dropped blank lines at chunk edges and fence lines the
+  # splitter adds when a code block spans chunks.
+  cat > "$home/check.py" <<'PY'
+import json
+import sys
+
+original, split_path, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+expected = open(original, encoding="utf-8").read().strip().split("\n")
+texts = json.load(open(split_path, encoding="utf-8"))["texts"]
+assert len(texts) > 1, "a reply over the limit must split: %r" % (texts,)
+for chunk in texts:
+    assert len(chunk) <= limit, "chunk over the %d limit: %d" % (limit, len(chunk))
+    assert sum(line.startswith("```") for line in chunk.split("\n")) % 2 == 0, (
+        "unbalanced fences in chunk: %r" % chunk
+    )
+for chunk in texts:
+    assert not any(
+        part.startswith("(") and part.endswith(")") and "/" in part
+        for part in chunk.split(" ")
+    ), "Discord chunks must not carry a (k/n) counter: %r" % chunk
+
+def edge_trim(lines):
+    start, end = 0, len(lines)
+    while start < end and lines[start] == "":
+        start += 1
+    while end > start and lines[end - 1] == "":
+        end -= 1
+    return lines[start:end]
+
+index = 0
+for position, chunk in enumerate(texts):
+    if position:
+        while index < len(expected) and expected[index] == "":
+            index += 1
+    for line in edge_trim(chunk.split("\n")):
+        if index < len(expected) and expected[index] == line:
+            index += 1
+            continue
+        assert line.startswith("```"), (
+            "line missing or reordered at chunk %d: %r (expected %r)"
+            % (position, line, expected[index] if index < len(expected) else None)
+        )
+while index < len(expected) and expected[index] == "":
+    index += 1
+assert index == len(expected), "split lost %d line(s)" % (len(expected) - index)
+PY
+
+  out=$(home_env "$home" "$OUTBOX" split < "$home/post.md") \
+    || fail "split refused the metrics post"
+  printf '%s' "$out" > "$home/split.json"
+  [ "$(jq -r '.limit' "$home/split.json")" = 1900 ] \
+    || fail "split must report the default limit"
+  "$PYTHON_BIN" "$home/check.py" "$home/post.md" "$home/split.json" 1900 \
+    || fail "a split reply must keep every line: $out"
+  # The nested sub-items keep their two-space indent and the fence stays whole.
+  jq -r '.texts[]' "$home/split.json" | grep -Fqx '  - the runner starts the scored set' \
+    || fail "nested bullets must keep their indent"
+  jq -r '.texts[]' "$home/split.json" | grep -Fq '```bash
+bin/eval-run.sh --set golden --report out/report.json
+```' || fail "a fenced code block that fits must stay intact"
+  pass "47 a long Discord reply splits on its own lines without renumbering"
+
+  # A code block longer than one chunk is closed and reopened with its own
+  # fence line, and stays within the limit.
+  {
+    printf 'Here is the log:\n\n```bash\n'
+    printf 'step %s of the deploy\n' 1 2 3 4 5 6
+    printf '```\n\nDone.\n'
+  } > "$home/code.md"
+  tight=$(home_env "$home" "$OUTBOX" split --max 60 < "$home/code.md") \
+    || fail "split refused the code post"
+  printf '%s' "$tight" > "$home/tight.json"
+  [ "$(jq -r '.texts | length' "$home/tight.json")" -gt 2 ] \
+    || fail "a code block over the budget must span chunks: $tight"
+  jq -r '.texts[]' "$home/tight.json" > "$home/tight.txt"
+  jq -e 'all(.texts[]; length <= 60)' "$home/tight.json" > /dev/null \
+    || fail "every chunk must stay within the tight budget: $(cat "$home/tight.txt")"
+  jq -e 'all(.texts[]; (split("\n") | map(select(startswith("```"))) | length) % 2 == 0)' \
+    "$home/tight.json" > /dev/null \
+    || fail "every chunk must carry balanced fences: $(cat "$home/tight.txt")"
+  [ "$(grep -c '^```bash$' "$home/tight.txt")" -gt 1 ] \
+    || fail "a reopened code block must keep its language tag: $(cat "$home/tight.txt")"
+  grep -Fqx '```' "$home/tight.txt" \
+    || fail "a split code block must be closed: $(cat "$home/tight.txt")"
+
+  # One line longer than the limit still splits safely.
+  "$PYTHON_BIN" -c 'print("a" * 200)' > "$home/word.md"
+  out=$(home_env "$home" "$OUTBOX" split --max 60 < "$home/word.md") \
+    || fail "split refused an over-long single line"
+  printf '%s' "$out" > "$home/word.json"
+  "$PYTHON_BIN" - "$home/word.json" <<'PY'
+import json, sys
+texts = json.load(open(sys.argv[1], encoding="utf-8"))["texts"]
+assert all(len(chunk) <= 60 for chunk in texts), "chunk over the 60 limit: %r" % texts
+assert "".join(texts) == "a" * 200, "a hard split must not lose characters: %r" % texts
+PY
+
+  # A reply under the limit is posted untouched.
+  printf 'Aye, all shipshape.\n\n- one\n- two\n' > "$home/short.md"
+  out=$(home_env "$home" "$OUTBOX" split < "$home/short.md") || fail "split refused a short reply"
+  [ "$(printf '%s' "$out" | jq -r '.texts | length')" = 1 ] \
+    || fail "an under-limit reply must be one message: $out"
+  printf '%s' "$out" > "$home/short.json"
+  "$PYTHON_BIN" - "$home/short.md" "$home/short.json" <<'PY' \
+    || fail "an under-limit reply must be untouched: $out"
+import json, pathlib, sys
+assert json.loads(pathlib.Path(sys.argv[2]).read_text())["texts"] == [
+    pathlib.Path(sys.argv[1]).read_text()
+]
+PY
+  pass "47 fences stay balanced across chunks and short replies pass through"
+}
+
+test_47_discord_splitter_keeps_structure
+# --- 48. splitter boundary regressions -------------------------------------
+
+test_48_discord_splitter_boundaries() {
+  local home
+  home="$TMP_ROOT/c48"
+  mkdir -p "$home"
+  home_env "$home" uv run --no-project python3 - "$OUTBOX" <<'PYTEST' || fail "splitter boundary regressions"
+import json
+import os
+import subprocess
+import sys
+
+
+def split(text, limit=60, cap=25):
+    result = subprocess.run(
+        [sys.argv[1], "split", "--max", str(limit), "--cap", str(cap)],
+        input=text, text=True, capture_output=True, check=True,
+    )
+    chunks = json.loads(result.stdout)["texts"]
+    assert all(len(chunk) <= limit for chunk in chunks), chunks
+    assert all(sum(line.startswith("```") for line in chunk.split("\n")) % 2 == 0
+               for chunk in chunks), chunks
+    return chunks
+
+for use_flags in (False, True):
+    env = dict(os.environ, FM_EXT_DISCORD_REPLY_MAX_CHARS="050",
+               FM_EXT_DISCORD_THREAD_MAX="025")
+    flags = ["--max", "050", "--cap", "025"] if use_flags else []
+    limits = subprocess.run([sys.argv[1], "limits"] + flags,
+                            env=env, text=True, capture_output=True, check=True)
+    assert json.loads(limits.stdout) == {"limit": 50, "cap": 25}, limits.stdout
+    for legacy in (False, True):
+        result = subprocess.run(
+            [sys.argv[1], "split"] + flags + (["--legacy"] if legacy else []),
+            env=env, input="x" * 100, text=True, capture_output=True, check=True,
+        )
+        plan = json.loads(result.stdout)
+        assert plan["limit"] == 50 and plan["cap"] == 25, plan
+        assert all(len(chunk) <= 50 for chunk in plan["texts"]), plan
+
+assert split("x" * 30 + "\n## Title\n" + "y" * 45) == [
+    "x" * 30 + "\n## Title", "y" * 45
+]
+
+line = '  print("a  b")  ' * 12
+assert "".join(split(line)) == line
+code = "```python\n" + line + "\n```"
+chunks = split(code)
+assert "".join("\n".join(chunk.split("\n")[1:-1]) for chunk in chunks) == line
+text = "  first  line\n \t \n  second  line\n\n" + "z" * 60
+chunks = split(text)
+assert chunks[0] == "  first  line\n \t \n  second  line", chunks
+assert split("  short  line\n \t \n  end  ") == ["  short  line\n \t \n  end  "]
+
+bullets = "- 12345678\n- abcdefgh\n- ijklmnop"
+assert split("p" * 1875 + "\n\n" + bullets, 1900) == ["p" * 1875, bullets]
+item = "- parent\n  - child\n  - sibling"
+chunks = split("a" * 45 + "\n" + item)
+assert item in chunks, chunks
+
+code = "```bash\n" + "\n".join(["x" * 20] * 6) + "\n```"
+chunks = split(code, cap=1)
+assert len(chunks) == 1 and chunks[0].endswith("…\n```"), chunks
+assert split("x" * 120, cap=1) == ["x" * 59 + "…"]
+
+for opener, expected in [
+    ('```typescript title="src/components/Example.tsx"', "```typescript"),
+    ("```" + "x" * 100, "```"),
+]:
+    chunks = split(opener + "\n" + "a" * 100 + "\n```", limit=50)
+    assert all(chunk.split("\n")[0] == expected for chunk in chunks), chunks
+    assert "".join("\n".join(chunk.split("\n")[1:-1]) for chunk in chunks) == "a" * 100
+print("ok - 48 whitespace, paragraphs, capped fences, and long openers")
+PYTEST
+}
+
+test_49_split_plan_survives_restart() {
+  local home slug mode
+  for mode in current legacy; do
+    home="$TMP_ROOT/c49-$mode"
+    setup_home "$home"
+    slug=$(intake_ok "$home" "resume original split plan")
+    "$PYTHON_BIN" -c 'print("0123456789" * 200, end="")' > "$home/ans.txt"
+    home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+      --text-file "$home/ans.txt" >/dev/null
+    home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$mode" <<'PYTEST' \
+      || fail "resume must preserve the $mode split plan"
+import json
+import sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, slug, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+path = home / "state" / "ext-outbox" / f"{slug}.answer.1.json"
+text = (home / "ans.txt").read_text()
+original_split = poster.split_reply
+plan = original_split(text, home=home, legacy=mode == "legacy")["texts"]
+if mode == "legacy":
+    def old_split(*args, **kwargs):
+        kwargs["legacy"] = True
+        return original_split(*args, **kwargs)
+    poster.split_reply = old_split
+
+sent = []
+def send(payload):
+    if payload["chunk_index"] > 0:
+        raise poster.DiscordSendError("transient", "retry later")
+    sent.append(payload["text"])
+    return {"discord_message_id": "490"}
+
+assert poster.deliver_one(path, send=send, home=home) == "failed"
+assert sent == plan[:1]
+payload = json.loads(path.read_text())
+progress = poster.load_progress(payload, home)
+assert progress["texts"] == plan
+if mode == "legacy":
+    del progress["texts"]
+    poster.write_progress(payload, progress, home)
+(home / "sent.json").write_text(json.dumps(sent))
+(home / "plan.json").write_text(json.dumps(plan))
+PYTEST
+    home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$mode" <<'PYTEST' \
+      || fail "restart must complete the $mode split plan"
+import json
+import re
+import sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, slug, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+path = home / "state" / "ext-outbox" / f"{slug}.answer.1.json"
+sent = json.loads((home / "sent.json").read_text())
+plan = json.loads((home / "plan.json").read_text())
+original_split = poster.split_reply
+def changed_split(*args, **kwargs):
+    assert mode == "legacy" and kwargs.get("legacy"), "must not recompute stored chunks"
+    return original_split(*args, **kwargs)
+poster.split_reply = changed_split
+
+def send(payload):
+    progress = poster.load_progress(json.loads(path.read_text()), home)
+    assert progress["texts"] == plan
+    sent.append(payload["text"])
+    return {"discord_message_id": str(490 + payload["chunk_index"])}
+
+assert poster.deliver_one(path, send=send, home=home) == "sent"
+assert sent == plan
+content = [re.sub(r" \(\d+/\d+\)$", "", chunk) for chunk in sent] if mode == "legacy" else sent
+assert "".join(content) == (home / "ans.txt").read_text()
+print("ok - 49", mode, "split plan survives restart without content loss or duplication")
+PYTEST
+  done
+}
+
+# --- 50. generated replies hold every splitter invariant -------------------
+
+test_50_discord_splitter_properties() {
+  local home
+  home="$TMP_ROOT/c50"
+  mkdir -p "$home"
+  cat > "$home/sweep.py" <<'PY'
+"""Seeded property sweep over the Discord reply splitter."""
+import random
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from discord_split import split_discord
+
+
+def delimiters(lines):
+    """Independent fence state machine: True when a line is a fence delimiter."""
+    flags = []
+    state = None
+    for line in lines:
+        stripped = line.lstrip(" \t")
+        char = stripped[0] if stripped else ""
+        length = 0
+        while length < len(stripped) and char in "`~" and stripped[length] == char:
+            length += 1
+        info = stripped[length:]
+        fence = char in "`~" and length >= 3 and not (char == "`" and "`" in info)
+        if not fence:
+            flags.append(False)
+            continue
+        if state is None:
+            state = (char, length)
+            flags.append(True)
+        elif char == state[0] and length >= state[1] and info.strip() == "":
+            state = None
+            flags.append(True)
+        else:
+            flags.append(False)
+    return flags
+
+
+def balance_ok(chunk):
+    lines = chunk.split("\n")
+    state = None
+    for line, fence in zip(lines, delimiters(lines)):
+        if not fence:
+            continue
+        stripped = line.lstrip(" \t")
+        char = stripped[0]
+        length = 0
+        while length < len(stripped) and stripped[length] == char:
+            length += 1
+        if state is None:
+            state = (char, length)
+        elif char == state[0] and length >= state[1]:
+            state = None
+    return state is None
+
+
+def content(lines):
+    return [line for line, fence in zip(lines, delimiters(lines)) if not fence]
+
+
+def edges_trimmed(lines):
+    lines = list(lines)
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+def check_message(text, limit, cap):
+    chunks = split_discord(text, limit, cap)
+    if len(text) <= limit:
+        assert chunks == [text], ("untouched reply", repr(text), chunks)
+        return
+    if not text.strip():
+        assert chunks == [], ("whitespace-only reply", chunks)
+        return
+    assert chunks, "a non-empty reply must produce chunks"
+    assert len(chunks) <= cap, ("cap", cap, chunks)
+    for chunk in chunks:
+        assert len(chunk) <= limit, ("limit", limit, len(chunk), chunk)
+        assert not any(
+            part.startswith("(") and part.endswith(")") and "/" in part
+            for part in chunk.split(" ")
+        ), ("counter", chunk)
+        assert balance_ok(chunk), ("fences", limit, repr(chunk))
+    want = content(edges_trimmed(text.split("\n")))
+    have = []
+    for chunk in chunks:
+        have.extend(content(edges_trimmed(chunk.split("\n"))))
+    truncated = len(chunks) == cap and "\u2026" in chunks[-1]
+    i = j = 0
+    while i < len(want):
+        expected = want[i]
+        if j < len(have) and have[j] == expected:
+            i += 1
+            j += 1
+            continue
+        if not expected.strip():
+            i += 1
+            continue
+        accumulated = ""
+        while len(accumulated) < len(expected) and j < len(have):
+            accumulated += have[j]
+            j += 1
+            if accumulated == expected:
+                break
+        if accumulated == expected:
+            i += 1
+            continue
+        if truncated and have and "\u2026" in have[-1] and j >= len(have):
+            break
+        raise AssertionError("content mismatch at %d: %r vs %r" % (i, expected, have[j:j + 2]))
+    while j < len(have) and not have[j].strip():
+        j += 1
+    if truncated and have[j:] == ["…"]:
+        j += 1
+    assert j >= len(have), ("extra content", have[j:], chunks)
+
+
+FRAGMENTS = [
+    "**Label:** short text", "- bullet one", "  - nested bullet", "    - deeper bullet",
+    "1. numbered item", "  2. nested number", "`inline code`", "    indented code line",
+    "```python", "```bash", "```", "~~~", "~~~~", "```literal", "text after fence",
+    "# Heading", "## Sub heading", "### Third level",
+    "plain paragraph line that has a fair number of words in it " * 3,
+    "x" * 90, "  leading spaces and  double  spaces  ", " \t ", "", "",
+    "- item with a long tail " * 2, '  print("a  b")  ' * 3,
+    "```" + " " * 50 + "literal", "~~~" + " " * 50 + "literal",
+    "x" * 60 + "```example", "x" * 60 + "~~~example",
+    "```   ", "~~~   ", "````text", "~~~~text", "`````   ", "~~~~~   ",
+    "`" * 61, "~" * 61, "```" + "long_info" * 30,
+    "~~~" + "long_info" * 30, "`" * 30, "~" * 30,
+    "x" * 10 + "`" * 20 + "x" * 10,
+    "x" * 10 + "~" * 20 + "x" * 10,
+]
+
+def regression_truncation_exposes_closer():
+    text = "```\na\n```\n" + "y" * 50 + "\n\n" + "z" * 60
+    check_message(text, 60, 1)
+    assert balance_ok(split_discord(text, 60, 1)[0])
+
+
+def regression_split_boundaries_do_not_create_fences():
+    for fence in ("```", "~~~"):
+        for text in (
+            fence + "text\n" + fence + " " * 50 + "literal\n" + fence,
+            "x" * 60 + fence + "example",
+        ):
+            check_message(text, 60, 25)
+
+
+def regression_oversized_fence_line():
+    for fence in ("`", "~"):
+        for body in ("", "content\n"):
+            text = fence * 3 + "\n" + body + fence * 61
+            check_message(text, 60, 25)
+            chunks = split_discord(text, 60, 25)
+            assert all(balance_ok(chunk) for chunk in chunks), chunks
+            assert any(body.rstrip("\n") in chunk for chunk in chunks), chunks
+
+
+def regression_minimal_valid_delimiters():
+    for char in ("`", "~"):
+        delimiter = char * 30
+        text = delimiter + "\n" + char * 3 + "\n" + delimiter
+        chunks = split_discord(text, 60)
+        assert len(chunks) == 1, chunks
+        assert chunks[0].split("\n")[1:-1] == [char * 3], chunks
+        assert len(chunks[0].split("\n")[0]) == 4, chunks
+        assert chunks[0].split("\n")[-1] == delimiter, chunks
+        check_message(text, 60, 25)
+        for body in ("x" * 40, "x" * 10 + char * 5 + "x" * 10):
+            text = delimiter + "\n" + body + "\n" + delimiter
+            chunks = split_discord(text, 60)
+            assert len(chunks) == 1, chunks
+            assert chunks[0].split("\n")[1:-1] == [body], chunks
+            expected = max(3, 6 if char in body else 3)
+            assert chunks[0].split("\n")[0] == char * expected, chunks
+            assert chunks[0].split("\n")[-1] == char * expected, chunks
+            check_message(text, 60, 25)
+        opener, closer = char * 3 + "python  ", "  " + char * 5 + "  "
+        text = opener + "\n" + "\n".join(["x" * 20] * 4) + "\n" + closer
+        chunks = split_discord(text, 60)
+        assert all(chunk.split("\n")[0] == opener for chunk in chunks), chunks
+        assert all(chunk.split("\n")[-1] == closer for chunk in chunks), chunks
+        check_message(text, 60, 25)
+        text = delimiter + "\n" + "x" * 50 + "\n" + delimiter
+        chunks = split_discord(text, 60)
+        assert chunks == [char * 3 + "\n" + "x" * 50 + "\n" + char * 3], chunks
+        check_message(text + "\n\n" + "y" * 60, 60, 1)
+
+
+def regression_exact_passthrough_and_opener():
+    for text in ("\nhi\n", " \t ", "", "```python  \na\n```\n"):
+        assert split_discord(text, 60) == [text]
+    text = "```python  \n" + "x" * 100 + "\n```"
+    chunks = split_discord(text, 60)
+    assert all(chunk.startswith("```python  \n") for chunk in chunks), chunks
+    check_message(text, 60, 25)
+
+
+regression_truncation_exposes_closer()
+regression_split_boundaries_do_not_create_fences()
+regression_oversized_fence_line()
+regression_minimal_valid_delimiters()
+regression_exact_passthrough_and_opener()
+
+total = 0
+for seed in (1, 7, 20261015, 424242, 999983):
+    rng = random.Random(seed)
+    for _ in range(600):
+        text = "\n".join(rng.choice(FRAGMENTS) for _ in range(rng.randint(1, 14)))
+        if rng.random() < 0.3:
+            text = "# Heading\n\n" + text
+        check_message(text, rng.choice([60, 200, 1900]), rng.choice([1, 2, 3, 25]))
+        total += 1
+
+# The shapes the review findings named, kept as deterministic cases.
+check_message("```python\n" + '  print("a  b")  ' * 8 + "\n```", 60, 25)
+check_message("  first  line\n \t \n  second  line\n\n" + "z" * 200, 60, 25)
+check_message("a" * 45 + "\n" + "- parent\n  - child\n  - sibling", 60, 25)
+check_message("p" * 1875 + "\n\n" + "- 12345678\n- abcdefgh\n- ijklmnop", 1900, 25)
+check_message('```typescript title="src/components/Example.tsx"\n' + "a" * 100 + "\n```", 50, 25)
+check_message("```text\n```literal\n" + "x" * 80 + "\n```", 60, 25)
+check_message("x" * 52 + "\n```\n```\n\nz", 60, 1)
+check_message("x" * 120, 60, 1)
+print("ok - 50 %d generated replies hold every splitter invariant" % total)
+PY
+  home_env "$home" uv run --no-project python3 "$home/sweep.py" "$PLUGIN" \
+    || fail "the generated-reply invariant sweep must pass"
+  pass "50 generated replies keep their lines, limits, fences, and content"
+}
+
+test_48_discord_splitter_boundaries
+test_49_split_plan_survives_restart
+test_50_discord_splitter_properties
 echo "all fm-ext-bridge tests passed"
