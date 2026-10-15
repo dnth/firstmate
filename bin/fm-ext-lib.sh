@@ -515,18 +515,31 @@ FM_EXT_DECISION_TEXT_MAX=1000
 # Longest Discord component custom_id.
 # shellcheck disable=SC2034 # Read by the sourcing emit script.
 FM_EXT_DECISION_CUSTOM_ID_MAX=100
-# Choice-shaped text (bin/fm-ext-emit.sh header owns the rule): two or more
-# option lines plus a reply/choice cue, or a "reply ... with the number/code"
-# line on its own.
+# Choice-shaped text (bin/fm-ext-emit.sh header owns the rule): a direct reply,
+# pick, choose, select, or say cue with digits; two or more option lines plus
+# a choice cue; or a choice heading followed by two or more option lines.
 FM_EXT_CHOICE_OPTION_RE='^[[:space:]]*((-|\*|•)[[:space:]]+)?(\(?[0-9]{1,2}[.):]|[A-Za-z][0-9]{1,2}[.):]?)([[:space:]]+[^[:space:]]|$)'
 FM_EXT_CHOICE_CUE_RE='(^|[^[:alnum:]_])((reply|respond|answer|type|send|pick|choose|select|tap|click)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,38}[^[:alnum:]_.!?])(number|code|letter|option|choice)s?|which (one|options?)|(pick|choose) one)([^[:alnum:]_]|$)'
 FM_EXT_CHOICE_REPLY_RE='(^|[^[:alnum:]_])reply([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,28}[^[:alnum:]_.!?])(with|using)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,18}[^[:alnum:]_.!?])(number|code|letter|option|choice)s?([^[:alnum:]_]|$)'
+FM_EXT_CHOICE_DIGIT_CUE_RE='(^|[^[:alnum:]_])(reply|pick|choose|select|say)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,38}[^[:alnum:]_.!?])([0-9]{1,2}([[:space:]]*,[[:space:]]*[0-9]{1,2})?([[:space:]]*,?[[:space:]]+or[[:space:]]+[0-9]{1,2})?|[0-9]{1,2}[[:space:]]*/[[:space:]]*[0-9]{1,2}|[0-9]{1,2}[[:space:]]+or[[:space:]]+[0-9]{1,2})([^[:alnum:]_]|$)'
+FM_EXT_CHOICE_HEADING_RE='^[[:space:]]*(\*\*(options?|your[[:space:]]+call|choose):?\*\*|__(options?|your[[:space:]]+call|choose):?__|(options?|your[[:space:]]+call|choose):?)[[:space:]]*$'
 
 fm_ext_text_choice_shaped() {
-  local text=$1 options
-  if printf '%s\n' "$text" | grep -qiE -e "$FM_EXT_CHOICE_REPLY_RE"; then
+  local text=$1 options line choice_heading=0 choice_options=0
+  if printf '%s\n' "$text" | grep -qiE -e "$FM_EXT_CHOICE_REPLY_RE" \
+    || printf '%s\n' "$text" | grep -qiE -e "$FM_EXT_CHOICE_DIGIT_CUE_RE"; then
     return 0
   fi
+  while IFS= read -r line; do
+    if printf '%s\n' "$line" | grep -qiE -e "$FM_EXT_CHOICE_HEADING_RE"; then
+      choice_heading=1
+      choice_options=0
+    elif [ "$choice_heading" = 1 ] \
+      && printf '%s\n' "$line" | grep -qE -e "$FM_EXT_CHOICE_OPTION_RE"; then
+      choice_options=$((choice_options + 1))
+      [ "$choice_options" -ge 2 ] && return 0
+    fi
+  done <<< "$text"
   options=$(printf '%s\n' "$text" | grep -cE -e "$FM_EXT_CHOICE_OPTION_RE")
   [ "${options:-0}" -ge 2 ] || return 1
   printf '%s\n' "$text" | grep -qiE -e "$FM_EXT_CHOICE_CUE_RE"

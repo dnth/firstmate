@@ -234,15 +234,22 @@ test_4_no_buttons_posts_a_deliberate_plain_list() {
 }
 
 test_5_ordinary_text_is_unaffected() {
-  local home=$TMP_ROOT/c5
+  local home=$TMP_ROOT/c5 text generation=0
   setup_home "$home"
-  emit_text "$home" 1 $'Two jobs are running.\n1. Ingest finished\n2. Eval running\nThe report lands tonight.'
-  [ "$RC" -eq 0 ] || fail "a numbered status list without a cue must post: $OUT"
-  emit_text "$home" 2 $'All 12 tests passed.\n5 files changed, 3 added.'
-  [ "$RC" -eq 0 ] || fail "a plain answer must post: $OUT"
+  for text in \
+    $'Two jobs are running.\n1. Ingest finished\n2. Eval running\nThe report lands tonight.' \
+    'All 12 tests passed. 5 files changed, 3 added.' \
+    'PR 562 merged; 3 of 5 cases pass' \
+    'steps 1, 2 and 3 are done' \
+    $'Options:\n1. Only one possible route.' \
+    $'1. First finding\n2. Second finding'; do
+    generation=$((generation + 1))
+    emit_text "$home" "$generation" "$text"
+    [ "$RC" -eq 0 ] || fail "ordinary text triggered the choice guard: $text: $OUT"
+  done
   jq -e 'has("no_buttons_reason") | not' "$(payload_of "$home" answer 1)" >/dev/null \
     || fail "a normal post must not carry a no-buttons reason"
-  pass "5 a numbered list without a choice cue and plain prose post unchanged"
+  pass "5 status prose and numbered lists without a choice cue or heading post unchanged"
 }
 
 test_6_choice_with_a_decision_file_is_unaffected() {
@@ -382,6 +389,32 @@ test_9_plural_choice_cues_require_buttons() {
   pass "9 plural options, choices, numbers, codes, and letters require buttons for every guarded post kind"
 }
 
+test_10_digit_choice_cues_and_headings_require_buttons() {
+  local home=$TMP_ROOT/c10 text generation=0
+  setup_home "$home"
+  for text in \
+    $'Options:\n1. **Restart only the eval service on today\'s production build** ... (Recommended)\n2. Report only the search-only retrieval scores we already have ...\n3. Wait until tomorrow.\n\nReply 1, 2 or 3.' \
+    $'Options:\n1. Keep them here (recommended, already running).\n2. Keep them here, but run their heavier live tests ...\n3. Fix the Boat second mate first ...\n\nReply 2 or 3 if you want either. 1 needs nothing.' \
+    $'**Your call:**\n1. Restart the service.\n2. Wait until tomorrow.\n3. Skip this change.' \
+    $'1. North\n2. South\nReply 1, 2 or 3.' \
+    $'1. North\n2. South\nPick 2 or 3.' \
+    $'1. North\n2. South\nChoose 1/2.' \
+    $'1. North\n2. South\nSelect 1 or 2.' \
+    $'1. North\n2. South\nSay 1 or 2.' \
+    'Reply 1 or 2.'; do
+    generation=$((generation + 1))
+    emit_text "$home" "$generation" "$text"
+    [ "$RC" -ne 0 ] || fail "choice escaped without buttons: $text"
+    assert_contains "$OUT" "fm-ext-ask.sh" "choice refusal must name ask"
+    emit_text "$home" "$generation" "$text" --no-buttons "deliberate plain choice list"
+    [ "$RC" -eq 0 ] || fail "--no-buttons did not allow a deliberate plain list: $OUT"
+    jq -e '.no_buttons_reason == "deliberate plain choice list"' \
+      "$(payload_of "$home" answer "$generation")" >/dev/null \
+      || fail "--no-buttons reason was not recorded for: $text"
+  done
+  pass "10 digit choice cues and choice headings require buttons unless --no-buttons is explicit"
+}
+
 test_1_ask_holds_and_posts_buttons_in_text_order
 test_2_mode_is_required_and_pre_hold_refusals
 test_3_emit_refuses_a_choice_without_buttons
@@ -391,3 +424,4 @@ test_6_choice_with_a_decision_file_is_unaffected
 test_7_settled_ask_retries_preserve_state
 test_8_choice_cues_match_whole_words
 test_9_plural_choice_cues_require_buttons
+test_10_digit_choice_cues_and_headings_require_buttons

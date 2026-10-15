@@ -54,35 +54,20 @@
 # the decision's current lifecycle (fm_ext_decision_key_occurrence in
 # bin/fm-ext-lib.sh), so the post can only ever answer that lifecycle.
 #
-# CHOICE GUARD. An answer, followup, or final whose text has the shape of a
-# choice is refused unless --decision-file is given, so a choice can never go
-# out as plain numbered text by mistake. Detection uses these line-local,
-# case-insensitive patterns:
-#   option line - a line, after optional indent and a "-", "*", or bullet
-#     marker, that starts with a 1-2 digit number ended by ".", ")", or ":"
-#     and optionally prefixed by "(" ("1." / "2)" / "(3)"), or a code of one
-#     letter plus 1-2 digits with an optional ".", ")", or ":"
-#     ("A1." / "B2:" / "B2 text"). The token must be followed by whitespace
-#     and non-whitespace text, or immediately by the end of the line.
-#   cue - "reply/respond/answer/type/send/pick/choose/select/tap/click",
-#     1-40 intervening characters, then "number/code/letter/option/choice"
-#     (singular or plural), without crossing ".", "!", or "?",
-#     or "which one", "which option(s)", "pick one", or "choose one".
-#     Cue verbs and nouns match whole words (letters, digits, and underscore
-#     are word characters); intervening spans start and end with non-word
-#     characters. The fixed phrases use single spaces.
-# Two or more option lines plus a cue anywhere in the text are refused.
-# A standalone cue also suffices: "reply", 1-30 intervening characters,
-# "with/using", 1-20 intervening characters, then
-# "number/code/letter/option/choice" (singular or plural), with the same word
-# boundaries and punctuation restrictions. No option lines are needed for
-# this rule. A numbered list without a cue and prose satisfying neither rule
-# post normally. --no-buttons "<reason>" posts a deliberate plain
-# list anyway: the reason (one line, at most 200 characters) is recorded in the
-# outbox payload as no_buttons_reason. It cannot be combined with
-# --decision-file. The guard never checks an ack.
-#
+# CHOICE GUARD. An answer, followup, or final whose text has the shape of a choice is refused unless --decision-file is given, so a choice cannot go out as plain text by mistake.
+# Detection is case-insensitive and uses these rules:
+#   option line - a line, after optional indent and a "-", "*", or bullet marker, that starts with a 1-2 digit number ended by ".", ")", or ":" and optionally prefixed by "(" ("1." / "2)" / "(3)"), or a code of one letter plus 1-2 digits with an optional ".", ")", or ":" ("A1." / "B2:" / "B2 text"); the token must be followed by whitespace and non-whitespace text, or immediately by the end of the line.
+#   choice cue - "reply/respond/answer/type/send/pick/choose/select/tap/click", 1-40 intervening characters, then "number/code/letter/option/choice" (singular or plural), without crossing ".", "!", or "?", or "which one", "which option(s)", "pick one", or "choose one"; cue words match whole words.
+#   digit cue - a reply, pick, choose, select, or say verb followed within 1-40 characters by at least two 1-2 digit numbers joined by commas, "/", or "or" (for example "1, 2 or 3", "2 or 3", "1/2", or "1 or 2").
+#   choice heading - a standalone "Options", "Your call", or "Choose" line, with an optional colon and Markdown bold; two or more option lines must follow it.
+# Two or more option lines plus a choice cue are refused, as is a digit cue by itself.
+# A standalone reply cue also suffices: "reply", 1-30 intervening characters, "with/using", 1-20 intervening characters, then "number/code/letter/option/choice" (singular or plural), with the same word boundaries and punctuation restrictions.
+# Numbered lists without a choice cue post normally, except when a choice heading is followed by two or more option lines.
+# --no-buttons "<reason>" posts a deliberate plain list anyway: the reason (one line, at most 200 characters) is recorded in the outbox payload as no_buttons_reason.
+# It cannot be combined with --decision-file.
+# The guard never checks an ack.
 # Discord text is untrusted: pass it with --text-file or stdin.
+#
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -204,7 +189,7 @@ if [ -z "$DECISION_FILE" ] && [ -z "$NO_BUTTONS_SET" ]; then
   case "$KIND" in
     answer|followup|final)
       if fm_ext_text_choice_shaped "$TEXT"; then
-        die "the text looks like a choice (numbered or coded options with a reply cue); post it with bin/fm-ext-ask.sh so the options become buttons, or pass --no-buttons \"<reason>\" to post a deliberate plain list"
+        die "the text looks like a choice (numbered or coded options with a cue or choice heading, or a direct digit-selection or reply-with-number cue); post it with bin/fm-ext-ask.sh so the options become buttons, or pass --no-buttons \"<reason>\" to post a deliberate plain list"
       fi
       ;;
   esac

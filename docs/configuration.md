@@ -978,7 +978,7 @@ Each decision post is bound to exactly one decision Firstmate already tracks, na
 `bin/fm-ext-ask.sh` is the one command that asks the captain a choice: it places or refreshes the captain hold for the task, writes the decision file, appends the numbered option lines to the post text in button order so text and buttons always match, and posts through `bin/fm-ext-emit.sh --decision-file` with the thread marked needs-you; its header owns the flags.
 Its `--mode done|release` is required and never inferred: `done` closes a question and `release` lifts the hold so held work proceeds.
 For a worker's existing keyed status decision, use `bin/fm-ext-emit.sh --decision-file` directly; its [header](../bin/fm-ext-emit.sh) owns the file format and validation.
-The [emit header's choice guard](../bin/fm-ext-emit.sh) owns detection of plain-text choices and routes refused posts to `bin/fm-ext-ask.sh`.
+The [emit header's choice guard](../bin/fm-ext-emit.sh) owns the matching rules, including digit-selection cues and standalone choice headings followed by at least two option lines, and routes refused plain-text choices to `bin/fm-ext-ask.sh`.
 `--no-buttons "<reason>"` posts a deliberate plain list anyway and records the reason in the outbox payload as `no_buttons_reason`; the emit header owns the exact detection rule.
 Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every decision post also carries a Discuss button, `fmd:<key>:d`.
 Channel members can read a `custom_id` through the Discord API, so the key is never written into a label or the post text, and emit refuses a post that names the key or its task id.
