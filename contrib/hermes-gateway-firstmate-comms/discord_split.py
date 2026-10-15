@@ -14,9 +14,15 @@ The rules, in the order they apply:
 - Packing prefers whole paragraphs; a paragraph is a run of non-blank lines.
 - A paragraph that does not fit splits at list-item boundaries first (an item
   keeps its indented sub-items while they fit), then at line boundaries.
-- A single line longer than the limit is cut at a space, and its characters are
-  never changed; only a line with no space at all is hard-cut.
+- A single over-long line is cut at a space where a safe boundary fits the
+  available budget, otherwise hard-cut, keeping its characters in order.
+  Cuts must not manufacture fence delimiters from ordinary text or block content.
 - Blank lines are preserved exactly where they were, except at a chunk edge.
+- Fence recognition ignores leading spaces and tabs: an opener is a run of at
+  least three backticks or tildes, optionally followed by an info string (which
+  cannot contain backticks for a backtick fence). A closer uses the same character
+  at least as many times, followed only by whitespace; other fence-like lines
+  inside the block remain content.
 - A fenced code block is kept whole where it fits. One that has to span chunks
   is closed with its own closing fence at the end of a chunk and reopened with
   its own opening fence line at the start of the next, shortened to the fence
