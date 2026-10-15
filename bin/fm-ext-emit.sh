@@ -55,11 +55,13 @@
 # bin/fm-ext-lib.sh), so the post can only ever answer that lifecycle.
 #
 # CHOICE GUARD. An answer, followup, or final whose text has the shape of a choice is refused unless --decision-file is given, so a choice cannot go out as plain text by mistake.
-# Detection is case-insensitive and uses these rules:
+# Detection is case-insensitive, cues match within one line, and it uses these rules:
 #   option line - a line, after optional indent and a "-", "*", or bullet marker, that starts with a 1-2 digit number ended by ".", ")", or ":" and optionally prefixed by "(" ("1." / "2)" / "(3)"), or a code of one letter plus 1-2 digits with an optional ".", ")", or ":" ("A1." / "B2:" / "B2 text"); the token must be followed by whitespace and non-whitespace text, or immediately by the end of the line.
 #   choice cue - "reply/respond/answer/type/send/pick/choose/select/tap/click", 1-40 intervening characters, then "number/code/letter/option/choice" (singular or plural), without crossing ".", "!", or "?", or "which one", "which option(s)", "pick one", or "choose one"; cue words match whole words.
+#     Letters, digits, and underscore are word characters; intervening spans start and end with non-word characters, and fixed phrases use single spaces.
 #   digit cue - a reply, pick, choose, select, or say verb followed within 1-40 characters by at least two 1-2 digit numbers joined by commas, "/", or "or" (for example "1, 2 or 3", "2 or 3", "1/2", or "1 or 2").
-#   choice heading - a standalone "Options", "Your call", or "Choose" line, with an optional colon and Markdown bold; two or more option lines must follow it.
+#   choice heading - a standalone "Option", "Options", "Your call", or "Choose" line, with an optional colon and optional Markdown bold ("**" or "__" around the whole heading); two or more option lines must follow it.
+# Digit cues use the same word boundaries and intervening-span punctuation restrictions as choice cues.
 # Two or more option lines plus a choice cue are refused, as is a digit cue by itself.
 # A standalone reply cue also suffices: "reply", 1-30 intervening characters, "with/using", 1-20 intervening characters, then "number/code/letter/option/choice" (singular or plural), with the same word boundaries and punctuation restrictions.
 # Numbered lists without a choice cue post normally, except when a choice heading is followed by two or more option lines.
