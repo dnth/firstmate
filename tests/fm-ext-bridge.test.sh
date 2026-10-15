@@ -2849,8 +2849,14 @@ PY
   out=$(home_env "$home" "$OUTBOX" split < "$home/short.md") || fail "split refused a short reply"
   [ "$(printf '%s' "$out" | jq -r '.texts | length')" = 1 ] \
     || fail "an under-limit reply must be one message: $out"
-  [ "$(printf '%s' "$out" | jq -r '.texts[0]')" = "$(printf 'Aye, all shipshape.\n\n- one\n- two')" ] \
+  printf '%s' "$out" > "$home/short.json"
+  "$PYTHON_BIN" - "$home/short.md" "$home/short.json" <<'PY' \
     || fail "an under-limit reply must be untouched: $out"
+import json, pathlib, sys
+assert json.loads(pathlib.Path(sys.argv[2]).read_text())["texts"] == [
+    pathlib.Path(sys.argv[1]).read_text()
+]
+PY
   pass "47 fences stay balanced across chunks and short replies pass through"
 }
 
@@ -3062,6 +3068,9 @@ def edges_trimmed(lines):
 
 def check_message(text, limit, cap):
     chunks = split_discord(text, limit, cap)
+    if len(text) <= limit:
+        assert chunks == [text], ("untouched reply", repr(text), chunks)
+        return
     if not text.strip():
         assert chunks == [], ("whitespace-only reply", chunks)
         return
@@ -3073,8 +3082,7 @@ def check_message(text, limit, cap):
             part.startswith("(") and part.endswith(")") and "/" in part
             for part in chunk.split(" ")
         ), ("counter", chunk)
-        if len(chunks) > 1:
-            assert balance_ok(chunk), ("fences", limit, repr(chunk))
+        assert balance_ok(chunk), ("fences", limit, repr(chunk))
     want = content(edges_trimmed(text.split("\n")))
     have = []
     for chunk in chunks:
@@ -3102,7 +3110,9 @@ def check_message(text, limit, cap):
         if truncated and have and "\u2026" in have[-1] and j >= len(have):
             break
         raise AssertionError("content mismatch at %d: %r vs %r" % (i, expected, have[j:j + 2]))
-    while not truncated and j < len(have) and not have[j].strip():
+    while j < len(have) and not have[j].strip():
+        j += 1
+    if truncated and have[j:] == ["…"]:
         j += 1
     assert j >= len(have), ("extra content", have[j:], chunks)
 
@@ -3115,7 +3125,51 @@ FRAGMENTS = [
     "plain paragraph line that has a fair number of words in it " * 3,
     "x" * 90, "  leading spaces and  double  spaces  ", " \t ", "", "",
     "- item with a long tail " * 2, '  print("a  b")  ' * 3,
+    "```" + " " * 50 + "literal", "~~~" + " " * 50 + "literal",
+    "x" * 60 + "```example", "x" * 60 + "~~~example",
+    "```   ", "~~~   ", "````text", "~~~~text", "`````   ", "~~~~~   ",
+    "`" * 61, "~" * 61, "```" + "long_info" * 30,
+    "~~~" + "long_info" * 30,
 ]
+
+def regression_truncation_exposes_closer():
+    text = "```\na\n```\n" + "y" * 50 + "\n\n" + "z" * 60
+    check_message(text, 60, 1)
+    assert balance_ok(split_discord(text, 60, 1)[0])
+
+
+def regression_split_boundaries_do_not_create_fences():
+    for fence in ("```", "~~~"):
+        for text in (
+            fence + "text\n" + fence + " " * 50 + "literal\n" + fence,
+            "x" * 60 + fence + "example",
+        ):
+            check_message(text, 60, 25)
+
+
+def regression_oversized_fence_line():
+    for fence in ("`", "~"):
+        for body in ("", "content\n"):
+            text = fence * 3 + "\n" + body + fence * 61
+            check_message(text, 60, 25)
+            chunks = split_discord(text, 60, 25)
+            assert all(balance_ok(chunk) for chunk in chunks), chunks
+            assert any(body.rstrip("\n") in chunk for chunk in chunks), chunks
+
+
+def regression_exact_passthrough_and_opener():
+    for text in ("\nhi\n", " \t ", "", "```python  \na\n```\n"):
+        assert split_discord(text, 60) == [text]
+    text = "```python  \n" + "x" * 100 + "\n```"
+    chunks = split_discord(text, 60)
+    assert all(chunk.startswith("```python  \n") for chunk in chunks), chunks
+    check_message(text, 60, 25)
+
+
+regression_truncation_exposes_closer()
+regression_split_boundaries_do_not_create_fences()
+regression_oversized_fence_line()
+regression_exact_passthrough_and_opener()
 
 total = 0
 for seed in (1, 7, 20261015, 424242, 999983):
@@ -3124,7 +3178,7 @@ for seed in (1, 7, 20261015, 424242, 999983):
         text = "\n".join(rng.choice(FRAGMENTS) for _ in range(rng.randint(1, 14)))
         if rng.random() < 0.3:
             text = "# Heading\n\n" + text
-        check_message(text, rng.choice([60, 200, 1900]), rng.choice([2, 3, 25]))
+        check_message(text, rng.choice([60, 200, 1900]), rng.choice([1, 2, 3, 25]))
         total += 1
 
 # The shapes the review findings named, kept as deterministic cases.

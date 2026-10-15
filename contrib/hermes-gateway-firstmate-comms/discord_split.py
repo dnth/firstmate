@@ -22,6 +22,8 @@ The rules, in the order they apply:
   its own opening fence line at the start of the next, shortened to the fence
   plus its first info word, then to a bare fence, when the full opener does not
   leave room for content. The added fence lines count against the limit.
+- A fence line longer than the limit is the sole fence-preservation exception:
+  its delimiter is shortened to fit because Discord rejects oversized messages.
 - Cap truncation keeps the last kept chunk within the limit and keeps its fences
   balanced by putting the ellipsis inside the block, on its own line before the
   closing fence.
@@ -133,14 +135,16 @@ def _split_line(line: str, limit: int) -> list[str]:
         return [line]
     parts: list[str] = []
     rest = line
-    while len(rest) > limit:
-        cut = rest.rfind(" ", 0, limit)
-        if cut < 1:
-            parts.append(rest[:limit])
-            rest = rest[limit:]
-            continue
-        parts.append(rest[: cut + 1])
-        rest = rest[cut + 1 :]
+    while len(rest) > limit or _fence_run(rest) is not None:
+        end = min(limit, len(rest) - 1)
+        cuts = [cut for cut in range(end, 0, -1)
+                if _fence_run(rest[:cut]) is None]
+        safe = [cut for cut in cuts if _fence_run(rest[cut:]) is None]
+        choices = safe or cuts
+        spaces = [cut for cut in choices if rest[cut - 1] == " "]
+        cut = (spaces or choices)[0]
+        parts.append(rest[:cut])
+        rest = rest[cut:]
     parts.append(rest)
     return parts
 
@@ -190,7 +194,7 @@ def _split_paragraph(lines: list[str], limit: int) -> list[list[str]]:
 def _reopen_candidates(opener: str, fence) -> list[str]:
     """Fence lines to reopen a split block with, most faithful first."""
     char, length, info = fence
-    candidates = [opener.rstrip()]
+    candidates = [opener]
     tag = info.strip().split()[0] if info.strip() else ""
     if tag:
         candidates.append(char * length + tag)
@@ -208,6 +212,8 @@ def _split_fence(lines: list[str], limit: int) -> list[list[str]]:
     closed = len(lines) > 1 and _is_closer(lines[-1], fence)
     close = lines[-1] if closed else fence[0] * fence[1]
     body = lines[1:-1] if closed else lines[1:]
+    if len(close) > limit:
+        close = fence[0] * fence[1]
     reopen = ""
     budget = limit
     for candidate in _reopen_candidates(lines[0], fence):
@@ -217,10 +223,19 @@ def _split_fence(lines: list[str], limit: int) -> list[list[str]]:
             budget = room
             break
     if not reopen:
-        # The fences alone do not fit; keep the content as plain text.
-        units = [[part] for line in body for part in _split_line(line, limit)]
-        return _pack_units(units, limit) if units else [[close]]
-    units = [[part] for line in body for part in _split_line(line, budget)]
+        close = fence[0] * fence[1]
+        for candidate in _reopen_candidates(lines[0], fence):
+            room = limit - len(candidate) - len(close) - 2
+            if room >= 1:
+                reopen, budget = candidate, room
+                break
+    if not reopen:
+        reopen = close = fence[0] * 3
+        budget = limit - len(reopen) - len(close) - 2
+    active_fence = _fence_run(reopen)
+    units = [[part] for line in body for part in _split_line(
+        line, min(budget, 2) if _is_closer(line, active_fence) else budget
+    )]
     if not units:
         return [[reopen, close]]
     pieces: list[list[str]] = []
@@ -294,6 +309,8 @@ def _ending_fence(lines: list[str]):
             state = None
             open_index = None
             open_line = None
+    if state is not None:
+        return open_index, open_line, state[0] * state[1]
     return None
 
 
@@ -301,13 +318,17 @@ def _mark_plain(lines: list[str], limit: int) -> list[str]:
     """Mark a fence-balanced chunk as truncated on its last line."""
     if not lines:
         return [ELLIPSIS]
-    while len(lines) > 1 and len(_text(lines)) + 1 > limit:
-        lines = lines[:-1]
+    if len(lines) > 1 and len(_text(lines)) + 1 > limit:
+        return _mark_truncated(lines[:-1], limit)
     head = _text(lines[:-1])
     room = limit - len(head) - (1 if len(lines) > 1 else 0) - 1
     if room < 0:
         room = 0
-    return lines[:-1] + [lines[-1][:room] + ELLIPSIS]
+    tail = lines[-1][:room] + ELLIPSIS
+    while _fence_run(tail) is not None:
+        room -= 1
+        tail = lines[-1][:room] + ELLIPSIS
+    return lines[:-1] + [tail]
 
 
 def _mark_truncated(lines: list[str], limit: int) -> list[str]:
@@ -318,9 +339,10 @@ def _mark_truncated(lines: list[str], limit: int) -> list[str]:
     if ending is not None:
         open_index, open_line, close = ending
         head = lines[:open_index]
-        body = lines[open_index + 1 : -1]
         fence = _fence_run(open_line)
         assert fence is not None
+        end = -1 if _is_closer(lines[-1], fence) else len(lines)
+        body = lines[open_index + 1 : end]
         for opener in _reopen_candidates(open_line, fence):
             content = list(body)
             while True:
@@ -349,6 +371,8 @@ def split_discord(text: str, limit: int = DEFAULT_LIMIT, cap: int = DEFAULT_CAP)
     """Split one Discord reply into at most `cap` chunks of at most `limit`."""
     if limit < 1 or cap < 1:
         raise ValueError("limit and cap must be positive")
+    if len(text) <= limit:
+        return [text]
     lines = text.split("\n")
     # Only blank lines at the two ends are dropped; a content line's own leading
     # or trailing whitespace is never touched.
