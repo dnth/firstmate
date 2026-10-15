@@ -806,8 +806,9 @@ A live owner stays protected from TTL-based claim stealing, including an ambiguo
 `receipt` writes the receipt once.
 `abort` deletes the posting marker after a transient definite send failure (HTTP 429 or 5xx) so that generation can retry.
 `fail` records a terminal failed marker after a permanent 4xx so pending stops retrying that generation.
-The gateway poster splits oversized Discord replies with the same numbered-thread algorithm X mode uses for Discord, driven by `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900, min 50, values above 2000 reset to 1900) and `FM_EXT_DISCORD_THREAD_MAX` (default 25).
-A reply that already fits is one unnumbered message; a longer reply is posted as ordered `(k/n)` chunks into the same thread.
+The gateway poster splits oversized Discord replies at paragraph, line, and word boundaries, keeping the reply's own lines, list nesting, and fenced code blocks instead of joining them into run-on text, driven by `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900, min 50, values above 2000 reset to 1900) and `FM_EXT_DISCORD_THREAD_MAX` (default 25).
+The `fm_ext_split_thread` header in [`bin/fm-ext-lib.sh`](../bin/fm-ext-lib.sh) owns that algorithm.
+A reply that already fits is one message; a longer reply is posted as ordered chunks into the same thread, with no `(k/n)` counter.
 Chunk progress is recorded so a later-chunk retry does not send earlier chunks again.
 A later-chunk transient failure then releases the inflight marker so only one poster can resume the next chunk.
 An ambiguous failure after a chunk may have been accepted stays mid-delivery for that chunk, which is what stops a double post.

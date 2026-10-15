@@ -1169,79 +1169,131 @@ fm_ext_discord_thread_max() {
   printf '%s\n' "$raw"
 }
 
-# Split a reply into a numbered thread of <=<max>-codepoint chunks.
-# Copied from fmx_split_thread in bin/fm-x-lib.sh; do not source that file.
+# Split a Discord reply into a thread of <=<max>-codepoint chunks that keeps the
+# reply's own line structure: paragraphs, list items with their nested
+# sub-items, and fenced code blocks are never rejoined onto one line and never
+# re-indented, so bullets and nested bullets reach Discord as written.
+# This is deliberately NOT the X-mode splitter (fmx_split_thread in
+# bin/fm-x-lib.sh): X packs to 280 codepoints and numbers its chunks, while
+# Discord has a different budget and shows the thread order itself.
+# Splitting prefers paragraph boundaries, then line boundaries, then word
+# boundaries, and hard-splits only a single over-long word.
+# A fenced code block that must span chunks is closed with the block's own
+# closing fence at the end of one chunk and reopened with the block's own
+# opening fence line (same language tag) at the start of the next; those added
+# fence lines count against the limit.
+# Chunks carry no "(k/n)" counter, since Discord already shows their order.
+# At most <cap> chunks are produced; when the reply would need more, the last
+# kept chunk is marked with an ellipsis in place of its final character so it
+# still fits the limit.
 # Reads the reply text on stdin and prints a compact JSON array of chunks.
+# Length is codepoint-based (via jq); the poster remains the final authority.
 fm_ext_split_thread() {
   jq -Rsc --argjson limit "$1" --argjson cap "$2" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def fence_marker: test("^[[:space:]]*```");
-    def fence_count: ((split("```") | length) - 1);
-    def numbered($i; $n):
-      "(\($i + 1)/\($n))" as $mark
-      | if ((fence_count % 2) == 0) and (split("\n")[-1] | fence_marker)
-        then . + "\n" + $mark
-        else . + " " + $mark
-        end;
+    def blank_line: test("^[[:space:]]*$");
+    # A top-level list item or heading starts its own unit, so an item keeps
+    # the indented sub-items and continuation lines that belong to it.
+    def unit_start: test("^([-*+] |[0-9]+[.)] |#{1,6} )");
     def hardsplit($b): . as $s | [range(0; ($s|length); $b) as $i | $s[$i:$i+$b]];
-    def wordsplit($b):
+    def wordsegments($b):
       (gsub("[[:space:]]+"; " ") | trim) as $norm
       | if ($norm | length) == 0 then []
         else
           [ $norm | split(" ")[] | if (length > $b) then hardsplit($b)[] else . end ] as $words
-          | (reduce $words[] as $w ({chunks: [], cur: ""};
+          | (reduce $words[] as $w ({segs: [], cur: ""};
               (if .cur == "" then $w else .cur + " " + $w end) as $cand
               | if ($cand | length) <= $b then .cur = $cand
-                else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $w end
+                else .segs += (if .cur == "" then [] else [.cur] end) | .cur = $w end
             )) as $st
-          | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end)
+          | $st.segs + (if $st.cur != "" then [$st.cur] else [] end)
         end;
-    def split_units:
-      split("\n") as $lines
-      | (reduce $lines[] as $line ({units: [], cur: "", fence: false};
+    # Group the lines into {lines, gap} units, where gap counts the blank lines
+    # that separated this unit from the previous one. Packing reproduces those
+    # counts, so a reply keeps every line rather than having them joined.
+    def units:
+      (reduce .[] as $line ({units: [], cur: [], gap: 0, fence: false};
           if .fence then
-            .cur = (if .cur == "" then $line else .cur + "\n" + $line end)
-            | if ($line | fence_marker) then .units += [.cur] | .cur = "" | .fence = false else . end
+            .cur += [$line]
+            | if ($line | fence_marker)
+              then .units += [{lines: .cur, gap: .gap}] | .cur = [] | .gap = 0 | .fence = false
+              else . end
           elif ($line | fence_marker) then
-            (if .cur != "" then .units += [.cur] | .cur = "" else . end)
-            | .cur = $line
-            | .fence = true
-          elif ($line | test("^[[:space:]]*$")) then
-            if .cur != "" then .units += [.cur] | .cur = "" else . end
+            (if (.cur | length) > 0 then .units += [{lines: .cur, gap: .gap}] | .gap = 0 else . end)
+            | .cur = [$line] | .fence = true
+          elif ($line | blank_line) then
+            (if (.cur | length) > 0 then .units += [{lines: .cur, gap: .gap}] | .cur = [] | .gap = 0 else . end)
+            | .gap += 1
           else
-            ($line | trim) as $clean
-            | .cur = (if .cur == "" then $clean else .cur + " " + $clean end)
+            (if ((.cur | length) > 0) and ($line | unit_start)
+              then .units += [{lines: .cur, gap: .gap}] | .cur = [] | .gap = 0
+              else . end)
+            | .cur += [$line]
           end
         )) as $st
-      | ($st.units + (if $st.cur != "" then [$st.cur] else [] end))
-      | map(select((trim | length) > 0));
-    def pack_units($units; $b):
-      (reduce $units[] as $u ({chunks: [], cur: ""};
-        if ($u | length) > $b then
-          (if .cur != "" then .chunks += [.cur] | .cur = "" else . end)
-          | .chunks += ($u | wordsplit($b))
+      | ($st.units + (if ($st.cur | length) > 0 then [{lines: $st.cur, gap: $st.gap}] else [] end));
+    # Last resort for one unit that cannot fit: split at line boundaries, and
+    # split a single over-long line at word boundaries.
+    def greedy_lines($ls; $b):
+      (reduce $ls[] as $l ({chunks: [], cur: []};
+          (if (.cur | length) == 0 then ($l | length)
+            else ((.cur | join("\n") | length) + 1 + ($l | length)) end) as $len
+          | if $len <= $b then .cur += [$l]
+            else .chunks += [.cur] | .cur = [$l] end
+        )) as $st
+      | ($st.chunks + (if ($st.cur | length) > 0 then [$st.cur] else [] end));
+    # Emit a fenced block as pieces that each carry their own opening and
+    # closing fence lines, so every piece renders as code on its own.
+    def code_pieces($ls; $b):
+      ($ls | length) as $n
+      | (($n >= 2) and ($ls[-1] | fence_marker)) as $closed
+      | $ls[0] as $open
+      | (if $closed then $ls[-1] else "```" end) as $close
+      | (if $closed then $ls[1:($n - 1)] else $ls[1:] end) as $raw
+      | (($b - ($open | length) - ($close | length) - 2) | if . < 1 then 1 else . end) as $cb
+      | [ $raw[] | if (length > $cb) then (wordsegments($cb)[]) else . end ] as $content
+      | if ($content | length) == 0 then [[$open]]
         else
-          (if .cur == "" then $u else .cur + "\n\n" + $u end) as $cand
-          | if ($cand | length) <= $b then .cur = $cand
-            else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $u end
-        end
-      )) as $st
-      | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end);
+          (reduce $content[] as $c ({pieces: [], cur: [], used: 0};
+              (($c | length) + 1) as $add
+              | if (.cur | length) == 0 then .cur = [$c] | .used = $add
+                elif ((($open | length) + 1 + .used + $add + ($close | length)) <= $b)
+                  then .cur += [$c] | .used += $add
+                else .pieces += [[$open] + .cur + [$close]] | .cur = [$c] | .used = $add end
+            )) as $st
+          | ($st.pieces + (if ($st.cur | length) > 0 then [[$open] + $st.cur + [$close]] else [] end))
+        end;
+    def split_unit($u; $b):
+      if ($u.lines[0] | fence_marker) then code_pieces($u.lines; $b)
+      else greedy_lines([ $u.lines[] | if (length > $b) then (wordsegments($b)[]) else . end ]; $b)
+      end;
+    def pack($us; $b):
+      (reduce $us[] as $u ({chunks: [], cur: []};
+          ($u.lines) as $ls
+          | if (($ls | join("\n") | length) <= $b) then
+              (if ((.cur | length) > 0) and ($u.gap > 0)
+                then .cur + [range(0; $u.gap) | ""] else .cur end) as $base
+              | ($base + $ls) as $cand
+              | if ($cand | join("\n") | length) <= $b then .cur = $cand
+                else .chunks += (if (.cur | length) > 0 then [.cur] else [] end) | .cur = $ls end
+            else
+              .chunks += (if (.cur | length) > 0 then [.cur] else [] end)
+              | .cur = []
+              | .chunks += split_unit($u; $b)
+            end
+        )) as $st
+      | ($st.chunks + (if ($st.cur | length) > 0 then [$st.cur] else [] end));
     def split_thread($limit; $cap):
       trim as $norm
       | if ($norm | length) == 0 then []
         elif ($norm | length) <= $limit then [$norm]
         else
-          ($cap | tostring | length) as $digits
-          | (4 + 2 * $digits) as $suffixw
-          | (if ($limit - $suffixw - 1) < 1 then 1 else ($limit - $suffixw - 1) end) as $budget
-          | ($norm | split_units) as $units
-          | pack_units($units; $budget) as $raw
-          | (if ($raw | length) > $cap
-              then ($raw[0:$cap] | (.[($cap - 1)] += "…"))
-              else $raw end) as $kept
-          | ($kept | length) as $n
-          | [ range(0; $n) as $i | $kept[$i] | numbered($i; $n) ]
+          ($norm | split("\n") | units) as $us
+          | (pack($us; $limit) | map(join("\n"))) as $raw
+          | if ($raw | length) > $cap
+            then ($raw[0:$cap] | (.[($cap - 1)] = ((.[($cap - 1)] | .[0:-1]) + "…")))
+            else $raw end
         end;
     split_thread($limit; $cap)
   '

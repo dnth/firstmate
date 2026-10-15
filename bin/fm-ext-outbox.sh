@@ -60,7 +60,9 @@
 # posting marker and progress stay in place.
 # split reads reply text on stdin and prints {limit,cap,texts} using
 # FM_EXT_DISCORD_REPLY_MAX_CHARS (default 1900) and FM_EXT_DISCORD_THREAD_MAX
-# (default 25). It does not require FMX_PAIRING_TOKEN or the hosted relay.
+# (default 25). Chunks keep the reply's own lines and carry no numbering; the
+# fm_ext_split_thread header in bin/fm-ext-lib.sh owns that algorithm. It does
+# not require FMX_PAIRING_TOKEN or the hosted relay.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

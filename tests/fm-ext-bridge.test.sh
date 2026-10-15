@@ -701,7 +701,7 @@ PY
 # --- 19. text over the budget posts ordered chunks without X pairing --------
 
 test_19_over_limit_posts_chunks_in_order_without_fmx_token() {
-  local home slug sent out n first last
+  local home slug sent out n
   home="$TMP_ROOT/c19"
   setup_home "$home"
   slug=$(intake_ok "$home" "long reply")
@@ -735,10 +735,12 @@ PY
   assert_contains "$out" "result=sent" "over-limit reply must send after split"
   n=$(wc -l < "$sent" | tr -d ' ')
   [ "$n" -gt 1 ] || fail "over-limit reply must post more than one message, got $n"
-  first=$(sed -n '1p' "$sent")
-  last=$(tail -n 1 "$sent")
-  case "$first" in *" (1/$n)") : ;; *) fail "first chunk must be numbered (1/$n): $first" ;; esac
-  case "$last" in *" ($n/$n)") : ;; *) fail "last chunk must be numbered ($n/$n): $last" ;; esac
+  grep -Eq '\([0-9]+/[0-9]+\)' "$sent" \
+    && fail "Discord chunks must not carry a (k/n) counter: $(cat "$sent")"
+  # The reply is one over-long line, so it splits on word boundaries; no word
+  # may be lost or reordered across the chunks.
+  [ "$(tr '\n' ' ' < "$sent" | tr -s ' ' | sed 's/ $//')" = "$(cat "$home/ans.txt")" ] \
+    || fail "word-boundary split must keep every word: $(cat "$sent")"
   awk -v lim=50 'length($0)>lim{exit 1}' "$sent" \
     || fail "every Discord chunk must stay within the 50-character budget"
   assert_present "$home/state/ext-outbox/${slug}.answer.1.receipt.json" \
@@ -2675,4 +2677,169 @@ test_46_attachment_recovery() {
 }
 
 test_46_attachment_recovery
+
+# --- 47. the Discord splitter keeps line structure, fences, and the budget -
+
+test_47_discord_splitter_keeps_structure() {
+  local home out tight
+  home="$TMP_ROOT/c47"
+  mkdir -p "$home"
+  # The shape of a real metrics-list post: a 21-item numbered list, headings,
+  # nested bullets, inline code, bold labels, and a fenced code block.
+  cat > "$home/post.md" <<'TXT'
+**Evaluation readiness** - the numbers an acceptance test still needs.
+
+Answer quality:
+1. Answer correctness: "the answer matches the source", target >=99%
+2. Faithfulness: every claim traces to a cited passage, target >=99%
+3. Fabrication rate, target <=1%
+4. Retrieval hit rate: must be reported with the scored set
+5. Mean reciprocal rank: must be reported with the scored set
+6. Scan accuracy: "the scan was read", target >=95%
+
+Citations:
+7. Citation correctness: the cited passage matches and its link resolves, target 100%
+8. Citation coverage: at least one citation in every answer
+
+Pipeline checks that need a scored set to prove them:
+9. Chunking fidelity: every chunk matches the source text
+10. Retrieval correctness: the executor returns the expected chunk for the query, ranked first
+11. Router intent accuracy: picks the right intent, with no hard-coded intent list anywhere
+12. Planner tool selection: picks the right tools for the request
+13. Score per answer: the check must output a valid score for each answer
+14. Conversation memory: answers stay correct on follow-up questions, including pronouns from an earlier turn
+15. Policy guard: off-topic questions blocked, with no false blocks on legitimate questions
+16. Prompt-injection guard: attack prompts blocked
+17. Response time within 8 s for a single question
+18. Search within 4 s
+19. Upload within 25 s
+20. Login within 2 s
+21. Concurrency: 10 / 25 / 50 / 100 users pass with no failed request
+
+Ownership and status:
+- **Owner:** platform team, with one reviewer per section
+- **Status:** the scored set is still missing
+  - the runner starts the scored set
+  - the report lands in the evaluation folder
+  - the runner writes one report per run
+  - the report lists every failed case
+
+Next step: agree a measurable target, then run the scored set end to end before the next rehearsal.
+
+Fix the runner first:
+
+```bash
+bin/eval-run.sh --set golden --report out/report.json
+```
+TXT
+  [ "$(wc -c < "$home/post.md")" -gt 1900 ] \
+    || fail "the fixture must exceed the default Discord budget"
+
+  # The alignment checker: every original line recurs byte-for-byte and in
+  # order, allowing only dropped blank lines at chunk edges and fence lines the
+  # splitter adds when a code block spans chunks.
+  cat > "$home/check.py" <<'PY'
+import json
+import sys
+
+original, split_path, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+expected = open(original, encoding="utf-8").read().strip().split("\n")
+texts = json.load(open(split_path, encoding="utf-8"))["texts"]
+assert len(texts) > 1, "a reply over the limit must split: %r" % (texts,)
+for chunk in texts:
+    assert len(chunk) <= limit, "chunk over the %d limit: %d" % (limit, len(chunk))
+for chunk in texts:
+    assert not any(
+        part.startswith("(") and part.endswith(")") and "/" in part
+        for part in chunk.split(" ")
+    ), "Discord chunks must not carry a (k/n) counter: %r" % chunk
+
+def edge_trim(lines):
+    start, end = 0, len(lines)
+    while start < end and lines[start] == "":
+        start += 1
+    while end > start and lines[end - 1] == "":
+        end -= 1
+    return lines[start:end]
+
+index = 0
+for position, chunk in enumerate(texts):
+    if position:
+        while index < len(expected) and expected[index] == "":
+            index += 1
+    for line in edge_trim(chunk.split("\n")):
+        if index < len(expected) and expected[index] == line:
+            index += 1
+            continue
+        assert line.startswith("```"), (
+            "line missing or reordered at chunk %d: %r (expected %r)"
+            % (position, line, expected[index] if index < len(expected) else None)
+        )
+while index < len(expected) and expected[index] == "":
+    index += 1
+assert index == len(expected), "split lost %d line(s)" % (len(expected) - index)
+PY
+
+  out=$(home_env "$home" "$OUTBOX" split < "$home/post.md") \
+    || fail "split refused the metrics post"
+  printf '%s' "$out" > "$home/split.json"
+  [ "$(jq -r '.limit' "$home/split.json")" = 1900 ] \
+    || fail "split must report the default limit"
+  "$PYTHON_BIN" "$home/check.py" "$home/post.md" "$home/split.json" 1900 \
+    || fail "a split reply must keep every line: $out"
+  # The nested sub-items keep their two-space indent and the fence stays whole.
+  jq -r '.texts[]' "$home/split.json" | grep -Fqx '  - the runner starts the scored set' \
+    || fail "nested bullets must keep their indent"
+  jq -r '.texts[]' "$home/split.json" | grep -Fq '```bash
+bin/eval-run.sh --set golden --report out/report.json
+```' || fail "a fenced code block that fits must stay intact"
+  pass "47 a long Discord reply splits on its own lines without renumbering"
+
+  # A code block longer than one chunk is closed and reopened with its own
+  # fence line, and stays within the limit.
+  {
+    printf 'Here is the log:\n\n```bash\n'
+    printf 'step %s of the deploy\n' 1 2 3 4 5 6
+    printf '```\n\nDone.\n'
+  } > "$home/code.md"
+  tight=$(home_env "$home" "$OUTBOX" split --max 60 < "$home/code.md") \
+    || fail "split refused the code post"
+  printf '%s' "$tight" > "$home/tight.json"
+  [ "$(jq -r '.texts | length' "$home/tight.json")" -gt 2 ] \
+    || fail "a code block over the budget must span chunks: $tight"
+  jq -r '.texts[]' "$home/tight.json" > "$home/tight.txt"
+  awk 'length($0)>60{exit 1}' "$home/tight.txt" \
+    || fail "every chunk must stay within the tight budget: $(cat "$home/tight.txt")"
+  awk 'BEGIN{n=0} /^```/{n++} END{exit (n%2)}' "$home/tight.txt" \
+    || fail "every chunk must carry balanced fences: $(cat "$home/tight.txt")"
+  [ "$(grep -c '^```bash$' "$home/tight.txt")" -gt 1 ] \
+    || fail "a reopened code block must keep its language tag: $(cat "$home/tight.txt")"
+  grep -Fqx '```' "$home/tight.txt" \
+    || fail "a split code block must be closed: $(cat "$home/tight.txt")"
+
+  # One line longer than the limit still splits safely.
+  "$PYTHON_BIN" -c 'print("a" * 200)' > "$home/word.md"
+  out=$(home_env "$home" "$OUTBOX" split --max 60 < "$home/word.md") \
+    || fail "split refused an over-long single line"
+  printf '%s' "$out" > "$home/word.json"
+  jq -r '.texts[]' "$home/word.json" > "$home/word.txt"
+  awk 'length($0)>60{exit 1}' "$home/word.txt" \
+    || fail "an over-long single line must stay within the limit: $out"
+  "$PYTHON_BIN" - "$home/word.json" <<'PY'
+import json, sys
+texts = json.load(open(sys.argv[1], encoding="utf-8"))["texts"]
+assert "".join(texts) == "a" * 200, "a hard split must not lose characters: %r" % texts
+PY
+
+  # A reply under the limit is posted untouched.
+  printf 'Aye, all shipshape.\n\n- one\n- two\n' > "$home/short.md"
+  out=$(home_env "$home" "$OUTBOX" split < "$home/short.md") || fail "split refused a short reply"
+  [ "$(printf '%s' "$out" | jq -r '.texts | length')" = 1 ] \
+    || fail "an under-limit reply must be one message: $out"
+  [ "$(printf '%s' "$out" | jq -r '.texts[0]')" = "$(printf 'Aye, all shipshape.\n\n- one\n- two')" ] \
+    || fail "an under-limit reply must be untouched: $out"
+  pass "47 fences stay balanced across chunks and short replies pass through"
+}
+
+test_47_discord_splitter_keeps_structure
 echo "all fm-ext-bridge tests passed"

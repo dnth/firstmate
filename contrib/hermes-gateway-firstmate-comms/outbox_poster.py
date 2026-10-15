@@ -9,8 +9,9 @@ last fallback) and the validation the poster applies before every create and
 rename.
 Unsent payloads (no posting marker, no receipt, no terminal failed marker)
 are retried after restart.
-Oversized replies are split with the X-mode Discord budget pattern
-(``FM_EXT_DISCORD_REPLY_MAX_CHARS``, default 1900) and posted in order.
+Oversized replies are split by ``bin/fm-ext-outbox.sh split``, which keeps the
+reply's own lines and list nesting (``FM_EXT_DISCORD_REPLY_MAX_CHARS``, default
+1900), and posted in order.
 A later-chunk transient failure records progress so earlier chunks are not
 sent again, then releases the exclusive inflight send marker so only one
 poster can resume the next chunk. A pre-send split failure or chunk-count

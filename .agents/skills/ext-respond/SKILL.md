@@ -141,6 +141,11 @@ Flag those destructive, irreversible, or security-sensitive asks through the nor
 Speak only in outcomes.
 Keep Discord replies short: every answer leads with a one-line headline, then at most a few bullets, then links to the full report or PR.
 Long detail only on request.
+Format for Discord, which renders its own Markdown dialect:
+- Never write a Markdown table, because Discord does not render one: use a bullet list, or a fenced code block for genuinely tabular data.
+- Prefer short bold labels or `##`/`###` headings over long paragraphs.
+- Wrap code, paths, and commands in backticks.
+- Aim to keep a post under about 1900 characters so it arrives as a single message; a longer reply is split across several messages.
 For oversized replies, consult the [local outbox delivery contract](../../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).
 Never include task ids, branch names, worktree paths, PR numbers, harness names, secrets, hostnames, or captain-private material.
 When in doubt, say less.
