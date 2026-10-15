@@ -192,9 +192,9 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Refreshed timings plus conservative hints for grown tests estimate ~84 min
-    # of serial work, balanced over six runners at ~14 min each. Keep the cap
-    # as a hang tripwire with runner-load margin; refresh hints per
+    # Refreshed measurements total 86m19.574s and project 14m23.259s–14m23.270s
+    # per shard. Keep this 20-minute cap as a hang tripwire with about 5m36.7s
+    # for setup and runner-load variance; refresh hints per
     # docs/fm-test-portable-shards.md when a shard approaches it.
     timeout-minutes: 20
     strategy:
