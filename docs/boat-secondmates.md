@@ -79,7 +79,7 @@ Reconcile an unresolved placement or credential record before retrying sleep or 
 `bin/fm_boat_auth.py` owns credential acquisition, use, rollback, and release.
 Each acquisition runs in a generation-specific systemd user service with `KillMode=control-group`.
 The service contains the broker it starts, read-only facade, installer, tunnel, and their descendants, including descendants whose leader exits or which create a new session.
-The workstation broker uses a service-private loopback port by default, so unrelated listeners cannot block wake or become its upstream.
+The workstation broker uses a service-private loopback port by default, so wake does not depend on the conventional workstation broker port being available.
 The [credential command header](../bin/fm-boat-omp-auth.sh) owns the shared-broker override.
 Release revokes the generation under kernel flock before stopping the exact service and verifying that its cgroup is empty.
 A delayed service request checks the generation under the same lock before consuming credentials.

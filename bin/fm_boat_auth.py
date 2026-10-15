@@ -267,8 +267,8 @@ def worker(base, generation):
             raise Failure('credential facade exited')
         if tunnel.poll() is not None:
             tunnel = subprocess.Popen(tunnel_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # A canonical broker started by another lease may disappear with that
-        # lease. The surviving service restores it inside its own cgroup.
+        # With a shared-broker override, another lease's broker may disappear
+        # with that lease. Restore it inside the surviving service's cgroup.
         if broker_process is not None:
             broker_process.poll()
         if not ready_url(settings['broker']) and (broker_process is None or broker_process.poll() is not None):
