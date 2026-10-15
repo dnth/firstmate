@@ -109,6 +109,14 @@ Against the newer passing measurement in the final row, the difference narrows t
 Separately, [run 38759616524](https://github.com/dnth/firstmate/actions/runs/38759616524) failed the stale-suppressor assertion after 100,083 ms.
 That is a separate correctness signal, not evidence that a 447-second `fm-watch-triage` run caused the timeout; the test assertions remain unchanged.
 
+### Required test fix
+
+`resolve_ios_pending` in [fm-remote-secondmate-lifecycle-e2e.test.sh](../tests/fm-remote-secondmate-lifecycle-e2e.test.sh) now selects the captured acknowledgement by the pending request's correlation ID.
+The previous selection excluded the first three result files and picked the last sorted result filename, which did not reliably identify the reply for that request.
+Handling an unrelated result could leave an inheritance acknowledgement unresolved before the merged-PR reply assertion.
+[Run 38770719267](https://github.com/dnth/firstmate/actions/runs/38770719267) failed that assertion without the correlation-ID selection; [run 38785253557](https://github.com/dnth/firstmate/actions/runs/38785253557) passed with it.
+The fix preserves the assertions and changes only which captured reply is handled.
+
 ### Rebalanced duration profile
 
 The six-shard PR run measured 5,461,112 ms (91m01.112s) across 166 serial scripts, averaging 15m10.185s per shard.
@@ -117,6 +125,7 @@ Seven shards are needed because six shards cannot fit that measured total within
 PR run 38774522507 measured `fm-watch-triage.test.sh` at 428,164 ms (7m08.164s); the earlier PR attempt 3 measured 446,890 ms (7m26.890s).
 If `fm-watch-triage.test.sh` reaches 446,890 ms again, shard 2 rises by only 18,726 ms to 798,888 ms (13m18.888s), still within the ~14-minute budget.
 The seven-shard assignment covers the observed variation without raising the 20-minute hang tripwire.
+CI acceptance for this change requires all seven actual serial jobs to complete without cancellation and with each job's wall time at most 15 minutes; projected script sums alone do not satisfy that requirement.
 
 | Shard | Scripts | Measured six-shard script sum | Six-shard CI job wall |
 |---|---:|---:|---:|
