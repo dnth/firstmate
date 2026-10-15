@@ -970,7 +970,7 @@ resolve_ios_pending() {
     remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 || true
     pending_result="" n=200
     while [ -z "$pending_result" ] && [ "$n" -gt 0 ]; do
-      pending_result=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" ! -name "$SID.1.result" ! -name "$SID.2.result" ! -name "$SID.3.result" -print | sort | tail -1)
+      pending_result=$(grep -lF "done [corr=$pending_corr]:" "$PARENT/state/procevent-inbox/$SID".*.result 2>/dev/null | head -1 || true)
       [ -n "$pending_result" ] || { n=$((n - 1)); sleep 0.1; }
     done
     [ -n "$pending_result" ] \
