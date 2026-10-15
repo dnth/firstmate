@@ -74,6 +74,7 @@ The recent 20-minute cancellations came from aggregate serial work, not a hangin
 The cancelled PR run is [38753521432](https://github.com/dnth/firstmate/actions/runs/38753521432).
 Its first attempt ended during `fm-on.test.sh` after the job reached its timeout, before the checkpoint test began.
 Its second attempt reached the checkpoint test about five seconds before cancellation, after the preceding serial scripts consumed the available job time.
+Its third attempt ended during `fm-wake-drain-unread-status.test.sh` after its wake acknowledgement, about ten seconds after that test began.
 On main run [38746979839 attempt 1](https://github.com/dnth/firstmate/actions/runs/38746979839/attempts/1), all 28 scripts emitted a 19m55.325s summary before the job was cancelled near its 20-minute limit.
 The passing main attempt completed the same shard's 28 scripts in 17m20.456s.
 
@@ -82,17 +83,36 @@ The passing main attempt completed the same shard's 28 scripts in 17m20.456s.
 | [Main 38746979839 attempt 1](https://github.com/dnth/firstmate/actions/runs/38746979839/attempts/1), cancelled | `fm-watch-triage`: 13:56:29–14:03:33 (423,952 ms); `fm-ext-decision`: 14:10:55–14:13:28 (153,704 ms); `fm-watch-checkpoint`: 14:16:03–14:16:10 (5,993 ms). | All scripts completed; the 19m55.325s suite summary preceded cancellation. |
 | [PR 38753521432 attempt 1](https://github.com/dnth/firstmate/actions/runs/38753521432/attempts/1), cancelled | `fm-watch-triage`: 14:40:54–14:48:14 (440,356 ms); `fm-ext-decision`: 14:55:56–14:58:39 (163,088 ms); `fm-on` began 15:00:52 and the job cancelled at 15:01:00. | Cancelled in the final `fm-on` test; checkpoint did not start. |
 | [PR 38753521432 attempt 2](https://github.com/dnth/firstmate/actions/runs/38753521432/attempts/2), cancelled | `fm-watch-triage`: 15:05:34–15:12:49 (435,200 ms); `fm-ext-decision`: 15:20:20–15:22:55 (155,491 ms); `fm-watch-checkpoint` began at 15:25:32 and the job cancelled at 15:25:37. | The checkpoint log reached its wake acknowledgement before cancellation; no test-end marker was emitted. |
+| [PR 38753521432 attempt 3](https://github.com/dnth/firstmate/actions/runs/38753521432/attempts/3), cancelled | `fm-watch-triage`: 15:30:20–15:37:47 (446,890 ms); `fm-ext-decision`: 15:45:36–15:48:25 (169,627 ms); `fm-wake-drain-unread-status` began at 15:50:11 and the job cancelled at 15:50:21. | Cancelled after the wake acknowledgement in `fm-wake-drain-unread-status`. |
 | [Main 38746979839 attempt 2](https://github.com/dnth/firstmate/actions/runs/38746979839/attempts/2), passed | `fm-watch-triage`: 14:22:32–14:29:22 (410,055 ms); `fm-ext-decision`: 14:35:28–14:37:25 (116,759 ms); `fm-watch-checkpoint`: 14:39:36–14:39:41 (5,271 ms). | All 28 scripts completed in 17m20.456s. |
 
 The checkpoint completed in 5.271s and 5.993s on the passing and cancelled main attempts, respectively.
-The cancelled PR attempt that reached it spent only about five seconds there before the 20-minute job limit, while the other cancelled PR attempt ended in `fm-on`.
+All three cancelled PR attempts reached the 20-minute limit in different tests: `fm-on`, `fm-watch-checkpoint`, and `fm-wake-drain-unread-status`, so no single test hung.
 The measured long tests vary across runs but none approaches the job limit; the cause is cumulative shard work.
 The fix rebalances measured work without changing tests or raising the 20-minute hang tripwire.
+
+Recent green `fm-watch-triage.test.sh` measurements provide the comparison for attempt 3's 446,890 ms:
+
+| Green run | Duration (ms) |
+|---|---:|
+| [38540024417](https://github.com/dnth/firstmate/actions/runs/38540024417) | 406,842 |
+| [38546582306](https://github.com/dnth/firstmate/actions/runs/38546582306) | 414,725 |
+| [38551009549](https://github.com/dnth/firstmate/actions/runs/38551009549) | 419,614 |
+| [38535146206](https://github.com/dnth/firstmate/actions/runs/38535146206) | 421,505 |
+| [38746979839 attempt 2](https://github.com/dnth/firstmate/actions/runs/38746979839/attempts/2) | 410,055 |
+
+The 446,890 ms measurement exceeds the recent green maximum of 421,505 ms by 25,385 ms, about 6%, so it is not a large outlier.
+Separately, [run 38759616524](https://github.com/dnth/firstmate/actions/runs/38759616524) failed the stale-suppressor assertion after 100,083 ms.
+That is a separate correctness signal, not evidence that a 447-second `fm-watch-triage` run caused the timeout; the test assertions remain unchanged.
 
 ### Rebalanced duration profile
 
 The refreshed longest-processing-time assignment projects 14m23.259s–14m23.270s per shard from the green run's measured script durations.
 The balanced six-runner matrix leaves about 5m36.7s for setup and runner-load variance before the 20-minute timeout.
+
+For the PR rationale, `portable-serial-2of6`, which contains `fm-watch-triage.test.sh`, projects 863,263 ms using its 410,055 ms green measurement.
+Substituting attempt 3's 446,890 ms yields 863,263 - 410,055 + 446,890 = 900,098 ms (15m00.098s), leaving 299,902 ms (4m59.902s) below the unchanged 20-minute cap.
+This remains a safe margin for setup and runner-load variance, and the timeout cause remains aggregate runtime.
 
 | Shard | Scripts | Projected script time |
 |---|---:|---:|
