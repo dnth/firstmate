@@ -152,7 +152,8 @@ def acquire(id, alias, config, model):
                            'alias': alias, 'config': str(Path(config).resolve())},
             'providers': allowed, 'omp': executable(os.environ.get('FM_BOAT_OMP_BIN', 'omp')),
             'node': executable(os.environ.get('FM_BOAT_NODE_BIN', 'node')),
-            'broker': os.environ.get('FM_BOAT_BROKER_URL', 'http://127.0.0.1:8765'),
+            # A lease must not depend on a conventional port owned by another app.
+            'broker': os.environ.get('FM_BOAT_BROKER_URL') or 'http://' + free_loopback(),
             'proxy': os.environ.get('FM_BOAT_PROXY_BIND') or free_loopback(),
             'remote': os.environ.get('FM_BOAT_REMOTE_BIND', '127.0.0.1:8765'),
             'timeout': TIMEOUT,

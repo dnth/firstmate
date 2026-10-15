@@ -138,6 +138,18 @@ class CredentialTests(unittest.TestCase):
         self.assertIn('bearer unshredded', rows(self.lab.lease)['cleanup'])
         self.assertTrue((self.lab.path / 'remote/omp-auth-broker.token').exists())
         self.assertFalse((self.lab.lease.parent / 'facade.token').exists())
+    def test_default_brokers_do_not_share_listeners_or_credentials(self):
+        other = Lab()
+        try:
+            for lab, access in ((self.lab, 'first_lease_access'), (other, 'second_lease_access')):
+                lab.env.pop('FM_BOAT_BROKER_URL')
+                lab.update(broker_access=access)
+                lab.start()
+                self.assertEqual(lab.request()['credentials'][0]['credential']['access'], access)
+            self.lab.call('stop')
+            self.assertEqual(other.request()['credentials'][0]['credential']['access'], 'second_lease_access')
+        finally:
+            other.clean()
     def test_service_broker_and_facade_partial_acquisition_failures(self):
         self.lab.health_status = 503
         self.lab.start(ok=False)
