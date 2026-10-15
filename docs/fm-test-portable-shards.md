@@ -325,7 +325,7 @@ tests/fm-omp-branch-types.test.sh
 tests/fm-pi-primary-live-e2e.test.sh
 ```
 
-To refresh after a green run, replace the full hint table with measured per-script pairs and regenerate the membership snapshot below from the same hints.
+To refresh after a green run, replace the full hint table with measured per-script pairs and regenerate the membership snapshot above from the same hints.
 Copy the generated assignments into the snapshot and run the partition guard.
 
 ```sh

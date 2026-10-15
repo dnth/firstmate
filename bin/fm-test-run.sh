@@ -94,9 +94,7 @@ JOBS_MAX=8
 # One owner: CI lane names carry this count and are refused when they disagree.
 PORTABLE_SERIAL_SHARDS=6
 
-# Balance hint for a portable-serial script with no measured duration, close to
-# the measured per-script mean so a newly added test neither starves nor
-# overloads the shard it lands in.
+# Fallback balance hint for a portable-serial script with no measured duration.
 PORTABLE_SERIAL_DEFAULT_WEIGHT_MS=20000
 
 usage() {
@@ -375,8 +373,8 @@ list_portable_serial() {
   done < <(all_repo_tests)
 }
 
-# Portable-serial duration hints in milliseconds, from CI artifacts, completed
-# log records, and conservative estimates documented in docs/fm-test-portable-shards.md.
+# Portable-serial measured duration hints in milliseconds; source evidence is
+# documented in docs/fm-test-portable-shards.md.
 # These affect balance only: the shard partition stays complete and disjoint, so a
 # stale hint costs balance rather than coverage. That doc owns the refresh
 # procedure.
