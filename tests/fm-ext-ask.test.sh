@@ -239,6 +239,7 @@ test_5_ordinary_text_is_unaffected() {
   for text in \
     $'Two jobs are running.\n1. Ingest finished\n2. Eval running\nThe report lands tonight.' \
     'All 12 tests passed. 5 files changed, 3 added.' \
+    'Say all 3 tests passed' \
     'PR 562 merged; 3 of 5 cases pass' \
     'steps 1, 2 and 3 are done' \
     $'Options:\n1. Only one possible route.' \
