@@ -16,6 +16,11 @@ JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_DIR=$(dirname "$PYTHON_BIN")
 BASE_PATH="$PYTHON_DIR:$BASE_PATH"
+# The Discord splitter is Python, which bin/fm-ext-outbox.sh runs through uv the
+# same way bin/fm-boat.sh does.
+UV_BIN=$(command -v uv) || fail "test needs uv to run the Discord splitter"
+UV_DIR=$(dirname "$UV_BIN")
+BASE_PATH="$UV_DIR:$BASE_PATH"
 TMP_ROOT=$(fm_test_tmproot fm-ext-bridge)
 
 INTAKE="$ROOT/bin/fm-ext-intake.sh"
@@ -2850,6 +2855,8 @@ PY
 }
 
 test_47_discord_splitter_keeps_structure
+# --- 48. splitter boundary regressions -------------------------------------
+
 test_48_discord_splitter_boundaries() {
   local home
   home="$TMP_ROOT/c48"
@@ -2981,6 +2988,162 @@ PYTEST
   done
 }
 
+# --- 50. generated replies hold every splitter invariant -------------------
+
+test_50_discord_splitter_properties() {
+  local home
+  home="$TMP_ROOT/c50"
+  mkdir -p "$home"
+  cat > "$home/sweep.py" <<'PY'
+"""Seeded property sweep over the Discord reply splitter."""
+import random
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from discord_split import split_discord
+
+
+def delimiters(lines):
+    """Independent fence state machine: True when a line is a fence delimiter."""
+    flags = []
+    state = None
+    for line in lines:
+        stripped = line.lstrip(" \t")
+        char = stripped[0] if stripped else ""
+        length = 0
+        while length < len(stripped) and char in "`~" and stripped[length] == char:
+            length += 1
+        info = stripped[length:]
+        fence = char in "`~" and length >= 3 and not (char == "`" and "`" in info)
+        if not fence:
+            flags.append(False)
+            continue
+        if state is None:
+            state = (char, length)
+            flags.append(True)
+        elif char == state[0] and length >= state[1] and info.strip() == "":
+            state = None
+            flags.append(True)
+        else:
+            flags.append(False)
+    return flags
+
+
+def balance_ok(chunk):
+    lines = chunk.split("\n")
+    state = None
+    for line, fence in zip(lines, delimiters(lines)):
+        if not fence:
+            continue
+        stripped = line.lstrip(" \t")
+        char = stripped[0]
+        length = 0
+        while length < len(stripped) and stripped[length] == char:
+            length += 1
+        if state is None:
+            state = (char, length)
+        elif char == state[0] and length >= state[1]:
+            state = None
+    return state is None
+
+
+def content(lines):
+    return [line for line, fence in zip(lines, delimiters(lines)) if not fence]
+
+
+def edges_trimmed(lines):
+    lines = list(lines)
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+def check_message(text, limit, cap):
+    chunks = split_discord(text, limit, cap)
+    if not text.strip():
+        assert chunks == [], ("whitespace-only reply", chunks)
+        return
+    assert chunks, "a non-empty reply must produce chunks"
+    assert len(chunks) <= cap, ("cap", cap, chunks)
+    for chunk in chunks:
+        assert len(chunk) <= limit, ("limit", limit, len(chunk), chunk)
+        assert not any(
+            part.startswith("(") and part.endswith(")") and "/" in part
+            for part in chunk.split(" ")
+        ), ("counter", chunk)
+        if len(chunks) > 1:
+            assert balance_ok(chunk), ("fences", limit, repr(chunk))
+    want = content(edges_trimmed(text.split("\n")))
+    have = []
+    for chunk in chunks:
+        have.extend(content(edges_trimmed(chunk.split("\n"))))
+    truncated = len(chunks) == cap and "\u2026" in chunks[-1]
+    i = j = 0
+    while i < len(want):
+        expected = want[i]
+        if j < len(have) and have[j] == expected:
+            i += 1
+            j += 1
+            continue
+        if not expected.strip():
+            i += 1
+            continue
+        accumulated = ""
+        while len(accumulated) < len(expected) and j < len(have):
+            accumulated += have[j]
+            j += 1
+            if accumulated == expected:
+                break
+        if accumulated == expected:
+            i += 1
+            continue
+        if truncated and have and "\u2026" in have[-1] and j >= len(have):
+            break
+        raise AssertionError("content mismatch at %d: %r vs %r" % (i, expected, have[j:j + 2]))
+    while not truncated and j < len(have) and not have[j].strip():
+        j += 1
+    assert j >= len(have), ("extra content", have[j:], chunks)
+
+
+FRAGMENTS = [
+    "**Label:** short text", "- bullet one", "  - nested bullet", "    - deeper bullet",
+    "1. numbered item", "  2. nested number", "`inline code`", "    indented code line",
+    "```python", "```bash", "```", "~~~", "~~~~", "```literal", "text after fence",
+    "# Heading", "## Sub heading", "### Third level",
+    "plain paragraph line that has a fair number of words in it " * 3,
+    "x" * 90, "  leading spaces and  double  spaces  ", " \t ", "", "",
+    "- item with a long tail " * 2, '  print("a  b")  ' * 3,
+]
+
+total = 0
+for seed in (1, 7, 20261015, 424242, 999983):
+    rng = random.Random(seed)
+    for _ in range(600):
+        text = "\n".join(rng.choice(FRAGMENTS) for _ in range(rng.randint(1, 14)))
+        if rng.random() < 0.3:
+            text = "# Heading\n\n" + text
+        check_message(text, rng.choice([60, 200, 1900]), rng.choice([2, 3, 25]))
+        total += 1
+
+# The shapes the review findings named, kept as deterministic cases.
+check_message("```python\n" + '  print("a  b")  ' * 8 + "\n```", 60, 25)
+check_message("  first  line\n \t \n  second  line\n\n" + "z" * 200, 60, 25)
+check_message("a" * 45 + "\n" + "- parent\n  - child\n  - sibling", 60, 25)
+check_message("p" * 1875 + "\n\n" + "- 12345678\n- abcdefgh\n- ijklmnop", 1900, 25)
+check_message('```typescript title="src/components/Example.tsx"\n' + "a" * 100 + "\n```", 50, 25)
+check_message("```text\n```literal\n" + "x" * 80 + "\n```", 60, 25)
+check_message("x" * 52 + "\n```\n```\n\nz", 60, 1)
+check_message("x" * 120, 60, 1)
+print("ok - 50 %d generated replies hold every splitter invariant" % total)
+PY
+  home_env "$home" uv run --no-project python3 "$home/sweep.py" "$PLUGIN" \
+    || fail "the generated-reply invariant sweep must pass"
+  pass "50 generated replies keep their lines, limits, fences, and content"
+}
+
 test_48_discord_splitter_boundaries
 test_49_split_plan_survives_restart
+test_50_discord_splitter_properties
 echo "all fm-ext-bridge tests passed"
