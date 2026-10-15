@@ -2867,8 +2867,9 @@ test_48_discord_splitter_boundaries() {
   local home
   home="$TMP_ROOT/c48"
   mkdir -p "$home"
-  home_env "$home" "$PYTHON_BIN" - "$OUTBOX" <<'PYTEST' || fail "splitter boundary regressions"
+  home_env "$home" uv run --no-project python3 - "$OUTBOX" <<'PYTEST' || fail "splitter boundary regressions"
 import json
+import os
 import subprocess
 import sys
 
@@ -2883,6 +2884,26 @@ def split(text, limit=60, cap=25):
     assert all(sum(line.startswith("```") for line in chunk.split("\n")) % 2 == 0
                for chunk in chunks), chunks
     return chunks
+
+for use_flags in (False, True):
+    env = dict(os.environ, FM_EXT_DISCORD_REPLY_MAX_CHARS="050",
+               FM_EXT_DISCORD_THREAD_MAX="025")
+    flags = ["--max", "050", "--cap", "025"] if use_flags else []
+    limits = subprocess.run([sys.argv[1], "limits"] + flags,
+                            env=env, text=True, capture_output=True, check=True)
+    assert json.loads(limits.stdout) == {"limit": 50, "cap": 25}, limits.stdout
+    for legacy in (False, True):
+        result = subprocess.run(
+            [sys.argv[1], "split"] + flags + (["--legacy"] if legacy else []),
+            env=env, input="x" * 100, text=True, capture_output=True, check=True,
+        )
+        plan = json.loads(result.stdout)
+        assert plan["limit"] == 50 and plan["cap"] == 25, plan
+        assert all(len(chunk) <= 50 for chunk in plan["texts"]), plan
+
+assert split("x" * 30 + "\n## Title\n" + "y" * 45) == [
+    "x" * 30 + "\n## Title", "y" * 45
+]
 
 line = '  print("a  b")  ' * 12
 assert "".join(split(line)) == line
@@ -3129,7 +3150,9 @@ FRAGMENTS = [
     "x" * 60 + "```example", "x" * 60 + "~~~example",
     "```   ", "~~~   ", "````text", "~~~~text", "`````   ", "~~~~~   ",
     "`" * 61, "~" * 61, "```" + "long_info" * 30,
-    "~~~" + "long_info" * 30,
+    "~~~" + "long_info" * 30, "`" * 30, "~" * 30,
+    "x" * 10 + "`" * 20 + "x" * 10,
+    "x" * 10 + "~" * 20 + "x" * 10,
 ]
 
 def regression_truncation_exposes_closer():
@@ -3157,6 +3180,37 @@ def regression_oversized_fence_line():
             assert any(body.rstrip("\n") in chunk for chunk in chunks), chunks
 
 
+def regression_minimal_valid_delimiters():
+    for char in ("`", "~"):
+        delimiter = char * 30
+        text = delimiter + "\n" + char * 3 + "\n" + delimiter
+        chunks = split_discord(text, 60)
+        assert len(chunks) == 1, chunks
+        assert chunks[0].split("\n")[1:-1] == [char * 3], chunks
+        assert len(chunks[0].split("\n")[0]) == 4, chunks
+        assert chunks[0].split("\n")[-1] == delimiter, chunks
+        check_message(text, 60, 25)
+        for body in ("x" * 40, "x" * 10 + char * 5 + "x" * 10):
+            text = delimiter + "\n" + body + "\n" + delimiter
+            chunks = split_discord(text, 60)
+            assert len(chunks) == 1, chunks
+            assert chunks[0].split("\n")[1:-1] == [body], chunks
+            expected = max(3, 6 if char in body else 3)
+            assert chunks[0].split("\n")[0] == char * expected, chunks
+            assert chunks[0].split("\n")[-1] == char * expected, chunks
+            check_message(text, 60, 25)
+        opener, closer = char * 3 + "python  ", "  " + char * 5 + "  "
+        text = opener + "\n" + "\n".join(["x" * 20] * 4) + "\n" + closer
+        chunks = split_discord(text, 60)
+        assert all(chunk.split("\n")[0] == opener for chunk in chunks), chunks
+        assert all(chunk.split("\n")[-1] == closer for chunk in chunks), chunks
+        check_message(text, 60, 25)
+        text = delimiter + "\n" + "x" * 50 + "\n" + delimiter
+        chunks = split_discord(text, 60)
+        assert chunks == [char * 3 + "\n" + "x" * 50 + "\n" + char * 3], chunks
+        check_message(text + "\n\n" + "y" * 60, 60, 1)
+
+
 def regression_exact_passthrough_and_opener():
     for text in ("\nhi\n", " \t ", "", "```python  \na\n```\n"):
         assert split_discord(text, 60) == [text]
@@ -3169,6 +3223,7 @@ def regression_exact_passthrough_and_opener():
 regression_truncation_exposes_closer()
 regression_split_boundaries_do_not_create_fences()
 regression_oversized_fence_line()
+regression_minimal_valid_delimiters()
 regression_exact_passthrough_and_opener()
 
 total = 0

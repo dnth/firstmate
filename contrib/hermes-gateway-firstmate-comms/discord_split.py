@@ -22,8 +22,10 @@ The rules, in the order they apply:
   its own opening fence line at the start of the next, shortened to the fence
   plus its first info word, then to a bare fence, when the full opener does not
   leave room for content. The added fence lines count against the limit.
-- A fence line longer than the limit is the sole fence-preservation exception:
-  its delimiter is shortened to fit because Discord rejects oversized messages.
+- Delimiters are shortened only when needed, to the same fence character with
+  length max(3, the longest run of that character in the body plus one).
+  Fitting delimiters remain unchanged, and body lines split only when they
+  cannot fit even with the minimal valid delimiters.
 - Cap truncation keeps the last kept chunk within the limit and keeps its fences
   balanced by putting the ellipsis inside the block, on its own line before the
   closing fence.
@@ -48,9 +50,9 @@ DEFAULT_LIMIT = 1900
 DEFAULT_CAP = 25
 ELLIPSIS = "\u2026"
 
-# A top-level list item or heading starts its own packing group inside a
+# A top-level list item starts its own packing group inside a
 # paragraph, so an item keeps the indented lines that belong to it.
-ITEM_START = re.compile(r"^([-*+] |\d+[.)] |#{1,6} )")
+ITEM_START = re.compile(r"^([-*+] |\d+[.)] )")
 
 
 def _text(lines: list[str]) -> str:
@@ -191,19 +193,29 @@ def _split_paragraph(lines: list[str], limit: int) -> list[list[str]]:
     return _pack_units(_paragraph_units(lines, limit), limit)
 
 
-def _reopen_candidates(opener: str, fence) -> list[str]:
-    """Fence lines to reopen a split block with, most faithful first."""
+def _fence_options(opener: str, close: str, body: list[str], limit: int):
+    """Return valid fence pairs and their body budgets, most faithful first."""
+    fence = _fence_run(opener)
+    assert fence is not None
     char, length, info = fence
-    candidates = [opener]
+    runs = [len(match.group()) for line in body
+            for match in re.finditer(re.escape(char) + "+", line)]
+    minimum = char * max(3, max(runs, default=0) + 1)
+    openers = [opener]
     tag = info.strip().split()[0] if info.strip() else ""
     if tag:
-        candidates.append(char * length + tag)
-    candidates.append(char * length)
-    ordered: list[str] = []
-    for candidate in candidates:
-        if candidate not in ordered:
-            ordered.append(candidate)
-    return ordered
+        openers.append(char * length + tag)
+    openers.append(char * length)
+    if len(minimum) < len(opener):
+        openers.append(minimum)
+    closers = [close]
+    if len(minimum) < len(close):
+        closers.append(minimum)
+    return [(start, end, limit - len(start) - len(end) - 2)
+            for end in dict.fromkeys(closers)
+            for start in dict.fromkeys(openers)
+            if _is_closer(end, _fence_run(start))
+            and limit - len(start) - len(end) - 2 >= (1 if body else -1)]
 
 
 def _split_fence(lines: list[str], limit: int) -> list[list[str]]:
@@ -212,46 +224,18 @@ def _split_fence(lines: list[str], limit: int) -> list[list[str]]:
     closed = len(lines) > 1 and _is_closer(lines[-1], fence)
     close = lines[-1] if closed else fence[0] * fence[1]
     body = lines[1:-1] if closed else lines[1:]
-    if len(close) > limit:
-        close = fence[0] * fence[1]
-    reopen = ""
-    budget = limit
-    for candidate in _reopen_candidates(lines[0], fence):
-        room = limit - len(candidate) - len(close) - 2
-        if room >= 1:
-            reopen = candidate
-            budget = room
-            break
-    if not reopen:
-        close = fence[0] * fence[1]
-        for candidate in _reopen_candidates(lines[0], fence):
-            room = limit - len(candidate) - len(close) - 2
-            if room >= 1:
-                reopen, budget = candidate, room
-                break
-    if not reopen:
-        reopen = close = fence[0] * 3
-        budget = limit - len(reopen) - len(close) - 2
-    active_fence = _fence_run(reopen)
-    units = [[part] for line in body for part in _split_line(
-        line, min(budget, 2) if _is_closer(line, active_fence) else budget
-    )]
-    if not units:
-        return [[reopen, close]]
-    pieces: list[list[str]] = []
-    current: list[str] = []
-    used = 0
-    for unit in units:
-        added = len(_text(unit)) + 1
-        if current and len(reopen) + 1 + used + added + len(close) > limit:
-            pieces.append([reopen] + current + [close])
-            current = []
-            used = 0
-        current = current + unit
-        used += added
-    if current:
-        pieces.append([reopen] + current + [close])
-    return pieces
+    options = _fence_options(lines[0], close, body, limit)
+    if not options:
+        body = [part for line in body
+                for part in _split_line(line, max(1, (limit - 4) // 3))]
+        options = _fence_options(lines[0], close, body, limit)
+    capacity = max(room for _, _, room in options)
+    required = max((len(line) for line in body if len(line) <= capacity),
+                   default=1 if body else -1)
+    reopen, close, budget = next(option for option in options if option[2] >= required)
+    units = [[part] for line in body for part in _split_line(line, budget)]
+    return [[reopen] + piece + [close] for piece in _pack_units(units, budget)] \
+        if units else [[reopen, close]]
 
 
 def _split_block(block: dict, limit: int) -> list[list[str]]:
@@ -343,16 +327,16 @@ def _mark_truncated(lines: list[str], limit: int) -> list[str]:
         assert fence is not None
         end = -1 if _is_closer(lines[-1], fence) else len(lines)
         body = lines[open_index + 1 : end]
-        for opener in _reopen_candidates(open_line, fence):
-            content = list(body)
-            while True:
-                candidate = head + [opener] + content + [ELLIPSIS, close]
-                if len(_text(candidate)) <= limit:
-                    return candidate
-                if not content:
-                    break
-                content = content[:-1]
-        # The block does not fit even with a bare fence: drop it and mark what is left.
+        content = list(body)
+        available = limit - len(_text(head)) - (1 if head else 0)
+        while True:
+            marked = content + [ELLIPSIS]
+            for opener, closer, room in _fence_options(open_line, close, marked, available):
+                if len(_text(marked)) <= room:
+                    return head + [opener] + marked + [closer]
+            if not content:
+                break
+            content = content[:-1]
         if head:
             return _mark_plain(head, limit)
         return [ELLIPSIS]

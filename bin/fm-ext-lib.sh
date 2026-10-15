@@ -1153,6 +1153,8 @@ fm_ext_discord_reply_max_chars() {
   case "$raw" in
     ''|*[!0-9]*) raw=1900 ;;
   esac
+  raw=${raw#"${raw%%[!0]*}"}
+  raw=${raw:-0}
   [ "$raw" -ge 50 ] 2>/dev/null || raw=50
   [ "$raw" -le 2000 ] 2>/dev/null || raw=1900
   printf '%s\n' "$raw"
@@ -1165,6 +1167,8 @@ fm_ext_discord_thread_max() {
   case "$raw" in
     ''|*[!0-9]*) raw=25 ;;
   esac
+  raw=${raw#"${raw%%[!0]*}"}
+  raw=${raw:-0}
   [ "$raw" -ge 1 ] 2>/dev/null || raw=25
   printf '%s\n' "$raw"
 }
