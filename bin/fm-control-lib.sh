@@ -205,6 +205,23 @@ fm_control_omp_home_owner_pid() {  # <home-state>
   printf '%s' "$pid"
 }
 
+# Only ESRCH proves absence. A failed probe can also mean EPERM or an
+# unavailable probe command; keep those owners and their artifacts untouched.
+fm_control_omp_owner_absent() {  # <probe-command> <pid> <owner-description>
+  local probe_cmd=$1 pid=$2 description=$3 probe_output
+  if probe_output=$(LC_ALL=C "$probe_cmd" -0 "$pid" 2>&1); then
+    printf 'error: OMP %s owner is still live; refusing relaunch\n' "$description" >&2
+    return 1
+  fi
+  case "$probe_output" in
+    *'No such process'*) return 0 ;;
+    *)
+      printf 'error: OMP %s owner is unverifiable; refusing relaunch\n' "$description" >&2
+      return 1
+      ;;
+  esac
+}
+
 # Retire OMP session artifacts only after the prior session is absent and its
 # primary marker is tied to this home, this runtime, and a known extension
 # closure. A stale marker is not disposable just because its recorded PID is
@@ -275,15 +292,10 @@ fm_control_omp_secondmate_prepare_relaunch() {  # <state> <id> <worktree> <backe
     lock_present=1
   fi
   if owner_pid=$(fm_control_omp_home_owner_pid "$worktree/state"); then
-    if [ -n "$marker_pid" ] \
-      && "$stop_cmd" -0 "$marker_pid" >/dev/null 2>&1; then
-      printf 'error: OMP primary marker owner is still live; refusing relaunch\n' >&2
-      return 1
+    if [ -n "$marker_pid" ]; then
+      fm_control_omp_owner_absent "$stop_cmd" "$marker_pid" 'primary marker' || return 1
     fi
-    if "$stop_cmd" -0 "$owner_pid" >/dev/null 2>&1; then
-      printf 'error: OMP home lock owner is still live; refusing relaunch\n' >&2
-      return 1
-    fi
+    fm_control_omp_owner_absent "$stop_cmd" "$owner_pid" 'home lock' || return 1
   elif [ "$lock_present" -eq 1 ] || [ -n "$marker_pid" ]; then
     printf 'error: OMP home lock owner is unverifiable; refusing relaunch\n' >&2
     return 1

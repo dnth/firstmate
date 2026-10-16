@@ -933,6 +933,35 @@ EOF
   [ "$(cat "$smhome/state/omp-sessions/saved.jsonl")" = 'saved session' ] \
     || fail "OMP preparation changed the saved session"
 
+  # Failed probes do not prove absence: permission errors, unknown errors,
+  # and a silent failure must preserve both generations of session artifacts.
+  cat > "$dir/uncertain-owner" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -0 ]; then
+  if [ "$2" = "$FM_TEST_UNCERTAIN_PID" ]; then
+    [ -z "$FM_TEST_PROBE_ERROR" ] || printf '%s\n' "$FM_TEST_PROBE_ERROR" >&2
+    exit 1
+  fi
+  printf 'kill: (%s) - No such process\n' "$2" >&2
+  exit 1
+fi
+printf '%s\n' "$*" >> "$FM_TEST_SIGNAL_LOG"
+SH
+  chmod +x "$dir/uncertain-owner"
+  local uncertain_pid probe_error
+  for uncertain_pid in "$marker_pid" "$lock_pid"; do
+    for probe_error in 'Operation not permitted' 'Permission denied' 'probe unavailable' ''; do
+      reset_fixture
+      if out=$(FM_RESTART_STOP_CMD="$dir/uncertain-owner" FM_TEST_UNCERTAIN_PID="$uncertain_pid" \
+        FM_TEST_PROBE_ERROR="$probe_error" FM_TEST_SIGNAL_LOG="$dir/uncertain-signals" prepare_fixture); then
+        fail "OMP preparation accepted an uncertain owner $uncertain_pid: $probe_error"
+      fi
+      assert_contains "$out" 'owner is unverifiable' "uncertain owner refusal was not actionable"
+      assert_absent "$dir/uncertain-signals" "OMP preparation signaled an uncertain owner"
+      assert_preserved
+    done
+  done
+
   marker_pid=$BASHPID
   reset_fixture
   if out=$(prepare_fixture); then fail "OMP preparation accepted a live marker owner"; fi
@@ -1020,8 +1049,9 @@ SH
   cat > "$dir/fake-live-lock" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = -0 ]; then
-  [ "${2:-}" = "$FM_TEST_LOCK_PID" ] && [ ! -e "$FM_TEST_SIGNAL_LOG" ]
-  exit $?
+  if [ "${2:-}" = "$FM_TEST_LOCK_PID" ] && [ ! -e "$FM_TEST_SIGNAL_LOG" ]; then exit 0; fi
+  printf 'kill: (%s) - No such process\n' "${2:-}" >&2
+  exit 1
 fi
 printf '%s\n' "$1" >> "$FM_TEST_SIGNAL_LOG"
 SH
@@ -1167,6 +1197,7 @@ while IFS= read -r m; do [ ! -e "$m" ] || present=$((present + 1)); done < "$FM_
 if [ "${1:-}" = "-0" ]; then
   if [ -e "$FM_TEST_OWNER_GONE" ]; then
     printf 'probe %s absent markers_present=%d\n' "${2:-}" "$present" >> "$FM_TEST_STOP_LOG"
+    printf 'kill: (%s) - No such process\n' "${2:-}" >&2
     exit 1
   fi
   printf 'probe %s alive markers_present=%d\n' "${2:-}" "$present" >> "$FM_TEST_STOP_LOG"
