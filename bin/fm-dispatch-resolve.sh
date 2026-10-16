@@ -37,7 +37,7 @@
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
 #     fallback: <runner-up rule taken when the picked rule missed its own floor>
 #     reason: <why the status is not clear>
-#     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
+#     candidate: <harness>:<model> provider=.. [account=..] scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor and no runner-up taken; decide as today
@@ -60,6 +60,31 @@
 #   numeric effectivePercentRemaining across its windows, or -1 if unknown),
 #   breaking ties by accountKey. Source: https://github.com/kunchenguid/quota-axi
 #   (src/advice.ts).
+#
+# Account lanes: config/quota-account-lanes.json in the effective CONFIG dir is
+#   an optional private mapping from a quota provider family to the concrete
+#   provider ids that spend each of that family's accounts, shaped
+#   {"providers": {"<quota provider>": {"<accountKey>": "<provider id>"}}}.
+#   When a profile's provider family is mapped there, the tool expands that one
+#   profile into one candidate per mapped account, reads each candidate's
+#   evidence from that account's own lane row, and names the account on the
+#   candidate line. A clear result then carries the chosen account in the
+#   profile model as "<provider id>/<bare model>", so fm-spawn launches that
+#   worker on the credential for that account. A family with no mapping, and a
+#   profile whose family is unmapped, keep the single collapsed-lane behavior
+#   above byte for byte, so single-lane providers are unchanged. Nothing here is
+#   guessed: a mapped account that the snapshot does not carry, a snapshot lane
+#   the mapping does not name, a mapped family whose profile names no model, a
+#   malformed mapping, and a mapped provider id that the harness's own model
+#   catalog does not offer that model are each reported on their own candidate
+#   line or as an actionable configuration error. The catalog is read once, with
+#   a bounded timeout, only when a mapping exists and only for harness omp; an
+#   unreadable catalog, and a missing omp executable, leave mapped accounts
+#   unverifiable, and a run with no
+#   mapping never reads it at all. The file names providers, never credentials,
+#   so it holds no secret; the operator contract lives in docs/configuration.md
+#   "Typed dispatch resolution", together with the OMP provider entries the ids
+#   refer to.
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
@@ -143,9 +168,37 @@ fi
 [ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
 command -v jq >/dev/null 2>&1 || die "jq required"
 RULES=$(mktemp) || die "mktemp failed"
-trap 'rm -f "$RULES"' EXIT
+LANES=$(mktemp) || { rm -f "$RULES"; die "mktemp failed"; }
+CATALOG=$(mktemp) || { rm -f "$RULES" "$LANES"; die "mktemp failed"; }
+trap 'rm -f "$RULES" "$LANES" "$CATALOG"' EXIT
+printf '[]\n' > "$CATALOG" || die "could not create catalog snapshot"
 cp "$RULES_PATH" "$RULES" || die "could not snapshot rules file: $RULES_PATH"
 chmod 400 "$RULES" || die "could not protect rules snapshot"
+# Optional private account-lane mapping; absent means every provider keeps the
+# single collapsed-lane behavior the header describes.
+LANES_PATH="$CONFIG/quota-account-lanes.json"
+printf '{}\n' > "$LANES" || die "could not create account lane snapshot"
+if [ -e "$LANES_PATH" ] || [ -L "$LANES_PATH" ]; then
+  [ -r "$LANES_PATH" ] || die "account lane file not readable: $LANES_PATH"
+  cp "$LANES_PATH" "$LANES" || die "could not snapshot account lane file: $LANES_PATH"
+  chmod 400 "$LANES" || die "could not protect account lane snapshot"
+  lanes_err=$(jq -r --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
+    def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
+    def lanes_bad($v):
+      ($v | type) != "object" or
+      ($v | length) == 0 or
+      any($v | to_entries[]; (provider_id(.key) | not) or (provider_id(.value) | not));
+    def top_bad:
+      any((.providers // {}) | to_entries[];
+        (provider_id(.key) | not) or (lanes_bad(.value)));
+    if type != "object" then "top-level value must be an object"
+    elif has("providers") and (.providers | type) != "object" then "providers must be an object"
+    elif top_bad then "each quota provider needs a non-empty map of accountKey to provider id, and every id must match ^[a-z0-9]+(-[a-z0-9]+)*\\z"
+    else empty end
+  ' "$LANES" 2>/dev/null) || die "malformed account lane file: $LANES_PATH (not JSON)"
+  [ -z "$lanes_err" ] || die "malformed account lane file: $LANES_PATH - $lanes_err"
+fi
+
 VERIFIED_HARNESSES=$(fm_dispatch_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
 
 # The fields this tool consumes must be well formed; bootstrap owns the wider
@@ -252,7 +305,7 @@ fi
 RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
-trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT"' EXIT
+trap 'rm -f "$RULES" "$LANES" "$CATALOG" "$RESP_FILE" "$QUOTA" "$TASK_TEXT"' EXIT
 
 # Send Jev only the task-describing sections bin/fm-brief.sh scaffolds - the
 # `# Task` body and, on ship briefs, the `# Acceptance criteria` - plus a scout
@@ -326,42 +379,117 @@ command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
 quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
+# ---- account lane providers: the mapped ids must really exist -------------------
+# A mapped account is dispatchable only when the provider id the mapping names
+# really offers that model, so the mapped candidates are checked against the
+# harness's own catalog. No mapping means no read at all, so the no-mapping path
+# is byte-identical, and an unreadable catalog leaves mapped candidates
+# unverifiable and reported rather than selected.
+CATALOG_OK=false
+read_omp_catalog() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 30 omp models --json 2>/dev/null
+  else
+    omp models --json 2>/dev/null
+  fi
+}
+if [ "$(jq -r '(.providers // {}) | length' "$LANES")" != 0 ] && command -v omp >/dev/null 2>&1; then
+  if catalog_raw=$(read_omp_catalog) &&
+     printf '%s' "$catalog_raw" | jq -e '.models | type == "array"' >/dev/null 2>&1; then
+    if printf '%s' "$catalog_raw" |
+      jq -c '[.models[]? | select((.provider | type) == "string" and (.id | type) == "string") |
+              {provider, id, selector: (.selector // ((.provider) + "/" + (.id)))}]' > "$CATALOG"; then
+      CATALOG_OK=true
+    fi
+  fi
+fi
+
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
-  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_LANES_JQ"'
+  --argjson catalog_ok "$CATALOG_OK" \
+  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" --slurpfile lanes "$LANES" --slurpfile catalog "$CATALOG" "$FM_QUOTA_LANES_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0] | collapse_lanes) as $q | ($r.answers.rule) as $a |
+  ($quota[0].providers // []) as $rawl | ($lanes[0].providers // {}) as $lmap | ($catalog[0]) as $cat |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
-  def rows($p): (prov($p) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
   def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
-  def measured($p):
-    (prov($p) != null and (["known", "partial"] | index(prov($p).quotaSemantics.status)) != null);
-  def applicable($p; $m):
-    (bare($m)) as $bare |
-    [rows($p)[] | select(
+  # Account lanes: the mapping names the provider ids that spend each account of
+  # a quota provider family. An unmapped family, and a candidate without an
+  # account, read exactly the single collapsed lane the header describes.
+  def lane_map($p): ($lmap[$p] // null);
+  def lane_keys($p): (lane_map($p) | if type == "object" then keys else [] end);
+  # A mapped account is dispatchable only when the provider id it names really
+  # offers that model in the harness catalog; the catalog is only read when a
+  # mapping exists, and an unreadable catalog leaves the lane unverifiable.
+  def catalog_offers($pid; $m):
+    any($cat[]; .provider == $pid and (.id == $m or .selector == ($pid + "/" + $m)));
+  def lane_unverifiable($c):
+    if ($c.account // null) == null or $c.harness != "omp" then null
+    elif ($catalog_ok | not) then "the OMP catalog could not be read, so account lane \($c.account) is unverifiable"
+    elif (catalog_offers($c.accountProvider; bare($c.model // "")) | not)
+      then "mapped account \($c.account) names provider \($c.accountProvider), which does not offer \(bare($c.model // ""))"
+    else null end;
+  def row_of($c):
+    (provider_of($c)) as $p |
+    if $c.account != null then
+      ([$rawl[] | select(.provider == $p and (.accountKey // "") == $c.account)] | first) // null
+    else prov($p) end;
+  def rows_of($c): (row_of($c) | .quotaSemantics.effectiveAvailability // []);
+  def measured_row($row):
+    ($row != null and (["known", "partial"] | index($row.quotaSemantics.status)) != null);
+  def applicable($c):
+    (bare($c.model // "")) as $bare |
+    [rows_of($c)[] | select(
       .scope == "all_models" or .scope == "all_products" or
-      ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare)))
+      (($c.model // "") != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare)))
     )];
-  def floor_state($f; $p):
+  def floor_state($f; $c):
     if $f == null then "none"
-    elif prov($p) == null or (measured($p) | not) then "unknown"
-    else [rows($p)[] | select(.scope == $f.scope)] as $matches
-      | if ($matches | length) == 0 or any($matches[]; .status != "known") then "unknown"
-        elif any($matches[]; .effectivePercentRemaining < $f.min_percent) then "below"
-        else "ok"
+    else (row_of($c)) as $row
+      | if $row == null or (measured_row($row) | not) then "unknown"
+        else [$row.quotaSemantics.effectiveAvailability[] | select(.scope == $f.scope)] as $matches
+          | if ($matches | length) == 0 or any($matches[]; .status != "known") then "unknown"
+            elif any($matches[]; .effectivePercentRemaining < $f.min_percent) then "below"
+            else "ok"
+            end
         end
+    end;
+  def expand_accounts($c):
+    (provider_of($c)) as $p |
+    (lane_keys($p)) as $keys |
+    if ($keys | length) == 0 then [$c]
+    elif ($c.model // "") == "" then
+      [$c + {laneError: "account mapping for provider \($p) needs an explicit model on the profile"}]
+    else
+      [$keys[] as $acct | $c + {
+        model: ((lane_map($p)[$acct]) + "/" + (bare($c.model))),
+        account: $acct,
+        accountProvider: lane_map($p)[$acct] }]
+    end;
+  def unmapped_candidates($c):
+    (provider_of($c)) as $p |
+    (lane_keys($p)) as $keys |
+    if ($keys | length) == 0 then []
+    else
+      ([$rawl[] | select(.provider == $p) | (.accountKey // "default")] - $keys | unique) as $extra |
+      [$extra[] | {profile: $c, provider: $p, account: ., eligible: false,
+                   reason: "account lane \(.) is not in the account mapping"}]
     end;
   def evidence($rows):
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
     (provider_of($c)) as $p |
-    if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
-    elif prov($p) == null then {profile: $c, provider: $p, eligible: true, unranked: true, reason: "provider \($p) not in the quota snapshot"}
+    (row_of($c)) as $row |
+    if $c.laneError then {profile: $c, provider: $p, account: ($c.account // null), eligible: false, reason: $c.laneError}
+    elif $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
+    elif $row == null and $c.account != null then {profile: $c, provider: $p, account: $c.account, eligible: false, reason: "account lane \($c.account) is not in the quota snapshot"}
+    elif lane_unverifiable($c) != null then {profile: $c, provider: $p, account: $c.account, eligible: false, reason: lane_unverifiable($c)}
+    elif $row == null then {profile: $c, provider: $p, eligible: true, unranked: true, reason: "provider \($p) not in the quota snapshot"}
     else
-      (applicable($p; ($c.model // ""))) as $rows |
+      (applicable($c)) as $rows |
       (evidence($rows)) as $bounds |
-      (floor_state($c.floor; $p)) as $profile_floor_state |
+      (floor_state($c.floor; $c)) as $profile_floor_state |
       if any($rows[]; (.runway.status // "") == "exhausted_now") then
         ($rows | map(select((.runway.status // "") == "exhausted_now")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: ($bad.effectivePercentRemaining // null), runway: $bad.runway.status, eligible: false, reason: "runway exhausted_now at \($bad.scope)"}
@@ -369,18 +497,18 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         ($rows | map(select(.status == "known" and (.effectivePercentRemaining | type) == "number" and .effectivePercentRemaining <= 0)) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "0% remaining at \($bad.scope)"}
       elif $profile_floor_state == "below" then
-        ([rows($p)[] | select(
+        ([rows_of($c)[] | select(
           .scope == $c.floor.scope and
           .effectivePercentRemaining < $c.floor.min_percent
         )] | first) as $floor_row |
         {profile: $c, provider: $p, bounds: $bounds, scope: ($floor_row.scope // $c.floor.scope), pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: false, reason: "profile floor \($c.floor.scope) below \($c.floor.min_percent)%"}
-      elif (measured($p) | not) then
-        ($rows | first) as $row |
-        {profile: $c, provider: $p, bounds: $bounds, scope: ($row.scope // null), pct: ($row.effectivePercentRemaining // null), runway: ($row.runway.status // null), eligible: true, unranked: true, unknown: true, reason: "provider \($p) unmeasured (\(prov($p).quotaSemantics.status))"}
+      elif (measured_row($row) | not) then
+        ($rows | first) as $first_row |
+        {profile: $c, provider: $p, bounds: $bounds, scope: ($first_row.scope // null), pct: ($first_row.effectivePercentRemaining // null), runway: ($first_row.runway.status // null), eligible: true, unranked: true, unknown: true, reason: "provider \($p) unmeasured (\($row.quotaSemantics.status))"}
       elif ($rows | length) == 0 then
         {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true, unknown: true, reason: "no applicable quota row for provider \($p)"}
       elif $profile_floor_state == "unknown" then
-        ([rows($p)[] | select(.scope == $c.floor.scope)] | first) as $floor_row |
+        ([rows_of($c)[] | select(.scope == $c.floor.scope)] | first) as $floor_row |
         {profile: $c, provider: $p, bounds: $bounds, scope: $c.floor.scope, pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: true, unranked: true, unknown: true, reason: "profile floor \($c.floor.scope) is unverifiable: not rankable"}
       elif any($rows[]; .status != "known") then
         ($rows | map(select(.status != "known")) | first) as $bad |
@@ -393,7 +521,10 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         {profile: $c, provider: $p, bounds: $bounds, scope: $limiting.scope, pct: $limiting.effectivePercentRemaining,
          spendPriority: $limiting.selection.spendPriority, runway: $limiting.runway.status, eligible: true, reason: "ok"}
       end
-    end;
+    end
+    | if ($c.account // null) != null then . + {account: $c.account} else . end;
+  def candidates($list): ($list | map(expand_accounts(.)) | flatten | map(evaluate(.)))
+    + ($list | map(unmapped_candidates(.)) | flatten);
   def rule_at($c):
     if $c == "default" then null
     elif ($c | test("^rule_[1-9][0-9]*$")) then
@@ -424,7 +555,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
    end) as $fb |
   (if $fb.to then $fb.to else $picked end) as $choice |
   (rule_at($choice)) as $rule |
-  (if $rule == null then "none" else floor_state($rule.floor; $rule.floor.provider) end) as $rule_floor_state |
+  (if $rule == null then "none" else floor_state($rule.floor; {provider: $rule.floor.provider}) end) as $rule_floor_state |
   (if $choice != "default" and $rule == null then []
    elif $rule == null then profiles($cfg.default // null)
    else profiles($rule.use)
@@ -447,14 +578,14 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
   elif $fb.below and $fb.global then
-    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
+    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: candidates($answer_use)}
   elif $fb.below and ($fb.to | not) then
-    $ev + {status: "ambiguous", reason: "\($picked) probability \($a.probabilities[$picked]) below its floor \($picked_floor); \($fb.why)", candidates: ($answer_use | map(evaluate(.)))}
+    $ev + {status: "ambiguous", reason: "\($picked) probability \($a.probabilities[$picked]) below its floor \($picked_floor); \($fb.why)", candidates: candidates($answer_use)}
   elif $sel.escalate then
-    $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
+    $ev + {status: "escalate", reason: $sel.escalate, candidates: candidates($answer_use)}
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else
-    ($sel.use | map(evaluate(.))) as $cands |
+    (candidates($sel.use)) as $cands |
     ([$cands[] | select(.eligible and ((.unranked // false) | not))]) as $elig |
     ([$cands[] | select(.unranked)]) as $unranked |
     if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
@@ -485,6 +616,7 @@ TEXT=$(jq -r '
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
+      + (if .account then "  account=\(.account | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),

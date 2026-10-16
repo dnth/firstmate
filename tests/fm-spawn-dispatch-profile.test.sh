@@ -1882,6 +1882,29 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
   pass "OMP invokes its canonical entrypoint directly and records its runtime identity"
 }
 
+test_omp_threads_account_lane_model() {
+  local rec id out status launch
+  # A resolved account-lane profile names an OMP provider id per account, so the
+  # model is a slash-qualified spec whose provider carries digits and dashes.
+  id=$(profile_id profile-omp-lane-z8l)
+  rec=$(make_spawn_case profile-omp-lane omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model opencode-go-dnth/deepseek-v4.1-flash --effort high)
+  status=$?
+  expect_code 0 "$status" "OMP spawn on an account-lane model should succeed"
+  assert_contains "$out" "spawned $id harness=omp kind=ship" "lane-model spawn did not preserve exact identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" omp opencode-go-dnth/deepseek-v4.1-flash high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'opencode-go-dnth/deepseek-v4.1-flash'" \
+    "OMP launch did not thread the account-lane model"
+  assert_contains "$launch" "--thinking 'high'" "OMP launch did not thread the lane profile effort"
+  unset FM_TEST_OMP_ACK
+  pass "OMP launches a worker on a resolved account-lane model"
+}
+
 test_omp_broker_env_uses_mode_600_file_without_exposing_bearer() {
   local rec id out status launch token_file
   id=$(profile_id profile-omp-broker-z8ob)
@@ -3570,6 +3593,7 @@ test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_omp_threads_exact_identity_model_and_every_thinking_level
+test_omp_threads_account_lane_model
 test_omp_broker_env_uses_mode_600_file_without_exposing_bearer
 test_secondmate_descendant_omp_inherits_complete_broker_pair
 test_omp_prewalk_threads_native_target_and_metadata

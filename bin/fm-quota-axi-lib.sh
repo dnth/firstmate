@@ -50,6 +50,8 @@ fm_quota_axi_compatible() {
 }
 
 # Map a provider identifier to quota-axi's provider family.
+# An account-lane provider id (see the fm-dispatch-resolve.sh header) carries
+# the family as its prefix, so `opencode-go-dnth` still reads opencode-go quota.
 fm_quota_provider_family() {
   local prefix=$1
   case "$prefix" in
@@ -57,6 +59,7 @@ fm_quota_provider_family() {
     openai|openai-codex|codex) printf '%s\n' codex ;;
     grok|xai) printf '%s\n' grok ;;
     kimi|kimi-coding|moonshot) printf '%s\n' kimi ;;
+    opencode-go|opencode-go-*) printf '%s\n' opencode-go ;;
     *) printf '%s\n' "$prefix" ;;
   esac
 }
