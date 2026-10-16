@@ -501,9 +501,9 @@ fm_ext_allowlisted() {
 # button's Discord custom_id carries that key and a 1-based option id
 # (fmd:<key>:<n>, or fmd:<key>:d for Discuss). The decision itself lives only
 # in those ledgers, and only Firstmate records an answer there: a click files a
-# request like a typed reply. The bridge keeps just what a post needs to be
-# found and redrawn - the decision in the post's chunk-progress record, its sent
-# click, its final line, and what Discord shows (bin/fm-ext-decision.sh).
+# request like a typed reply. The bridge keeps only what a post needs to be
+# found and redrawn: decision options and structured question, explanation, and
+# numbered-list sections in chunk progress, its sent click, outcome, and display.
 
 # Most options one decision post carries: one Discord action row.
 FM_EXT_DECISION_MAX_OPTIONS=5
@@ -1301,7 +1301,15 @@ fm_ext_outbox_schema_valid() {
             and (.id | type == "number")
             and (.label | type == "string" and length >= 1 and length <= $label_max)
             and (.confirm | type == "boolean")
-            and ((.recommended // false) | type == "boolean"))))
+            and ((.recommended // false) | type == "boolean")))
+        and (if has("sections") then
+          (.sections | type == "object"
+            and (.question | type == "string")
+            and (.explanation | type == "string")
+            and (.options | type == "string")
+            and (.cue | type == "string")
+            and (.structured | type == "boolean"))
+        else true end))
       else true end)
   ' "$file" >/dev/null 2>&1
 }

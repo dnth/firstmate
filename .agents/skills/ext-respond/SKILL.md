@@ -85,12 +85,12 @@ Its `decision` field carries the key, the post's `occurrence`, the option, any c
    - `hold:` - one keyed line `<task-id>\t<option>\t<option_id>. <option>\t<mode>` on stdin to `bin/fm-captain-hold.sh answers --source "Discord button: option <option_id> \"<option>\" chosen by <by> (<author>) at <at> for <key>"`.
    - `key:` - `bin/fm-send.sh <task-id> --resolve-key <slug> "Decision answer: <option> (<the same audit>)"`.
    When `confirmed` is true, append `, confirmed by clicking "<confirm_prompt>"` to the audit.
-   That record is what the post reads to show "✅ <option> chosen by <by>"; one naming no single option shows a plain "✅ Decided".
+   The post reads that record under the [decision display rules](../../../docs/configuration.md#decision-buttons), including the legacy text-preservation exception.
    A `confirmed` click is the clicker's explicit word for that one decision only, which is the confirmation a merge, prod deploy, deletion, money, or credential option needs; it is never standing authority, and merge authority otherwise stays where AGENTS.md puts it.
 2. `choice` `discuss`: nothing is decided; talk it through with the captain in the thread.
 3. Finish with an `answer` or `final`, as for any request.
 
-When you settle a decision that has a button post any other way, such as a typed numbered reply, record it through its own channel as usual and name the chosen option in the answer, by its number or label; the post then disables itself and shows that option as the captain's choice.
+When you settle a decision that has a button post any other way, such as a typed numbered reply, record it through its own channel as usual and name the chosen option in the answer, by its number or label.
 
 ## Name the thread, then mark its state
 

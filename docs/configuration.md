@@ -1031,9 +1031,12 @@ Reactions are best effort and use the same bot token and User-Agent as replies: 
 
 Firstmate can attach option buttons to an `answer`, `followup`, or `final`, so the captain sends a choice to Firstmate from the post.
 Each decision post is bound to exactly one decision Firstmate already tracks, named by its key: `hold:<task-id>` for a captain call held on the board, or `key:<task-id>:<slug>` for a worker's keyed status decision.
-`bin/fm-ext-ask.sh` is the one command that asks the captain a choice: it places or refreshes the captain hold for the task, writes the decision file, appends the numbered option lines to the post text in button order so text and buttons always match, and posts through `bin/fm-ext-emit.sh --decision-file` with the thread marked needs-you; its header owns the flags.
+`bin/fm-ext-ask.sh` is the one command that asks the captain a choice: it places or refreshes the captain hold, writes the decision file, and posts matching numbered options.
+Its `--text-file` is the question, optional `--explanation-file` is the explanation, and it records those sections separately from the numbered option list and reply cue for safe chunking and later edits.
+The gateway reserves room for the outcome header on the final button-carrying chunk and keeps the numbered options together there; its header and the [emit header](../bin/fm-ext-emit.sh) own the section format and flags.
 Its `--mode done|release` is required and never inferred: `done` closes a question and `release` lifts the hold so held work proceeds.
 For a worker's existing keyed status decision, use `bin/fm-ext-emit.sh --decision-file` directly; its [header](../bin/fm-ext-emit.sh) owns the file format and validation.
+If its file omits `sections`, the whole post is treated as protected question text.
 The [emit header's choice guard](../bin/fm-ext-emit.sh) owns the matching rules, including digit-selection cues and standalone choice headings followed by at least two option lines, and routes refused plain-text choices to `bin/fm-ext-ask.sh`.
 `--no-buttons "<reason>"` posts a deliberate plain list anyway and records the reason in the outbox payload as `no_buttons_reason`; the emit header owns the exact detection rule.
 Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every decision post also carries a Discuss button, `fmd:<key>:d`.
@@ -1061,7 +1064,18 @@ A recommended option that also needs confirmation still needs its second click.
 A confirmed click from a standing-rule author is that author's explicit word for that one decision only, never standing authority, and merge authority stays where `AGENTS.md` puts it.
 
 Each post is bound to the lifecycle of its decision that was open when it was posted, so a captain call re-held or a worker key reopened for a new question is a different decision to it.
-When Firstmate records an answer on any channel, its posts are disabled and edited to show the outcome, read from the same ledgers rather than from any step Firstmate must remember: `✅ <option> chosen by <user> <time>` names the clicker when the recorded answer is the option that post's click sent, and the captain for any other recorded answer that names exactly one option by number or label; `✅ Decided <time>` covers answers that cannot be matched to one option, `Closed - no longer needed <time>` covers a decision closed with no captain answer or replaced by a later lifecycle, and `Replaced by a newer post <time>` covers an older post for the same decision.
+When Firstmate records an answer on any channel, only the last chunk of a new post is edited with a bold outcome header above its exact original text whenever both fit Discord's 2,000-character limit; earlier chunks stay unchanged.
+The uniquely chosen option is success-colored and gains a `✓`; every other option and Discuss are grey, and all buttons are disabled.
+When no single option matches, every button is grey; a click waiting for Firstmate to record it still highlights the clicked option.
+The outcome names the clicker when the recorded answer matches that post's click, and otherwise names the captain when the answer names exactly one option by number or label; `✅ Decided <time>` covers answers without one unique option, and `Closed - no longer needed <time>` covers a decision closed without an answer or replaced by a later lifecycle.
+When a newer post replaces an older one for the same decision, the older outcome header links to the newest post when its message id is known and otherwise says `Replaced by a newer question`.
+Structured posts reserve space for that header, so a normal settlement edit needs no truncation.
+Legacy posts, identified by missing original chunks or legacy decision records without section metadata, receive only button updates in every outcome state; their message text stays byte for byte unchanged, even if an earlier version replaced it with a waiting line.
+Legacy posts need no original-text recovery or retained payload, and a recorded answer updates their buttons even when an older waiting receipt exists.
+An already-settled legacy post keeps the choice recorded in its own immutable settlement, including when its key is reopened or its task re-held; when that record identifies no unique option, all buttons are grey.
+For new posts, an edit that cannot fit trims the explanation tail with `(trimmed)` while preserving the header, question, and option list.
+New decision plans that exceed the configured chunk cap are refused before posting rather than truncating their text.
+The outcome is read from the same ledgers rather than from any step Firstmate must remember.
 Option matching ignores the appended Discord-button audit and the `Decision answer: ` prefix.
 For a recommended option, matching accepts its label with or without the leading star, while the outcome keeps the displayed label.
 A unique longest full option label at the start of the answer wins immediately, regardless of trailing text; otherwise the matcher collects standalone option numbers and whole-word labels and accepts only one distinct option.

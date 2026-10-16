@@ -5,7 +5,7 @@
 #   fm-ext-ask.sh --request-id discord:<guild>:<channel>:<thread>:<message>
 #     --kind answer|followup|final --generation <n>
 #     --task <task-id> [--title <title>] [--repo <repo>] --reason <reason>
-#     (--text-file <path> | --text-file -)
+#     (--text-file <path> | --text-file -) [--explanation-file <path>]
 #     --option <label> [--recommended] [--confirm]
 #     [--option <label> [--recommended] [--confirm]] ... (1-5 options)
 #     --mode done|release [--thread-title <text>]
@@ -19,13 +19,13 @@
 #   2. writes the decision file (key hold:<task-id>, the mode, the options);
 #   3. posts through bin/fm-ext-emit.sh --decision-file with
 #      --thread-state needs-you.
-# The post text is the --text-file body followed by the numbered option lines,
-# one per option in button order, and a one-line cue, so the text and the buttons
-# always match. A recommended option shows "⭐ " in both. --recommended marks the
-# option just before it as the recommended choice (at most one); --confirm asks
-# for a second click on the option just before it. Options whose label matches
-# FM_EXT_DECISION_CONFIRM_PATTERN in bin/fm-ext-lib.sh (merge, deploy, delete,
-# and other risky words) get the confirmation click automatically.
+# The post text keeps the question, optional explanation, numbered option
+# lines, and reply cue as separate sections for safe chunking and settlement.
+# The numbered option lines follow button order, and a recommended option shows
+# "⭐ " in both. --recommended marks the option just before it (at most one);
+# --confirm asks for a second click on the option just before it. Options whose
+# label matches FM_EXT_DECISION_CONFIRM_PATTERN in bin/fm-ext-lib.sh (merge,
+# deploy, delete, and other risky words) get the confirmation click automatically.
 # --mode is required and has no default: it chooses how a chosen option closes
 # the call, as in bin/fm-captain-hold.sh answers. done closes a question;
 # release lifts the hold so held work proceeds. A held build task that has not
@@ -56,7 +56,7 @@ usage() {
 usage: fm-ext-ask.sh --request-id discord:<guild>:<channel>:<thread>:<message>
          --kind answer|followup|final --generation <n>
          --task <task-id> [--title <title>] [--repo <repo>] --reason <reason>
-         (--text-file <path> | --text-file -)
+         (--text-file <path> | --text-file -) [--explanation-file <path>]
          --option <label> [--recommended] [--confirm] [--option <label> ...]
          --mode done|release [--thread-title <text>]
 EOF
@@ -76,10 +76,10 @@ TITLE=
 REPO=
 REASON=
 TEXT_FILE=
+EXPLANATION_FILE=
 MODE=
 THREAD_TITLE=
 OPTIONS_JSON='[]'
-
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
   '') usage; exit 2 ;;
@@ -96,6 +96,7 @@ while [ "$#" -gt 0 ]; do
     --repo) shift; REPO=${1:-} ;;
     --reason) shift; REASON=${1:-} ;;
     --text-file) shift; TEXT_FILE=${1:-} ;;
+    --explanation-file) shift; EXPLANATION_FILE=${1:-} ;;
     --mode) shift; MODE=${1:-} ;;
     --thread-title) shift; THREAD_TITLE=${1:-} ;;
     --option)
@@ -143,6 +144,7 @@ jq -e --argjson max "$FM_EXT_DECISION_MAX_OPTIONS" --argjson label_max "$FM_EXT_
 ' <<<"$OPTIONS_JSON" >/dev/null 2>&1 \
   || die "give 1-$FM_EXT_DECISION_MAX_OPTIONS distinct --option labels of 1-$FM_EXT_DECISION_LABEL_MAX characters, at most one --recommended"
 
+KEY="hold:$TASK"
 if [ "$TEXT_FILE" = '-' ]; then
   TEXT=$(cat)
 else
@@ -150,10 +152,15 @@ else
   TEXT=$(cat -- "$TEXT_FILE")
 fi
 [ -n "$TEXT" ] || die "text is empty"
+EXPLANATION=
+if [ -n "$EXPLANATION_FILE" ]; then
+  [ -f "$EXPLANATION_FILE" ] && [ ! -L "$EXPLANATION_FILE" ] \
+    || die "explanation file not found: $EXPLANATION_FILE"
+  EXPLANATION=$(cat -- "$EXPLANATION_FILE")
+fi
 
-KEY="hold:$TASK"
-# The key and task id ride only in the button ids; refuse before holding.
-if { printf '%s\n' "$TEXT"; jq -r '.[].label' <<<"$OPTIONS_JSON"; } | grep -qiF -e "$TASK" -e "$KEY"; then
+if { printf '%s\n' "$TEXT" "$EXPLANATION"; jq -r '.[].label' <<<"$OPTIONS_JSON"; } \
+  | grep -qiF -e "$TASK" -e "$KEY"; then
   die "the text and labels must not name the task id"
 fi
 
@@ -161,12 +168,19 @@ fi
 LINES=$(jq -r '. as $o | range(0; length) as $i
   | $o[$i] | "\($i + 1). " + (if (.recommended // false) and ((.label | startswith("⭐")) | not) then "⭐ " + .label else .label end)' \
   <<<"$OPTIONS_JSON") || die "could not number the options" 1
-FULL_TEXT=$(printf '%s\n\n%s\nTap a button, or reply with the number.' "$TEXT" "$LINES")
+CUE='Tap a button, or reply with the number.'
+BODY=$TEXT
+[ -z "$EXPLANATION" ] || BODY=$(printf '%s\n\n%s' "$TEXT" "$EXPLANATION")
+FULL_TEXT=$(printf '%s\n\n%s\n%s' "$BODY" "$LINES" "$CUE")
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-ext-ask.XXXXXX") || die "could not make a scratch directory" 1
 trap 'rm -rf "$WORK"' EXIT
-jq -n --arg key "$KEY" --arg mode "$MODE" --argjson options "$OPTIONS_JSON" \
-  '{key: $key, mode: $mode, options: $options}' > "$WORK/decision.json" \
+jq -n --arg key "$KEY" --arg mode "$MODE" --arg question "$TEXT" \
+  --arg explanation "$EXPLANATION" --arg option_text "$LINES" --arg cue "$CUE" \
+  --argjson options "$OPTIONS_JSON" \
+  '{key: $key, mode: $mode, options: $options,
+    sections: {question: $question, explanation: $explanation,
+      options: $option_text, cue: $cue}}' > "$WORK/decision.json" \
   || die "could not write the decision file" 1
 
 emit=("$SCRIPT_DIR/fm-ext-emit.sh" --request-id "$REQUEST_ID" --kind "$KIND"

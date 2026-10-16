@@ -28,9 +28,9 @@
 #   <stem>.sent.json       the click that filed this post's request, written
 #                          once, so a second click files nothing
 #   <stem>.settled.json    the post's final outcome line, written once
-#   <stem>.finalized       the post content Discord shows now
+#   <stem>.finalized       the displayed content or legacy button-state receipt
 #
-# What a post shows, where <time> is a Discord timestamp:
+# Stored outcome lines, where <time> is a Discord timestamp:
 #   ⏳ <label> sent by <name> <time> - waiting for Firstmate to record it
 #                                        a click filed a request; buttons off
 #   ✅ <label> chosen by <name> <time>    Firstmate recorded the clicked option
@@ -47,6 +47,8 @@
 # The recorded answer comes from the ledgers through
 # fm_ext_decision_key_outcome in bin/fm-ext-lib.sh and is never shown itself,
 # because it may not be public-safe.
+# Display formatting and the legacy text-preservation exception are owned by
+# docs/configuration.md, "Decision buttons".
 #
 # click
 #   The gateway plugin runs this for every button click. --post-id is the
@@ -69,7 +71,7 @@
 #     0  sent: claims the post once, files one request through
 #        bin/fm-ext-intake.sh --origin button carrying the key, its occurrence,
 #        the option, the decision text, any confirmation, and who and when;
-#        the post then shows the sent line with its buttons off
+#        the post then updates under the display rules above
 #   Exit 1 means nothing was filed; the claim is released so the click can be
 #   tried again. If an inbox request was published but notification failed,
 #   exit 0 reports recovery needed; the sent claim remains and retrying uses
@@ -78,8 +80,10 @@
 #
 # posts
 #   Prints one JSON line per button post whose current content Discord does
-#   not show yet: {post, channel_id, message_id, content, final, key,
-#   options}; a listed post always shows with its buttons off. Without
+#   not show yet: {post, channel_id, message_id, content, receipt, final, key,
+#   options, selected_option_id}; content is null for a components-only legacy
+#   edit, and receipt is the value to pass to finalized. A listed post always
+#   shows with its buttons off. Without
 #   --settled-only it first settles every live post that a newer post for the
 #   same key replaced, or whose own lifecycle the ledgers report closed.
 #
@@ -96,8 +100,8 @@
 #   is open. Read-only.
 #
 # finalized
-#   Records the content Discord now shows for a post, so posts lists it only
-#   when that content changes.
+#   Records the displayed content or legacy button state, so posts lists it
+#   only when that receipt changes.
 #
 # still-open
 #   The check Firstmate runs before recording a button request: is the
@@ -238,10 +242,12 @@ post_content() {
   fi
 }
 
-# settle_post <stem> <kind> <text>: the post's final outcome line, written once.
+# settle_post <stem> <kind> <text> [selected option id]: write the final
+# outcome once, including the option whose button should remain highlighted.
 settle_post() {
-  jq -cn --arg kind "$2" --arg text "$3" --argjson at "$NOW" \
-    '{kind:$kind, text:$text, at:$at}' \
+  jq -cn --arg kind "$2" --arg text "$3" --arg selected "${4:-}" --argjson at "$NOW" \
+    '{kind:$kind, text:$text, at:$at}
+     + if $selected == "" then {} else {selected_option_id:($selected | tonumber)} end' \
     | fm_ext_private_artifact_publish_stdin_once "$OUTBOX" "$1.settled.json" 600
   [ "$?" -le 1 ]
 }
@@ -260,6 +266,63 @@ newer_post() {
     fi
   done < <(progress_files)
   return 1
+}
+
+# newer_post_link <stem>: the newest newer button post's jump URL, when known.
+newer_post_link() {
+  local stem=$1 key posted file candidate candidate_posted best_stem=
+  local request guild thread message best_posted=0
+  key=$(post_field "$stem" '.decision.key')
+  posted=$(post_field "$stem" '.posted_at')
+  while IFS= read -r file; do
+    candidate=$(basename "$file" .progress.json)
+    [ "$candidate" = "$stem" ] && continue
+    if jq -e --arg key "$key" --argjson posted "${posted:-0}" --argjson best "$best_posted" \
+      '.decision.key == $key and .buttons == true
+       and ((.posted_at // 0) > $posted) and ((.posted_at // 0) > $best)' \
+      "$file" >/dev/null 2>&1; then
+      candidate_posted=$(jq -r '.posted_at // 0' "$file" 2>/dev/null)
+      best_posted=$candidate_posted
+      best_stem=$candidate
+    fi
+  done < <(progress_files)
+  [ -n "$best_stem" ] || return 0
+  file="$OUTBOX/$best_stem.progress.json"
+  request=$(jq -r '.request_id // ""' "$file")
+  guild=${request#discord:}
+  guild=${guild%%:*}
+  message=$(jq -r '.discord_message_ids[-1] // empty' "$file")
+  case "$guild" in ''|*[!0-9]*) return 0 ;; esac
+  case "$message" in ''|*[!0-9]*) return 0 ;; esac
+  thread=$(post_thread "$best_stem") || return 0
+  printf 'https://discord.com/channels/%s/%s/%s\n' "$guild" "$thread" "$message"
+}
+
+# selected_option_id <stem>: the option chosen for this settled or sent post.
+selected_option_id() {
+  local stem=$1 kind option
+  if settled "$stem"; then
+    kind=$(jq -r '.kind // empty' "$OUTBOX/$stem.settled.json" 2>/dev/null)
+    [ "$kind" = decided ] || return 0
+    option=$(jq -r '.selected_option_id // empty' "$OUTBOX/$stem.settled.json" 2>/dev/null)
+    if [ -z "$option" ]; then
+      option=$(jq -r --slurpfile progress "$OUTBOX/$stem.progress.json" '
+        .text as $outcome
+        | [$progress[0].decision.options[]
+           | ("✅ " + .label + " chosen by ") as $prefix
+           | select($outcome | startswith($prefix))]
+        | if length == 0 then empty else
+            (map(.label | length) | max) as $longest
+            | map(select((.label | length) == $longest))
+            | if length == 1 then .[0].id else empty end
+          end' "$OUTBOX/$stem.settled.json" 2>/dev/null) || return 0
+    fi
+  elif sent "$stem"; then
+    option=$(sent_field "$stem" '.option_id')
+  else
+    return 0
+  fi
+  case "$option" in [1-9]) printf '%s\n' "$option" ;; esac
 }
 
 # answer_option <stem> <answer>: ignore the audit suffix, then accept a unique
@@ -343,7 +406,7 @@ post_outcome() {
 # or whose own lifecycle closed. Returns 0 when the post is settled after it,
 # 1 while the decision is still open, and 2 when its state cannot be read.
 settle_if_closed() {
-  local stem=$1 outcome state
+  local stem=$1 outcome state option
   settled "$stem" && return 0
   if newer_post "$stem"; then
     settle_post "$stem" replaced "Replaced by a newer post $(discord_time "$NOW")" || return 2
@@ -354,7 +417,10 @@ settle_if_closed() {
   case "$state" in
     open) return 1 ;;
     decided|superseded)
-      settle_post "$stem" "$state" "$(outcome_text "$stem" "$state" "${outcome#*$'\t'}")" || return 2
+      option=
+      [ "$state" != decided ] || option=$(answer_option "$stem" "${outcome#*$'\t'}")
+      settle_post "$stem" "$state" "$(outcome_text "$stem" "$state" "${outcome#*$'\t'}")" "$option" \
+        || return 2
       return 0
       ;;
   esac
@@ -552,8 +618,52 @@ command_click() {
   notice 0 "Sent: $label. Firstmate will record it, and the post updates when it does."
 }
 
+# fit_post_content <header> <original text> <progress file>: preserve the
+# original last chunk when it fits; structured posts trim only explanation.
+fit_post_content() {
+  jq -njr --arg header "$1" --arg original "$2" --slurpfile progress "$3" '
+    def compose($header; $question; $explanation; $options; $cue):
+      ($header + "\n\n") as $base
+      | (if $options == "" then "" else "\n\n" + $options end) as $option_suffix
+      | (if $cue == "" then "" else "\n" + $cue end) as $cue_suffix
+      | ($option_suffix + $cue_suffix) as $suffix
+      | "\n\n(trimmed)" as $marker
+      | (($base | length) + ($suffix | length)) as $fixed
+      | if ($fixed + ($question | length)) > 2000 then
+          error("decision header, question, and options exceed the Discord limit")
+        else
+          (2000 - $fixed - ($question | length)) as $room
+          | if $explanation == "" then
+              $base + $question + $suffix
+            elif (2 + ($explanation | length)) <= $room then
+              $base + $question + "\n\n" + $explanation + $suffix
+            elif $room >= (2 + ($marker | length)) then
+              ($room - 2 - ($marker | length)) as $explanation_room
+              | $base + $question + "\n\n"
+                + $explanation[0:$explanation_room] + $marker + $suffix
+            else
+              error("decision header leaves no room for the explanation marker")
+            end
+        end;
+    $progress[0] as $post
+    | ($header + "\n\n" + $original) as $whole
+    | if ($whole | length) <= 2000 then
+        $whole
+      else
+        ($post.decision.sections // {}) as $sections
+        | if $sections.structured == true then
+            compose($header; $sections.question; $sections.explanation;
+              $sections.options; $sections.cue)
+          else
+            compose($header; $original; ""; ""; "")
+          end
+      end
+  '
+}
+
 command_posts() {
-  local settled_only=0 file stem thread content shown final
+  local settled_only=0 file stem thread content original displayed shown final receipt legacy
+  local kind header replacement_url selected
   [ "${1:-}" != --settled-only ] || settled_only=1
   while IFS= read -r file; do
     stem=$(basename "$file" .progress.json)
@@ -561,18 +671,62 @@ command_posts() {
     if [ "$settled_only" = 0 ]; then
       settle_if_closed "$stem" || true
     fi
-    content=$(post_content "$stem")
-    [ -n "$content" ] || continue
-    shown=$(cat "$OUTBOX/$stem.finalized" 2>/dev/null) || shown=
-    [ "$content" != "$shown" ] || continue
+    if ! settled "$stem"; then
+      if ! sent "$stem"; then
+        continue
+      fi
+      if ! request_published "$(sent_field "$stem" '.request_id')"; then
+        continue
+      fi
+    fi
+    selected=$(selected_option_id "$stem")
     final=false
     settled "$stem" && final=true
+    legacy=true
+    displayed=
+    if jq -e '(.decision.sections | type == "object")
+      and (.texts[-1] | type == "string" and length > 0)' "$file" >/dev/null 2>&1; then
+      legacy=false
+      content=$(post_content "$stem")
+      [ -n "$content" ] || continue
+      replacement_url=
+      if settled "$stem"; then
+        kind=$(jq -r '.kind // empty' "$OUTBOX/$stem.settled.json" 2>/dev/null)
+      else
+        kind=waiting
+      fi
+      if [ "$kind" = replaced ]; then
+        replacement_url=$(newer_post_link "$stem")
+        if [ -n "$replacement_url" ]; then
+          header="♻️ **Replaced by a newer question** ([open]($replacement_url))"
+        else
+          header="**Replaced by a newer question**"
+        fi
+      else
+        header="**$content**"
+      fi
+      original=$(jq -j '.texts[-1]' "$file"; printf '\001')
+      original=${original%$'\001'}
+      displayed=$(fit_post_content "$header" "$original" "$file") || continue
+      receipt=$displayed
+    else
+      receipt=$(jq -cn --arg selected "$selected" --argjson final "$final" '
+        {components_only:true, final:$final,
+         selected_option_id:(if $selected == "" then null else ($selected | tonumber) end)}') || continue
+    fi
+    shown=$(cat "$OUTBOX/$stem.finalized" 2>/dev/null; printf '\001') || shown=
+    shown=${shown%$'\001'}
+    [ "$receipt" != "$shown" ] || continue
     thread=$(post_thread "$stem") || continue
     jq -cn --arg post "$stem" --arg channel "$thread" \
       --arg message "$(post_field "$stem" '.discord_message_ids[-1]')" \
-      --arg content "$content" --argjson final "$final" \
+      --arg content "$displayed" --arg receipt "$receipt" --argjson legacy "$legacy" \
+      --arg selected "$selected" --argjson final "$final" \
       --slurpfile progress "$file" \
-      '{post:$post, channel_id:$channel, message_id:$message, content:$content, final:$final,
+      '{post:$post, channel_id:$channel, message_id:$message,
+        content:(if $legacy then null else $content end), receipt:$receipt,
+        final:$final,
+        selected_option_id:(if $selected == "" then null else ($selected | tonumber) end),
         key:$progress[0].decision.key, options:$progress[0].decision.options}'
   done < <(progress_files)
 }
