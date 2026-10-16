@@ -1511,6 +1511,24 @@ def discord_edit(channel_id: str, message_id: str, content: str, components: lis
         raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
 
 
+def discord_message_text(channel_id: str, message_id: str) -> str:
+    token = _bot_token()
+    if not token:
+        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
+    if not (_SNOWFLAKE.fullmatch(channel_id or "") and _SNOWFLAKE.fullmatch(message_id or "")):
+        raise ValueError("read target is not a Discord message id")
+    request = urllib.request.Request(
+        f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}",
+        method="GET",
+        headers={"Authorization": f"Bot {token}", "User-Agent": USER_AGENT},
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        text = json.load(response).get("content")
+    if not isinstance(text, str) or not text:
+        raise ValueError("Discord message has no original text")
+    return text
+
+
 def _decision_cli() -> Path:
     return firstmate_root() / "bin" / "fm-ext-decision.sh"
 
@@ -1552,6 +1570,24 @@ def reconcile_decision_posts(
     for line in result.stdout.splitlines():
         try:
             item = json.loads(line)
+            if item["content"] is None:
+                try:
+                    outbox = state_dir(home) / "ext-outbox"
+                    progress = json.loads((outbox / (item["post"] + ".progress.json")).read_text())
+                    if (outbox / (item["post"] + ".finalized")).exists():
+                        raise ValueError("original decision text is unavailable after an earlier edit")
+                    ids = progress["discord_message_ids"]
+                    if len(ids) != progress["total"] or progress["posted_count"] != progress["total"]:
+                        raise ValueError("decision delivery is incomplete")
+                    progress["texts"] = [discord_message_text(item["channel_id"], message) for message in ids]
+                    slug, kind, generation = item["post"].rsplit(".", 2)
+                    write_progress({"slug": slug, "kind": kind, "generation": int(generation)}, progress, home)
+                    item["content"] = item["header"] + "\n\n" + progress["texts"][-1]
+                    if len(item["content"]) > DISCORD_MESSAGE_MAX:
+                        raise ValueError("legacy decision text cannot safely fit its outcome header")
+                except Exception as err:
+                    print(f"fm-ext-poster: original decision text recovery failed: {err}", file=sys.stderr)
+                    continue
             components = decisions.components_for(
                 item,
                 disabled=True,

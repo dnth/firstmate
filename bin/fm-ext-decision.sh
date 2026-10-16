@@ -651,7 +651,7 @@ fit_post_content() {
 
 command_posts() {
   local settled_only=0 file stem thread content original displayed shown final
-  local kind header replacement_url selected
+  local kind header replacement_url selected missing_original
   [ "${1:-}" != --settled-only ] || settled_only=1
   while IFS= read -r file; do
     stem=$(basename "$file" .progress.json)
@@ -661,8 +661,6 @@ command_posts() {
     fi
     content=$(post_content "$stem")
     [ -n "$content" ] || continue
-    original=$(jq -j '.texts[-1] // ""' "$file"; printf '\001')
-    original=${original%$'\001'}
     selected=$(selected_option_id "$stem")
     replacement_url=
     if settled "$stem"; then
@@ -680,18 +678,27 @@ command_posts() {
     else
       header="**$content**"
     fi
-    displayed=$(fit_post_content "$header" "$original" "$file") || continue
-    shown=$(cat "$OUTBOX/$stem.finalized" 2>/dev/null; printf '\001') || shown=
-    shown=${shown%$'\001'}
-    [ "$displayed" != "$shown" ] || continue
+    missing_original=true
+    displayed=
+    if jq -e '.texts[-1] | type == "string" and length > 0' "$file" >/dev/null 2>&1; then
+      missing_original=false
+      original=$(jq -j '.texts[-1]' "$file"; printf '\001')
+      original=${original%$'\001'}
+      displayed=$(fit_post_content "$header" "$original" "$file") || continue
+      shown=$(cat "$OUTBOX/$stem.finalized" 2>/dev/null; printf '\001') || shown=
+      shown=${shown%$'\001'}
+      [ "$displayed" != "$shown" ] || continue
+    fi
     final=false
     settled "$stem" && final=true
     thread=$(post_thread "$stem") || continue
     jq -cn --arg post "$stem" --arg channel "$thread" \
       --arg message "$(post_field "$stem" '.discord_message_ids[-1]')" \
-      --arg content "$displayed" --arg selected "$selected" --argjson final "$final" \
+      --arg content "$displayed" --arg header "$header" --argjson missing_original "$missing_original" \
+      --arg selected "$selected" --argjson final "$final" \
       --slurpfile progress "$file" \
-      '{post:$post, channel_id:$channel, message_id:$message, content:$content,
+      '{post:$post, channel_id:$channel, message_id:$message,
+        content:(if $missing_original then null else $content end), header:$header,
         final:$final,
         selected_option_id:(if $selected == "" then null else ($selected | tonumber) end),
         key:$progress[0].decision.key, options:$progress[0].decision.options}'

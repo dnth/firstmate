@@ -1019,6 +1019,8 @@ When no single option matches, every button is grey; a click waiting for Firstma
 The outcome names the clicker when the recorded answer matches that post's click, and otherwise names the captain when the answer names exactly one option by number or label; `✅ Decided <time>` covers answers without one unique option, and `Closed - no longer needed <time>` covers a decision closed without an answer or replaced by a later lifecycle.
 When a newer post replaces an older one for the same decision, the older outcome header links to the newest post when its message id is known and otherwise says `Replaced by a newer question`.
 Structured posts reserve space for that header, so a normal settlement edit needs no truncation.
+Completed legacy posts without persisted chunks recover their original text from Discord before editing; a failed recovery leaves the message and finalize receipt untouched.
+An earlier edit that already removed the original text cannot be recovered from Discord.
 If an edit cannot fit, the bridge trims the explanation tail with `(trimmed)` while preserving the header, question, and option list; if those protected sections cannot fit, or an older unstructured post overflows, it refuses the edit and leaves the original message intact.
 New decision plans that exceed the configured chunk cap are refused before posting rather than truncating their text.
 The outcome is read from the same ledgers rather than from any step Firstmate must remember.

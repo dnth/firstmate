@@ -1569,6 +1569,104 @@ PYTEST
   pass "18 capped decisions refuse text loss and legacy resumes retain original chunks"
 }
 
+test_19_completed_legacy_posts_recover_original_chunks_before_editing() {
+  local home payload
+  home="$TMP_ROOT/c19"
+  setup_home "$home"
+  open_request "$home"
+  open_key "$home" recover-original
+  payload=$(emit_decision "$home" 1 '{"key":"key:'"$TASK"':recover-original","options":[{"label":"North"},{"label":"South"}]}')
+  plugin_py "$home" "$payload" <<'PYTEST' || fail "could not prepare completed legacy chunks"
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, path = Path(sys.argv[1]), Path(sys.argv[3])
+payload = json.loads(path.read_text())
+payload["text"] = "Earlier explanation. " * 90 + "\n\n" + payload["text"]
+payload["decision"].pop("sections", None)
+path.write_text(json.dumps(payload))
+messages = {}
+def send(chunk):
+    message = str(700000000000000190 + chunk["chunk_index"])
+    messages[message] = chunk["text"]
+    return {"discord_message_id": message, "buttons": True}
+assert poster.deliver_one(path, send=send, home=home) == "sent"
+progress = poster.load_progress(payload, home)
+assert progress["total"] == 2
+assert progress["posted_count"] == 2
+progress.pop("texts")
+poster.write_progress(payload, progress, home)
+(home / "messages.json").write_text(json.dumps(messages))
+PYTEST
+  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key recover-original North \
+    >/dev/null 2>&1 || fail "could not settle the completed legacy post"
+  plugin_py "$home" "$payload" <<'PYTEST' || fail "completed legacy recovery lost original text or retry semantics"
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, path = Path(sys.argv[1]), Path(sys.argv[3])
+stem = path.stem
+outbox = path.parent
+progress_path = outbox / (stem + ".progress.json")
+finalized = outbox / (stem + ".finalized")
+messages = json.loads((home / "messages.json").read_text())
+import io
+from unittest.mock import patch
+sample_id, sample_text = next(iter(messages.items()))
+with patch.object(poster, "_bot_token", return_value="test-token"), patch.object(
+    poster.urllib.request, "urlopen",
+    return_value=io.BytesIO(json.dumps({"content": sample_text}).encode()),
+) as http:
+    assert poster.discord_message_text("222222222222222222", sample_id) == sample_text
+    request = http.call_args.args[0]
+    assert request.get_method() == "GET"
+    assert request.full_url.endswith("/channels/222222222222222222/messages/" + sample_id)
+    assert request.get_header("Authorization") == "Bot test-token"
+reads, edits = [], []
+def read(channel, message):
+    assert channel == "222222222222222222"
+    reads.append(message)
+    if message.endswith("191"):
+        raise OSError("temporary read failure")
+    return messages[message]
+def edit(channel, message, content, components):
+    edits.append((message, content))
+    assert message.endswith("191")
+    assert content.split("\n\n", 1)[1] == messages[message]
+    assert all(button["disabled"] for row in components for button in row["components"])
+
+poster.discord_message_text = read
+assert poster.reconcile_decision_posts(home=home, edit=edit) == []
+assert edits == []
+assert "texts" not in json.loads(progress_path.read_text())
+assert not finalized.exists()
+poster.discord_message_text = lambda channel, message: messages[message]
+def failed_edit(*args):
+    raise poster.DiscordSendError("transient", "temporary edit failure")
+assert poster.reconcile_decision_posts(home=home, edit=failed_edit) == []
+assert json.loads(progress_path.read_text())["texts"] == list(messages.values())
+assert not finalized.exists()
+def unexpected_read(*args):
+    raise AssertionError("persisted originals must not be fetched again")
+poster.discord_message_text = unexpected_read
+assert poster.reconcile_decision_posts(home=home, edit=edit) == [stem]
+assert len(edits) == 1
+assert finalized.read_text() == edits[0][1]
+assert poster.reconcile_decision_posts(home=home, edit=edit) == []
+assert len(edits) == 1
+progress = json.loads(progress_path.read_text())
+progress.pop("texts")
+payload = {"slug": stem.rsplit(".", 2)[0], "kind": "followup", "generation": 1}
+poster.write_progress(payload, progress, home)
+assert poster.reconcile_decision_posts(home=home, edit=edit) == []
+assert len(edits) == 1
+PYTEST
+  pass "19 completed legacy posts recover original chunks before editing and preserve retries and receipts"
+}
+
+
 test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records
@@ -1590,3 +1688,4 @@ test_15_full_labels_keep_digits_and_overlaps_together
 test_16_recommended_option_renders_green_with_a_single_star
 test_17_outcome_headers_fit_reserved_and_legacy_posts
 test_18_decision_plans_preserve_questions_and_legacy_boundaries
+test_19_completed_legacy_posts_recover_original_chunks_before_editing
