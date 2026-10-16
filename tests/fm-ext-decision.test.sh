@@ -1756,6 +1756,66 @@ PYTEST
 }
 
 
+test_21_legacy_settled_choices_survive_reopened_keys() {
+  local home choice payload selected
+  for choice in North South unknown; do
+    home="$TMP_ROOT/c21-$choice"
+    setup_home "$home"
+    open_request "$home"
+    open_key "$home" historical
+    payload=$(emit_decision "$home" 1 '{"key":"key:'"$TASK"':historical","options":[{"label":"North"},{"label":"South"}]}')
+    deliver "$home" "$POST"
+    selected=none
+    case "$choice" in North) selected=1 ;; South) selected=2 ;; esac
+    home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key historical "$choice" \
+      >/dev/null 2>&1 || fail "could not record the historical choice"
+    home_env "$home" "$ROOT/bin/fm-ext-decision.sh" posts >/dev/null \
+      || fail "could not settle the historical post"
+    plugin_py "$home" "$payload" <<'PYTEST' || fail "could not prepare the immutable legacy settlement"
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, path = Path(sys.argv[1]), Path(sys.argv[3])
+stem = path.stem
+progress_path = path.parent / (stem + ".progress.json")
+progress = json.loads(progress_path.read_text())
+original = progress["texts"][-1]
+progress.pop("texts")
+progress["decision"].pop("sections", None)
+slug, kind, generation = stem.rsplit(".", 2)
+poster.write_progress(dict(slug=slug, kind=kind, generation=int(generation)), progress, home)
+settled_path = path.parent / (stem + ".settled.json")
+settled = json.loads(settled_path.read_text())
+assert settled["kind"] == "decided"
+settled.pop("selected_option_id", None)
+settled_path.write_text(json.dumps(settled))
+settled_path.chmod(0o600)
+(home / "historical-settlement.json").write_bytes(settled_path.read_bytes())
+(home / "discord.json").write_text(json.dumps(dict(content=original, earlier="Earlier chunk\n")))
+PYTEST
+    open_key "$home" historical
+    assert_legacy_edit "$home" "$payload" "$selected" true
+    home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key historical South \
+      >/dev/null 2>&1 || fail "could not answer the reopened key"
+    plugin_py "$home" "$payload" <<'PYTEST' || fail "a later lifecycle changed the historical settlement"
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, path = Path(sys.argv[1]), Path(sys.argv[3])
+settled_path = path.parent / (path.stem + ".settled.json")
+assert settled_path.read_bytes() == (home / "historical-settlement.json").read_bytes()
+edits = []
+assert poster.reconcile_decision_posts(home=home, edit=lambda *args: edits.append(args)) == []
+assert edits == []
+assert settled_path.read_bytes() == (home / "historical-settlement.json").read_bytes()
+PYTEST
+  done
+  pass "21 immutable legacy settlements retain their historical choice or all-grey state after reopening"
+}
+
+
 test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records
@@ -1779,3 +1839,4 @@ test_17_outcome_headers_fit_reserved_and_legacy_posts
 test_18_decision_plans_preserve_questions_and_legacy_boundaries
 test_19_legacy_buttons_settle_in_every_outcome_state
 test_20_legacy_waiting_receipts_need_no_original_or_payload
+test_21_legacy_settled_choices_survive_reopened_keys

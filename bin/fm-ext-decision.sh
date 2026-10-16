@@ -296,14 +296,22 @@ newer_post_link() {
 
 # selected_option_id <stem>: the option chosen for this settled or sent post.
 selected_option_id() {
-  local stem=$1 kind outcome option
+  local stem=$1 kind option
   if settled "$stem"; then
     kind=$(jq -r '.kind // empty' "$OUTBOX/$stem.settled.json" 2>/dev/null)
     [ "$kind" = decided ] || return 0
     option=$(jq -r '.selected_option_id // empty' "$OUTBOX/$stem.settled.json" 2>/dev/null)
     if [ -z "$option" ]; then
-      outcome=$(post_outcome "$stem") || return 0
-      option=$(answer_option "$stem" "${outcome#*$'\t'}")
+      option=$(jq -r --slurpfile progress "$OUTBOX/$stem.progress.json" '
+        .text as $outcome
+        | [$progress[0].decision.options[]
+           | ("✅ " + .label + " chosen by ") as $prefix
+           | select($outcome | startswith($prefix))]
+        | if length == 0 then empty else
+            (map(.label | length) | max) as $longest
+            | map(select((.label | length) == $longest))
+            | if length == 1 then .[0].id else empty end
+          end' "$OUTBOX/$stem.settled.json" 2>/dev/null) || return 0
     fi
   elif sent "$stem"; then
     option=$(sent_field "$stem" '.option_id')
