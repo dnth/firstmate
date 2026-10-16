@@ -607,11 +607,10 @@ command_click() {
 }
 
 # fit_post_content <header> <original text> <progress file>: preserve the
-# original last chunk when it fits; structured posts trim only explanation,
-# while legacy overflow keeps the header and option labels before the question prefix.
+# original last chunk when it fits; structured posts trim only explanation.
 fit_post_content() {
   jq -njr --arg header "$1" --arg original "$2" --slurpfile progress "$3" '
-    def compose($header; $question; $explanation; $options; $cue; $trim_question):
+    def compose($header; $question; $explanation; $options; $cue):
       ($header + "\n\n") as $base
       | (if $options == "" then "" else "\n\n" + $options end) as $option_suffix
       | (if $cue == "" then "" else "\n" + $cue end) as $cue_suffix
@@ -619,12 +618,7 @@ fit_post_content() {
       | "\n\n(trimmed)" as $marker
       | (($base | length) + ($suffix | length)) as $fixed
       | if ($fixed + ($question | length)) > 2000 then
-          if $trim_question then
-            (2000 - $fixed - ($marker | length)) as $room
-            | $base + ($question[0:(if $room < 0 then 0 else $room end)]) + $marker + $suffix
-          else
-            error("structured decision header, question, and options exceed the Discord limit")
-          end
+          error("decision header, question, and options exceed the Discord limit")
         else
           (2000 - $fixed - ($question | length)) as $room
           | if $explanation == "" then
@@ -636,12 +630,7 @@ fit_post_content() {
               | $base + $question + "\n\n"
                 + $explanation[0:$explanation_room] + $marker + $suffix
             else
-              if $trim_question then
-                (2000 - $fixed - ($marker | length)) as $question_room
-                | $base + ($question[0:(if $question_room < 0 then 0 else $question_room end)]) + $marker + $suffix
-              else
-                error("structured decision header leaves no room for the explanation marker")
-              end
+              error("decision header leaves no room for the explanation marker")
             end
         end;
     $progress[0] as $post
@@ -652,10 +641,9 @@ fit_post_content() {
         ($post.decision.sections // {}) as $sections
         | if $sections.structured == true then
             compose($header; $sections.question; $sections.explanation;
-              $sections.options; $sections.cue; false)
+              $sections.options; $sections.cue)
           else
-            compose($header; $original; "";
-              ([$post.decision.options[] | "\(.id). \(.label)"] | join("\n")); ""; true)
+            error("legacy decision text cannot safely fit its outcome header")
           end
       end
   '

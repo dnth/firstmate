@@ -1437,24 +1437,22 @@ test_17_outcome_headers_fit_reserved_and_legacy_posts() {
   payload=$(emit_decision "$home" 3 '{"key":"key:'"$TASK"':legacy-overflow","options":[{"label":"North"},{"label":"South"}]}')
   deliver "$home" 700000000000000120
   progress="${payload%.json}.progress.json"
-  legacy=$(printf '%*s' 2300 '' | tr ' ' L)
-  if ! jq --arg legacy "$legacy" '.texts[-1] = $legacy | del(.decision.sections)' \
+  legacy=$(printf '%*s' 1900 '' | tr ' ' L)
+  if ! jq --arg legacy "$legacy" '.texts[-1] = $legacy
+      | .decision.options[0].label = ("North" * 16) | del(.decision.sections)' \
     "$progress" > "$home/legacy-progress.json"; then
     fail "could not build the legacy overflow fixture"
   fi
   mv "$home/legacy-progress.json" "$progress" \
     || fail "could not install the legacy overflow fixture"
   home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key legacy-overflow \
-    "No preference yet" >/dev/null 2>&1 || fail "could not settle the legacy decision"
+    "$(printf 'North%.0s' {1..16})" >/dev/null 2>&1 || fail "could not settle the legacy decision"
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
-  printf '%s' "$out" | jq -e '
-    .message == "700000000000000120"
-    and (.content | length <= 2000)
-    and (.content | startswith("**✅ Decided <t:1791720000:f>**\n\nL"))
-    and (.content | contains("(trimmed)\n\n1. North\n2. South"))
-    and ([.components[].components[] | .disabled] | all)
-    and ([.components[].components[] | .style] | all(. == 2))' >/dev/null \
-    || fail "the legacy fallback must keep its header, question prefix, marker, option labels, and grey buttons: $out"
+  [ -z "$out" ] || fail "legacy overflow must refuse the edit rather than truncate protected text: $out"
+  jq -e --arg legacy "$legacy" '.texts[-1] == $legacy' "$progress" >/dev/null \
+    || fail "legacy overflow changed the original text"
+  [ -f "${payload%.json}.settled.json" ] || fail "legacy overflow lost its settlement"
+  [ ! -f "${payload%.json}.finalized" ] || fail "refused legacy edit was finalized"
 
   open_key "$home" replace-fallback
   old_payload=$(emit_decision "$home" 4 \
@@ -1484,7 +1482,91 @@ test_17_outcome_headers_fit_reserved_and_legacy_posts() {
     || fail "the replacement fallback must keep the question and disable the old buttons: $out"
   repeat=$(reconcile "$home" True)
   [ -z "$repeat" ] || fail "settled overflow and replacement edits must not retry unchanged posts"
-  pass "17 reserved chunks settle without trimming, only the last chunk is edited, and legacy overflow retains its header, question prefix, option labels, and one-time replacement state"
+  pass "17 reserved chunks settle without trimming, only the last chunk is edited, and legacy overflow refuses truncation while replacement state remains one-time"
+}
+
+test_18_decision_plans_preserve_questions_and_legacy_boundaries() {
+  local home mode length slug payload
+  for mode in structured unstructured; do
+    home="$TMP_ROOT/c18-$mode"
+    setup_home "$home"
+    open_request "$home"
+    open_key "$home" capped
+    payload=$(emit_decision "$home" 1 '{"key":"key:'"$TASK"':capped","options":[{"label":"North"},{"label":"South"}]}')
+    plugin_py "$home" "$payload" "$mode" <<'PYTEST' || fail "capped $mode decision lost protected text"
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, path, mode = Path(sys.argv[1]), Path(sys.argv[3]), sys.argv[4]
+payload = json.loads(path.read_text())
+question = "Q" * 1800
+options = "1. North\n2. South"
+cue = "Tap a button, or reply with the number."
+text = question + "\n\n" + options + "\n" + cue
+payload["text"] = text
+payload["decision"]["sections"] = dict(question=question, explanation="", options=options,
+                                        cue=cue, structured=mode == "structured")
+path.write_text(json.dumps(payload))
+poster.reply_limits = lambda home: {"limit": 1900, "cap": 1}
+sent = []
+def send(chunk):
+    sent.append(chunk["text"])
+    return {"discord_message_id": str(1800 + chunk["chunk_index"]), "buttons": True}
+
+assert poster.deliver_one(path, send=send, home=home) == "failed"
+assert sent == []
+assert poster.load_progress(payload, home) is None
+poster.reply_limits = lambda home: {"limit": 1900, "cap": 2}
+assert poster.deliver_one(path, send=send, home=home) == "sent"
+assert len(sent) == 2
+assert "".join(sent) == text
+assert sent[-1].endswith(options + "\n" + cue)
+assert all(len(chunk) <= 1744 for chunk in sent)
+PYTEST
+  done
+  for length in 3200 3600; do
+    home="$TMP_ROOT/c18-resume-$length"
+    setup_home "$home"
+    open_request "$home"
+    open_key "$home" resume
+    slug=$(emit_decision "$home" 1 '{"key":"key:'"$TASK"':resume","options":[{"label":"North"},{"label":"South"}]}')
+    plugin_py "$home" "$slug" "$length" <<'PYTEST' || fail "legacy decision resume changed chunk boundaries"
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, path, length = Path(sys.argv[1]), Path(sys.argv[3]), int(sys.argv[4])
+payload = json.loads(path.read_text())
+payload["text"] = "0123456789" * (length // 10)
+payload["decision"].pop("sections", None)
+path.write_text(json.dumps(payload))
+plan = poster.split_reply(payload["text"], home=home, limit=1900, cap=25, legacy=True)
+assert len(plan["texts"]) == 2
+original = poster.split_decision_reply
+poster.split_decision_reply = lambda payload, **kwargs: plan
+sent = []
+def partial(chunk):
+    if chunk["chunk_index"]:
+        raise poster.DiscordSendError("transient", "retry later")
+    sent.append(chunk["text"])
+    return {"discord_message_id": "1801"}
+assert poster.deliver_one(path, send=partial, home=home) == "failed"
+progress = poster.load_progress(payload, home)
+assert progress["posted_count"] == 1
+assert progress["limit"] == 1900
+progress.pop("texts")
+poster.write_progress(payload, progress, home)
+poster.split_decision_reply = original
+def resume(chunk):
+    sent.append(chunk["text"])
+    return {"discord_message_id": "1802", "buttons": True}
+assert poster.deliver_one(path, send=resume, home=home) == "sent"
+assert sent == plan["texts"], sent
+assert poster.load_progress(payload, home)["posted_count"] == 2
+PYTEST
+  done
+  pass "18 capped decisions refuse text loss and legacy resumes retain original chunks"
 }
 
 test_1_buttons_carry_key_and_option_ids_in_the_thread
@@ -1507,3 +1589,4 @@ test_15_full_labels_keep_digits_and_overlaps_together
 
 test_16_recommended_option_renders_green_with_a_single_star
 test_17_outcome_headers_fit_reserved_and_legacy_posts
+test_18_decision_plans_preserve_questions_and_legacy_boundaries

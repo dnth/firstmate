@@ -1019,8 +1019,9 @@ When no single option matches, every button is grey; a click waiting for Firstma
 The outcome names the clicker when the recorded answer matches that post's click, and otherwise names the captain when the answer names exactly one option by number or label; `✅ Decided <time>` covers answers without one unique option, and `Closed - no longer needed <time>` covers a decision closed without an answer or replaced by a later lifecycle.
 When a newer post replaces an older one for the same decision, the older outcome header links to the newest post when its message id is known and otherwise says `Replaced by a newer question`.
 Structured posts reserve space for that header, so a normal settlement edit needs no truncation.
-If an edit cannot fit, the bridge trims the explanation tail with `(trimmed)` while preserving the header, question, and option list; for an older unstructured post that still overflows, it keeps the header, as much question text as fits, the marker, and the complete option labels.
-Both paths remain within Discord's character limit, and the outcome is read from the same ledgers rather than from any step Firstmate must remember.
+If an edit cannot fit, the bridge trims the explanation tail with `(trimmed)` while preserving the header, question, and option list; if those protected sections cannot fit, or an older unstructured post overflows, it refuses the edit and leaves the original message intact.
+New decision plans that exceed the configured chunk cap are refused before posting rather than truncating their text.
+The outcome is read from the same ledgers rather than from any step Firstmate must remember.
 Option matching ignores the appended Discord-button audit and the `Decision answer: ` prefix.
 For a recommended option, matching accepts its label with or without the leading star, while the outcome keeps the displayed label.
 A unique longest full option label at the start of the answer wins immediately, regardless of trailing text; otherwise the matcher collects standalone option numbers and whole-word labels and accepts only one distinct option.

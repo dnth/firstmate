@@ -395,9 +395,15 @@ def split_decision_reply(
     resolved = reply_limits(home) if limit is None or cap is None else None
     used_limit = limit if limit is not None else resolved["limit"]
     used_cap = cap if cap is not None else resolved["cap"]
+    if legacy:
+        return split_reply(text, home=home, limit=used_limit, cap=used_cap, legacy=True)
     budget = min(used_limit, DISCORD_MESSAGE_MAX - DECISION_OUTCOME_HEADER_RESERVE)
-    if legacy or not sections.get("structured"):
-        return split_reply(text, home=home, limit=budget, cap=used_cap, legacy=legacy)
+    if not sections.get("structured"):
+        split = split_reply(text, home=home, limit=budget, cap=max(used_cap, len(text) + 1))
+        if len(split["texts"]) > used_cap:
+            raise ValueError("decision question exceeds the configured chunk cap")
+        split["cap"] = used_cap
+        return split
 
     question = sections.get("question", "")
     explanation = sections.get("explanation", "")
@@ -412,7 +418,9 @@ def split_decision_reply(
     prefix_budget = budget - len(suffix)
     if prefix_budget < 1:
         raise ValueError("decision option list leaves no room for question text")
-    chunks = discord_split.split_discord(prefix, prefix_budget, used_cap)
+    chunks = discord_split.split_discord(prefix, prefix_budget, max(used_cap, len(prefix) + 1))
+    if len(chunks) > used_cap:
+        raise ValueError("decision question and explanation exceed the configured chunk cap")
     if not chunks:
         chunks = [""]
     chunks[-1] += suffix
