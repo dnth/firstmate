@@ -238,10 +238,12 @@ post_content() {
   fi
 }
 
-# settle_post <stem> <kind> <text>: the post's final outcome line, written once.
+# settle_post <stem> <kind> <text> [selected option id]: write the final
+# outcome once, including the option whose button should remain highlighted.
 settle_post() {
-  jq -cn --arg kind "$2" --arg text "$3" --argjson at "$NOW" \
-    '{kind:$kind, text:$text, at:$at}' \
+  jq -cn --arg kind "$2" --arg text "$3" --arg selected "${4:-}" --argjson at "$NOW" \
+    '{kind:$kind, text:$text, at:$at}
+     + if $selected == "" then {} else {selected_option_id:($selected | tonumber)} end' \
     | fm_ext_private_artifact_publish_stdin_once "$OUTBOX" "$1.settled.json" 600
   [ "$?" -le 1 ]
 }
@@ -260,6 +262,55 @@ newer_post() {
     fi
   done < <(progress_files)
   return 1
+}
+
+# newer_post_link <stem>: the newest newer button post's jump URL, when known.
+newer_post_link() {
+  local stem=$1 key posted file candidate candidate_posted best_stem=
+  local request guild thread message best_posted=0
+  key=$(post_field "$stem" '.decision.key')
+  posted=$(post_field "$stem" '.posted_at')
+  while IFS= read -r file; do
+    candidate=$(basename "$file" .progress.json)
+    [ "$candidate" = "$stem" ] && continue
+    if jq -e --arg key "$key" --argjson posted "${posted:-0}" --argjson best "$best_posted" \
+      '.decision.key == $key and .buttons == true
+       and ((.posted_at // 0) > $posted) and ((.posted_at // 0) > $best)' \
+      "$file" >/dev/null 2>&1; then
+      candidate_posted=$(jq -r '.posted_at // 0' "$file" 2>/dev/null)
+      best_posted=$candidate_posted
+      best_stem=$candidate
+    fi
+  done < <(progress_files)
+  [ -n "$best_stem" ] || return 0
+  file="$OUTBOX/$best_stem.progress.json"
+  request=$(jq -r '.request_id // ""' "$file")
+  guild=${request#discord:}
+  guild=${guild%%:*}
+  message=$(jq -r '.discord_message_ids[-1] // empty' "$file")
+  case "$guild" in ''|*[!0-9]*) return 0 ;; esac
+  case "$message" in ''|*[!0-9]*) return 0 ;; esac
+  thread=$(post_thread "$best_stem") || return 0
+  printf 'https://discord.com/channels/%s/%s/%s\n' "$guild" "$thread" "$message"
+}
+
+# selected_option_id <stem>: the option chosen for this settled or sent post.
+selected_option_id() {
+  local stem=$1 kind outcome option
+  if settled "$stem"; then
+    kind=$(jq -r '.kind // empty' "$OUTBOX/$stem.settled.json" 2>/dev/null)
+    [ "$kind" = decided ] || return 0
+    option=$(jq -r '.selected_option_id // empty' "$OUTBOX/$stem.settled.json" 2>/dev/null)
+    if [ -z "$option" ]; then
+      outcome=$(post_outcome "$stem") || return 0
+      option=$(answer_option "$stem" "${outcome#*$'\t'}")
+    fi
+  elif sent "$stem"; then
+    option=$(sent_field "$stem" '.option_id')
+  else
+    return 0
+  fi
+  case "$option" in [1-9]) printf '%s\n' "$option" ;; esac
 }
 
 # answer_option <stem> <answer>: ignore the audit suffix, then accept a unique
@@ -343,7 +394,7 @@ post_outcome() {
 # or whose own lifecycle closed. Returns 0 when the post is settled after it,
 # 1 while the decision is still open, and 2 when its state cannot be read.
 settle_if_closed() {
-  local stem=$1 outcome state
+  local stem=$1 outcome state option
   settled "$stem" && return 0
   if newer_post "$stem"; then
     settle_post "$stem" replaced "Replaced by a newer post $(discord_time "$NOW")" || return 2
@@ -354,7 +405,10 @@ settle_if_closed() {
   case "$state" in
     open) return 1 ;;
     decided|superseded)
-      settle_post "$stem" "$state" "$(outcome_text "$stem" "$state" "${outcome#*$'\t'}")" || return 2
+      option=
+      [ "$state" != decided ] || option=$(answer_option "$stem" "${outcome#*$'\t'}")
+      settle_post "$stem" "$state" "$(outcome_text "$stem" "$state" "${outcome#*$'\t'}")" "$option" \
+        || return 2
       return 0
       ;;
   esac
@@ -552,8 +606,64 @@ command_click() {
   notice 0 "Sent: $label. Firstmate will record it, and the post updates when it does."
 }
 
+# fit_post_content <header> <original text> <progress file>: preserve the
+# original last chunk when it fits; structured posts trim only explanation,
+# while legacy overflow keeps the header and option labels before the question prefix.
+fit_post_content() {
+  jq -njr --arg header "$1" --arg original "$2" --slurpfile progress "$3" '
+    def compose($header; $question; $explanation; $options; $cue; $trim_question):
+      ($header + "\n\n") as $base
+      | (if $options == "" then "" else "\n\n" + $options end) as $option_suffix
+      | (if $cue == "" then "" else "\n" + $cue end) as $cue_suffix
+      | ($option_suffix + $cue_suffix) as $suffix
+      | "\n\n(trimmed)" as $marker
+      | (($base | length) + ($suffix | length)) as $fixed
+      | if ($fixed + ($question | length)) > 2000 then
+          if $trim_question then
+            (2000 - $fixed - ($marker | length)) as $room
+            | $base + ($question[0:(if $room < 0 then 0 else $room end)]) + $marker + $suffix
+          else
+            error("structured decision header, question, and options exceed the Discord limit")
+          end
+        else
+          (2000 - $fixed - ($question | length)) as $room
+          | if $explanation == "" then
+              $base + $question + $suffix
+            elif (2 + ($explanation | length)) <= $room then
+              $base + $question + "\n\n" + $explanation + $suffix
+            elif $room >= (2 + ($marker | length)) then
+              ($room - 2 - ($marker | length)) as $explanation_room
+              | $base + $question + "\n\n"
+                + $explanation[0:$explanation_room] + $marker + $suffix
+            else
+              if $trim_question then
+                (2000 - $fixed - ($marker | length)) as $question_room
+                | $base + ($question[0:(if $question_room < 0 then 0 else $question_room end)]) + $marker + $suffix
+              else
+                error("structured decision header leaves no room for the explanation marker")
+              end
+            end
+        end;
+    $progress[0] as $post
+    | ($header + "\n\n" + $original) as $whole
+    | if ($whole | length) <= 2000 then
+        $whole
+      else
+        ($post.decision.sections // {}) as $sections
+        | if $sections.structured == true then
+            compose($header; $sections.question; $sections.explanation;
+              $sections.options; $sections.cue; false)
+          else
+            compose($header; $original; "";
+              ([$post.decision.options[] | "\(.id). \(.label)"] | join("\n")); ""; true)
+          end
+      end
+  '
+}
+
 command_posts() {
-  local settled_only=0 file stem thread content shown final
+  local settled_only=0 file stem thread content original displayed shown final
+  local kind header replacement_url selected
   [ "${1:-}" != --settled-only ] || settled_only=1
   while IFS= read -r file; do
     stem=$(basename "$file" .progress.json)
@@ -563,16 +673,39 @@ command_posts() {
     fi
     content=$(post_content "$stem")
     [ -n "$content" ] || continue
-    shown=$(cat "$OUTBOX/$stem.finalized" 2>/dev/null) || shown=
-    [ "$content" != "$shown" ] || continue
+    original=$(jq -j '.texts[-1] // ""' "$file"; printf '\001')
+    original=${original%$'\001'}
+    selected=$(selected_option_id "$stem")
+    replacement_url=
+    if settled "$stem"; then
+      kind=$(jq -r '.kind // empty' "$OUTBOX/$stem.settled.json" 2>/dev/null)
+    else
+      kind=waiting
+    fi
+    if [ "$kind" = replaced ]; then
+      replacement_url=$(newer_post_link "$stem")
+      if [ -n "$replacement_url" ]; then
+        header="♻️ **Replaced by a newer question** ([open]($replacement_url))"
+      else
+        header="**Replaced by a newer question**"
+      fi
+    else
+      header="**$content**"
+    fi
+    displayed=$(fit_post_content "$header" "$original" "$file") || continue
+    shown=$(cat "$OUTBOX/$stem.finalized" 2>/dev/null; printf '\001') || shown=
+    shown=${shown%$'\001'}
+    [ "$displayed" != "$shown" ] || continue
     final=false
     settled "$stem" && final=true
     thread=$(post_thread "$stem") || continue
     jq -cn --arg post "$stem" --arg channel "$thread" \
       --arg message "$(post_field "$stem" '.discord_message_ids[-1]')" \
-      --arg content "$content" --argjson final "$final" \
+      --arg content "$displayed" --arg selected "$selected" --argjson final "$final" \
       --slurpfile progress "$file" \
-      '{post:$post, channel_id:$channel, message_id:$message, content:$content, final:$final,
+      '{post:$post, channel_id:$channel, message_id:$message, content:$content,
+        final:$final,
+        selected_option_id:(if $selected == "" then null else ($selected | tonumber) end),
         key:$progress[0].decision.key, options:$progress[0].decision.options}'
   done < <(progress_files)
 }

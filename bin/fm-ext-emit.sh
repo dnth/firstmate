@@ -34,25 +34,32 @@
 # The file is JSON:
 #   {"key": "hold:<task-id>" | "key:<task-id>:<slug>",
 #    "mode": "done" | "release",
-#    "options": [{"label": "<text>", "confirm": true|false, "recommended": true|false}, ...]}
+#    "options": [{"label": "<text>", "confirm": true|false, "recommended": true|false}, ...],
+#    "sections": {"question": "<text>", "explanation": "<text>",
+#                 "options": "<numbered list>", "cue": "<reply cue>"}}
 # with 1-5 options whose input and displayed labels are distinct, 1-80 characters, and free of
 # control characters, in the same order as the post text numbers them; option
 # ids are 1-based in that order. "mode" (captain calls only, default done)
 # chooses how a chosen option closes the call, as in fm-captain-hold.sh
 # answers. "confirm" and "recommended" are optional booleans, default false.
+# "sections" is optional; when present, its question, explanation, option list,
+# and cue must reproduce the post text exactly. Without it, the whole post is
+# protected question text. fm-ext-ask.sh writes these boundaries explicitly.
+# A decision post reserves room for its later outcome header and keeps the
+# option list on the final button-carrying chunk.
 # At most one option may set "recommended": true; emit adds "⭐ " unless the
 # label already starts with ⭐, and stores the displayed label in the payload.
-# The added prefix counts toward the 80-character label limit.
 # The key must name a decision that is open right now (a held captain
 # call, or a worker's open keyed status decision) and must fit Discord's
 # 100-character custom_id as fmd:<key>:<n>. An option needs a confirmation
 # click when it declares confirm, and always when its label matches
 # FM_EXT_DECISION_CONFIRM_PATTERN in bin/fm-ext-lib.sh. The post text and labels
 # are refused when they name the key or its task id, because only the button
-# custom_ids may carry the key. The payload's decision field carries the key,
-# mode, numbered options, the post text cut to its first 1000 characters, and
-# the decision's current lifecycle (fm_ext_decision_key_occurrence in
-# bin/fm-ext-lib.sh), so the post can only ever answer that lifecycle.
+# custom_ids may carry the key. The payload's decision field also carries
+# the mode, numbered options, post text cut to its first 1000 characters,
+# structured post sections, and current lifecycle
+# (fm_ext_decision_key_occurrence in bin/fm-ext-lib.sh), so a post can only ever
+# answer that lifecycle.
 #
 # CHOICE GUARD. An answer, followup, or final whose text has the shape of a choice is refused unless --decision-file is given, so a choice cannot go out as plain text by mistake.
 # Detection is case-insensitive, cues match within one line, and it uses these rules:
@@ -230,6 +237,7 @@ esac
 # A decision is validated in full before anything is published, so a refused
 # decision posts nothing at all.
 DECISION_JSON=null
+DECISION_SECTIONS=null
 if [ -n "$DECISION_FILE" ]; then
   [ -f "$DECISION_FILE" ] && [ ! -L "$DECISION_FILE" ] || die "decision file not found: $DECISION_FILE"
   jq -e \
@@ -249,8 +257,15 @@ if [ -n "$DECISION_FILE" ]; then
     and ([.options[] | select(.recommended // false)] | length <= 1)
     and ([.options[].label | ascii_downcase] | length == (unique | length))
     and ([.options[] | (if (.recommended // false) and ((.label | startswith("⭐")) | not) then ("⭐ " + .label) else .label end) | ascii_downcase] | length == (unique | length))
+    and (if has("sections") then
+      (.sections | type == "object"
+        and (.question | type == "string")
+        and (.explanation | type == "string")
+        and (.options | type == "string")
+        and (.cue | type == "string"))
+      else true end)
   ' "$DECISION_FILE" >/dev/null 2>&1 \
-    || die "decision file must hold {key, mode, options:[{label, confirm, recommended}]} with 1-$FM_EXT_DECISION_MAX_OPTIONS distinct labels of 1-$FM_EXT_DECISION_LABEL_MAX characters and at most one recommended option"
+    || die "decision file must hold {key, mode, options:[{label, confirm, recommended}], sections?} with 1-$FM_EXT_DECISION_MAX_OPTIONS distinct labels of 1-$FM_EXT_DECISION_LABEL_MAX characters and at most one recommended option"
   DECISION_KEY=$(jq -r '.key' "$DECISION_FILE")
   DECISION_MODE=$(jq -r '.mode // "done"' "$DECISION_FILE")
   DECISION_TASK=$(fm_ext_decision_key_task "$DECISION_KEY") \
@@ -277,13 +292,30 @@ if [ -n "$DECISION_FILE" ]; then
   # call is re-held or the key reopened is a no-op.
   DECISION_OCCURRENCE=$(fm_ext_decision_key_occurrence "$DECISION_KEY") \
     || die "could not read which lifecycle of decision $DECISION_KEY is open" 1
+  if jq -e 'has("sections")' "$DECISION_FILE" >/dev/null 2>&1; then
+    jq -e --arg text "$TEXT" '
+      .sections as $s
+      | ($s.question
+        + (if $s.explanation == "" then "" else "\n\n" + $s.explanation end)
+        + (if $s.options == "" then "" else "\n\n" + $s.options end)
+        + (if $s.cue == "" then "" else "\n" + $s.cue end)) == $text
+    ' "$DECISION_FILE" >/dev/null \
+      || die "decision sections must reproduce the post text exactly" 2
+    DECISION_SECTIONS=$(jq -c '.sections + {structured: true}' "$DECISION_FILE") \
+      || die "could not read decision sections" 1
+  else
+    DECISION_SECTIONS=$(jq -cn --arg question "$TEXT" \
+      '{question:$question, explanation:"", options:"", cue:"", structured:false}') \
+      || die "could not build default decision sections" 1
+  fi
   DECISION_JSON=$(jq -c \
     --arg pattern "$FM_EXT_DECISION_CONFIRM_PATTERN" \
     --arg mode "$DECISION_MODE" \
     --arg occurrence "$DECISION_OCCURRENCE" \
     --arg text "$TEXT" \
-    --argjson text_max "$FM_EXT_DECISION_TEXT_MAX" '
-    {key, mode: $mode, occurrence: $occurrence,
+    --argjson text_max "$FM_EXT_DECISION_TEXT_MAX" \
+    --argjson sections "$DECISION_SECTIONS" '
+    {key, mode: $mode, occurrence: $occurrence, sections: $sections,
      options: [.options | to_entries[] | ({"id": (.key + 1),
        "label": (if (.value.recommended // false) and ((.value.label | startswith("⭐")) | not) then ("⭐ " + .value.label) else .value.label end),
        "confirm": ((.value.confirm // false) or (.value.label | test($pattern; "i")))}

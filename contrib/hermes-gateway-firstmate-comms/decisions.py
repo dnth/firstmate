@@ -89,32 +89,39 @@ def confirm_id(post_id: str, option: int) -> str:
     return f"fmc:{post_id}:{option}"
 
 
-def components_for(decision: dict, disabled: bool = False) -> list[dict]:
-    """The decision's buttons: one row of options, then the Discuss button.
-    Recommendation styling does not waive confirmation; the click handler
-    still requires it before filing a request.
-    """
+def components_for(
+    decision: dict,
+    disabled: bool = False,
+    selected_option_id: int | str | None = None,
+) -> list[dict]:
+    """Build decision buttons, showing the recorded choice on a settled post."""
     key = decision["key"]
     options = []
     for option in decision["options"]:
-        if option.get("recommended"):
+        selected = disabled and str(option["id"]) == str(selected_option_id)
+        if disabled:
+            style = _STYLE_SUCCESS if selected else _STYLE_SECONDARY
+        elif option.get("recommended"):
             style = _STYLE_SUCCESS
         elif option.get("confirm"):
             style = _STYLE_DANGER
         else:
             style = _STYLE_SECONDARY
+        label = option["label"]
+        if selected:
+            label = label[:78].rstrip() + " ✓"
         options.append(
             {
                 "type": _BUTTON,
                 "style": style,
-                "label": option["label"],
+                "label": label,
                 "custom_id": custom_id(key, option["id"]),
                 "disabled": disabled,
             }
         )
     discuss = {
         "type": _BUTTON,
-        "style": _STYLE_PRIMARY,
+        "style": _STYLE_SECONDARY if disabled else _STYLE_PRIMARY,
         "label": DISCUSS_LABEL,
         "custom_id": custom_id(key, "d"),
         "disabled": disabled,

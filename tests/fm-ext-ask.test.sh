@@ -80,10 +80,11 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
   ln -sf "$(command -v tasks-axi)" "$home/fakebin/tasks-axi"
   fm_fake_exit0 "$home/fakebin" treehouse no-mistakes gh gh-axi
   printf 'The fix can go two ways.' > "$home/body.txt"
+  printf 'North takes less time; South keeps the existing API.' > "$home/explanation.txt"
 
   slug=$(home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
     --task "$TASK" --title "Pick the route" --repo sample --reason "route pending" --mode "done" \
-    --text-file "$home/body.txt" \
+    --text-file "$home/body.txt" --explanation-file "$home/explanation.txt" \
     --option "North" --recommended --option "South" --option "Merge it" \
     --option "Hold" --confirm) || fail "fm-ext-ask refused a valid choice"
   [ -n "$slug" ] || fail "fm-ext-ask printed no slug"
@@ -99,8 +100,15 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
     and ([.decision.options[] | .id] == [1,2,3,4])
     and ([.decision.options[] | .label] == ["⭐ North","South","Merge it","Hold"])
     and ([.decision.options[] | .confirm] == [false,false,true,true])
-    and .decision.options[0].recommended == true' "$payload" >/dev/null \
-    || fail "wrong decision block: $(jq -c .decision "$payload")"
+    and .decision.options[0].recommended == true
+    and .decision.sections == {
+      "question":"The fix can go two ways.",
+      "explanation":"North takes less time; South keeps the existing API.",
+      "options":"1. ⭐ North\n2. South\n3. Merge it\n4. Hold",
+      "cue":"Tap a button, or reply with the number.",
+      "structured":true
+    }' "$payload" >/dev/null \
+    || fail "wrong decision block or structured post sections: $(jq -c .decision "$payload")"
   # The numbered lines in the text follow the buttons, label for label.
   jq -r '.text' "$payload" | grep -E '^[0-9]+\. ' | sed -E 's/^[0-9]+\. //' > "$home/text-labels"
   jq -r '.decision.options[].label' "$payload" > "$home/button-labels"

@@ -130,9 +130,10 @@ import sys
 from pathlib import Path
 import decisions, outbox_poster
 decisions.buttons_ready = lambda: True
-outbox_poster.drain_outbox(
-    send=lambda p: {"ok": True, "discord_message_id": sys.argv[3], "buttons": bool(p.get("decision"))},
-    home=Path(sys.argv[1]))
+def send(p):
+    return {"ok": True, "discord_message_id": str(int(sys.argv[3]) + int(p.get("chunk_index", 0))),
+            "buttons": bool(p.get("decision"))}
+outbox_poster.drain_outbox(send=send, home=Path(sys.argv[1]))
 PY
 }
 
@@ -383,22 +384,31 @@ test_2_standing_click_files_one_request_for_a_worker_key() {
 
   # The post's buttons go off at once with the sent line.
   out=$(reconcile "$home" False)
-  printf '%s' "$out" | jq -e --arg key "$KEY" --arg msg "$POST" '
-    .message == $msg
-    and .content == "⏳ North sent by Dana <t:1791720000:f> - waiting for Firstmate to record it"
+  printf '%s' "$out" | jq -e --arg key "$KEY" --arg msg "$POST" \
+    --arg expected $'**⏳ North sent by Dana <t:1791720000:f> - waiting for Firstmate to record it**\n\nWhich way should the fix go?\n1. North ⭐\n2. South\nReply to this message with the number.' '
+    .message == $msg and .content == $expected
     and ([.components[].components[] | .disabled] | all)
+    and .components[0].components[0].style == 3
+    and .components[0].components[0].label == "North ✓"
+    and .components[0].components[1].style == 2
+    and .components[1].components[0].style == 2
     and (.components[0].components[0].custom_id == ("fmd:" + $key + ":1"))' >/dev/null \
-    || fail "a sent click must turn the post's buttons off with the sent line: $out"
+    || fail "a sent click must keep its question visible and highlight only its disabled choice: $out"
   [ -z "$(reconcile "$home" True)" ] || fail "an unchanged sent post was edited again"
 
   # Firstmate records the request through its normal path; the post follows.
   [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "Firstmate found the clicked decision no longer open"
   [ "$(resolved_lines "$home" pick)" = 1 ] || fail "Firstmate's normal path did not record the answer"
   out=$(FM_EXT_NOW_OVERRIDE=1791720100 reconcile "$home" True)
-  printf '%s' "$out" | jq -e --arg msg "$POST" '
-    .message == $msg and .content == "✅ North chosen by Dana <t:1791720000:f>"
-    and ([.components[].components[] | .disabled] | all)' >/dev/null \
-    || fail "the post must show the recorded choice with its buttons off: $out"
+  printf '%s' "$out" | jq -e --arg msg "$POST" \
+    --arg expected $'**✅ North chosen by Dana <t:1791720000:f>**\n\nWhich way should the fix go?\n1. North ⭐\n2. South\nReply to this message with the number.' '
+    .message == $msg and .content == $expected
+    and ([.components[].components[] | .disabled] | all)
+    and .components[0].components[0].style == 3
+    and .components[0].components[0].label == "North ✓"
+    and .components[0].components[1].style == 2
+    and .components[1].components[0].style == 2' >/dev/null \
+    || fail "the post must preserve its question and mark only the recorded choice: $out"
   [ -z "$(reconcile "$home" True)" ] || fail "a post Discord already shows was edited again"
   pass "2 a standing click files one request with key, option, text, and audit, turns the buttons off, and shows the choice once Firstmate records it"
 }
@@ -517,11 +527,11 @@ test_3_captain_call_click_is_a_request_the_board_records() {
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
   printf '%s\n' "$out" | jq -se '
     (map({(.message): .content}) | add) as $shown
-    | $shown["700000000000000001"] == "✅ South chosen by Dana <t:1791720000:f>"
-      and $shown["700000000000000006"] == "✅ South chosen by the captain <t:1791720000:f>"
-      and $shown["700000000000000007"] == "Closed - no longer needed <t:1791720000:f>"
-      and $shown["700000000000000008"] == "Closed - no longer needed <t:1791720000:f>"
-      and $shown["700000000000000010"] == "Closed - no longer needed <t:1791720000:f>"' \
+    | ($shown["700000000000000001"] | startswith("**✅ South chosen by Dana <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000006"] | startswith("**✅ South chosen by the captain <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000007"] | startswith("**Closed - no longer needed <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000008"] | startswith("**Closed - no longer needed <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000010"] | startswith("**Closed - no longer needed <t:1791720000:f>**\n\nWhich way"))' \
     >/dev/null || fail "button, board, unanswered, and re-held calls must each show their own outcome: $out"
   for pair in digits overlap; do
     case "$pair" in
@@ -538,8 +548,9 @@ test_3_captain_call_click_is_a_request_the_board_records() {
     home_env "$home" "$ROOT/bin/fm-captain-hold.sh" answer "$id-$pair" --decision-file "$home/answer.txt" >/dev/null \
       || fail "could not record the undecorated captain-call answer"
     out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
-    jq -e --arg expected "✅ ⭐ $label chosen by the captain <t:1791720000:f>" '.content == $expected' <<<"$out" >/dev/null \
-      || fail "the recommended captain-call outcome picked the wrong label: $out"
+    jq -e --arg expected "✅ ⭐ $label chosen by the captain <t:1791720000:f>" \
+      '.content | startswith("**" + $expected + "**\n\nWhich way")' <<<"$out" >/dev/null \
+      || fail "the recommended captain-call outcome picked the wrong label or lost its question: $out"
   done
   pass "3 a captain-call click files a request the board records; board answers, unanswered closes, and re-holds show their own outcome"
 }
@@ -704,13 +715,20 @@ test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops() {
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
   printf '%s\n' "$out" | jq -se '
     (map({(.message): .content}) | add) as $shown
-    | $shown["700000000000000001"] == "✅ North chosen by Dana <t:1791720000:f>"
-      and $shown["700000000000000002"] == "✅ South chosen by the captain <t:1791720000:f>"
-      and $shown["700000000000000003"] == "✅ South chosen by the captain <t:1791720000:f>"
-      and $shown["700000000000000004"] == "✅ Decided <t:1791720000:f>"
-      and $shown["700000000000000005"] == "Closed - no longer needed <t:1791720000:f>"
-      and $shown["700000000000000006"] == "✅ South chosen by the captain <t:1791720000:f>"
-      and $shown["700000000000000007"] == "✅ Decided <t:1791720000:f>"
+    | ($shown["700000000000000001"] | startswith("**✅ North chosen by Dana <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000002"] | startswith("**✅ South chosen by the captain <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000003"] | startswith("**✅ South chosen by the captain <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000004"] | startswith("**✅ Decided <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000005"] | startswith("**Closed - no longer needed <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000006"] | startswith("**✅ South chosen by the captain <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000007"] | startswith("**✅ Decided <t:1791720000:f>**\n\nWhich way"))
+      and (map(select(.message == "700000000000000002"))[0]
+        | .components[0].components[0].style == 2
+          and .components[0].components[1].style == 3
+          and .components[0].components[1].label == "South ✓"
+          and .components[1].components[0].style == 2)
+      and (map(select(.message == "700000000000000004"))[0].components
+        | [.[].components[] | .style] | all(. == 2))
       and all(.[]; [.components[].components[].disabled] | all)' >/dev/null \
     || fail "every answered or superseded post must be disabled and show its outcome from the ledger: $out"
   out=$(click "$home" "fmd:key:$TASK:typed:1" "$CAPTAIN" 880000000000000041 700000000000000002)
@@ -750,11 +768,11 @@ test_7_stale_posts_are_no_ops() {
   assert_contains "$out" "Sent: South." "the replacement post's option 1 must send its own label"
   [ "$(record_as_firstmate "$home" "$(button_request "$home" option)")" = open ] || fail "Firstmate found the clicked decision no longer open"
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
-  printf '%s\n' "$out" | jq -se '
+  printf '%s\n' "$out" | jq -se --arg url "https://discord.com/channels/$GUILD/$CHANNEL/700000000000000011" '
     (map({(.message): .content}) | add) as $shown
-    | $shown["700000000000000011"] == "✅ South chosen by Dana <t:1791720000:f>"
-      and $shown["700000000000000010"] == "Replaced by a newer post <t:1791720000:f>"' >/dev/null \
-    || fail "a replaced post must show it was replaced, not the winner's index read through its own options: $out"
+    | ($shown["700000000000000011"] | startswith("**✅ South chosen by Dana <t:1791720000:f>**\n\nWhich way"))
+      and ($shown["700000000000000010"] | startswith("♻️ **Replaced by a newer question** ([open](" + $url + "))\n\nWhich way"))' >/dev/null \
+    || fail "the newer post must show its own choice and the replaced post must link to it: $out"
 
   # A worker key answered and then reopened for a new question: the old post
   # belongs to the first question and must not answer the second.
@@ -1160,7 +1178,8 @@ test_14_audit_metadata_does_not_match_options() {
   deliver "$home" 700000000000000011
   home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key ambiguous-audit 'Decision answer: Merge or Hold (Discord button: option 2 Hold)' >/dev/null 2>&1 || fail "could not record the ambiguous answer"
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
-  jq -e '.content == "✅ Merge chosen by the captain <t:1791720000:f>"' <<<"$out" >/dev/null || fail "a full label prefix must win after audit removal"
+  jq -e '.content | startswith("**✅ Merge chosen by the captain <t:1791720000:f>**\n\nWhich way")' \
+    <<<"$out" >/dev/null || fail "a full label prefix must win after audit removal and preserve the question"
   pass "14 option matching ignores appended audit metadata and gives the full label prefix precedence"
 }
 
@@ -1223,7 +1242,9 @@ test_15_full_labels_keep_digits_and_overlaps_together() {
           home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key "$slug" "$answer" >/dev/null 2>&1 || fail "could not record the typed full-label answer"
         fi
         out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
-        jq -e --arg expected "$expected" '.content == $expected and ([.components[].components[].disabled] | all)' <<<"$out" >/dev/null || fail "the full-label outcome lost its choice, attribution, or fallback ambiguity: $out"
+        jq -e --arg expected "$expected" \
+          '.content | startswith("**" + $expected + "**\n\nWhich way")' <<<"$out" >/dev/null \
+          || fail "the full-label outcome lost its choice, attribution, fallback ambiguity, or original question: $out"
       done
     done
   done
@@ -1252,12 +1273,29 @@ PY
     .[0].components[0] == {"type":2,"style":3,"label":"⭐ North","custom_id":("fmd:" + $key + ":1"),"disabled":false}
     and .[0].components[1] == {"type":2,"style":4,"label":"Merge it","custom_id":("fmd:" + $key + ":2"),"disabled":false}' \
     >/dev/null || fail "the recommended button must be green and the other keeps its style: $out"
+  out=$(plugin_py "$home" <<'PY'
+import json, decisions
+decision = {"key": "key:route-fix:limit", "options": [
+    {"id": 1, "label": "x" * 80}, {"id": 2, "label": "Other"}]}
+print(json.dumps(decisions.components_for(
+    decision, disabled=True, selected_option_id=1)))
+PY
+  ) || fail "the renderer refused a maximum-length selected label"
+  printf '%s' "$out" | jq -e '
+    .[0].components[0].style == 3
+    and .[0].components[0].label == (("x" * 78) + " ✓")
+    and (.[0].components[0].label | length == 80)
+    and .[0].components[1].style == 2
+    and .[1].components[0].style == 2
+    and all(.[].components[]; .disabled)' >/dev/null \
+    || fail "the selected marker must fit the Discord label limit and leave other buttons grey: $out"
   deliver "$home" "$POST"
   home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key pick 'Decision answer: Choose North' >/dev/null 2>&1 \
     || fail "could not record the undecorated recommended label fallback"
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
-  jq -e '.content == "✅ ⭐ North chosen by the captain <t:1791720000:f>"' <<<"$out" >/dev/null \
-    || fail "the recommended label fallback lost its display label: $out"
+  jq -e '.content | startswith("**✅ ⭐ North chosen by the captain <t:1791720000:f>**\n\nWhich way")' \
+    <<<"$out" >/dev/null \
+    || fail "the recommended label fallback lost its display label or original question: $out"
   open_key "$home" confirm-rec
   payload=$(emit_decision "$home" 2 '{"key":"key:'"$TASK"':confirm-rec","options":[
     {"label":"Merge it","confirm":true,"recommended":true},{"label":"Hold"}]}')
@@ -1279,8 +1317,9 @@ PY
   record=$(button_request "$home" option)
   [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "Firstmate found the recommended decision no longer open"
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
-  printf '%s' "$out" | jq -e --arg expected "✅ ⭐ Merge it chosen by Dana <t:1791720000:f>" '.content == $expected' >/dev/null \
-    || fail "the recorded answer label must match the shown label: $out"
+  printf '%s' "$out" | jq -e --arg expected "✅ ⭐ Merge it chosen by Dana <t:1791720000:f>" \
+    '.content | startswith("**" + $expected + "**\n\nWhich way")' >/dev/null \
+    || fail "the recorded answer label or original question was lost: $out"
   open_key "$home" pre-starred
   deliver "$home" 700000000000000032
   payload=$(emit_decision "$home" 3 '{"key":"key:'"$TASK"':pre-starred","options":[
@@ -1311,6 +1350,143 @@ PY
   pass "16 the recommended option renders green with a single star, still confirms when risky, and emit refuses two recommended options"
 }
 
+# --- 17. settled edits preserve sections and fit legacy posts ---------------
+
+test_17_outcome_headers_fit_reserved_and_legacy_posts() {
+  local home question explanation option_text cue full slug progress payload original out repeat legacy last_message
+  local old_payload new_payload old_progress new_progress
+  home="$TMP_ROOT/c17"
+  setup_home "$home"
+  open_request "$home"
+
+  open_key "$home" near-limit
+  question=$(printf '%*s' 1800 '' | tr ' ' Q)
+  option_text=$'1. North\n2. South'
+  cue='Tap a button, or reply with the number.'
+  full=$(printf '%s\n\n%s\n%s' "$question" "$option_text" "$cue")
+  printf '%s' "$full" > "$home/post.txt"
+  jq -n --arg key "key:$TASK:near-limit" --arg question "$question" \
+    --arg options "$option_text" --arg cue "$cue" \
+    '{key:$key, options:[{label:"North"},{label:"South"}],
+      sections:{question:$question, explanation:"", options:$options, cue:$cue}}' \
+    > "$home/decision.json"
+  slug=$(home_env "$home" "$EMIT" --request-id "discord:$GUILD:$CHANNEL:$CHANNEL:$REQUEST_MESSAGE" \
+    --kind followup --generation 1 --text-file "$home/post.txt" \
+    --decision-file "$home/decision.json") || fail "emit refused structured near-limit decision"
+  payload="$home/state/ext-outbox/$slug.followup.1.json"
+  deliver "$home" 700000000000000101
+  progress="${payload%.json}.progress.json"
+  jq -e '.decision.sections.structured == true
+    and .decision.sections.explanation == ""
+    and (.texts | length == 2)
+    and .discord_message_ids == ["700000000000000101", "700000000000000102"]
+    and (.limit as $limit | all(.texts[]; length <= $limit))
+    and (.texts[-1] | contains("1. North\n2. South\nTap a button, or reply with the number."))' \
+    "$progress" >/dev/null || fail "the decision split lost its options or header reserve"
+  original=$(jq -r '.texts[-1]' "$progress")
+  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key near-limit North >/dev/null 2>&1 \
+    || fail "could not settle the near-limit decision"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
+  printf '%s\n' "$out" | jq -se --arg original "$original" '
+    length == 1
+    and .[0].message == "700000000000000102"
+    and .[0].content == ("**✅ North chosen by the captain <t:1791720000:f>**\n\n" + $original)
+    and (.[0].content | length <= 2000)
+    and ([.[0].components[].components[] | .disabled] | all)
+    and .[0].components[0].components[0].style == 3
+    and .[0].components[0].components[0].label == "North ✓"
+    and .[0].components[0].components[1].style == 2
+    and .[0].components[1].components[0].style == 2' >/dev/null \
+    || fail "only the last chunk must be edited, with its original text and selected button preserved: $out"
+
+
+  open_key "$home" explanation-overflow
+  question='Which option should the team record?'
+  explanation=$(printf '%*s' 2300 '' | tr ' ' E)
+  full=$(printf '%s\n\n%s\n\n%s\n%s' "$question" "$explanation" "$option_text" "$cue")
+  printf '%s' "$full" > "$home/post.txt"
+  jq -n --arg key "key:$TASK:explanation-overflow" --arg question "$question" \
+    --arg explanation "$explanation" --arg options "$option_text" --arg cue "$cue" \
+    '{key:$key, options:[{label:"North"},{label:"South"}],
+      sections:{question:$question, explanation:$explanation, options:$options, cue:$cue}}' \
+    > "$home/decision.json"
+  slug=$(home_env "$home" "$EMIT" --request-id "discord:$GUILD:$CHANNEL:$CHANNEL:$REQUEST_MESSAGE" \
+    --kind followup --generation 2 --text-file "$home/post.txt" \
+    --decision-file "$home/decision.json") || fail "emit refused the structured explanation fixture"
+  payload="$home/state/ext-outbox/$slug.followup.2.json"
+  deliver "$home" 700000000000000110
+  progress="${payload%.json}.progress.json"
+  last_message=$(jq -r '.discord_message_ids[-1]' "$progress")
+  if ! jq --arg full "$full" '.texts[-1] = $full' "$progress" \
+    > "$home/explanation-progress.json"; then
+    fail "could not force the explanation overflow fixture"
+  fi
+  mv "$home/explanation-progress.json" "$progress" \
+    || fail "could not install the explanation overflow fixture"
+  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key explanation-overflow North \
+    >/dev/null 2>&1 || fail "could not settle the explanation overflow"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
+  printf '%s' "$out" | jq -e --arg message "$last_message" --arg question "$question" \
+    --arg option_text "$option_text" --arg cue "$cue" '
+    .message == $message
+    and (.content | startswith("**✅ North chosen by the captain <t:1791720000:f>**\n\n" + $question + "\n\nE"))
+    and (.content | contains("(trimmed)\n\n" + $option_text + "\n" + $cue))' >/dev/null \
+    || fail "overflow must trim only the explanation tail and retain the full question and options: $out"
+
+  open_key "$home" legacy-overflow
+  payload=$(emit_decision "$home" 3 '{"key":"key:'"$TASK"':legacy-overflow","options":[{"label":"North"},{"label":"South"}]}')
+  deliver "$home" 700000000000000120
+  progress="${payload%.json}.progress.json"
+  legacy=$(printf '%*s' 2300 '' | tr ' ' L)
+  if ! jq --arg legacy "$legacy" '.texts[-1] = $legacy | del(.decision.sections)' \
+    "$progress" > "$home/legacy-progress.json"; then
+    fail "could not build the legacy overflow fixture"
+  fi
+  mv "$home/legacy-progress.json" "$progress" \
+    || fail "could not install the legacy overflow fixture"
+  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key legacy-overflow \
+    "No preference yet" >/dev/null 2>&1 || fail "could not settle the legacy decision"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
+  printf '%s' "$out" | jq -e '
+    .message == "700000000000000120"
+    and (.content | length <= 2000)
+    and (.content | startswith("**✅ Decided <t:1791720000:f>**\n\nL"))
+    and (.content | contains("(trimmed)\n\n1. North\n2. South"))
+    and ([.components[].components[] | .disabled] | all)
+    and ([.components[].components[] | .style] | all(. == 2))' >/dev/null \
+    || fail "the legacy fallback must keep its header, question prefix, marker, option labels, and grey buttons: $out"
+
+  open_key "$home" replace-fallback
+  old_payload=$(emit_decision "$home" 4 \
+    '{"key":"key:'"$TASK"':replace-fallback","options":[{"label":"North"}]}')
+  deliver "$home" 700000000000000130
+  new_payload=$(emit_decision "$home" 5 \
+    '{"key":"key:'"$TASK"':replace-fallback","options":[{"label":"South"}]}')
+  deliver "$home" 700000000000000140
+  old_progress="${old_payload%.json}.progress.json"
+  new_progress="${new_payload%.json}.progress.json"
+  if ! jq '.posted_at = 1000' "$old_progress" > "$home/old-progress.json"; then
+    fail "could not order the old post fixture"
+  fi
+  mv "$home/old-progress.json" "$old_progress" || fail "could not install old-post ordering"
+  if ! jq '.posted_at = 1001 | .discord_message_ids = []' "$new_progress" \
+    > "$home/new-progress.json"; then
+    fail "could not hide the newer message id"
+  fi
+  mv "$home/new-progress.json" "$new_progress" || fail "could not install missing newer message id"
+  out=$(reconcile "$home" True)
+  printf '%s' "$out" | jq -e '
+    .message == "700000000000000130"
+    and (.content | startswith("**Replaced by a newer question**\n\nWhich way should the fix go?"))
+    and (.content | length <= 2000)
+    and ([.components[].components[] | .disabled] | all)
+    and ([.components[].components[] | .style] | all(. == 2))' >/dev/null \
+    || fail "the replacement fallback must keep the question and disable the old buttons: $out"
+  repeat=$(reconcile "$home" True)
+  [ -z "$repeat" ] || fail "settled overflow and replacement edits must not retry unchanged posts"
+  pass "17 reserved chunks settle without trimming, only the last chunk is edited, and legacy overflow retains its header, question prefix, option labels, and one-time replacement state"
+}
+
 test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records
@@ -1330,3 +1506,4 @@ test_14_audit_metadata_does_not_match_options
 test_15_full_labels_keep_digits_and_overlaps_together
 
 test_16_recommended_option_renders_green_with_a_single_star
+test_17_outcome_headers_fit_reserved_and_legacy_posts
