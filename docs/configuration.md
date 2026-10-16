@@ -509,10 +509,10 @@ Missing or nonnumeric `spendPriority` evidence is never ranked, and every candid
 On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
 The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor with no runner-up taken), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
 Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
+Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules or account-lane file, or missing `jq`, each reported and never selected around.
 Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
-By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
+By accepted design, a `clear` result does not enforce general catalog/authentication, reasoning-class, or completion-runway gates; mapped OMP accounts must pass the catalog check owned by the script header.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
@@ -535,15 +535,13 @@ It maps a quota-axi provider family to the concrete provider ids that spend each
 }
 ```
 
-Every key and value must match `^[a-z0-9]+(-[a-z0-9]+)*\z`; a mapped family needs a non-empty map, and the file holds provider ids, never credentials.
 These are OMP provider ids: profiles for other harnesses keep their declared model and single collapsed lane, with no account field.
-When an OMP profile's declared `provider` appears as a family in this file, the resolver expands that profile into one candidate per mapped account, reads each candidate's quota rows from that account's own lane, prints the account on the candidate line, and names the winning account's provider id as the model prefix, so the profile it emits is `--harness omp --model <provider id>/<bare model>` and `fm-spawn.sh` launches the worker on that account's credential.
-A snapshot lane the map does not name, a mapped account the snapshot does not carry, and a mapped family whose profile names no model are each reported on their own candidate line and never guessed.
-A mapped provider id is also checked against the harness's own model catalog (`omp models --json` for `omp`, read once with a bounded timeout, and only when a map exists), so a map entry that names a provider the worker could not load is reported as `not eligible` and never becomes a profile; a missing `omp` or an unreadable catalog leaves the mapped accounts unverifiable in the same way.
-An absent or empty map, and any family it does not name, keep the single collapsed-lane behavior described above and read no catalog at all.
-The file must contain exactly one JSON object; a malformed map is an actionable `error` with exit 2, the same as a malformed rules file.
+The [resolver header](../bin/fm-dispatch-resolve.sh) owns the mapping schema, validation, expansion, and bounded catalog-read contract, including refusal of mapped accounts when the catalog is missing or unreadable.
 Predictive fallback checks do not resolve account-lane provider ids through this mapping and yield no fallback reason for those models.
 The provider ids name entries in the operator's own `~/.omp/agent/models.yml`, which is not part of this repo.
+Before adding per-account entries, copy that file to `~/.omp/agent/models.yml.bak-fm-quota-active-account-lane`; add entries without changing any existing provider or the built-in `opencode-go` credential.
+Keep the mapping in the effective home's private config directory and configure each secondmate separately; bootstrap does not validate it and it is not automatically propagated to secondmate homes.
+Never edit `~/.local/share/opencode/auth.json` or `~/.omp/agent/agent.db` for this setup, and never print credentials or their full hashes in commands, logs, reports, or test output.
 Each such entry points at the family's own base URL, mirrors the built-in provider for the models dispatch uses, and takes its credential from a `!command` value that reads that account's key at request time, so no key reaches a command line, a log, or a status line:
 
 ```yaml
@@ -571,7 +569,7 @@ providers:
 
 OMP keys several request behaviors on the provider id itself, so a per-account entry cannot inherit them from the built-in provider by name.
 Three consequences are worth naming: the OpenCode Go gateway rejects a request that carries no `x-opencode-session` header, which the built-in provider supplies from its own catalog, so a per-account entry must declare one; the reasoning-continuation compat the built-in derives for a reasoning model on this provider must be declared as above, or thinking-mode tool calls 400; and a model id that resolves to a different api family under the built-in provider, such as `muse-spark-1.3-contributor` at `openai-responses`, must carry that api in its own entry.
-The per-account entry defines only the models dispatch names, so add a model id here in the same pass as adding it to the mapping.
+The per-account entry defines only the models dispatch names, so add a model id here in the same pass as adding it to a dispatch profile; the account mapping contains provider ids, not model ids.
 The ported evidence record lives in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md); upstream's live rule-match runs are recorded there and remain the authority on model behavior.
 
 ## Toolchain

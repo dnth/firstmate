@@ -17,8 +17,7 @@ This skill is the single owner of the completion-aware profile-array selection p
 `quota-axi` remains data-only, reports whatever granularity the vendor supplies, and never recommends, selects, ranks, or infers a route.
 The opt-in `bin/fm-dispatch-resolve.sh` (`docs/configuration.md` "Typed dispatch resolution") applies the same eligibility gates and `spendPriority` argmax in code after a typed rule match; it never removes this skill's authority, and its `ambiguous`, `escalate`, and `error` outcomes return here.
 Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
-An account-lane mapping (the [`fm-dispatch-resolve.sh`](../../../bin/fm-dispatch-resolve.sh) header owns the file and its shape) can expand one profile on a multi-account provider into one candidate per account, each read from that account's own lane row, with the chosen account named in the emitted profile model.
-That expansion comes from the declared mapping, never from a provider-name prefix, and an account the mapping does not name, an account the snapshot does not carry, or a mapped provider id the harness catalog does not offer is reported and never selected.
+For OMP account expansion, follow the declared mapping contract in the [`fm-dispatch-resolve.sh`](../../../bin/fm-dispatch-resolve.sh) header, never a provider-name prefix; [Typed dispatch resolution](../../../docs/configuration.md#typed-dispatch-resolution-env-typesafe_api_key) owns the operator setup.
 Deterministic shell owns only schema, configuration, and version validation plus concrete spawn safeguards; every model-to-provider, provider-to-credential, and quota-applicability relation is yours to establish transparently and to show your evidence for.
 
 ## Collect facts

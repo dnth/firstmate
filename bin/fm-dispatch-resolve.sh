@@ -45,7 +45,8 @@
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
-#   existing unreadable rules file, malformed rules, or missing jq), which is
+#   existing unreadable rules or account-lane file, malformed configuration,
+#   or missing jq), which is
 #   actionable, never selected around.
 #
 # Quota snapshot versions: quota-axi --json schemaVersion 5 and 6 are accepted
@@ -65,6 +66,9 @@
 #   an optional private mapping from a quota provider family to the concrete
 #   provider ids that spend each of that family's accounts, shaped
 #   {"providers": {"<quota provider>": {"<accountKey>": "<provider id>"}}}.
+#   The file must contain exactly one JSON object; providers may be absent or
+#   empty, but each mapped family needs a non-empty account map. Family names,
+#   account keys, and provider ids must match ^[a-z0-9]+(-[a-z0-9]+)*\z.
 #   Only harness omp uses these OMP provider ids; other harnesses keep their
 #   declared model and single collapsed lane, with no account field.
 #   When an OMP profile's provider family is mapped there, the tool expands that one
@@ -82,8 +86,9 @@
 #   line or as an actionable configuration error. The catalog is read once, with
 #   a bounded timeout, only when a mapping exists and only for harness omp; an
 #   unreadable catalog, and a missing omp executable, leave mapped accounts
-#   unverifiable, and a run with no
-#   mapping never reads it at all. The file names providers, never credentials,
+#   unverifiable, and a run with no mapping never reads it at all.
+#   Expansion uses only the declared mapping, never a provider-name prefix.
+#   The file names providers, never credentials,
 #   so it holds no secret; the operator contract lives in docs/configuration.md
 #   "Typed dispatch resolution", together with the OMP provider entries the ids
 #   refer to.
