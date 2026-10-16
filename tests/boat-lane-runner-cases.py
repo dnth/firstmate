@@ -180,14 +180,21 @@ class Cases(unittest.TestCase):
         body = spec(3)
         body["ttl_seconds"] = 3600
         body["lanes"][1]["ttl_seconds"] = 14400
+        for lane in body["lanes"][1:]:
+            lane["selections"] = [step("sleep 120 # SELECT", 120)]
         self.assertEqual(self.run_case(body, "--cap-usd", ".29", "--jobs", "2"), 3)
         intents = {row["lane"]: row for row in self.ledger() if row["event"] == "create_intent"}
-        self.assertEqual(intents["lane1"]["ttl_seconds"], 14400)
-        self.assertAlmostEqual(intents["lane1"]["reserved_usd"], .288)
         refusal = next(row for row in self.ledger() if row["event"] == "refused")
-        self.assertEqual(refusal["lane"], "lane2")
-        self.assertAlmostEqual(refusal["new_usd"], .072)
-        self.assertGreaterEqual(refusal["reserved_usd"], .288)
+        admitted = ({"lane1", "lane2"} - {refusal["lane"]}).pop()
+        self.assertEqual(set(intents), {"pilot", admitted})
+        for lane, ttl, reserve in (("lane1", 14400, .288), ("lane2", 3600, .072)):
+            if lane == admitted:
+                self.assertEqual(intents[lane]["ttl_seconds"], ttl)
+                self.assertAlmostEqual(intents[lane]["reserved_usd"], reserve)
+                self.assertGreaterEqual(refusal["reserved_usd"], reserve)
+            else:
+                self.assertAlmostEqual(refusal["new_usd"], reserve)
+        self.assertGreater(refusal["spent_usd"] + refusal["reserved_usd"] + refusal["new_usd"], .29)
         self.assert_cleanup()
 
     def test_invalid_lane_ttl_is_refused_before_box_creation(self):
@@ -231,6 +238,39 @@ class Cases(unittest.TestCase):
         self.assertEqual(len(steps), 2)
         self.assertGreater(artifact["sequence"], steps[1]["sequence"])
         self.assertEqual(artifact["exit"], 0)
+        self.assert_cleanup()
+
+    def test_continued_lane_verdict_preserves_failure_precedence_in_both_orders(self):
+        import itertools
+        import shlex
+        pairs = list(itertools.permutations(("product", "uncertain", "dependency-blocked"), 2))
+        body = spec(len(pairs) + 1)
+        expected = {}
+        path = "/tmp/boat-lane-tests/cases.json"
+        for lane, kinds in zip(body["lanes"][1:], pairs):
+            lane["continue_on_failure"] = True
+            lane["selections"] = []
+            expected[lane["id"]] = "product_failure" if "product" in kinds else "uncertain_failure"
+            for index, kind in enumerate((*kinds, "pass")):
+                case = dict(id=f"case-{index}", status="pass" if kind == "pass" else
+                            "dependency-blocked" if kind == "dependency-blocked" else "failed",
+                            failure_signature=f"{lane['id']}-{index}")
+                if kind == "product":
+                    case["kind"] = "product"
+                command = "printf %s " + shlex.quote(json.dumps(dict(cases=[case])))
+                lane["selections"].append(dict(command=command + " > " + shlex.quote(path) + " # SELECT",
+                                               timeout_seconds=2, evidence_file=path))
+        self.assertEqual(self.run_case(body, "--jobs", "1"), 4)
+        reports = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        results = {row["lane"]: row for row in self.ledger() if row["event"] == "lane_result"}
+        for lane, verdict in expected.items():
+            with self.subTest(lane=lane):
+                complete = next(row for row in reports if row["lane"] == lane and row["attempt"] == "complete")
+                self.assertEqual(complete["verdict"], verdict)
+                self.assertEqual(results[lane]["verdict"], verdict)
+                self.assertEqual(len(complete["failures"]), 2)
+                self.assertEqual([row["selection"] for row in reports
+                                  if row["lane"] == lane and row["attempt"] == "initial"], [0, 1, 2])
         self.assert_cleanup()
 
     def test_lane_still_stops_after_nonpass_by_default(self):
@@ -375,19 +415,27 @@ class Cases(unittest.TestCase):
                               dict(id=blocked, status="blocked", dependency_blocked=True,
                                    request_ids=["req-blocked"]),
                               dict(id="eligible", status="fail", request_ids=["req-eligible"])])
-        retried = dict(cases=[dict(id="eligible", status="pass", request_ids=["req-retry"])])
+        other_known = [dict(id=f"known-{status}", status=status, request_ids=[f"req-{status}"])
+                       for status in ("failed", "error", "blocked", "dependency-blocked", "pass")]
+        initial["cases"].extend(other_known)
+        retried = dict(cases=[dict(id="eligible", status="pass", request_ids=["req-retry"]),
+                              dict(id="retry-known", status="failed", request_ids=["req-new"])])
         import shlex
         emit = lambda payload: "printf %s " + shlex.quote(json.dumps(payload)) + " > " + shlex.quote(path)
-        body["known_product_failures"] = [known, blocked]
+        body["known_product_failures"] = [known, blocked, "retry-known"] + [case["id"] for case in other_known]
         body["lanes"][0]["selections"] = [dict(command=emit(initial) + "; false # SELECT",
             timeout_seconds=2, evidence_file=path, retry_reset=[step("true")],
             retry_cases={known: step("touch /tmp/boat-lane-tests/unsafe-known-retry; false"),
                          "eligible": step(emit(retried) + " # RETRY_uncertain")})]
+        for case in other_known:
+            body["lanes"][0]["selections"][0]["retry_cases"][case["id"]] = step(
+                "touch /tmp/boat-lane-tests/unsafe-known-retry; false")
         self.assertEqual(self.run_case(body), 4)
         self.assertFalse((self.home / "unsafe-known-retry").exists())
         reports = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
         initial_report = next(row for row in reports if row["attempt"] == "initial")
-        self.assertEqual([case["id"] for case in initial_report["failures"]], [known, blocked, "eligible"])
+        self.assertEqual([case["id"] for case in initial_report["failures"]],
+                         [case["id"] for case in initial["cases"] if case["status"] != "pass"])
         cases = {row["id"]: row for row in initial_report["cases"]}
         self.assertEqual(cases[known]["status"], "fail")
         self.assertEqual(cases[known]["classification"], "product")
@@ -400,9 +448,21 @@ class Cases(unittest.TestCase):
         self.assertEqual(cases["eligible"]["retry_decision"], "once-case")
         retries = [row for row in reports if row["attempt"] == "retry"]
         self.assertEqual(len(retries), 1)
-        self.assertEqual([case["id"] for case in retries[0]["cases"]], ["eligible"])
+        self.assertEqual([case["id"] for case in retries[0]["cases"]], ["eligible", "retry-known"])
         final = next(row for row in reports if row["attempt"] == "complete")
         final_cases = {row["id"]: row for row in final["cases"]}
+        for case in other_known:
+            identity, status = case["id"], case["status"]
+            classification = ("pass" if status == "pass" else "known-harness-defect"
+                              if status == "dependency-blocked" else "product")
+            for observed in (cases[identity], final_cases[identity]):
+                self.assertEqual(observed["status"], status)
+                self.assertEqual(observed["classification"], classification)
+                self.assertEqual(observed["request_ids"], case["request_ids"])
+                self.assertEqual(observed["retry_decision"], "not-needed" if status == "pass" else "never")
+        self.assertEqual(final_cases["retry-known"]["classification"], "product")
+        self.assertEqual(final_cases["retry-known"]["retry_decision"], "never")
+        self.assertEqual(final_cases["retry-known"]["request_ids"], ["req-new"])
         self.assertEqual(final_cases[known]["status"], "fail")
         self.assertEqual(final_cases[known]["retry_decision"], "never")
         self.assertEqual(final_cases["eligible"]["retry_decision"], "exhausted")

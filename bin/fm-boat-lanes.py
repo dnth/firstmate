@@ -672,7 +672,7 @@ class Runner:
                     classification = "pass"
                 elif blocked or status == "dependency-blocked":
                     classification = "known-harness-defect"
-                elif identity in self.known_product_failures and status == "fail":
+                elif identity in self.known_product_failures:
                     classification = "product"
                 elif any(x in signature for x in self.spec.get("known_harness_defects", [])):
                     classification = "known-harness-defect"
@@ -893,7 +893,8 @@ class Runner:
                 phase = "selection"
                 code, failure_verdict = self.selection(box, lane, selection, index)
                 if code:
-                    verdict = failure_verdict
+                    verdict = max(verdict, failure_verdict, key=(
+                        "pass", "known_harness_defect", "uncertain_failure", "product_failure").index)
                     with self.lock:
                         signature = sorted(value for value, seen in self.signatures.items() if name in seen)
                     if not lane.get("continue_on_failure", False) or self.stop.is_set():
