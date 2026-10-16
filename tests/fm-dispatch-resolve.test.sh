@@ -144,13 +144,29 @@ else
 fi
 printf '%s\n' "$*" >> "${QUOTA_AXI_CALLS:?}"
 [ "${FAKE_QUOTA_FAIL:-0}" = 1 ] && exit 1
+[ "${1:-}" != --provider ] || shift 2
 [ "${1:-}" = --json ] || exit 2
 cat "${QUOTA_AXI_FIXTURE:?}"
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
+cat > "$FAKEBIN/omp" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${OMP_CALL_LOG:?}"
+[ "${FM_FAKE_OMP_CATALOG_FAIL:-0}" = 1 ] && exit 3
+if [ "${FM_FAKE_OMP_CATALOG_HANG:-0}" = 1 ]; then sleep 60; fi
+[ "${1:-}" = models ] || exit 2
+if [ -n "${FM_FAKE_OMP_CATALOG:-}" ]; then
+  printf '%s\n' "$FM_FAKE_OMP_CATALOG"
+else
+  printf '%s\n' '{"models":[]}'
+fi
+SH
+chmod +x "$FAKEBIN/omp"
+
 RESPONSE="$TMP_ROOT/response.json"
-export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env"
+export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env" OMP_CALL_LOG="$LOG/omp.calls"
 
 reset_log() {
   rm -rf "$LOG"
@@ -758,6 +774,274 @@ jq '.providers[-1].accountKey = "default"' "$V6" > "$V7"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$V7" run code out err "$BRIEF"
 assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "schema 6 with a duplicate provider lane is refused"
 pass "schema 5 and 6 snapshots are read from the right lane and window; schema 7 is refused"
+
+# --- account lanes: one profile expands to one candidate per mapped account ----
+# config/quota-account-lanes.json maps a quota provider family to the concrete
+# provider ids that spend each of its accounts. The resolver must rank each
+# mapped lane on that lane's own quota row, emit the chosen account's provider
+# in the profile model, report every unverifiable or unmapped account, and leave
+# an unmapped family on the single collapsed lane exactly as before.
+LANE_RULES="$TMP_ROOT/lane-rules.json"
+cat > "$LANE_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "Crew work that runs on the captain's OpenCode Go subscription.",
+      "use": { "harness": "omp", "model": "opencode-go/deepseek-v4.1-flash", "effort": "high", "provider": "opencode-go" }
+    }
+  ],
+  "default": [
+    { "harness": "claude", "model": "sonnet", "effort": "high" }
+  ]
+}
+JSON
+cat > "$LANE_RULES.no-model" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "Crew work on the captain's OpenCode Go subscription with no named model.",
+      "use": { "harness": "omp", "effort": "high", "provider": "opencode-go" }
+    }
+  ]
+}
+JSON
+LANES="$HOME_DIR/config/quota-account-lanes.json"
+MISSING_LANE_RULES="$TMP_ROOT/lane-rules-missing.json"
+jq '.rules[0].use.model = "opencode-go/muse-spark-1.3-contributor"' "$LANE_RULES" > "$MISSING_LANE_RULES"
+
+write_lane_response() {  # <path> <choice> <confidence>
+  cat > "$1" <<JSON
+{ "model": "jev-1.13.0",
+  "answers": { "rule": { "type": "choice", "choice": "$2", "confidence": $3,
+    "probabilities": { "rule_1": 0.97, "default": 0.03 } } },
+  "usage": { "input_tokens": 640, "output_tokens": 41 } }
+JSON
+}
+
+# Schema 6 snapshot with three opencode-go lanes: the built-in credential's own
+# "default" lane plus two mapped account lanes. <all> sets every lane's
+# all_models and model-scope spendPriority for the account the caller names.
+write_lane_quota() {  # <path> <default-priority> <acct-a-priority> <acct-b-priority>
+  local path=$1 da=$2 pa=$3 pb=$4
+  jq --argjson da "$da" --argjson pa "$pa" --argjson pb "$pb" '
+    .schemaVersion = 6
+    | .providers |= map(. + {accountKey: "default", accountKeys: ["default"]})
+    | .providers |= map(select(.provider != "opencode-go"))
+    | .providers += [
+      {provider: "opencode-go", accountKey: "default", accountKeys: ["default"], state: {status: "fresh"}, quotaSemantics: {status: "known", effectiveAvailability: [
+        {scope: "all_models", status: "known", effectivePercentRemaining: 88, runway: {status: "projected_exhaustion"}, selection: {spendPriority: $da}}]}},
+      {provider: "opencode-go", accountKey: "acct-a", accountKeys: ["acct-a"], state: {status: "fresh"}, quotaSemantics: {status: "known", effectiveAvailability: [
+        {scope: "all_models", status: "known", effectivePercentRemaining: 41, runway: {status: "projected_exhaustion"}, selection: {spendPriority: $pa}},
+        {scope: "model:deepseek-v4.1-flash", status: "known", effectivePercentRemaining: 37, runway: {status: "projected_exhaustion"}, selection: {spendPriority: $pa}}]}},
+      {provider: "opencode-go", accountKey: "acct-b", accountKeys: ["acct-b"], state: {status: "fresh"}, quotaSemantics: {status: "known", effectiveAvailability: [
+        {scope: "all_models", status: "known", effectivePercentRemaining: 73, runway: {status: "through_reset"}, selection: {spendPriority: $pb}}]}}]' "$QUOTA" > "$path"
+}
+LANE_QUOTA="$TMP_ROOT/lane-quota.json"
+# Avoid trailing zeroes: jq versions differ in preserving JSON number spelling.
+write_lane_quota "$LANE_QUOTA" 0.95 0.3 0.9
+
+# The lane provider ids are checked against the harness's own model catalog, so
+# the stub answers with exactly the providers these cases map.
+lane_catalog() {  # <path> <provider id>...
+  local path=$1 first=1 p
+  shift
+  {
+    printf '{"models":['
+    for p in "$@"; do
+      [ "$first" = 1 ] || printf ','
+      first=0
+      printf '{"provider":"%s","id":"deepseek-v4.1-flash","selector":"%s/deepseek-v4.1-flash"}' "$p" "$p"
+      printf ',{"provider":"%s","id":"muse-spark-1.3-contributor","selector":"%s/muse-spark-1.3-contributor"}' "$p" "$p"
+    done
+    printf ']}'
+  } > "$path"
+}
+LANE_CATALOG="$TMP_ROOT/lane-catalog.json"
+lane_catalog "$LANE_CATALOG" opencode-go opencode-go-a opencode-go-b opencode-go-gone
+
+cat > "$LANES" <<'JSON'
+{
+  "providers": {
+    "opencode-go": {
+      "acct-a": "opencode-go-a",
+      "acct-b": "opencode-go-b"
+    }
+  }
+}
+JSON
+reset_log
+cp "$LANE_RULES" "$RULES"
+write_lane_response "$RESPONSE" rule_1 0.93
+FM_FAKE_OMP_CATALOG="$(cat "$LANE_CATALOG")" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LANE_QUOTA" run code out err "$BRIEF"
+expect_code 0 "$code" "account lanes exit 0"
+assert_contains "$out" '  status: clear' "account lanes resolve"
+assert_contains "$out" "  candidate: omp:opencode-go-a/deepseek-v4.1-flash  provider=opencode-go  account=acct-a  scope=all_models  remaining=41%  spendPriority=0.3  runway=projected_exhaustion" "the first mapped account is its own candidate on its own lane"
+assert_contains "$out" "  candidate: omp:opencode-go-b/deepseek-v4.1-flash  provider=opencode-go  account=acct-b  scope=all_models  remaining=73%  spendPriority=0.9  runway=through_reset  -> eligible" "the second mapped account is ranked on its own lane"
+assert_contains "$out" '  candidate: omp:opencode-go/deepseek-v4.1-flash  provider=opencode-go  account=default  -> not eligible: account lane default is not in the account mapping' "a snapshot lane the mapping does not name is reported, never used"
+assert_contains "$out" "  profile: --harness 'omp' --model 'opencode-go-b/deepseek-v4.1-flash' --effort 'high'" "the profile names the chosen account's provider"
+assert_not_contains "$out" "  profile: --harness 'omp' --model 'opencode-go/deepseek-v4.1-flash'" "the built-in credential's lane is never chosen while the mapping omits it"
+pass "a mapped family expands into one candidate per account, ranked on each lane's own row"
+
+for harness in opencode pi pi-signed; do
+  reset_log
+  jq --arg harness "$harness" '.rules[0].use.harness = $harness | del(.rules[0].use.effort)' "$LANE_RULES" > "$RULES"
+  FM_FAKE_OMP_CATALOG_FAIL=1 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LANE_QUOTA" run code out err "$BRIEF"
+  expect_code 0 "$code" "$harness on a mapped family exits 0"
+  assert_contains "$out" '  status: clear' "$harness retains collapsed-lane resolution"
+  assert_contains "$out" "candidate: $harness:opencode-go/deepseek-v4.1-flash  provider=opencode-go  scope=all_models  remaining=88%  spendPriority=0.95" "$harness reads the default collapsed lane"
+  assert_contains "$out" "  profile: --harness '$harness' --model 'opencode-go/deepseek-v4.1-flash'" "$harness keeps its declared model"
+  assert_not_contains "$out" 'account=' "$harness gains no account field or unmapped candidates"
+  assert_absent "$LOG/omp.calls" "$harness never consults another harness catalog"
+done
+cp "$LANE_RULES" "$RULES"
+
+EXHAUSTED_LANES="$TMP_ROOT/exhausted-lanes.json"
+jq '(.providers[] | select(.provider == "opencode-go") | .quotaSemantics.effectiveAvailability[]) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$LANE_QUOTA" > "$EXHAUSTED_LANES"
+for harness in omp opencode pi pi-signed; do
+  reason=$(PATH="$FAKEBIN:$BASE_PATH" QUOTA_AXI_FIXTURE="$EXHAUSTED_LANES" bash -c '
+    . "$1/bin/fm-quota-axi-lib.sh"
+    fm_quota_profile_fallback_reason "$2" "$3"
+  ' _ "$ROOT" "$harness" opencode-go-dnth/deepseek-v4.1-flash)
+  assert_equals '' "$reason" "$harness account model has no predictive fallback from collapsed family quota"
+done
+reason=$(PATH="$FAKEBIN:$BASE_PATH" QUOTA_AXI_FIXTURE="$EXHAUSTED_LANES" bash -c '
+  . "$1/bin/fm-quota-axi-lib.sh"
+  fm_quota_profile_fallback_reason omp opencode-go/deepseek-v4.1-flash
+' _ "$ROOT")
+assert_equals quota_exhausted "$reason" "the built-in provider still has predictive fallback on exhausted quota"
+pass "other harnesses preserve collapsed dispatch and account models skip predictive family fallback"
+
+# The mapping may point a lane straight at the built-in provider id, and then
+# that lane, not the account with the best headroom, carries the profile.
+cat > "$LANES" <<'JSON'
+{
+  "providers": {
+    "opencode-go": {
+      "default": "opencode-go",
+      "acct-a": "opencode-go-a"
+    }
+  }
+}
+JSON
+reset_log
+write_lane_response "$RESPONSE" rule_1 0.93
+FM_FAKE_OMP_CATALOG="$(cat "$LANE_CATALOG")" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LANE_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'omp' --model 'opencode-go/deepseek-v4.1-flash' --effort 'high'" "a lane mapped to the built-in provider id keeps the built-in model"
+assert_contains "$out" '  candidate: omp:opencode-go/deepseek-v4.1-flash  provider=opencode-go  account=default  scope=all_models  remaining=88%  spendPriority=0.95  runway=projected_exhaustion  -> eligible' "the built-in credential's lane is ranked on its own row"
+assert_contains "$out" '  candidate: omp:opencode-go-a/deepseek-v4.1-flash  provider=opencode-go  account=acct-a  scope=all_models  remaining=41%  spendPriority=0.3  runway=projected_exhaustion' "the weaker mapped lane keeps its evidence"
+assert_contains "$out" '  candidate: omp:opencode-go/deepseek-v4.1-flash  provider=opencode-go  account=acct-b  -> not eligible: account lane acct-b is not in the account mapping' "a lane with no mapping stays reported"
+pass "the most-headroom lane wins even when it is not the account with the best headline number, and the mapping alone decides which provider id rides the profile"
+
+# A mapped account the snapshot does not carry is reported, never guessed.
+cat > "$LANES" <<'JSON'
+{
+  "providers": {
+    "opencode-go": {
+      "acct-a": "opencode-go-a",
+      "acct-gone": "opencode-go-gone"
+    }
+  }
+}
+JSON
+reset_log
+write_lane_response "$RESPONSE" rule_1 0.93
+FM_FAKE_OMP_CATALOG="$(cat "$LANE_CATALOG")" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LANE_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  candidate: omp:opencode-go-gone/deepseek-v4.1-flash  provider=opencode-go  account=acct-gone  -> not eligible: account lane acct-gone is not in the quota snapshot' "a mapped account missing from the snapshot is reported"
+assert_contains "$out" "  profile: --harness 'omp' --model 'opencode-go-a/deepseek-v4.1-flash' --effort 'high'" "the remaining mapped account still resolves"
+pass "a mapped account with no snapshot lane is reported and never guessed"
+
+# A mapped family whose profile names no model cannot be expanded.
+cat > "$LANES" <<'JSON'
+{
+  "providers": {
+    "opencode-go": {
+      "acct-a": "opencode-go-a"
+    }
+  }
+}
+JSON
+reset_log
+cp "$LANE_RULES.no-model" "$RULES"
+write_lane_response "$RESPONSE" rule_1 0.93
+FM_FAKE_OMP_CATALOG="$(cat "$LANE_CATALOG")" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LANE_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  candidate: omp:-  provider=opencode-go  -> not eligible: account mapping for provider opencode-go needs an explicit model on the profile' "a mapped family without a model is reported"
+assert_contains "$out" '  status: escalate' "an unexpandable mapped profile escalates instead of dispatching"
+cp "$LANE_RULES" "$RULES"
+pass "a mapped family whose profile names no model is reported and never guessed"
+
+# A mapped provider id the harness catalog does not offer is reported, and the
+# run escalates rather than dispatching a model the worker cannot load.
+cat > "$LANES" <<'JSON'
+{"providers":{"opencode-go":{"acct-a":"opencode-go-typo"}}}
+JSON
+reset_log
+cp "$LANE_RULES" "$RULES"
+write_lane_response "$RESPONSE" rule_1 0.93
+FM_FAKE_OMP_CATALOG="$(cat "$LANE_CATALOG")" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LANE_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  candidate: omp:opencode-go-typo/deepseek-v4.1-flash  provider=opencode-go  account=acct-a  -> not eligible: mapped account acct-a names provider opencode-go-typo, which does not offer deepseek-v4.1-flash' "a mapped provider id the catalog does not offer is reported"
+assert_contains "$out" '  status: escalate' "an unverifiable mapped provider never yields a profile"
+assert_present "$LOG/argv" "an unverifiable mapped provider still makes the model request"
+pass "a mapped provider id the harness catalog does not offer is reported and never dispatched"
+
+# An unreadable catalog leaves every mapped account unverifiable.
+cat > "$LANES" <<'JSON'
+{"providers":{"opencode-go":{"acct-a":"opencode-go-a"}}}
+JSON
+reset_log
+write_lane_response "$RESPONSE" rule_1 0.93
+FM_FAKE_OMP_CATALOG_FAIL=1 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LANE_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  candidate: omp:opencode-go-a/deepseek-v4.1-flash  provider=opencode-go  account=acct-a  -> not eligible: the OMP catalog could not be read, so account lane acct-a is unverifiable' "an unreadable catalog is reported"
+assert_contains "$out" '  status: escalate' "an unverifiable catalog escalates instead of dispatching"
+pass "an unreadable harness catalog leaves mapped accounts unverifiable"
+
+reset_log
+FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_FAKE_OMP_CATALOG_HANG=1 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LANE_QUOTA" run code out err "$BRIEF"
+expect_code 0 "$code" "a catalog timeout remains a structured outcome"
+assert_contains "$out" 'the OMP catalog could not be read, so account lane acct-a is unverifiable' "the portable timeout refuses the stalled catalog"
+assert_contains "$out" '  status: escalate' "a timed-out catalog cannot dispatch an account"
+assert_not_contains "$out" '  profile:' "a timed-out catalog emits no profile"
+pass "a stalled catalog is bounded without an external timeout executable"
+
+# An unmapped family keeps the single collapsed lane byte for byte.
+rm -f "$LANES"
+reset_log
+cp "$BASE_RULES" "$RULES"
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$V6" run code out err "$BRIEF"
+expect_code 0 "$code" "an absent mapping file exits 0"
+assert_not_contains "$out" 'account=' "an absent mapping file adds no account field"
+assert_absent "$LOG/omp.calls" "an absent mapping file never reads the harness catalog"
+reset_log
+printf '%s\n' '{"providers":{}}' > "$LANES"
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$V6" run code out err "$BRIEF"
+expect_code 0 "$code" "an empty mapping exits 0"
+assert_not_contains "$out" 'account=' "an empty mapping adds no account field"
+pass "providers with no mapping keep the single collapsed lane exactly as before"
+
+# A malformed mapping is an actionable configuration error.
+reset_log
+for bad in \
+  '{"providers":{"opencode-go":{"acct-a":"Opencode-Go-A"}}}|each quota provider needs a non-empty map of accountKey to provider id' \
+  '{"providers":{"opencode-go":{}}}|each quota provider needs a non-empty map of accountKey to provider id' \
+  '{"providers":{"OpenCode-Go":{"acct-a":"opencode-go-a"}}}|each quota provider needs a non-empty map of accountKey to provider id' \
+  '{"providers":"opencode-go"}|providers must be an object' \
+  '[]|top-level value must be an object' \
+  '{} {}|exactly one JSON object is required' \
+  '{} {"providers":{"opencode-go":{"acct-a":"opencode-go-a"}}}|exactly one JSON object is required'; do
+  printf '%s\n' "${bad%%|*}" > "$LANES"
+  cp "$LANE_RULES" "$RULES"
+  write_lane_response "$RESPONSE" rule_1 0.93
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "malformed mapping exits 2: ${bad#*|}"
+  assert_contains "$err" "malformed account lane file: $LANES - ${bad#*|}" "malformed mapping is named: ${bad#*|}"
+done
+printf '%s\n' '{"providers":' > "$LANES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "non-JSON mapping exits 2"
+assert_contains "$err" 'not JSON' "non-JSON mapping is named"
+rm -f "$LANES"
+pass "a malformed account mapping is an actionable configuration error"
 
 # --- API and response failures are error outcomes, exit 0 ----------------------
 reset_log

@@ -509,16 +509,67 @@ Missing or nonnumeric `spendPriority` evidence is never ranked, and every candid
 On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
 The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor with no runner-up taken), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
 Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
+Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules or account-lane file, or missing `jq`, each reported and never selected around.
 Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
-By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
+By accepted design, a `clear` result does not enforce general catalog/authentication, reasoning-class, or completion-runway gates; mapped OMP accounts must pass the catalog check owned by the script header.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 Typed resolution validates and reads `quota-axi --json` according to the schema-version and account-lane contract in the [`fm-dispatch-resolve.sh` header](../bin/fm-dispatch-resolve.sh); an incompatible snapshot is an ordinary `error` outcome that returns the intake to firstmate, so the `FM_QUOTA_AXI_MIN` floor is unchanged.
+`config/quota-account-lanes.json` is an optional local, gitignored file that turns one profile on a multi-account provider into one candidate per account, so a dispatch can spend whichever of the captain's accounts has the most headroom instead of whichever account its single credential happens to be.
+It maps a quota-axi provider family to the concrete provider ids that spend each of that family's accounts, keyed by the `accountKey` the snapshot reports:
+
+```json
+{
+  "providers": {
+    "opencode-go": {
+      "opencode-go-dnth": "opencode-go-dnth",
+      "opencode-go-dnth-1": "opencode-go-dnth-1",
+      "opencode-go-neuralengine": "opencode-go-neuralengine",
+      "opencode-go-neuralengine-1": "opencode-go-neuralengine-1"
+    }
+  }
+}
+```
+
+These are OMP provider ids: profiles for other harnesses keep their declared model and single collapsed lane, with no account field.
+The [resolver header](../bin/fm-dispatch-resolve.sh) owns the mapping schema, validation, expansion, and bounded catalog-read contract, including refusal of mapped accounts when the catalog is missing or unreadable.
+Predictive fallback checks do not resolve account-lane provider ids through this mapping and yield no fallback reason for those models.
+The provider ids name entries in the operator's own `~/.omp/agent/models.yml`, which is not part of this repo.
+Before adding per-account entries, copy that file to `~/.omp/agent/models.yml.bak-fm-quota-active-account-lane`; add entries without changing any existing provider or the built-in `opencode-go` credential.
+Keep the mapping in the effective home's private config directory and configure each secondmate separately; bootstrap does not validate it and it is not automatically propagated to secondmate homes.
+Never edit `~/.local/share/opencode/auth.json` or `~/.omp/agent/agent.db` for this setup, and never print credentials or their full hashes in commands, logs, reports, or test output.
+Each such entry points at the family's own base URL, mirrors the built-in provider for the models dispatch uses, and takes its credential from a `!command` value that reads that account's key at request time, so no key reaches a command line, a log, or a status line:
+
+```yaml
+providers:
+  opencode-go-dnth:
+    baseUrl: https://opencode.ai/zen/go/v1
+    apiKey: "!jq -er '.[\"opencode-go-dnth\"].key | select(type==\"string\" and length>0)' ~/.local/share/opencode/auth.json"
+    headers:
+      x-opencode-session: "!cat /proc/sys/kernel/random/uuid"
+    compat:
+      whenThinking:
+        requiresReasoningContentForToolCalls: true
+        allowsSyntheticReasoningContentForToolCalls: false
+        reasoningContentField: reasoning_content
+    models:
+      - id: <model id>
+        api: <the api the built-in provider resolves for this id>
+        reasoning: true
+        thinking: { mode: effort, efforts: [low, high, max] }
+        input: [text, image]
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+        contextWindow: 1000000
+        maxTokens: 384000
+```
+
+OMP keys several request behaviors on the provider id itself, so a per-account entry cannot inherit them from the built-in provider by name.
+Three consequences are worth naming: the OpenCode Go gateway rejects a request that carries no `x-opencode-session` header, which the built-in provider supplies from its own catalog, so a per-account entry must declare one; the reasoning-continuation compat the built-in derives for a reasoning model on this provider must be declared as above, or thinking-mode tool calls 400; and a model id that resolves to a different api family under the built-in provider, such as `muse-spark-1.3-contributor` at `openai-responses`, must carry that api in its own entry.
+The per-account entry defines only the models dispatch names, so add a model id here in the same pass as adding it to a dispatch profile; the account mapping contains provider ids, not model ids.
 The ported evidence record lives in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md); upstream's live rule-match runs are recorded there and remain the authority on model behavior.
 
 ## Toolchain
