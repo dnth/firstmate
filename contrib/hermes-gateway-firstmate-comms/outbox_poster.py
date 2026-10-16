@@ -1479,8 +1479,8 @@ def discord_send(payload: dict) -> dict:
     }
 
 
-def discord_edit(channel_id: str, message_id: str, content: str, components: list) -> None:
-    """Replace one posted message's text and buttons over REST. Mentions are
+def discord_edit(channel_id: str, message_id: str, content: str | None, components: list) -> None:
+    """Edit buttons and optional text over REST; None preserves text. Mentions are
     never parsed, so a name in the outcome line cannot ping anyone. Raises
     DiscordSendError on any failure.
     """
@@ -1489,9 +1489,10 @@ def discord_edit(channel_id: str, message_id: str, content: str, components: lis
         raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
     if not (_SNOWFLAKE.fullmatch(channel_id or "") and _SNOWFLAKE.fullmatch(message_id or "")):
         raise DiscordSendError("permanent", "edit target is not a Discord message id")
-    body = json.dumps(
-        {"content": content, "components": components, "allowed_mentions": {"parse": []}}
-    ).encode("utf-8")
+    body = {"components": components, "allowed_mentions": {"parse": []}}
+    if content is not None:
+        body["content"] = content
+    body = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(
         f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}",
         data=body,
@@ -1509,24 +1510,6 @@ def discord_edit(channel_id: str, message_id: str, content: str, components: lis
         raise DiscordSendError(classify_http_code(err.code), f"discord HTTP {err.code}", err.code) from err
     except (urllib.error.URLError, TimeoutError, OSError) as err:
         raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
-
-
-def discord_message_text(channel_id: str, message_id: str) -> str:
-    token = _bot_token()
-    if not token:
-        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
-    if not (_SNOWFLAKE.fullmatch(channel_id or "") and _SNOWFLAKE.fullmatch(message_id or "")):
-        raise ValueError("read target is not a Discord message id")
-    request = urllib.request.Request(
-        f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}",
-        method="GET",
-        headers={"Authorization": f"Bot {token}", "User-Agent": USER_AGENT},
-    )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        text = json.load(response).get("content")
-    if not isinstance(text, str) or not text:
-        raise ValueError("Discord message has no original text")
-    return text
 
 
 def _decision_cli() -> Path:
@@ -1551,7 +1534,7 @@ def _unshown_settled_posts(home: Path | None = None) -> bool:
 def reconcile_decision_posts(
     home: Path | None = None,
     full: bool = True,
-    edit: Callable[[str, str, str, list], None] | None = None,
+    edit: Callable[[str, str, str | None, list], None] | None = None,
 ) -> list[str]:
     """Show each decision post's current line on Discord with its buttons off:
     the sent line once a click filed its request, then the outcome once
@@ -1570,34 +1553,6 @@ def reconcile_decision_posts(
     for line in result.stdout.splitlines():
         try:
             item = json.loads(line)
-            if item["content"] is None:
-                try:
-                    outbox = state_dir(home) / "ext-outbox"
-                    progress = json.loads((outbox / (item["post"] + ".progress.json")).read_text())
-                    ids = progress["discord_message_ids"]
-                    if len(ids) != progress["total"] or progress["posted_count"] != progress["total"]:
-                        raise ValueError("decision delivery is incomplete")
-                    payload_path = outbox / (item["post"] + ".json")
-                    if payload_path.is_file():
-                        payload = json.loads(payload_path.read_text())
-                        progress["texts"] = split_reply(
-                            payload["text"], home=home, limit=progress["limit"],
-                            cap=progress["cap"], legacy=True,
-                        )["texts"]
-                        if len(progress["texts"]) != progress["total"]:
-                            raise ValueError("recovered decision chunk count does not match delivery")
-                    else:
-                        if (outbox / (item["post"] + ".finalized")).exists():
-                            raise ValueError("original decision text is unavailable after an earlier edit")
-                        progress["texts"] = [discord_message_text(item["channel_id"], message) for message in ids]
-                    slug, kind, generation = item["post"].rsplit(".", 2)
-                    write_progress({"slug": slug, "kind": kind, "generation": int(generation)}, progress, home)
-                    item["content"] = item["header"] + "\n\n" + progress["texts"][-1]
-                    if len(item["content"]) > DISCORD_MESSAGE_MAX:
-                        raise ValueError("legacy decision text cannot safely fit its outcome header")
-                except Exception as err:
-                    print(f"fm-ext-poster: original decision text recovery failed: {err}", file=sys.stderr)
-                    continue
             components = decisions.components_for(
                 item,
                 disabled=True,
@@ -1609,7 +1564,7 @@ def reconcile_decision_posts(
                 continue
         except Exception:
             continue
-        with _temp_text(item["content"]) as content_file:
+        with _temp_text(item["receipt"]) as content_file:
             done = subprocess.run(
                 [str(_decision_cli()), "finalized", "--post", item["post"], "--content-file", content_file],
                 check=False,
@@ -1912,10 +1867,15 @@ def deliver_one(
         "limit": split["limit"],
         "cap": split["cap"],
     }
-    progress["texts"] = chunks
     if isinstance(payload.get("decision"), dict):
         # The post record a click and a later edit find this decision by.
-        progress["decision"] = payload["decision"]
+        post_decision = dict(payload["decision"])
+        if stored and ("texts" not in stored or not isinstance(
+            (stored.get("decision") or {}).get("sections"), dict
+        )):
+            post_decision.pop("sections", None)
+        progress["decision"] = post_decision
+    progress["texts"] = chunks
     if int(progress.get("total") or 0) != len(chunks):
         release_inflight(payload, home=home)
         return "mid-delivery"

@@ -1448,11 +1448,19 @@ test_17_outcome_headers_fit_reserved_and_legacy_posts() {
   home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key legacy-overflow \
     "$(printf 'North%.0s' {1..16})" >/dev/null 2>&1 || fail "could not settle the legacy decision"
   out=$(FM_EXT_NOW_OVERRIDE=1791720000 reconcile "$home" True)
-  [ -z "$out" ] || fail "legacy overflow must refuse the edit rather than truncate protected text: $out"
+  printf '%s' "$out" | jq -e '
+    .message == "700000000000000120" and .content == null
+    and ([.components[].components[] | .disabled] | all)
+    and .components[0].components[0].style == 3
+    and (.components[0].components[0].label | endswith(" ✓"))
+    and .components[0].components[1].style == 2
+    and .components[1].components[0].style == 2' >/dev/null \
+    || fail "legacy overflow must settle its buttons without a text edit: $out"
   jq -e --arg legacy "$legacy" '.texts[-1] == $legacy' "$progress" >/dev/null \
     || fail "legacy overflow changed the original text"
   [ -f "${payload%.json}.settled.json" ] || fail "legacy overflow lost its settlement"
-  [ ! -f "${payload%.json}.finalized" ] || fail "refused legacy edit was finalized"
+  jq -e '.components_only == true and .final == true and .selected_option_id == 1' \
+    "${payload%.json}.finalized" >/dev/null || fail "legacy button settlement was not receipted"
 
   open_key "$home" replace-fallback
   old_payload=$(emit_decision "$home" 4 \
@@ -1482,7 +1490,7 @@ test_17_outcome_headers_fit_reserved_and_legacy_posts() {
     || fail "the replacement fallback must keep the question and disable the old buttons: $out"
   repeat=$(reconcile "$home" True)
   [ -z "$repeat" ] || fail "settled overflow and replacement edits must not retry unchanged posts"
-  pass "17 reserved chunks settle without trimming, only the last chunk is edited, and legacy overflow refuses truncation while replacement state remains one-time"
+  pass "17 reserved chunks settle without trimming, only the last chunk is edited, and legacy overflow settles buttons without changing text"
 }
 
 test_18_decision_plans_preserve_questions_and_legacy_boundaries() {
@@ -1539,7 +1547,8 @@ import outbox_poster as poster
 home, path, length = Path(sys.argv[1]), Path(sys.argv[3]), int(sys.argv[4])
 payload = json.loads(path.read_text())
 payload["text"] = "0123456789" * (length // 10)
-payload["decision"].pop("sections", None)
+if length == 3600:
+    payload["decision"].pop("sections", None)
 path.write_text(json.dumps(payload))
 plan = poster.split_reply(payload["text"], home=home, limit=1900, cap=25, legacy=True)
 assert len(plan["texts"]) == 2
@@ -1564,197 +1573,186 @@ def resume(chunk):
 assert poster.deliver_one(path, send=resume, home=home) == "sent"
 assert sent == plan["texts"], sent
 assert poster.load_progress(payload, home)["posted_count"] == 2
+assert "sections" not in poster.load_progress(payload, home)["decision"]
 PYTEST
   done
   pass "18 capped decisions refuse text loss and legacy resumes retain original chunks"
 }
 
-test_19_completed_legacy_posts_recover_original_chunks_before_editing() {
-  local home payload
-  home="$TMP_ROOT/c19"
-  setup_home "$home"
-  open_request "$home"
-  open_key "$home" recover-original
-  payload=$(emit_decision "$home" 1 '{"key":"key:'"$TASK"':recover-original","options":[{"label":"North"},{"label":"South"}]}')
-  plugin_py "$home" "$payload" <<'PYTEST' || fail "could not prepare completed legacy chunks"
-import json, sys
+assert_legacy_edit() {
+  local home=$1 payload=$2 selected=$3 final=$4
+  plugin_py "$home" "$payload" "$selected" "$final" <<'PYTEST' || fail "legacy buttons did not settle without changing text"
+import io, json, sys
 from pathlib import Path
-import outbox_poster as poster
-
-home, path = Path(sys.argv[1]), Path(sys.argv[3])
-payload = json.loads(path.read_text())
-payload["text"] = "Earlier explanation. " * 90 + "\n\n" + payload["text"]
-payload["decision"].pop("sections", None)
-path.write_text(json.dumps(payload))
-messages = {}
-def send(chunk):
-    message = str(700000000000000190 + chunk["chunk_index"])
-    messages[message] = chunk["text"]
-    return {"discord_message_id": message, "buttons": True}
-assert poster.deliver_one(path, send=send, home=home) == "sent"
-progress = poster.load_progress(payload, home)
-assert progress["total"] == 2
-assert progress["posted_count"] == 2
-progress.pop("texts")
-poster.write_progress(payload, progress, home)
-(home / "messages.json").write_text(json.dumps(messages))
-PYTEST
-  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key recover-original North \
-    >/dev/null 2>&1 || fail "could not settle the completed legacy post"
-  plugin_py "$home" "$payload" <<'PYTEST' || fail "completed legacy recovery lost original text or retry semantics"
-import json, sys
-from pathlib import Path
-import outbox_poster as poster
-
-home, path = Path(sys.argv[1]), Path(sys.argv[3])
-stem = path.stem
-outbox = path.parent
-progress_path = outbox / (stem + ".progress.json")
-finalized = outbox / (stem + ".finalized")
-messages = json.loads((home / "messages.json").read_text())
-path.unlink(missing_ok=True)
-import io
 from unittest.mock import patch
-sample_id, sample_text = next(iter(messages.items()))
-with patch.object(poster, "_bot_token", return_value="test-token"), patch.object(
-    poster.urllib.request, "urlopen",
-    return_value=io.BytesIO(json.dumps({"content": sample_text}).encode()),
-) as http:
-    assert poster.discord_message_text("222222222222222222", sample_id) == sample_text
-    request = http.call_args.args[0]
-    assert request.get_method() == "GET"
-    assert request.full_url.endswith("/channels/222222222222222222/messages/" + sample_id)
-    assert request.get_header("Authorization") == "Bot test-token"
-reads, edits = [], []
-def read(channel, message):
-    assert channel == "222222222222222222"
-    reads.append(message)
-    if message.endswith("191"):
-        raise OSError("temporary read failure")
-    return messages[message]
-def edit(channel, message, content, components):
-    edits.append((message, content))
-    assert message.endswith("191")
-    assert content.split("\n\n", 1)[1] == messages[message]
-    assert all(button["disabled"] for row in components for button in row["components"])
+import outbox_poster as poster
 
-poster.discord_message_text = read
-assert poster.reconcile_decision_posts(home=home, edit=edit) == []
-assert edits == []
-assert "texts" not in json.loads(progress_path.read_text())
-assert not finalized.exists()
-poster.discord_message_text = lambda channel, message: messages[message]
-def failed_edit(*args):
-    raise poster.DiscordSendError("transient", "temporary edit failure")
-assert poster.reconcile_decision_posts(home=home, edit=failed_edit) == []
-assert json.loads(progress_path.read_text())["texts"] == list(messages.values())
-assert not finalized.exists()
-def unexpected_read(*args):
-    raise AssertionError("persisted originals must not be fetched again")
-poster.discord_message_text = unexpected_read
-assert poster.reconcile_decision_posts(home=home, edit=edit) == [stem]
-assert len(edits) == 1
-assert finalized.read_text() == edits[0][1]
-assert poster.reconcile_decision_posts(home=home, edit=edit) == []
-assert len(edits) == 1
-progress = json.loads(progress_path.read_text())
-progress.pop("texts")
-payload = {"slug": stem.rsplit(".", 2)[0], "kind": "followup", "generation": 1}
-poster.write_progress(payload, progress, home)
-assert poster.reconcile_decision_posts(home=home, edit=edit) == []
-assert len(edits) == 1
+home, path = Path(sys.argv[1]), Path(sys.argv[3])
+selected = None if sys.argv[4] == "none" else int(sys.argv[4])
+final = sys.argv[5] == "true"
+state_path = home / "discord.json"
+state = json.loads(state_path.read_text())
+original = state["content"].encode()
+earlier = state["earlier"].encode()
+requests = []
+settled = path.parent / (path.stem + ".settled.json")
+ledger = settled.read_bytes() if settled.exists() else None
+def http(request, timeout):
+    body = json.loads(request.data)
+    requests.append((request.get_method(), request.full_url, body))
+    if "content" in body:
+        state["content"] = body["content"]
+    state["components"] = body["components"]
+    return io.BytesIO(b"{}")
+with patch.object(poster, "_bot_token", return_value="test-token"), patch.object(
+    poster.urllib.request, "urlopen", side_effect=http,
+):
+    result = poster.reconcile_decision_posts(home=home)
+    assert result == [path.stem], (result, requests)
+    assert len(requests) == 1, requests
+    method, url, body = requests[0]
+    assert method == "PATCH" and url.endswith("/messages/700000000000000001"), requests
+    assert set(body) == {"components", "allowed_mentions"}, body
+    assert state["content"].encode() == original
+    assert state["earlier"].encode() == earlier
+    buttons = [button for row in body["components"] for button in row["components"]]
+    assert all(button["disabled"] for button in buttons), buttons
+    for index, button in enumerate(buttons, 1):
+        chosen = index == selected
+        assert button["style"] == (3 if chosen else 2), buttons
+        assert button["label"].endswith(" ✓") == chosen, buttons
+    receipt = json.loads((path.parent / (path.stem + ".finalized")).read_text())
+    assert receipt == dict(components_only=True, final=final, selected_option_id=selected), receipt
+    assert poster.reconcile_decision_posts(home=home) == []
+    assert len(requests) == 1
+if ledger is not None:
+    assert settled.read_bytes() == ledger
+state_path.write_text(json.dumps(state))
 PYTEST
-  pass "19 completed legacy posts recover original chunks before editing and preserve retries and receipts"
 }
 
+test_19_legacy_buttons_settle_in_every_outcome_state() {
+  local home state payload out record selected
+  for state in waiting chosen captain ambiguous closed replaced; do
+    home="$TMP_ROOT/c19-$state"
+    setup_home "$home"
+    open_request "$home"
+    open_key "$home" legacy
+    payload=$(emit_decision "$home" 1 '{"key":"key:'"$TASK"':legacy","options":[{"label":"North"},{"label":"South"}]}')
+    deliver "$home" "$POST"
+    plugin_py "$home" "$payload" "$state" <<'PYTEST' || fail "could not prepare legacy decision"
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
 
-test_20_previously_edited_legacy_posts_recover_retained_payloads() {
-  local home payload
+home, path, state = Path(sys.argv[1]), Path(sys.argv[3]), sys.argv[4]
+progress_path = path.parent / (path.stem + ".progress.json")
+progress = json.loads(progress_path.read_text())
+progress["decision"]["options"][0]["label"] = "North" * 16
+prefix = "Original question?\n1. " + "North" * 16 + "\n2. South\n\n"
+original = prefix + "E" * (1900 - len(prefix) - 4) + " \n\t\n"
+assert len(original) == 1900
+progress["texts"] = [original]
+if state != "captain":
+    progress["decision"].pop("sections", None)
+if state in ("captain", "ambiguous", "closed"):
+    progress.pop("texts")
+slug, kind, generation = path.stem.rsplit(".", 2)
+poster.write_progress(dict(slug=slug, kind=kind, generation=int(generation)), progress, home)
+path.unlink(missing_ok=True)
+(home / "discord.json").write_text(json.dumps(dict(content=original, earlier="Earlier chunk\n")))
+PYTEST
+    selected=none
+    case "$state" in
+      waiting|chosen)
+        out=$(click "$home" "fmd:key:$TASK:legacy:1" "$CAPTAIN" 880000000000000191)
+        assert_contains "$out" "Sent:" "the legacy click was not filed"
+        selected=1
+        if [ "$state" = chosen ]; then
+          record=$(button_request "$home" option)
+          [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "could not record legacy choice"
+        fi
+        ;;
+      captain)
+        home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key legacy \
+          "$(printf 'North%.0s' {1..16})" >/dev/null 2>&1 || fail "could not record captain legacy choice"
+        selected=1
+        ;;
+      ambiguous)
+        home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key legacy \
+          "No preference" >/dev/null 2>&1 || fail "could not record ambiguous legacy choice"
+        ;;
+      closed) printf 'done: no longer needed\n' >> "$home/state/$TASK.status" ;;
+      replaced)
+        emit_decision "$home" 2 '{"key":"key:'"$TASK"':legacy","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
+        deliver "$home" 700000000000000002
+        ;;
+    esac
+    if [ "$state" = waiting ]; then
+      assert_legacy_edit "$home" "$payload" "$selected" false
+      record=$(button_request "$home" option)
+      [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "could not finalize waiting legacy choice"
+    fi
+    assert_legacy_edit "$home" "$payload" "$selected" true
+  done
+  pass "19 every legacy outcome settles buttons with 1900-character text and 80-character options unchanged"
+}
+
+test_20_legacy_waiting_receipts_need_no_original_or_payload() {
+  local home payload out
   home="$TMP_ROOT/c20"
   setup_home "$home"
   open_request "$home"
-  open_key "$home" retained-original
-  payload=$(emit_decision "$home" 1 '{"key":"key:'"$TASK"':retained-original","options":[{"label":"North"},{"label":"South"}]}')
-  plugin_py "$home" "$payload" <<'PYTEST' || fail "could not prepare previously edited legacy post"
+  open_key "$home" legacy-waiting
+  payload=$(emit_decision "$home" 1 '{"key":"key:'"$TASK"':legacy-waiting","options":[{"label":"North"},{"label":"South"}]}')
+  deliver "$home" "$POST"
+  out=$(click "$home" "fmd:key:$TASK:legacy-waiting:1" "$CAPTAIN" 880000000000000201)
+  assert_contains "$out" "Sent: North" "the legacy waiting click was not filed"
+  plugin_py "$home" "$payload" <<'PYTEST' || fail "could not prepare legacy waiting receipt"
 import json, sys
 from pathlib import Path
 import outbox_poster as poster
 
 home, path = Path(sys.argv[1]), Path(sys.argv[3])
-payload = json.loads(path.read_text())
-payload["text"] = "Earlier explanation. " * 90 + "\n\n" + payload["text"]
-payload["decision"].pop("sections", None)
-path.write_text(json.dumps(payload))
-(home / "retained.json").write_text(json.dumps(payload))
-plan = poster.split_reply(payload["text"], home=home, limit=1900, cap=25, legacy=True)
-assert len(plan["texts"]) == 2
-poster.split_decision_reply = lambda *args, **kwargs: plan
-def send(chunk):
-    return {"discord_message_id": str(700000000000000200 + chunk["chunk_index"]), "buttons": True}
-assert poster.deliver_one(path, send=send, home=home) == "sent"
-progress = poster.load_progress(payload, home)
-assert progress["total"] == progress["posted_count"] == 2
-progress.pop("texts")
-poster.write_progress(payload, progress, home)
-finalized = path.parent / (path.stem + ".finalized")
-finalized.write_text("⏳ North sent by Dana - waiting for Firstmate to record it")
-finalized.chmod(0o600)
-(home / "plan.json").write_text(json.dumps(plan["texts"]))
-PYTEST
-  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key retained-original North \
-    >/dev/null 2>&1 || fail "could not settle the previously edited legacy post"
-  plugin_py "$home" "$payload" <<'PYTEST' || fail "retained legacy payload did not restore the final decision display"
-import json, sys
-from pathlib import Path
-import outbox_poster as poster
-
-home, path = Path(sys.argv[1]), Path(sys.argv[3])
-path.write_text((home / "retained.json").read_text())
-path.chmod(0o600)
-plan = json.loads((home / "plan.json").read_text())
-finalized = path.parent / (path.stem + ".finalized")
-old_receipt = finalized.read_text()
-edits = []
-def read(*args):
-    raise AssertionError("retained payload must recover originals without reading the edited Discord message")
-poster.discord_message_text = read
-progress_path = path.parent / (path.stem + ".progress.json")
-progress = json.loads(progress_path.read_text())
-for texts in (None, [], [""]):
-    candidate = dict(progress)
-    if texts is not None:
-        candidate["texts"] = texts
-    poster.write_progress(json.loads(path.read_text()), candidate, home)
-    assert path not in poster.list_pending(home=home)
-    assert path.is_file()
-def failed_edit(*args):
-    raise poster.DiscordSendError("transient", "temporary edit failure")
-assert poster.reconcile_decision_posts(home=home, edit=failed_edit) == []
-assert finalized.read_text() == old_receipt
 progress = json.loads((path.parent / (path.stem + ".progress.json")).read_text())
-assert progress["texts"] == plan
-assert progress["limit"] == 1900 and progress["cap"] == 25
-assert path not in poster.list_pending(home=home)
-assert not path.exists()
-def edit(channel, message, content, components):
-    edits.append(dict(message=message, content=content, components=components))
-result = poster.reconcile_decision_posts(home=home, edit=edit)
-assert result == [path.stem], dict(result=result, edits=edits)
-assert len(edits) == 1
-message = edits[0]
-assert message["message"] == "700000000000000201", message
-assert "chosen by the captain" in message["content"].split("\n\n", 1)[0], message
-assert message["content"].split("\n\n", 1)[1] == plan[-1], message
-buttons = [button for row in message["components"] for button in row["components"]]
-assert all(button["disabled"] for button in buttons), buttons
-assert buttons[0]["style"] == 3 and buttons[0]["label"] == "North ✓", buttons
-assert all(button["style"] == 2 for button in buttons[1:]), buttons
-assert finalized.read_text() == message["content"]
-
-assert poster.reconcile_decision_posts(home=home, edit=edit) == []
-assert len(edits) == 1
+progress.pop("texts")
+progress["decision"].pop("sections", None)
+slug, kind, generation = path.stem.rsplit(".", 2)
+poster.write_progress(dict(slug=slug, kind=kind, generation=int(generation)), progress, home)
+path.unlink(missing_ok=True)
+waiting = "⏳ North sent by Dana - waiting for Firstmate to record it"
+finalized = path.parent / (path.stem + ".finalized")
+finalized.write_text(waiting)
+finalized.chmod(0o600)
+(home / "discord.json").write_text(json.dumps(dict(content=waiting, earlier="Earlier chunk\n")))
+(home / "old-receipt.txt").write_text(waiting)
 PYTEST
-  pass "20 previously edited legacy posts recover retained split plans and finalize the recorded decision"
+  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key legacy-waiting South \
+    >/dev/null 2>&1 || fail "could not record the legacy waiting answer"
+  plugin_py "$home" "$payload" <<'PYTEST' || fail "legacy component retry changed its receipt"
+import io, json, sys, urllib.error
+from pathlib import Path
+from unittest.mock import patch
+import outbox_poster as poster
+
+home, path = Path(sys.argv[1]), Path(sys.argv[3])
+finalized = path.parent / (path.stem + ".finalized")
+before = finalized.read_bytes()
+settled = path.parent / (path.stem + ".settled.json")
+def http(request, timeout):
+    body = json.loads(request.data)
+    assert "content" not in body
+    raise urllib.error.HTTPError(request.full_url, 429, "retry", {}, None)
+with patch.object(poster, "_bot_token", return_value="test-token"), patch.object(
+    poster.urllib.request, "urlopen", side_effect=http,
+):
+    assert poster.reconcile_decision_posts(home=home) == []
+assert finalized.read_bytes() == before
+assert settled.is_file()
+assert not path.exists()
+PYTEST
+  assert_legacy_edit "$home" "$payload" 2 true
+  pass "20 legacy waiting receipts retry and re-settle buttons after an answer without text recovery"
 }
 
 
@@ -1779,5 +1777,5 @@ test_15_full_labels_keep_digits_and_overlaps_together
 test_16_recommended_option_renders_green_with_a_single_star
 test_17_outcome_headers_fit_reserved_and_legacy_posts
 test_18_decision_plans_preserve_questions_and_legacy_boundaries
-test_19_completed_legacy_posts_recover_original_chunks_before_editing
-test_20_previously_edited_legacy_posts_recover_retained_payloads
+test_19_legacy_buttons_settle_in_every_outcome_state
+test_20_legacy_waiting_receipts_need_no_original_or_payload
