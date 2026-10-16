@@ -672,7 +672,12 @@ command_posts() {
       settle_if_closed "$stem" || true
     fi
     if ! settled "$stem"; then
-      sent "$stem" && request_published "$(sent_field "$stem" '.request_id')" || continue
+      if ! sent "$stem"; then
+        continue
+      fi
+      if ! request_published "$(sent_field "$stem" '.request_id')"; then
+        continue
+      fi
     fi
     selected=$(selected_option_id "$stem")
     final=false
