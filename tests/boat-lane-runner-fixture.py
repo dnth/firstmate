@@ -48,10 +48,11 @@ def main():
     if command == "new":
         assert "--no-env" in args and "--personal" in args
         assert args[args.index("--environment") + 1] == "base"
+        ttl = int(args[args.index("--ttl") + 1])
         def create(state):
             box = "bx_" + str(len(state["boxes"]) + 1)
-            state["boxes"][box] = {"deleted": False}
-            state["events"].append({"event": "new", "box": box})
+            state["boxes"][box] = {"deleted": False, "create_ttl": ttl}
+            state["events"].append({"event": "new", "box": box, "ttl_seconds": ttl})
             return box
         box = mutate(create)
         print(json.dumps({"id": box}), flush=True)
