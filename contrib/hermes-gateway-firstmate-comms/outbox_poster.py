@@ -39,10 +39,8 @@ A decision payload carries buttons only on the final chunk and only when
 text. Progress keeps the decision, button state, chunk ids, and posting time.
 Structured sections keep options together on the final chunk and reserve room
 for a later outcome header.
-``reconcile_decision_posts`` edits only that final message, prepending a bold
-outcome line and preserving the original last-chunk text whenever it fits.
-It disables every button, highlights a unique choice in success style, and
-grays the remaining options and Discuss. ``reconcile_thread_states`` then
+``reconcile_decision_posts`` edits only that final message under the display
+rules in docs/configuration.md, "Decision buttons". ``reconcile_thread_states`` then
 clears answered needs-you threads and retries failed renames.
 """
 
@@ -1536,10 +1534,10 @@ def reconcile_decision_posts(
     full: bool = True,
     edit: Callable[[str, str, str | None, list], None] | None = None,
 ) -> list[str]:
-    """Show each decision post's current line on Discord with its buttons off:
-    the sent line once a click filed its request, then the outcome once
-    Firstmate records the answer. ``full`` also settles posts whose decision
-    closed or was replaced, which reads Firstmate's ledgers, so the watcher
+    """Reconcile decision displays through the CLI's content and receipt plan.
+    A null content preserves legacy message text.
+    ``full`` also settles posts whose decision closed or was replaced, which
+    reads Firstmate's ledgers, so the watcher
     runs it on a slower cadence than the pass after a click. A permanent
     refusal (the message is gone) counts as shown; anything else is retried on
     a later pass. Returns the posts it updated.

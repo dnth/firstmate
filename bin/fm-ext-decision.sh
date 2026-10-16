@@ -30,7 +30,7 @@
 #   <stem>.settled.json    the post's final outcome line, written once
 #   <stem>.finalized       the displayed content or legacy button-state receipt
 #
-# What a post shows, where <time> is a Discord timestamp:
+# Stored outcome lines, where <time> is a Discord timestamp:
 #   ⏳ <label> sent by <name> <time> - waiting for Firstmate to record it
 #                                        a click filed a request; buttons off
 #   ✅ <label> chosen by <name> <time>    Firstmate recorded the clicked option
@@ -47,6 +47,8 @@
 # The recorded answer comes from the ledgers through
 # fm_ext_decision_key_outcome in bin/fm-ext-lib.sh and is never shown itself,
 # because it may not be public-safe.
+# Display formatting and the legacy text-preservation exception are owned by
+# docs/configuration.md, "Decision buttons".
 #
 # click
 #   The gateway plugin runs this for every button click. --post-id is the
@@ -69,7 +71,7 @@
 #     0  sent: claims the post once, files one request through
 #        bin/fm-ext-intake.sh --origin button carrying the key, its occurrence,
 #        the option, the decision text, any confirmation, and who and when;
-#        the post then shows the sent line with its buttons off
+#        the post then updates under the display rules above
 #   Exit 1 means nothing was filed; the claim is released so the click can be
 #   tried again. If an inbox request was published but notification failed,
 #   exit 0 reports recovery needed; the sent claim remains and retrying uses
@@ -79,7 +81,9 @@
 # posts
 #   Prints one JSON line per button post whose current content Discord does
 #   not show yet: {post, channel_id, message_id, content, receipt, final, key,
-#   options}; a listed post always shows with its buttons off. Without
+#   options, selected_option_id}; content is null for a components-only legacy
+#   edit, and receipt is the value to pass to finalized. A listed post always
+#   shows with its buttons off. Without
 #   --settled-only it first settles every live post that a newer post for the
 #   same key replaced, or whose own lifecycle the ledgers report closed.
 #

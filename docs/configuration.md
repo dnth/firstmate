@@ -1013,7 +1013,7 @@ A recommended option that also needs confirmation still needs its second click.
 A confirmed click from a standing-rule author is that author's explicit word for that one decision only, never standing authority, and merge authority stays where `AGENTS.md` puts it.
 
 Each post is bound to the lifecycle of its decision that was open when it was posted, so a captain call re-held or a worker key reopened for a new question is a different decision to it.
-When Firstmate records an answer on any channel, new posts are disabled and edited with a bold outcome header above the exact original last-chunk text whenever both fit Discord's 2,000-character limit.
+When Firstmate records an answer on any channel, only the last chunk of a new post is edited with a bold outcome header above its exact original text whenever both fit Discord's 2,000-character limit; earlier chunks stay unchanged.
 The uniquely chosen option is success-colored and gains a `✓`; every other option and Discuss are grey, and all buttons are disabled.
 When no single option matches, every button is grey; a click waiting for Firstmate to record it still highlights the clicked option.
 The outcome names the clicker when the recorded answer matches that post's click, and otherwise names the captain when the answer names exactly one option by number or label; `✅ Decided <time>` covers answers without one unique option, and `Closed - no longer needed <time>` covers a decision closed without an answer or replaced by a later lifecycle.
@@ -1021,6 +1021,7 @@ When a newer post replaces an older one for the same decision, the older outcome
 Structured posts reserve space for that header, so a normal settlement edit needs no truncation.
 Legacy posts, identified by missing original chunks or legacy decision records without section metadata, receive only button updates in every outcome state; their message text stays byte for byte unchanged, even if an earlier version replaced it with a waiting line.
 Legacy posts need no original-text recovery or retained payload, and a recorded answer updates their buttons even when an older waiting receipt exists.
+An already-settled legacy post keeps the choice recorded in its own immutable settlement, including when its key is reopened or its task re-held; when that record identifies no unique option, all buttons are grey.
 For new posts, an edit that cannot fit trims the explanation tail with `(trimmed)` while preserving the header, question, and option list.
 New decision plans that exceed the configured chunk cap are refused before posting rather than truncating their text.
 The outcome is read from the same ledgers rather than from any step Firstmate must remember.
