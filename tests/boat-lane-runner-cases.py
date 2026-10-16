@@ -469,6 +469,66 @@ class Cases(unittest.TestCase):
         self.assertEqual(final["verdict"], "product_failure")
         self.assert_cleanup()
 
+    def test_known_failures_survive_overlapping_retry_evidence_and_stop_fanout(self):
+        import shlex
+        body = spec(3)
+        path = "/tmp/boat-lane-tests/cases.json"
+        retained = [dict(id="known", status="failed", failure_signature="original product failure",
+                         request_ids=["req-original"]),
+                    dict(id="blocked", status="blocked", dependency_blocked=True,
+                         failure_signature="original dependency failure", request_ids=["req-blocked"])]
+        initial = dict(cases=retained + [dict(id="known-pass", status="pass"),
+                                        dict(id="eligible-1", status="failed"),
+                                        dict(id="eligible-2", status="failed"),
+                                        dict(id="unlisted", status="failed", kind="product")])
+        discovered = [dict(id="new-known", status="error", failure_signature="new failure",
+                           request_ids=["req-new"]),
+                      dict(id="known-pass", status="failed", failure_signature="newly failing",
+                           request_ids=["req-newly-failing"])]
+        first_retry = dict(cases=[dict(id=case["id"], status="pass", request_ids=["req-replacement"])
+                                 for case in retained] + discovered +
+                                [dict(id="eligible-1", status="pass"),
+                                 dict(id="eligible-2", status="failed"),
+                                 dict(id="unlisted", status="pass")])
+        second_retry = dict(cases=[dict(id=case["id"], status="pass", request_ids=["req-erased"])
+                                  for case in retained + discovered] +
+                                 [dict(id="eligible-2", status="pass")])
+        emit = lambda payload: "printf %s " + shlex.quote(json.dumps(payload)) + " > " + shlex.quote(path)
+        body["known_product_failures"] = [case["id"] for case in retained + discovered]
+        body["lanes"][0]["selections"] = [dict(
+            command=emit(initial) + "; false # SELECT", timeout_seconds=2, evidence_file=path,
+            retry_reset=[step("true")],
+            retry_cases={"eligible-1": step(emit(first_retry)), "eligible-2": step(emit(second_retry))})]
+        self.assertEqual(self.run_case(body), 4)
+        reports = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        initial_report = next(row for row in reports if row["attempt"] == "initial")
+        retries = [row for row in reports if row["attempt"] == "retry"]
+        self.assertEqual(len(retries), 2)
+        final = next(row for row in reports if row["attempt"] == "complete")
+        originals = {case["id"]: case for case in initial_report["cases"]}
+        first_observed = {case["id"]: case for case in retries[0]["cases"]}
+        for report in retries + [final]:
+            cases = {case["id"]: case for case in report["cases"]}
+            for case in retained:
+                self.assertEqual(cases[case["id"]], originals[case["id"]])
+            for case in discovered:
+                self.assertEqual(cases[case["id"]], first_observed[case["id"]])
+                self.assertEqual(cases[case["id"]]["status"], case["status"])
+                self.assertEqual(cases[case["id"]]["retry_decision"], "never")
+            self.assertEqual(report["overall_totals"],
+                             {"failed": 3, "blocked": 1, "error": 1, "pass": 2}
+                             if report is retries[0] else
+                             {"failed": 2, "blocked": 1, "error": 1, "pass": 3})
+        final_cases = {case["id"]: case for case in final["cases"]}
+        self.assertEqual(final_cases["unlisted"]["status"], "pass")
+        self.assertEqual(final_cases["eligible-1"]["status"], "pass")
+        self.assertEqual(final_cases["eligible-2"]["status"], "pass")
+        self.assertEqual(final["verdict"], "product_failure")
+        results = [row for row in self.ledger() if row["event"] == "lane_result"]
+        self.assertEqual([(row["lane"], row["verdict"]) for row in results], [("pilot", "product_failure")])
+        self.assertEqual(len(self.state()["boxes"]), 1)
+        self.assert_cleanup()
+
     def test_invalid_known_product_failure_ids_are_refused_before_box_creation(self):
         body = spec()
         body["known_product_failures"] = ["not a valid case id"]

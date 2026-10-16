@@ -810,6 +810,8 @@ class Runner:
                     cases.append(row)
             for row in cases:
                 if row["id"] in latest:
+                    if row["id"] in self.known_product_failures and row["status"] != "pass":
+                        continue
                     decision = ("exhausted" if row["id"] in attempted else
                                 "not-needed" if latest[row["id"]]["status"] == "pass" else
                                 "never" if latest[row["id"]]["classification"] in ("known-harness-defect", "product")
