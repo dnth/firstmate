@@ -1498,16 +1498,22 @@ fm_ext_outbox_fail() {
 # that is genuinely still pending instead of every reply ever sent. The terminal
 # marker itself stays in place, so a duplicate emit of the same generation is
 # still recognized as already delivered until retention expires it. Returns 0
-# when the generation is terminal and its payload is gone, 1 when it is not
+# when the generation is terminal, 1 when it is not
 # terminal, and 2 on an unsafe path or a removal failure.
 fm_ext_outbox_retire() {
-  local dir=$1 slug=$2 kind=$3 generation=$4 payload receipt failed
+  local dir=$1 slug=$2 kind=$3 generation=$4 payload receipt failed progress
   payload=$(fm_ext_outbox_basename "$slug" "$kind" "$generation") || return 2
   receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
   failed=$(fm_ext_outbox_failed_basename "$slug" "$kind" "$generation") || return 2
   if ! fm_ext_private_artifact_file_valid "$dir" "$receipt" 600 \
     && ! fm_ext_private_artifact_file_valid "$dir" "$failed" 600; then
     return 1
+  fi
+  progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 2
+  if fm_ext_private_artifact_file_valid "$dir" "$progress" 600 \
+    && jq -e '.decision.key and .buttons == true
+      and (.texts[-1] | type != "string" or length == 0)' "$dir/$progress" >/dev/null 2>&1; then
+    return 0
   fi
   fm_ext_private_artifact_remove "$dir" "$payload" 600 || return 2
   return 0

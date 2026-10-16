@@ -1574,12 +1574,22 @@ def reconcile_decision_posts(
                 try:
                     outbox = state_dir(home) / "ext-outbox"
                     progress = json.loads((outbox / (item["post"] + ".progress.json")).read_text())
-                    if (outbox / (item["post"] + ".finalized")).exists():
-                        raise ValueError("original decision text is unavailable after an earlier edit")
                     ids = progress["discord_message_ids"]
                     if len(ids) != progress["total"] or progress["posted_count"] != progress["total"]:
                         raise ValueError("decision delivery is incomplete")
-                    progress["texts"] = [discord_message_text(item["channel_id"], message) for message in ids]
+                    payload_path = outbox / (item["post"] + ".json")
+                    if payload_path.is_file():
+                        payload = json.loads(payload_path.read_text())
+                        progress["texts"] = split_reply(
+                            payload["text"], home=home, limit=progress["limit"],
+                            cap=progress["cap"], legacy=True,
+                        )["texts"]
+                        if len(progress["texts"]) != progress["total"]:
+                            raise ValueError("recovered decision chunk count does not match delivery")
+                    else:
+                        if (outbox / (item["post"] + ".finalized")).exists():
+                            raise ValueError("original decision text is unavailable after an earlier edit")
+                        progress["texts"] = [discord_message_text(item["channel_id"], message) for message in ids]
                     slug, kind, generation = item["post"].rsplit(".", 2)
                     write_progress({"slug": slug, "kind": kind, "generation": int(generation)}, progress, home)
                     item["content"] = item["header"] + "\n\n" + progress["texts"][-1]

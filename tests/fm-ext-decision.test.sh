@@ -1612,6 +1612,7 @@ outbox = path.parent
 progress_path = outbox / (stem + ".progress.json")
 finalized = outbox / (stem + ".finalized")
 messages = json.loads((home / "messages.json").read_text())
+path.unlink(missing_ok=True)
 import io
 from unittest.mock import patch
 sample_id, sample_text = next(iter(messages.items()))
@@ -1667,6 +1668,96 @@ PYTEST
 }
 
 
+test_20_previously_edited_legacy_posts_recover_retained_payloads() {
+  local home payload
+  home="$TMP_ROOT/c20"
+  setup_home "$home"
+  open_request "$home"
+  open_key "$home" retained-original
+  payload=$(emit_decision "$home" 1 '{"key":"key:'"$TASK"':retained-original","options":[{"label":"North"},{"label":"South"}]}')
+  plugin_py "$home" "$payload" <<'PYTEST' || fail "could not prepare previously edited legacy post"
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, path = Path(sys.argv[1]), Path(sys.argv[3])
+payload = json.loads(path.read_text())
+payload["text"] = "Earlier explanation. " * 90 + "\n\n" + payload["text"]
+payload["decision"].pop("sections", None)
+path.write_text(json.dumps(payload))
+(home / "retained.json").write_text(json.dumps(payload))
+plan = poster.split_reply(payload["text"], home=home, limit=1900, cap=25, legacy=True)
+assert len(plan["texts"]) == 2
+poster.split_decision_reply = lambda *args, **kwargs: plan
+def send(chunk):
+    return {"discord_message_id": str(700000000000000200 + chunk["chunk_index"]), "buttons": True}
+assert poster.deliver_one(path, send=send, home=home) == "sent"
+progress = poster.load_progress(payload, home)
+assert progress["total"] == progress["posted_count"] == 2
+progress.pop("texts")
+poster.write_progress(payload, progress, home)
+finalized = path.parent / (path.stem + ".finalized")
+finalized.write_text("⏳ North sent by Dana - waiting for Firstmate to record it")
+finalized.chmod(0o600)
+(home / "plan.json").write_text(json.dumps(plan["texts"]))
+PYTEST
+  home_env "$home" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key retained-original North \
+    >/dev/null 2>&1 || fail "could not settle the previously edited legacy post"
+  plugin_py "$home" "$payload" <<'PYTEST' || fail "retained legacy payload did not restore the final decision display"
+import json, sys
+from pathlib import Path
+import outbox_poster as poster
+
+home, path = Path(sys.argv[1]), Path(sys.argv[3])
+path.write_text((home / "retained.json").read_text())
+path.chmod(0o600)
+plan = json.loads((home / "plan.json").read_text())
+finalized = path.parent / (path.stem + ".finalized")
+old_receipt = finalized.read_text()
+edits = []
+def read(*args):
+    raise AssertionError("retained payload must recover originals without reading the edited Discord message")
+poster.discord_message_text = read
+progress_path = path.parent / (path.stem + ".progress.json")
+progress = json.loads(progress_path.read_text())
+for texts in (None, [], [""]):
+    candidate = dict(progress)
+    if texts is not None:
+        candidate["texts"] = texts
+    poster.write_progress(json.loads(path.read_text()), candidate, home)
+    assert path not in poster.list_pending(home=home)
+    assert path.is_file()
+def failed_edit(*args):
+    raise poster.DiscordSendError("transient", "temporary edit failure")
+assert poster.reconcile_decision_posts(home=home, edit=failed_edit) == []
+assert finalized.read_text() == old_receipt
+progress = json.loads((path.parent / (path.stem + ".progress.json")).read_text())
+assert progress["texts"] == plan
+assert progress["limit"] == 1900 and progress["cap"] == 25
+assert path not in poster.list_pending(home=home)
+assert not path.exists()
+def edit(channel, message, content, components):
+    edits.append(dict(message=message, content=content, components=components))
+result = poster.reconcile_decision_posts(home=home, edit=edit)
+assert result == [path.stem], dict(result=result, edits=edits)
+assert len(edits) == 1
+message = edits[0]
+assert message["message"] == "700000000000000201", message
+assert "chosen by the captain" in message["content"].split("\n\n", 1)[0], message
+assert message["content"].split("\n\n", 1)[1] == plan[-1], message
+buttons = [button for row in message["components"] for button in row["components"]]
+assert all(button["disabled"] for button in buttons), buttons
+assert buttons[0]["style"] == 3 and buttons[0]["label"] == "North ✓", buttons
+assert all(button["style"] == 2 for button in buttons[1:]), buttons
+assert finalized.read_text() == message["content"]
+
+assert poster.reconcile_decision_posts(home=home, edit=edit) == []
+assert len(edits) == 1
+PYTEST
+  pass "20 previously edited legacy posts recover retained split plans and finalize the recorded decision"
+}
+
+
 test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records
@@ -1689,3 +1780,4 @@ test_16_recommended_option_renders_green_with_a_single_star
 test_17_outcome_headers_fit_reserved_and_legacy_posts
 test_18_decision_plans_preserve_questions_and_legacy_boundaries
 test_19_completed_legacy_posts_recover_original_chunks_before_editing
+test_20_previously_edited_legacy_posts_recover_retained_payloads
