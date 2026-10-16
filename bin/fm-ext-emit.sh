@@ -60,7 +60,7 @@
 #   choice cue - "reply/respond/answer/type/send/pick/choose/select/tap/click", 1-40 intervening characters, then "number/code/letter/option/choice" (singular or plural), without crossing ".", "!", or "?", or "which one", "which option(s)", "pick one", or "choose one"; cue words match whole words.
 #     Letters, digits, and underscore are word characters; intervening spans start and end with non-word characters, and fixed phrases use single spaces.
 #   digit cue - a reply, pick, choose, select, or say verb followed within 1-40 characters by at least two 1-2 digit numbers joined by commas, "/", or "or" (for example "1, 2 or 3", "2 or 3", "1/2", or "1 or 2").
-#   choice heading - a standalone "Option", "Options", "Your call", or "Choose" line, with an optional colon and optional Markdown bold ("**" or "__" around the whole heading); two or more option lines must follow it.
+#   choice heading - a standalone "Option" or "Options" heading, "Your call" heading, or "Choose" heading, optionally followed by a colon and optionally wrapped in Markdown bold ("**" or "__"); two or more option lines must follow it.
 # Digit cues use the same word boundaries and intervening-span punctuation restrictions as choice cues.
 # Two or more option lines plus a choice cue are refused, as is a digit cue by itself.
 # A standalone reply cue also suffices: "reply", 1-30 intervening characters, "with/using", 1-20 intervening characters, then "number/code/letter/option/choice" (singular or plural), with the same word boundaries and punctuation restrictions.
