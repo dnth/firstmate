@@ -837,7 +837,8 @@ write_lane_quota() {  # <path> <default-priority> <acct-a-priority> <acct-b-prio
         {scope: "all_models", status: "known", effectivePercentRemaining: 73, runway: {status: "through_reset"}, selection: {spendPriority: $pb}}]}}]' "$QUOTA" > "$path"
 }
 LANE_QUOTA="$TMP_ROOT/lane-quota.json"
-write_lane_quota "$LANE_QUOTA" 0.95 0.30 0.90
+# Avoid trailing zeroes: jq versions differ in preserving JSON number spelling.
+write_lane_quota "$LANE_QUOTA" 0.95 0.3 0.9
 
 # The lane provider ids are checked against the harness's own model catalog, so
 # the stub answers with exactly the providers these cases map.
