@@ -416,6 +416,38 @@ test_10_digit_choice_cues_and_headings_require_buttons() {
   pass "10 digit choice cues and choice headings require buttons unless --no-buttons is explicit"
 }
 
+test_11_bold_headings_allow_colons_inside_or_outside() {
+  local home=$TMP_ROOT/c11 kind heading marker title text out rc generation=0
+  setup_home "$home"
+  for kind in answer followup final; do
+    for heading in Option Options 'Your call' Choose; do
+      for marker in '**' '__'; do
+        for title in "$marker$heading:$marker" "$marker$heading$marker:" "$marker$heading$marker"; do
+          generation=$((generation + 1))
+          text=$(printf '%s\n1. North\n2. South' "$title")
+          printf '%s' "$text" > "$home/post.txt"
+          out=$(home_env "$home" "$EMIT" --request-id "$RID" --kind "$kind" --generation "$generation" \
+            --text-file "$home/post.txt" 2>&1)
+          rc=$?
+          [ "$rc" -ne 0 ] || fail "$kind choice bypassed the guard: $title"
+          assert_contains "$out" "fm-ext-ask.sh" "heading refusal must name ask"
+          if compgen -G "$home/state/ext-outbox/*.$kind.$generation.json" >/dev/null; then
+            fail "refused heading choice published a payload"
+          fi
+          out=$(home_env "$home" "$EMIT" --request-id "$RID" --kind "$kind" --generation "$generation" \
+            --text-file "$home/post.txt" --no-buttons 'deliberate plain choice list' 2>&1)
+          rc=$?
+          [ "$rc" -eq 0 ] || fail "--no-buttons refused $title: $out"
+          jq -e '.no_buttons_reason == "deliberate plain choice list"' \
+            "$(payload_of "$home" "$kind" "$generation")" >/dev/null \
+            || fail "heading escape reason was not recorded"
+        done
+      done
+    done
+  done
+  pass "11 bold choice headings require buttons with colons inside, outside, or omitted"
+}
+
 test_1_ask_holds_and_posts_buttons_in_text_order
 test_2_mode_is_required_and_pre_hold_refusals
 test_3_emit_refuses_a_choice_without_buttons
@@ -426,3 +458,4 @@ test_7_settled_ask_retries_preserve_state
 test_8_choice_cues_match_whole_words
 test_9_plural_choice_cues_require_buttons
 test_10_digit_choice_cues_and_headings_require_buttons
+test_11_bold_headings_allow_colons_inside_or_outside

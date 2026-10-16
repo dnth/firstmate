@@ -522,7 +522,7 @@ FM_EXT_CHOICE_OPTION_RE='^[[:space:]]*((-|\*|•)[[:space:]]+)?(\(?[0-9]{1,2}[.)
 FM_EXT_CHOICE_CUE_RE='(^|[^[:alnum:]_])((reply|respond|answer|type|send|pick|choose|select|tap|click)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,38}[^[:alnum:]_.!?])(number|code|letter|option|choice)s?|which (one|options?)|(pick|choose) one)([^[:alnum:]_]|$)'
 FM_EXT_CHOICE_REPLY_RE='(^|[^[:alnum:]_])reply([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,28}[^[:alnum:]_.!?])(with|using)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,18}[^[:alnum:]_.!?])(number|code|letter|option|choice)s?([^[:alnum:]_]|$)'
 FM_EXT_CHOICE_DIGIT_CUE_RE='(^|[^[:alnum:]_])(reply|pick|choose|select|say)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,38}[^[:alnum:]_.!?])(([0-9]{1,2}([[:space:]]*,[[:space:]]*[0-9]{1,2}([[:space:]]*,?[[:space:]]+or[[:space:]]+[0-9]{1,2})?|[[:space:]]+or[[:space:]]+[0-9]{1,2}))|[0-9]{1,2}[[:space:]]*/[[:space:]]*[0-9]{1,2})([^[:alnum:]_]|$)'
-FM_EXT_CHOICE_HEADING_RE='^[[:space:]]*(\*\*(options?|your[[:space:]]+call|choose):?\*\*|__(options?|your[[:space:]]+call|choose):?__|(options?|your[[:space:]]+call|choose):?)[[:space:]]*$'
+FM_EXT_CHOICE_HEADING_RE='^[[:space:]]*(\*\*(options?|your[[:space:]]+call|choose)(:?\*\*|\*\*:)|__(options?|your[[:space:]]+call|choose)(:?__|__:)|(options?|your[[:space:]]+call|choose):?)[[:space:]]*$'
 
 fm_ext_text_choice_shaped() {
   local text=$1 options line choice_heading=0 choice_options=0
