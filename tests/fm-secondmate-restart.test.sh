@@ -1080,7 +1080,7 @@ SH
 # decision, real fm-send over the real OMP native doorbell, the parent-owned
 # persist gate, and bin/fm-control.sh's relaunch transaction with its OMP
 # preparation step. Only the two things that would touch this machine are
-# replaced: the signal that stops the home session owner, and the launch owner.
+# replaced: the home-owner absence probe, and the launch owner.
 # Both stubs record what the world looked like AT THE MOMENT they ran, which is
 # how the order below is asserted rather than assumed: the absence probe sees all
 # four session artifacts still on disk (so nothing was deleted while the owner

@@ -70,7 +70,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
    An endpoint the backend authoritatively reports missing counts as already stopped - there is no agent to stop - so the transaction journals that verdict and continues instead of refusing.
-5. **Retire an OMP second mate's session artifacts**, only for that case, after both its endpoint and its home session owner are proven gone; `bin/fm-control-lib.sh`'s `fm_control_omp_secondmate_prepare_relaunch` owns that sequence and the two overrides that let a test drive it.
+5. **Retire an OMP second mate's session artifacts** through `bin/fm-control-lib.sh`'s `fm_control_omp_secondmate_prepare_relaunch`, subject to the recovery checks owned by [configuration's harness support](configuration.md#harness-support).
    Without it the launch owner would refuse the replacement over its own predecessor's leftovers, so an OMP second mate launches fresh with `--secondmate` and its new endpoint is revalidated from the record the launch published rather than the retired one.
 6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded worktree and normally the endpoint - and recreates the endpoint inside that same worktree when the backend proves the recorded one gone - while allowing OMP secondmates to publish a fresh endpoint after clearing the previous harness's per-task wiring and arming a fresh busy generation.
    A ship relaunch also recovers the recorded mode and yolo contract when the caller does not repeat them.

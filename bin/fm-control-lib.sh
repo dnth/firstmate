@@ -227,6 +227,8 @@ fm_control_omp_owner_absent() {  # <probe-command> <pid> <owner-description>
 # closure. A stale marker is not disposable just because its recorded PID is
 # dead: foreign, malformed, or unexplained state must keep refusing relaunch.
 #
+# FM_RESTART_STOP_CMD overrides kill for absence probes only, invoked as
+# "<cmd> -0 <pid>"; it never receives a stop signal request here.
 fm_control_omp_secondmate_prepare_relaunch() {  # <state> <id> <worktree> <backend> <target> <meta>
   local state=$1 id=$2 worktree=$3 backend=$4 target=$5 meta=$6 omp_state
   local stop_cmd owner_pid marker marker_pid
