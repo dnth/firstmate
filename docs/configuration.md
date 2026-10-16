@@ -536,11 +536,13 @@ It maps a quota-axi provider family to the concrete provider ids that spend each
 ```
 
 Every key and value must match `^[a-z0-9]+(-[a-z0-9]+)*\z`; a mapped family needs a non-empty map, and the file holds provider ids, never credentials.
-When a profile's declared `provider` appears as a family in this file, the resolver expands that profile into one candidate per mapped account, reads each candidate's quota rows from that account's own lane, prints the account on the candidate line, and names the winning account's provider id as the model prefix, so the profile it emits is `--harness omp --model <provider id>/<bare model>` and `fm-spawn.sh` launches the worker on that account's credential.
+These are OMP provider ids: profiles for other harnesses keep their declared model and single collapsed lane, with no account field.
+When an OMP profile's declared `provider` appears as a family in this file, the resolver expands that profile into one candidate per mapped account, reads each candidate's quota rows from that account's own lane, prints the account on the candidate line, and names the winning account's provider id as the model prefix, so the profile it emits is `--harness omp --model <provider id>/<bare model>` and `fm-spawn.sh` launches the worker on that account's credential.
 A snapshot lane the map does not name, a mapped account the snapshot does not carry, and a mapped family whose profile names no model are each reported on their own candidate line and never guessed.
 A mapped provider id is also checked against the harness's own model catalog (`omp models --json` for `omp`, read once with a bounded timeout, and only when a map exists), so a map entry that names a provider the worker could not load is reported as `not eligible` and never becomes a profile; a missing `omp` or an unreadable catalog leaves the mapped accounts unverifiable in the same way.
 An absent or empty map, and any family it does not name, keep the single collapsed-lane behavior described above and read no catalog at all.
-A malformed map is an actionable `error` with exit 2, the same as a malformed rules file.
+The file must contain exactly one JSON object; a malformed map is an actionable `error` with exit 2, the same as a malformed rules file.
+Predictive fallback checks do not resolve account-lane provider ids through this mapping and yield no fallback reason for those models.
 The provider ids name entries in the operator's own `~/.omp/agent/models.yml`, which is not part of this repo.
 Each such entry points at the family's own base URL, mirrors the built-in provider for the models dispatch uses, and takes its credential from a `!command` value that reads that account's key at request time, so no key reaches a command line, a log, or a status line:
 

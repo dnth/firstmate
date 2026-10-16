@@ -65,7 +65,9 @@
 #   an optional private mapping from a quota provider family to the concrete
 #   provider ids that spend each of that family's accounts, shaped
 #   {"providers": {"<quota provider>": {"<accountKey>": "<provider id>"}}}.
-#   When a profile's provider family is mapped there, the tool expands that one
+#   Only harness omp uses these OMP provider ids; other harnesses keep their
+#   declared model and single collapsed lane, with no account field.
+#   When an OMP profile's provider family is mapped there, the tool expands that one
 #   profile into one candidate per mapped account, reads each candidate's
 #   evidence from that account's own lane row, and names the account on the
 #   candidate line. A clear result then carries the chosen account in the
@@ -111,6 +113,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-env-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
@@ -182,7 +185,7 @@ if [ -e "$LANES_PATH" ] || [ -L "$LANES_PATH" ]; then
   [ -r "$LANES_PATH" ] || die "account lane file not readable: $LANES_PATH"
   cp "$LANES_PATH" "$LANES" || die "could not snapshot account lane file: $LANES_PATH"
   chmod 400 "$LANES" || die "could not protect account lane snapshot"
-  lanes_err=$(jq -r --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
+  lanes_err=$(jq -rs --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
     def lanes_bad($v):
       ($v | type) != "object" or
@@ -191,10 +194,12 @@ if [ -e "$LANES_PATH" ] || [ -L "$LANES_PATH" ]; then
     def top_bad:
       any((.providers // {}) | to_entries[];
         (provider_id(.key) | not) or (lanes_bad(.value)));
+    if length != 1 then "exactly one JSON object is required"
+    else .[0] |
     if type != "object" then "top-level value must be an object"
     elif has("providers") and (.providers | type) != "object" then "providers must be an object"
     elif top_bad then "each quota provider needs a non-empty map of accountKey to provider id, and every id must match ^[a-z0-9]+(-[a-z0-9]+)*\\z"
-    else empty end
+    else empty end end
   ' "$LANES" 2>/dev/null) || die "malformed account lane file: $LANES_PATH (not JSON)"
   [ -z "$lanes_err" ] || die "malformed account lane file: $LANES_PATH - $lanes_err"
 fi
@@ -386,15 +391,13 @@ fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an inval
 # is byte-identical, and an unreadable catalog leaves mapped candidates
 # unverifiable and reported rather than selected.
 CATALOG_OK=false
-read_omp_catalog() {
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 30 omp models --json 2>/dev/null
-  else
-    omp models --json 2>/dev/null
-  fi
-}
-if [ "$(jq -r '(.providers // {}) | length' "$LANES")" != 0 ] && command -v omp >/dev/null 2>&1; then
-  if catalog_raw=$(read_omp_catalog) &&
+if jq -e --slurpfile rules "$RULES" '
+  def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+  (.providers // {}) as $mapped |
+  any(((($rules[0].rules // [])[] | profiles(.use)[]), profiles($rules[0].default // null)[]) | select(.harness == "omp");
+      $mapped[.provider] != null)
+' "$LANES" >/dev/null 2>&1 && command -v omp >/dev/null 2>&1; then
+  if catalog_raw=$(fm_run_timed 30 omp models --json 2>/dev/null) &&
      printf '%s' "$catalog_raw" | jq -e '.models | type == "array"' >/dev/null 2>&1; then
     if printf '%s' "$catalog_raw" |
       jq -c '[.models[]? | select((.provider | type) == "string" and (.id | type) == "string") |
@@ -418,14 +421,16 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   # a quota provider family. An unmapped family, and a candidate without an
   # account, read exactly the single collapsed lane the header describes.
   def lane_map($p): ($lmap[$p] // null);
-  def lane_keys($p): (lane_map($p) | if type == "object" then keys else [] end);
+  def lane_keys($c):
+    if $c.harness == "omp" then (lane_map(provider_of($c)) | if type == "object" then keys else [] end)
+    else [] end;
   # A mapped account is dispatchable only when the provider id it names really
   # offers that model in the harness catalog; the catalog is only read when a
   # mapping exists, and an unreadable catalog leaves the lane unverifiable.
   def catalog_offers($pid; $m):
     any($cat[]; .provider == $pid and (.id == $m or .selector == ($pid + "/" + $m)));
   def lane_unverifiable($c):
-    if ($c.account // null) == null or $c.harness != "omp" then null
+    if ($c.account // null) == null then null
     elif ($catalog_ok | not) then "the OMP catalog could not be read, so account lane \($c.account) is unverifiable"
     elif (catalog_offers($c.accountProvider; bare($c.model // "")) | not)
       then "mapped account \($c.account) names provider \($c.accountProvider), which does not offer \(bare($c.model // ""))"
@@ -457,7 +462,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     end;
   def expand_accounts($c):
     (provider_of($c)) as $p |
-    (lane_keys($p)) as $keys |
+    (lane_keys($c)) as $keys |
     if ($keys | length) == 0 then [$c]
     elif ($c.model // "") == "" then
       [$c + {laneError: "account mapping for provider \($p) needs an explicit model on the profile"}]
@@ -469,7 +474,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     end;
   def unmapped_candidates($c):
     (provider_of($c)) as $p |
-    (lane_keys($p)) as $keys |
+    (lane_keys($c)) as $keys |
     if ($keys | length) == 0 then []
     else
       ([$rawl[] | select(.provider == $p) | (.accountKey // "default")] - $keys | unique) as $extra |

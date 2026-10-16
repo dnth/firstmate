@@ -144,6 +144,7 @@ else
 fi
 printf '%s\n' "$*" >> "${QUOTA_AXI_CALLS:?}"
 [ "${FAKE_QUOTA_FAIL:-0}" = 1 ] && exit 1
+[ "${1:-}" != --provider ] || shift 2
 [ "${1:-}" = --json ] || exit 2
 cat "${QUOTA_AXI_FIXTURE:?}"
 SH
@@ -154,6 +155,7 @@ cat > "$FAKEBIN/omp" <<'SH'
 set -u
 printf '%s\n' "$*" >> "${OMP_CALL_LOG:?}"
 [ "${FM_FAKE_OMP_CATALOG_FAIL:-0}" = 1 ] && exit 3
+if [ "${FM_FAKE_OMP_CATALOG_HANG:-0}" = 1 ]; then sleep 60; fi
 [ "${1:-}" = models ] || exit 2
 if [ -n "${FM_FAKE_OMP_CATALOG:-}" ]; then
   printf '%s\n' "$FM_FAKE_OMP_CATALOG"
@@ -879,6 +881,35 @@ assert_contains "$out" "  profile: --harness 'omp' --model 'opencode-go-b/deepse
 assert_not_contains "$out" "  profile: --harness 'omp' --model 'opencode-go/deepseek-v4.1-flash'" "the built-in credential's lane is never chosen while the mapping omits it"
 pass "a mapped family expands into one candidate per account, ranked on each lane's own row"
 
+for harness in opencode pi pi-signed; do
+  reset_log
+  jq --arg harness "$harness" '.rules[0].use.harness = $harness | del(.rules[0].use.effort)' "$LANE_RULES" > "$RULES"
+  FM_FAKE_OMP_CATALOG_FAIL=1 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LANE_QUOTA" run code out err "$BRIEF"
+  expect_code 0 "$code" "$harness on a mapped family exits 0"
+  assert_contains "$out" '  status: clear' "$harness retains collapsed-lane resolution"
+  assert_contains "$out" "candidate: $harness:opencode-go/deepseek-v4.1-flash  provider=opencode-go  scope=all_models  remaining=88%  spendPriority=0.95" "$harness reads the default collapsed lane"
+  assert_contains "$out" "  profile: --harness '$harness' --model 'opencode-go/deepseek-v4.1-flash'" "$harness keeps its declared model"
+  assert_not_contains "$out" 'account=' "$harness gains no account field or unmapped candidates"
+  assert_absent "$LOG/omp.calls" "$harness never consults another harness catalog"
+done
+cp "$LANE_RULES" "$RULES"
+
+EXHAUSTED_LANES="$TMP_ROOT/exhausted-lanes.json"
+jq '(.providers[] | select(.provider == "opencode-go") | .quotaSemantics.effectiveAvailability[]) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$LANE_QUOTA" > "$EXHAUSTED_LANES"
+for harness in omp opencode pi pi-signed; do
+  reason=$(PATH="$FAKEBIN:$BASE_PATH" QUOTA_AXI_FIXTURE="$EXHAUSTED_LANES" bash -c '
+    . "$1/bin/fm-quota-axi-lib.sh"
+    fm_quota_profile_fallback_reason "$2" "$3"
+  ' _ "$ROOT" "$harness" opencode-go-dnth/deepseek-v4.1-flash)
+  assert_equals '' "$reason" "$harness account model has no predictive fallback from collapsed family quota"
+done
+reason=$(PATH="$FAKEBIN:$BASE_PATH" QUOTA_AXI_FIXTURE="$EXHAUSTED_LANES" bash -c '
+  . "$1/bin/fm-quota-axi-lib.sh"
+  fm_quota_profile_fallback_reason omp opencode-go/deepseek-v4.1-flash
+' _ "$ROOT")
+assert_equals quota_exhausted "$reason" "the built-in provider still has predictive fallback on exhausted quota"
+pass "other harnesses preserve collapsed dispatch and account models skip predictive family fallback"
+
 # The mapping may point a lane straight at the built-in provider id, and then
 # that lane, not the account with the best headroom, carries the profile.
 cat > "$LANES" <<'JSON'
@@ -962,6 +993,14 @@ assert_contains "$out" '  candidate: omp:opencode-go-a/deepseek-v4.1-flash  prov
 assert_contains "$out" '  status: escalate' "an unverifiable catalog escalates instead of dispatching"
 pass "an unreadable harness catalog leaves mapped accounts unverifiable"
 
+reset_log
+FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_FAKE_OMP_CATALOG_HANG=1 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LANE_QUOTA" run code out err "$BRIEF"
+expect_code 0 "$code" "a catalog timeout remains a structured outcome"
+assert_contains "$out" 'the OMP catalog could not be read, so account lane acct-a is unverifiable' "the portable timeout refuses the stalled catalog"
+assert_contains "$out" '  status: escalate' "a timed-out catalog cannot dispatch an account"
+assert_not_contains "$out" '  profile:' "a timed-out catalog emits no profile"
+pass "a stalled catalog is bounded without an external timeout executable"
+
 # An unmapped family keeps the single collapsed lane byte for byte.
 rm -f "$LANES"
 reset_log
@@ -986,7 +1025,9 @@ for bad in \
   '{"providers":{"opencode-go":{}}}|each quota provider needs a non-empty map of accountKey to provider id' \
   '{"providers":{"OpenCode-Go":{"acct-a":"opencode-go-a"}}}|each quota provider needs a non-empty map of accountKey to provider id' \
   '{"providers":"opencode-go"}|providers must be an object' \
-  '[]|top-level value must be an object'; do
+  '[]|top-level value must be an object' \
+  '{} {}|exactly one JSON object is required' \
+  '{} {"providers":{"opencode-go":{"acct-a":"opencode-go-a"}}}|exactly one JSON object is required'; do
   printf '%s\n' "${bad%%|*}" > "$LANES"
   cp "$LANE_RULES" "$RULES"
   write_lane_response "$RESPONSE" rule_1 0.93
