@@ -72,6 +72,27 @@ elif name == 'curl':
     else:
         print(json.dumps({'ok': True, 'sandbox': state}))
 elif name == 'omp':
+    if len(args) > 1 and args[1] == 'serve':
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        host, port = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--bind=')).rsplit(':', 1)
+        class BrokerHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                if self.path == '/v1/healthz':
+                    body = {'ok': True}
+                elif self.path == '/v1/snapshot':
+                    body = {'generation': 1, 'generatedAt': 1, 'serverNowMs': 1,
+                            'refresher': {'enabled': True, 'intervalMs': 100, 'skewMs': 100, 'nextSweepInMs': 100},
+                            'credentials': [{'provider': 'openai-codex', 'id': 2,
+                            'credential': {'type': 'oauth', 'access': state['broker_access'],
+                                           'refresh': 'fixture_refresh', 'expires': 4102444800000}}]}
+                else:
+                    self.send_error(404); return
+                self.send_response(200); self.send_header('Content-Type', 'application/json')
+                self.end_headers(); self.wfile.write(json.dumps(body).encode())
+        server = ThreadingHTTPServer((host, int(port)), BrokerHandler)
+        helper(os.getpid())
+        server.serve_forever()
     refusal('token')
     if state.get('token_barrier'):
         (world / 'token-waiting').touch()

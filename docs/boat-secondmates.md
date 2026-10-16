@@ -79,6 +79,8 @@ Reconcile an unresolved placement or credential record before retrying sleep or 
 `bin/fm_boat_auth.py` owns credential acquisition, use, rollback, and release.
 Each acquisition runs in a generation-specific systemd user service with `KillMode=control-group`.
 The service contains the broker it starts, read-only facade, installer, tunnel, and their descendants, including descendants whose leader exits or which create a new session.
+The workstation broker uses a service-private loopback port by default, so wake does not depend on the conventional workstation broker port being available.
+The [credential command header](../bin/fm-boat-omp-auth.sh) owns the shared-broker override.
 Release revokes the generation under kernel flock before stopping the exact service and verifying that its cgroup is empty.
 A delayed service request checks the generation under the same lock before consuming credentials.
 No PID journal, descendant snapshot, STOP/CONT handshake, or PID fallback selects processes to signal.
@@ -109,6 +111,7 @@ Refresh refuses an ID that the current scoped snapshot cannot vend.
 `tests/fm-boat-omp-auth.test.sh`, `tests/fm-boat-lifecycle.test.sh`, and `tests/fm-boat-routing.test.sh` use fresh fixture homes and fake Boat, SSH, and credential commands.
 The credential suite exercises real systemd cgroups and asserts that no recorded helper identity survives cleanup.
 It skips explicitly when the required Linux user manager is absent.
+The credential suite also checks that concurrent default leases serve their own credentials and that releasing one does not stop the other.
 
 The live entry point is `bin/fm-boat.sh live-smoke --identity <key> --model <provider/model>`.
 It refuses without `FM_BOAT_LIVE=1`, serializes one small sandbox, uses the `fm-boat-smoke-` name prefix, and keeps TTL renewals within the original one-sandbox-hour deadline.

@@ -152,7 +152,8 @@ def acquire(id, alias, config, model):
                            'alias': alias, 'config': str(Path(config).resolve())},
             'providers': allowed, 'omp': executable(os.environ.get('FM_BOAT_OMP_BIN', 'omp')),
             'node': executable(os.environ.get('FM_BOAT_NODE_BIN', 'node')),
-            'broker': os.environ.get('FM_BOAT_BROKER_URL', 'http://127.0.0.1:8765'),
+            # A lease must not depend on a conventional port owned by another app.
+            'broker': os.environ.get('FM_BOAT_BROKER_URL') or 'http://' + free_loopback(),
             'proxy': os.environ.get('FM_BOAT_PROXY_BIND') or free_loopback(),
             'remote': os.environ.get('FM_BOAT_REMOTE_BIND', '127.0.0.1:8765'),
             'timeout': TIMEOUT,
@@ -266,8 +267,8 @@ def worker(base, generation):
             raise Failure('credential facade exited')
         if tunnel.poll() is not None:
             tunnel = subprocess.Popen(tunnel_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # A canonical broker started by another lease may disappear with that
-        # lease. The surviving service restores it inside its own cgroup.
+        # With a shared-broker override, another lease's broker may disappear
+        # with that lease. Restore it inside the surviving service's cgroup.
         if broker_process is not None:
             broker_process.poll()
         if not ready_url(settings['broker']) and (broker_process is None or broker_process.poll() is not None):
