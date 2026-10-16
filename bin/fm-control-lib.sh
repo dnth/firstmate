@@ -210,15 +210,9 @@ fm_control_omp_home_owner_pid() {  # <home-state>
 # closure. A stale marker is not disposable just because its recorded PID is
 # dead: foreign, malformed, or unexplained state must keep refusing relaunch.
 #
-# FM_RESTART_STOP_CMD replaces the signal and liveness probe for the home lock
-# owner (default: kill; invoked as "<cmd> <pid>" to stop it and "<cmd> -0 <pid>"
-# to probe it). A distinct marker PID is probed but never signaled. This exists
-# so tests/fm-secondmate-restart.test.sh can drive the sequence deterministically.
-#   FM_RESTART_STOP_WAIT  seconds to wait for the lock owner to go (default 30)
-#   FM_RESTART_STOP_POLL  seconds between absence probes (default 1)
 fm_control_omp_secondmate_prepare_relaunch() {  # <state> <id> <worktree> <backend> <target> <meta>
   local state=$1 id=$2 worktree=$3 backend=$4 target=$5 meta=$6 omp_state
-  local stop_cmd stop_wait stop_poll owner_pid elapsed proven marker marker_pid
+  local stop_cmd owner_pid marker marker_pid
   local expected_bun expected_bin current_version head committed_version lib_dir lock_present
   omp_state=$(fm_backend_agent_state "$backend" "$target" "$meta" 2>/dev/null || printf 'unreadable')
   case "$omp_state" in
@@ -231,10 +225,6 @@ fm_control_omp_secondmate_prepare_relaunch() {  # <state> <id> <worktree> <backe
     *) return 1 ;;
   esac
   stop_cmd=${FM_RESTART_STOP_CMD:-kill}
-  stop_wait=${FM_RESTART_STOP_WAIT:-30}
-  stop_poll=${FM_RESTART_STOP_POLL:-1}
-  case "$stop_wait" in ''|*[!0-9]*) return 1 ;; esac
-  case "$stop_poll" in ''|*[!0-9]*|0) return 1 ;; esac
   [ -d "$state" ] && [ ! -L "$state" ] \
     && [ -d "$worktree/state" ] && [ ! -L "$worktree/state" ] \
     || { printf 'error: OMP home state is not an ordinary directory; refusing relaunch\n' >&2; return 1; }
@@ -290,22 +280,8 @@ fm_control_omp_secondmate_prepare_relaunch() {  # <state> <id> <worktree> <backe
       printf 'error: OMP primary marker owner is still live; refusing relaunch\n' >&2
       return 1
     fi
-    "$stop_cmd" "$owner_pid" >/dev/null 2>&1 || true
-    proven=0
-    elapsed=0
-    while :; do
-      if ! "$stop_cmd" -0 "$owner_pid" >/dev/null 2>&1; then
-        proven=1
-        break
-      fi
-      [ "$elapsed" -lt "$stop_wait" ] || break
-      sleep "$stop_poll"
-      elapsed=$((elapsed + stop_poll))
-    done
-    [ "$proven" -eq 1 ] || return 1
-    if [ -n "$marker_pid" ] \
-      && "$stop_cmd" -0 "$marker_pid" >/dev/null 2>&1; then
-      printf 'error: OMP primary marker owner is still live; refusing relaunch\n' >&2
+    if "$stop_cmd" -0 "$owner_pid" >/dev/null 2>&1; then
+      printf 'error: OMP home lock owner is still live; refusing relaunch\n' >&2
       return 1
     fi
   elif [ "$lock_present" -eq 1 ] || [ -n "$marker_pid" ]; then

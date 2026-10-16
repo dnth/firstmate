@@ -902,7 +902,7 @@ EOF
     write_fixture_marker "$version" "$marker_pid" "$bash_bin" "$bash_bin"
   }
   prepare_fixture() {
-    FM_RESTART_STOP_WAIT=0 bash -c '
+    bash -c '
       . "$1/bin/fm-backend.sh" || exit 1
       . "$1/bin/fm-control-lib.sh" || exit 1
       fm_backend_agent_state() { printf missing; }
@@ -1019,15 +1019,28 @@ SH
 
   cat > "$dir/fake-live-lock" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = "-0" ] && [ "${2:-}" = "$FM_TEST_LOCK_PID" ]; then exit 0; fi
-exit 1
+if [ "${1:-}" = -0 ]; then
+  [ "${2:-}" = "$FM_TEST_LOCK_PID" ] && [ ! -e "$FM_TEST_SIGNAL_LOG" ]
+  exit $?
+fi
+printf '%s\n' "$1" >> "$FM_TEST_SIGNAL_LOG"
 SH
   chmod +x "$dir/fake-live-lock"
-  reset_fixture
-  if out=$(FM_RESTART_STOP_CMD="$dir/fake-live-lock" FM_TEST_LOCK_PID="$lock_pid" prepare_fixture); then
-    fail "OMP preparation accepted a live lock owner"
-  fi
-  assert_preserved
+  for path in present absent; do
+    reset_fixture
+    [ "$path" = present ] || rm -f "$marker"
+    if out=$(FM_RESTART_STOP_CMD="$dir/fake-live-lock" FM_TEST_LOCK_PID="$lock_pid" \
+      FM_TEST_SIGNAL_LOG="$dir/lock-signals" prepare_fixture); then
+      fail "OMP preparation accepted a live stoppable lock owner with marker $path"
+    fi
+    assert_contains "$out" 'lock owner is still live' "live lock-owner refusal was not actionable"
+    assert_absent "$dir/lock-signals" "OMP preparation signaled the live lock owner"
+    if [ "$path" = absent ]; then
+      assert_absent "$marker" "refused OMP relaunch created a primary marker"
+      write_fixture_marker "$version" "$marker_pid" "$bash_bin" "$bash_bin"
+    fi
+    assert_preserved
+  done
   pass "OMP relaunch preparation accepts only owned dead markers and preserves sessions on every refusal"
 }
 
@@ -1187,18 +1200,16 @@ SH
   export FM_TEST_NEW_WINDOW="reborn:fm-$id"
   export FM_RESTART_STOP_CMD="$sb/stop"
   export FM_RESTART_SPAWN_CMD="$sb/spawn"
-  export FM_RESTART_STOP_POLL=1
   printf '%s\n' "$pid" > "$dir/$id-home/state/.lock"
 }
 
 clear_omp_restart_stubs() {
   unset FM_TEST_MARKERS FM_TEST_STOP_LOG FM_TEST_SPAWN_LOG FM_TEST_OWNER_GONE
   unset FM_TEST_META FM_TEST_NEW_WINDOW FM_RESTART_STOP_CMD FM_RESTART_SPAWN_CMD
-  unset FM_RESTART_STOP_POLL
 }
 
 test_omp_restart_stops_proves_cleans_then_relaunches() {
-  local dir out rc owner marker primary_marker stop_first stop_probe spawn_line version bash_bin smhome
+  local dir out rc owner marker primary_marker stop_probe spawn_line version bash_bin smhome
   dir=$(new_case omp)
   printf 'omp\n' > "$dir/home/config/secondmate-harness"
   add_omp_mate "$dir" sm1
@@ -1234,14 +1245,12 @@ test_omp_restart_stops_proves_cleans_then_relaunches() {
 
   # 1 + 2. The owner was stopped, and its absence was PROVEN while every session
   # artifact was still on disk.
-  stop_first=$(sed -n 2p "$dir/stop.log")
-  stop_probe=$(sed -n 3p "$dir/stop.log")
+  stop_probe=$(sed -n 2p "$dir/stop.log")
   [ "$(sed -n 1p "$dir/stop.log")" = "probe $owner absent markers_present=4" ] \
     || fail "the graceful exit did not retire the marker owner before preparation"
-  [ "$stop_first" = "stopped $owner markers_present=4" ] \
-    || fail "the restart did not stop the mate's session owner first: '$stop_first'"$'\n'"$(cat "$dir/stop.log")"
   [ "$stop_probe" = "probe $owner absent markers_present=4" ] \
-    || fail "owner absence was not proven before anything was cleaned up: '$stop_probe'"$'\n'"$(cat "$dir/stop.log")"
+    || fail "lock-owner absence was not proven before cleanup: '$stop_probe'"$'\n'"$(cat "$dir/stop.log")"
+  assert_no_grep '^stopped ' "$dir/stop.log" "relaunch preparation must not signal an owner"
 
   # 3. Every session artifact the launch owner refuses to launch over is gone.
   while IFS= read -r marker; do
@@ -1320,7 +1329,7 @@ test_local_omp_restart_after_extension_closure_update() {
   assert_contains "$(cat "$dir/home/state/sm1.inbox"/*.msg)" "Open-record persistence" \
     "the superseded local session never received the persist request"
   persisted_line=$(grep -n '^persisted corr=' "$dir/stop.log" | head -1 | cut -d: -f1)
-  stop_line=$(grep -n "^stopped $owner " "$dir/stop.log" | head -1 | cut -d: -f1)
+  stop_line=$(grep -n "^probe $owner absent " "$dir/stop.log" | head -1 | cut -d: -f1)
   [ -n "$persisted_line" ] && [ -n "$stop_line" ] && [ "$persisted_line" -lt "$stop_line" ] \
     || fail "the superseded local session was not asked to persist before it stopped"$'\n'"$(cat "$dir/stop.log")"
   pass "T18 a local OMP mate persists and restarts after an update changes its loaded closure"
@@ -1389,12 +1398,6 @@ test_unlistable_state_still_refuses_restart() {
   assert_no_grep '^/exit$' "$dir/fake/literal" "an unlistable state refusal must not have stopped the agent"
   pass "T20 a mate home whose state cannot be listed still refuses the restart"
 }
-if [ "${FM_TEST_OMP_RESTART_ONLY:-0}" = 1 ]; then
-  test_omp_secondmate_prepare_relaunch_clears_owned_markers
-  test_omp_restart_stops_proves_cleans_then_relaunches
-  test_local_omp_restart_after_extension_closure_update
-  exit 0
-fi
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
