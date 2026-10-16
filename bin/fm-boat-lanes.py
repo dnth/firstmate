@@ -23,14 +23,17 @@ size accepts fm-boat.py's RATES keys; spec-wide ttl_seconds is an integer from
 pilot names one of them. Each lane has nonempty selections, an optional
 report-only profile (default "default"), and an optional ttl_seconds override
 using the same range; omitted lane TTLs inherit the spec value.
-continue_on_failure is an optional boolean that defaults to false. When true,
+The effective lane TTL controls reservation, cap admission, box creation and TTL update.
+continue_on_failure is an optional boolean that defaults to false, stopping after
+a selection remains non-pass following any permitted retries. When true,
 later selections continue after a selection reports failed or blocked cases;
 harness errors, timeouts, cancellation, and invalid evidence still stop the lane.
+Continued selections retain earlier failures; product_failure takes precedence
+over uncertain_failure, then known_harness_defect, then pass in the lane verdict.
 prepare, finish, artifacts and env default to empty; known_harness_defects and
 infra_signatures are optional top-level lists of nonempty literal substrings.
 known_product_failures is an optional top-level list of unique case IDs matching
-[A-Za-z0-9_.:-]{1,120}; failed matching cases are product failures and are never retried.
-Dependency-blocked evidence keeps its existing classification.
+[A-Za-z0-9_.:-]{1,120}, defaulting to empty; classification and retry rules follow below.
 Every step needs a positive finite timeout_seconds. env maps shell variable
 names to strings without NUL; FM_ names are reserved. Artifact and evidence
 paths must be beneath /tmp without '..' components. Upload sources must exist.
@@ -62,9 +65,10 @@ Required selection evidence_file is a /tmp JSON object with cases:[{id,status,
  dependency_blocked defaults to false and must be a boolean, request_ids defaults
  to [] and must contain strings matching [A-Za-z0-9_.:-]{1,160}, and kind
  (when present) must be infra or product.
- Malformed fields are harness evidence errors. Non-pass cases classify as known-harness-defect when
- dependency_blocked=true, status="dependency-blocked", or matching a literal
- substring in spec known_harness_defects;
+ Malformed fields are harness evidence errors. Non-pass cases classify in order:
+ known-harness-defect when dependency_blocked=true or status="dependency-blocked";
+ then product when the ID is in known_product_failures;
+ then known-harness-defect when matching a literal substring in known_harness_defects;
  then infra when kind=infra or matching infra_signatures (e.g. a known outage);
  then product when kind=product; otherwise uncertain. Passes classify as pass.
  Only infra/uncertain are eligible for one retry. Selection retry_reset:[STEP]
@@ -73,7 +77,10 @@ Required selection evidence_file is a /tmp JSON object with cases:[{id,status,
  skipped when it would rerun an attempted case or a currently known-defect/product case. Never rerun
  all lane selections. Missing reset/selection records a skipped retry. Retry
  commands must write updated evidence_file; known defects/product are never
- retry targets. Newly reported retry cases remain in verdicts and reports; newly
+ retry targets. For IDs in known_product_failures, the first non-pass status and
+ evidence are retained within the selection, including dependency-blocked cases;
+ overlapping retry evidence cannot replace them in retry or final reports.
+ Newly reported retry cases remain in verdicts and reports; newly
  observed infra/uncertain cases are recorded without adding retry targets.
  Infra transport/timeout failures without readable case evidence
  remain harness/timeout verdicts, not invented product cases.
@@ -107,7 +114,8 @@ report.jsonl appends a fsynced record immediately after each selection/retry and
  lane finish: lane, box, profile, duration_seconds, cases (id/status/classification/
  request_ids/retry_decision), case_counts, failures and spend_so_far_usd. Each
  append recomputes overall_totals from the latest case result per lane/selection/id
- (retries replace their original result). report.md is atomically replaced after
+ (retries replace their original result except for retained listed failures).
+ report.md is atomically replaced after
  every append and readable mid-run. Only structural evidence is recorded, never
  arbitrary request bodies, credentials, commands or remote stdout/stderr.
 
