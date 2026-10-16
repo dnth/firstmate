@@ -3203,6 +3203,8 @@ if [ "$KIND" = secondmate ]; then
       if ! fm_omp_primary_marker_read "$OMP_PRIMARY_MARKER" \
          || [ -z "$OMP_EXPECTED_MARKER_VERSION" ] \
          || [ "$FM_OMP_MARKER_VERSION" != "$OMP_EXPECTED_MARKER_VERSION" ] \
+         || [ "$FM_OMP_MARKER_BUN" != "$OMP_BUN_CANON" ] \
+         || [ "$FM_OMP_MARKER_BIN" != "$OMP_BIN_CANON" ] \
          || [ "$FM_OMP_MARKER_PID" != "$OMP_STALE_LOCK_PID" ]; then
         echo "error: OMP secondmate home has an unowned or malformed primary-integration marker at $OMP_PRIMARY_MARKER; refusing duplicate launch" >&2
         exit 1

@@ -197,32 +197,42 @@ fm_control_exit_command() {  # <harness>
 fm_control_omp_home_owner_pid() {  # <home-state>
   local home_state=$1 pid=""
   if [ -f "$home_state/.lock" ] && [ ! -L "$home_state/.lock" ]; then
-    IFS= read -r pid < "$home_state/.lock" || pid=""
+    pid=$(cat "$home_state/.lock" 2>/dev/null) || return 1
   fi
   case "$pid" in
-    ''|*[!0-9]*|0|1) return 1 ;;
+    ''|*[!0-9]*|0*|1) return 1 ;;
   esac
   printf '%s' "$pid"
 }
 
-# Retire the session artifacts an OMP second mate leaves behind, so its
-# replacement launch is not refused by its own predecessor's leftovers.
+# Only ESRCH proves absence. A failed probe can also mean EPERM or an
+# unavailable probe command; keep those owners and their artifacts untouched.
+fm_control_omp_owner_absent() {  # <probe-command> <pid> <owner-description>
+  local probe_cmd=$1 pid=$2 description=$3 probe_output
+  if probe_output=$(LC_ALL=C "$probe_cmd" -0 "$pid" 2>&1); then
+    printf 'error: OMP %s owner is still live; refusing relaunch\n' "$description" >&2
+    return 1
+  fi
+  case "$probe_output" in
+    *'No such process'*) return 0 ;;
+    *)
+      printf 'error: OMP %s owner is unverifiable; refusing relaunch\n' "$description" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Retire OMP session artifacts only after the prior session is absent and its
+# primary marker is tied to this home, this runtime, and a known extension
+# closure. A stale marker is not disposable just because its recorded PID is
+# dead: foreign, malformed, or unexplained state must keep refusing relaunch.
 #
-# The order is the contract. Both owners have to be proven gone FIRST - the
-# recorded endpoint, and the process holding the home session - because an
-# artifact removed under a live agent is indistinguishable from a fresh one, and
-# the launch owner would then accept a duplicate against a still-running mate.
-#
-# FM_RESTART_STOP_CMD replaces the signal and the liveness probe for the home
-# session owner (default: kill; invoked as "<cmd> <pid>" to stop it and
-# "<cmd> -0 <pid>" to probe it, so one override covers both halves). It exists so
-# tests/fm-secondmate-restart.test.sh can drive this sequence deterministically;
-# unset, this is an ordinary kill and the behavior is unchanged.
-#   FM_RESTART_STOP_WAIT  seconds to wait for the owner to go (default 30)
-#   FM_RESTART_STOP_POLL  seconds between absence probes (default 1)
+# FM_RESTART_STOP_CMD overrides kill for absence probes only, invoked as
+# "<cmd> -0 <pid>"; it never receives a stop signal request here.
 fm_control_omp_secondmate_prepare_relaunch() {  # <state> <id> <worktree> <backend> <target> <meta>
   local state=$1 id=$2 worktree=$3 backend=$4 target=$5 meta=$6 omp_state
-  local stop_cmd stop_wait stop_poll owner_pid elapsed proven
+  local stop_cmd owner_pid marker marker_pid
+  local expected_bun expected_bin current_version head committed_version lib_dir lock_present
   omp_state=$(fm_backend_agent_state "$backend" "$target" "$meta" 2>/dev/null || printf 'unreadable')
   case "$omp_state" in
     missing) ;;
@@ -234,24 +244,63 @@ fm_control_omp_secondmate_prepare_relaunch() {  # <state> <id> <worktree> <backe
     *) return 1 ;;
   esac
   stop_cmd=${FM_RESTART_STOP_CMD:-kill}
-  stop_wait=${FM_RESTART_STOP_WAIT:-30}
-  stop_poll=${FM_RESTART_STOP_POLL:-1}
-  case "$stop_wait" in ''|*[!0-9]*) return 1 ;; esac
-  case "$stop_poll" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ -d "$state" ] && [ ! -L "$state" ] \
+    && [ -d "$worktree/state" ] && [ ! -L "$worktree/state" ] \
+    || { printf 'error: OMP home state is not an ordinary directory; refusing relaunch\n' >&2; return 1; }
+
+  marker="$worktree/state/.omp-primary-extension-loaded"
+  marker_pid=
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] \
+      || { printf 'error: OMP primary marker is not an ordinary file; refusing relaunch\n' >&2; return 1; }
+    lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+    # shellcheck source=bin/fm-primary-watch-version-lib.sh
+    . "$lib_dir/fm-primary-watch-version-lib.sh" || return 1
+    # shellcheck source=bin/fm-omp-process-lib.sh
+    . "$lib_dir/fm-omp-process-lib.sh" || return 1
+    fm_omp_primary_marker_read "$marker" \
+      || { printf 'error: OMP primary marker is malformed; refusing relaunch\n' >&2; return 1; }
+    marker_pid=$FM_OMP_MARKER_PID
+    case "$marker_pid" in
+      0|1|0*|*[!0-9]*)
+        printf 'error: OMP primary marker has an invalid owner PID; refusing relaunch\n' >&2
+        return 1
+        ;;
+    esac
+    expected_bun=$(fm_meta_get "$meta" omp_bun 2>/dev/null || true)
+    expected_bin=$(fm_meta_get "$meta" omp_bin 2>/dev/null || true)
+    if [ -z "$expected_bun" ] || [ -z "$expected_bin" ] \
+      || [ "$FM_OMP_MARKER_BUN" != "$expected_bun" ] \
+      || [ "$FM_OMP_MARKER_BIN" != "$expected_bin" ]; then
+      printf 'error: OMP primary marker runtime does not match the recorded home; refusing relaunch\n' >&2
+      return 1
+    fi
+    current_version=$(fm_primary_watch_version "$worktree/.omp/extensions/fm-primary-omp.ts" "$worktree" 2>/dev/null) \
+      || { printf 'error: current OMP primary closure is unreadable; refusing relaunch\n' >&2; return 1; }
+    if [ "$FM_OMP_MARKER_VERSION" != "$current_version" ]; then
+      head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+        || { printf 'error: OMP home HEAD is unverifiable; refusing relaunch\n' >&2; return 1; }
+      committed_version=$(fm_omp_primary_version_at_commit "$worktree" "$head" 2>/dev/null) \
+        || { printf 'error: committed OMP primary closure is unreadable; refusing relaunch\n' >&2; return 1; }
+      [ "$committed_version" = "$current_version" ] \
+        || { printf 'error: OMP primary closure differs from the recorded home revision; refusing relaunch\n' >&2; return 1; }
+      fm_omp_primary_version_fast_forwarded_from "$worktree" "$FM_OMP_MARKER_VERSION" >/dev/null 2>&1 \
+        || { printf 'error: OMP primary marker version is not explained by recorded fast-forward history; refusing relaunch\n' >&2; return 1; }
+    fi
+  fi
+
+  lock_present=0
+  if [ -e "$worktree/state/.lock" ] || [ -L "$worktree/state/.lock" ]; then
+    lock_present=1
+  fi
   if owner_pid=$(fm_control_omp_home_owner_pid "$worktree/state"); then
-    "$stop_cmd" "$owner_pid" >/dev/null 2>&1 || true
-    proven=0
-    elapsed=0
-    while :; do
-      if ! "$stop_cmd" -0 "$owner_pid" >/dev/null 2>&1; then
-        proven=1
-        break
-      fi
-      [ "$elapsed" -lt "$stop_wait" ] || break
-      sleep "$stop_poll"
-      elapsed=$((elapsed + stop_poll))
-    done
-    [ "$proven" -eq 1 ] || return 1
+    if [ -n "$marker_pid" ]; then
+      fm_control_omp_owner_absent "$stop_cmd" "$marker_pid" 'primary marker' || return 1
+    fi
+    fm_control_omp_owner_absent "$stop_cmd" "$owner_pid" 'home lock' || return 1
+  elif [ "$lock_present" -eq 1 ] || [ -n "$marker_pid" ]; then
+    printf 'error: OMP home lock owner is unverifiable; refusing relaunch\n' >&2
+    return 1
   fi
   rm -f -- "$state/$id.omp-ext.ts" "$state/$id.omp-ready" \
     "$state/$id.omp-started" "$worktree/state/.omp-primary-extension-loaded"
