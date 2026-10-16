@@ -150,6 +150,154 @@ class Cases(unittest.TestCase):
                             for row in self.ledger()))
         self.assert_cleanup()
 
+    def test_lane_ttl_overrides_creation_reservation_and_runs_concurrently(self):
+        body = spec(3)
+        body["ttl_seconds"] = 3600
+        body["lanes"][1]["ttl_seconds"] = 14400
+        barrier = ("touch /tmp/boat-lane-tests/$FM_LANE.started; "
+                   "for attempt in {1..100}; do "
+                   "if test -f /tmp/boat-lane-tests/lane1.started && "
+                   "test -f /tmp/boat-lane-tests/lane2.started; then break; fi; "
+                   "sleep .05; done; "
+                   "test -f /tmp/boat-lane-tests/lane1.started && "
+                   "test -f /tmp/boat-lane-tests/lane2.started # SELECT")
+        body["lanes"][1]["selections"] = [step(barrier, 8)]
+        body["lanes"][2]["selections"] = [step(barrier, 8)]
+        self.assertEqual(self.run_case(body, "--cap-usd", ".37", "--jobs", "2"), 0)
+        intents = {row["lane"]: row for row in self.ledger() if row["event"] == "create_intent"}
+        self.assertEqual(intents["lane1"]["ttl_seconds"], 14400)
+        self.assertAlmostEqual(intents["lane1"]["reserved_usd"], .288)
+        self.assertEqual(intents["lane2"]["ttl_seconds"], 3600)
+        self.assertAlmostEqual(intents["lane2"]["reserved_usd"], .072)
+        boxes = {row["lane"]: row["box"] for row in self.ledger() if row["event"] == "created"}
+        for lane, ttl in (("lane1", 14400), ("lane2", 3600)):
+            box = self.state()["boxes"][boxes[lane]]
+            self.assertEqual(box["create_ttl"], ttl)
+            self.assertEqual(box["ttlSeconds"], ttl)
+        self.assert_cleanup()
+
+    def test_lane_ttl_is_used_by_cap_check(self):
+        body = spec(3)
+        body["ttl_seconds"] = 3600
+        body["lanes"][1]["ttl_seconds"] = 14400
+        for lane in body["lanes"][1:]:
+            lane["selections"] = [step("sleep 120 # SELECT", 120)]
+        self.assertEqual(self.run_case(body, "--cap-usd", ".29", "--jobs", "2"), 3)
+        intents = {row["lane"]: row for row in self.ledger() if row["event"] == "create_intent"}
+        refusal = next(row for row in self.ledger() if row["event"] == "refused")
+        admitted = ({"lane1", "lane2"} - {refusal["lane"]}).pop()
+        self.assertEqual(set(intents), {"pilot", admitted})
+        for lane, ttl, reserve in (("lane1", 14400, .288), ("lane2", 3600, .072)):
+            if lane == admitted:
+                self.assertEqual(intents[lane]["ttl_seconds"], ttl)
+                self.assertAlmostEqual(intents[lane]["reserved_usd"], reserve)
+                self.assertGreaterEqual(refusal["reserved_usd"], reserve)
+            else:
+                self.assertAlmostEqual(refusal["new_usd"], reserve)
+        self.assertGreater(refusal["spent_usd"] + refusal["reserved_usd"] + refusal["new_usd"], .29)
+        self.assert_cleanup()
+
+    def test_invalid_lane_ttl_is_refused_before_box_creation(self):
+        body = spec()
+        body["lanes"][0]["ttl_seconds"] = True
+        self.assertEqual(self.run_case(body), 2)
+        self.assertEqual(self.state()["boxes"], {})
+
+
+    def test_continue_on_failure_runs_later_selection_and_fetches_artifacts(self):
+        body = spec()
+        path = "/tmp/boat-lane-tests/cases.json"
+        initial = dict(cases=[dict(id="resilience-fail", status="fail"),
+                              dict(id="resilience-blocked", status="blocked")])
+        later = dict(cases=[dict(id="maintenance", status="pass")])
+        import shlex
+        emit = lambda payload: "printf %s " + shlex.quote(json.dumps(payload)) + " > " + shlex.quote(path)
+        body["lanes"][0]["continue_on_failure"] = True
+        body["lanes"][0]["selections"] = [
+            dict(command=emit(initial) + "; exit 0 # SELECT",
+                 timeout_seconds=2, evidence_file=path),
+            dict(command=emit(later) + "; touch /tmp/boat-lane-tests/maintenance-artifact # SELECT",
+                 timeout_seconds=2, evidence_file=path)]
+        body["artifacts"] = ["/tmp/boat-lane-tests/maintenance-artifact"]
+        self.assertEqual(self.run_case(body), 4)
+        reports = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        selections = [row for row in reports if row["attempt"] == "initial"]
+        self.assertEqual([row["selection"] for row in selections], [0, 1])
+        first = {case["id"]: case for case in selections[0]["cases"]}
+        self.assertEqual(first["resilience-fail"]["status"], "fail")
+        self.assertEqual(first["resilience-blocked"]["status"], "blocked")
+        self.assertEqual(selections[1]["cases"][0]["id"], "maintenance")
+        self.assertEqual(selections[1]["cases"][0]["status"], "pass")
+        complete = next(row for row in reports if row["attempt"] == "complete")
+        self.assertEqual(complete["verdict"], "uncertain_failure")
+        self.assertEqual({case["id"] for case in complete["failures"]},
+                         {"resilience-fail", "resilience-blocked"})
+        steps = [row for row in self.ledger() if row["event"] == "step" and row.get("phase") == "selection"]
+        artifact = next(row for row in self.ledger()
+                        if row["event"] == "artifact" and row["path"] == body["artifacts"][0])
+        self.assertEqual(len(steps), 2)
+        self.assertGreater(artifact["sequence"], steps[1]["sequence"])
+        self.assertEqual(artifact["exit"], 0)
+        self.assert_cleanup()
+
+    def test_continued_lane_verdict_preserves_failure_precedence_in_both_orders(self):
+        import itertools
+        import shlex
+        pairs = list(itertools.permutations(("product", "uncertain", "dependency-blocked"), 2))
+        body = spec(len(pairs) + 1)
+        expected = {}
+        path = "/tmp/boat-lane-tests/cases.json"
+        for lane, kinds in zip(body["lanes"][1:], pairs):
+            lane["continue_on_failure"] = True
+            lane["selections"] = []
+            expected[lane["id"]] = "product_failure" if "product" in kinds else "uncertain_failure"
+            for index, kind in enumerate((*kinds, "pass")):
+                case = dict(id=f"case-{index}", status="pass" if kind == "pass" else
+                            "dependency-blocked" if kind == "dependency-blocked" else "failed",
+                            failure_signature=f"{lane['id']}-{index}")
+                if kind == "product":
+                    case["kind"] = "product"
+                command = "printf %s " + shlex.quote(json.dumps(dict(cases=[case])))
+                lane["selections"].append(dict(command=command + " > " + shlex.quote(path) + " # SELECT",
+                                               timeout_seconds=2, evidence_file=path))
+        self.assertEqual(self.run_case(body, "--jobs", "1"), 4)
+        reports = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        results = {row["lane"]: row for row in self.ledger() if row["event"] == "lane_result"}
+        for lane, verdict in expected.items():
+            with self.subTest(lane=lane):
+                complete = next(row for row in reports if row["lane"] == lane and row["attempt"] == "complete")
+                self.assertEqual(complete["verdict"], verdict)
+                self.assertEqual(results[lane]["verdict"], verdict)
+                self.assertEqual(len(complete["failures"]), 2)
+                self.assertEqual([row["selection"] for row in reports
+                                  if row["lane"] == lane and row["attempt"] == "initial"], [0, 1, 2])
+        self.assert_cleanup()
+
+    def test_lane_still_stops_after_nonpass_by_default(self):
+        body = spec()
+        path = "/tmp/boat-lane-tests/cases.json"
+        initial = dict(cases=[dict(id="first", status="fail")])
+        later = dict(cases=[dict(id="later", status="pass")])
+        import shlex
+        emit = lambda payload: "printf %s " + shlex.quote(json.dumps(payload)) + " > " + shlex.quote(path)
+        body["lanes"][0]["selections"] = [
+            dict(command=emit(initial) + "; exit 0 # SELECT",
+                 timeout_seconds=2, evidence_file=path),
+            dict(command=emit(later) + "; touch /tmp/boat-lane-tests/should-not-run # SELECT",
+                 timeout_seconds=2, evidence_file=path)]
+        self.assertEqual(self.run_case(body), 4)
+        self.assertFalse((self.home / "should-not-run").exists())
+        reports = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        self.assertEqual([row["selection"] for row in reports if row["attempt"] == "initial"], [0])
+        self.assert_cleanup()
+
+    def test_invalid_continue_on_failure_is_refused_before_box_creation(self):
+        body = spec()
+        body["lanes"][0]["continue_on_failure"] = "yes"
+        self.assertEqual(self.run_case(body), 2)
+        self.assertEqual(self.state()["boxes"], {})
+
+
     def test_product_failure_cleanup_and_pilot_stops_fanout(self):
         body = spec(4)
         body["lanes"][0]["selections"] = [step("false # SELECT")]
@@ -256,6 +404,136 @@ class Cases(unittest.TestCase):
         final = next(row for row in reports if row["attempt"] == "complete")
         self.assertEqual(next(case for case in final["cases"] if case["id"] == "uncertain")["retry_decision"], "exhausted")
         self.assert_cleanup()
+
+    def test_known_product_failure_ids_are_not_retried(self):
+        body = spec()
+        path = "/tmp/boat-lane-tests/cases.json"
+        known = "QA-QUAL-RANKING-01"
+        blocked = "QA-KNOWN-BLOCKED"
+        initial = dict(cases=[dict(id=known, status="fail", failure_signature="ranking mismatch",
+                                   request_ids=["req-known"]),
+                              dict(id=blocked, status="blocked", dependency_blocked=True,
+                                   request_ids=["req-blocked"]),
+                              dict(id="eligible", status="fail", request_ids=["req-eligible"])])
+        other_known = [dict(id=f"known-{status}", status=status, request_ids=[f"req-{status}"])
+                       for status in ("failed", "error", "blocked", "dependency-blocked", "pass")]
+        initial["cases"].extend(other_known)
+        retried = dict(cases=[dict(id="eligible", status="pass", request_ids=["req-retry"]),
+                              dict(id="retry-known", status="failed", request_ids=["req-new"])])
+        import shlex
+        emit = lambda payload: "printf %s " + shlex.quote(json.dumps(payload)) + " > " + shlex.quote(path)
+        body["known_product_failures"] = [known, blocked, "retry-known"] + [case["id"] for case in other_known]
+        body["lanes"][0]["selections"] = [dict(command=emit(initial) + "; false # SELECT",
+            timeout_seconds=2, evidence_file=path, retry_reset=[step("true")],
+            retry_cases={known: step("touch /tmp/boat-lane-tests/unsafe-known-retry; false"),
+                         "eligible": step(emit(retried) + " # RETRY_uncertain")})]
+        for case in other_known:
+            body["lanes"][0]["selections"][0]["retry_cases"][case["id"]] = step(
+                "touch /tmp/boat-lane-tests/unsafe-known-retry; false")
+        self.assertEqual(self.run_case(body), 4)
+        self.assertFalse((self.home / "unsafe-known-retry").exists())
+        reports = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        initial_report = next(row for row in reports if row["attempt"] == "initial")
+        self.assertEqual([case["id"] for case in initial_report["failures"]],
+                         [case["id"] for case in initial["cases"] if case["status"] != "pass"])
+        cases = {row["id"]: row for row in initial_report["cases"]}
+        self.assertEqual(cases[known]["status"], "fail")
+        self.assertEqual(cases[known]["classification"], "product")
+        self.assertEqual(cases[known]["retry_decision"], "never")
+        self.assertEqual(cases[blocked]["status"], "blocked")
+        self.assertEqual(cases[blocked]["classification"], "known-harness-defect")
+        self.assertEqual(cases[blocked]["retry_decision"], "never")
+        self.assertEqual(cases[blocked]["request_ids"], ["req-blocked"])
+        self.assertEqual(cases[known]["request_ids"], ["req-known"])
+        self.assertEqual(cases["eligible"]["retry_decision"], "once-case")
+        retries = [row for row in reports if row["attempt"] == "retry"]
+        self.assertEqual(len(retries), 1)
+        self.assertEqual([case["id"] for case in retries[0]["cases"]], ["eligible", "retry-known"])
+        final = next(row for row in reports if row["attempt"] == "complete")
+        final_cases = {row["id"]: row for row in final["cases"]}
+        for case in other_known:
+            identity, status = case["id"], case["status"]
+            classification = ("pass" if status == "pass" else "known-harness-defect"
+                              if status == "dependency-blocked" else "product")
+            for observed in (cases[identity], final_cases[identity]):
+                self.assertEqual(observed["status"], status)
+                self.assertEqual(observed["classification"], classification)
+                self.assertEqual(observed["request_ids"], case["request_ids"])
+                self.assertEqual(observed["retry_decision"], "not-needed" if status == "pass" else "never")
+        self.assertEqual(final_cases["retry-known"]["classification"], "product")
+        self.assertEqual(final_cases["retry-known"]["retry_decision"], "never")
+        self.assertEqual(final_cases["retry-known"]["request_ids"], ["req-new"])
+        self.assertEqual(final_cases[known]["status"], "fail")
+        self.assertEqual(final_cases[known]["retry_decision"], "never")
+        self.assertEqual(final_cases["eligible"]["retry_decision"], "exhausted")
+        self.assertEqual(final["verdict"], "product_failure")
+        self.assert_cleanup()
+
+    def test_known_failures_survive_overlapping_retry_evidence_and_stop_fanout(self):
+        import shlex
+        body = spec(3)
+        path = "/tmp/boat-lane-tests/cases.json"
+        retained = [dict(id="known", status="failed", failure_signature="original product failure",
+                         request_ids=["req-original"]),
+                    dict(id="blocked", status="blocked", dependency_blocked=True,
+                         failure_signature="original dependency failure", request_ids=["req-blocked"])]
+        initial = dict(cases=retained + [dict(id="known-pass", status="pass"),
+                                        dict(id="eligible-1", status="failed"),
+                                        dict(id="eligible-2", status="failed"),
+                                        dict(id="unlisted", status="failed", kind="product")])
+        discovered = [dict(id="new-known", status="error", failure_signature="new failure",
+                           request_ids=["req-new"]),
+                      dict(id="known-pass", status="failed", failure_signature="newly failing",
+                           request_ids=["req-newly-failing"])]
+        first_retry = dict(cases=[dict(id=case["id"], status="pass", request_ids=["req-replacement"])
+                                 for case in retained] + discovered +
+                                [dict(id="eligible-1", status="pass"),
+                                 dict(id="eligible-2", status="failed"),
+                                 dict(id="unlisted", status="pass")])
+        second_retry = dict(cases=[dict(id=case["id"], status="pass", request_ids=["req-erased"])
+                                  for case in retained + discovered] +
+                                 [dict(id="eligible-2", status="pass")])
+        emit = lambda payload: "printf %s " + shlex.quote(json.dumps(payload)) + " > " + shlex.quote(path)
+        body["known_product_failures"] = [case["id"] for case in retained + discovered]
+        body["lanes"][0]["selections"] = [dict(
+            command=emit(initial) + "; false # SELECT", timeout_seconds=2, evidence_file=path,
+            retry_reset=[step("true")],
+            retry_cases={"eligible-1": step(emit(first_retry)), "eligible-2": step(emit(second_retry))})]
+        self.assertEqual(self.run_case(body), 4)
+        reports = [json.loads(line) for line in (self.home / "run/report.jsonl").read_text().splitlines()]
+        initial_report = next(row for row in reports if row["attempt"] == "initial")
+        retries = [row for row in reports if row["attempt"] == "retry"]
+        self.assertEqual(len(retries), 2)
+        final = next(row for row in reports if row["attempt"] == "complete")
+        originals = {case["id"]: case for case in initial_report["cases"]}
+        first_observed = {case["id"]: case for case in retries[0]["cases"]}
+        for report in retries + [final]:
+            cases = {case["id"]: case for case in report["cases"]}
+            for case in retained:
+                self.assertEqual(cases[case["id"]], originals[case["id"]])
+            for case in discovered:
+                self.assertEqual(cases[case["id"]], first_observed[case["id"]])
+                self.assertEqual(cases[case["id"]]["status"], case["status"])
+                self.assertEqual(cases[case["id"]]["retry_decision"], "never")
+            self.assertEqual(report["overall_totals"],
+                             {"failed": 3, "blocked": 1, "error": 1, "pass": 2}
+                             if report is retries[0] else
+                             {"failed": 2, "blocked": 1, "error": 1, "pass": 3})
+        final_cases = {case["id"]: case for case in final["cases"]}
+        self.assertEqual(final_cases["unlisted"]["status"], "pass")
+        self.assertEqual(final_cases["eligible-1"]["status"], "pass")
+        self.assertEqual(final_cases["eligible-2"]["status"], "pass")
+        self.assertEqual(final["verdict"], "product_failure")
+        results = [row for row in self.ledger() if row["event"] == "lane_result"]
+        self.assertEqual([(row["lane"], row["verdict"]) for row in results], [("pilot", "product_failure")])
+        self.assertEqual(len(self.state()["boxes"]), 1)
+        self.assert_cleanup()
+
+    def test_invalid_known_product_failure_ids_are_refused_before_box_creation(self):
+        body = spec()
+        body["known_product_failures"] = ["not a valid case id"]
+        self.assertEqual(self.run_case(body), 2)
+        self.assertEqual(self.state()["boxes"], {})
 
     def test_streaming_report_valid_before_last_lane_finishes(self):
         body = spec(3)
@@ -937,7 +1215,9 @@ class Cases(unittest.TestCase):
     def test_help_owns_schema_and_exits(self):
         result = subprocess.run([sys.executable, str(ROOT / "bin/fm-boat-lanes.py"), "--help"],
                                 capture_output=True, text=True, check=True)
-        for term in ("Spec v1", "ledger.jsonl", "Exit codes", "124", "SIGKILL", "pilot", "cap-usd"):
+        for term in ("Spec v1", "ledger.jsonl", "Exit codes", "124", "SIGKILL",
+                     "pilot", "cap-usd", "ttl_seconds", "known_product_failures",
+                     "continue_on_failure"):
             self.assertIn(term, result.stdout)
 
 

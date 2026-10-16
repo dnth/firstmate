@@ -12,19 +12,31 @@ box can be supplied. Each created ID is fsynced before customization; the provid
 name is fm-lanes-<random run token>-<lane>. Never adopt or delete another run's box.
 
 Spec v1 is JSON: {"version":1,"size":"large","ttl_seconds":1800,
- "pilot":"pilot","env":{"NAME":"value"},"prepare":[STEP],"guard":STEP,
- "lanes":[{"id":"pilot","selections":[STEP]}],"artifacts":["/tmp/results"],
- "finish":[STEP]}. STEP is {"command":"shell script","timeout_seconds":60}
- or, in prepare only, {"upload":"/absolute/local/file","destination":"/tmp/file",
- "timeout_seconds":60}. size accepts fm-boat.py's RATES keys; ttl_seconds is an
- integer from 60 through 86400. Lane IDs are unique and match
- [a-zA-Z0-9][a-zA-Z0-9_-]{0,31}; pilot names one of them. Each lane has a nonempty
- selections list and an optional report-only profile (default "default").
- prepare, finish, artifacts and env default to empty; known_harness_defects and
- infra_signatures are optional top-level lists of nonempty literal substrings.
- Every step needs a positive finite timeout_seconds. env maps shell variable
- names to strings without NUL; FM_ names are reserved. Artifact and evidence
- paths must be beneath /tmp without '..' components. Upload sources must exist.
+ "pilot":"pilot","known_product_failures":["case-id"],"env":{"NAME":"value"},
+ "prepare":[STEP],"guard":STEP,"lanes":[{"id":"pilot","ttl_seconds":3600,
+ "continue_on_failure":true,"selections":[STEP]}],"artifacts":["/tmp/results"],
+ "finish":[STEP]}.
+STEP is {"command":"shell script","timeout_seconds":60} or, in prepare only,
+ {"upload":"/absolute/local/file","destination":"/tmp/file","timeout_seconds":60}.
+size accepts fm-boat.py's RATES keys; spec-wide ttl_seconds is an integer from
+60 through 86400. Lane IDs are unique and match [a-zA-Z0-9][a-zA-Z0-9_-]{0,31};
+pilot names one of them. Each lane has nonempty selections, an optional
+report-only profile (default "default"), and an optional ttl_seconds override
+using the same range; omitted lane TTLs inherit the spec value.
+The effective lane TTL controls reservation, cap admission, box creation and TTL update.
+continue_on_failure is an optional boolean that defaults to false, stopping after
+a selection remains non-pass following any permitted retries. When true,
+later selections continue after a selection reports failed or blocked cases;
+harness errors, timeouts, cancellation, and invalid evidence still stop the lane.
+Continued selections retain earlier failures; product_failure takes precedence
+over uncertain_failure, then known_harness_defect, then pass in the lane verdict.
+prepare, finish, artifacts and env default to empty; known_harness_defects and
+infra_signatures are optional top-level lists of nonempty literal substrings.
+known_product_failures is an optional top-level list of unique case IDs matching
+[A-Za-z0-9_.:-]{1,120}, defaulting to empty; classification and retry rules follow below.
+Every step needs a positive finite timeout_seconds. env maps shell variable
+names to strings without NUL; FM_ names are reserved. Artifact and evidence
+paths must be beneath /tmp without '..' components. Upload sources must exist.
  Keep project recipes private under the operator home's config/boat-lanes/;
  tests/boat-lane-runner-cases.py contains offline fake-provider spec examples.
  Commands execute remotely in bash with strict errors,
@@ -53,9 +65,10 @@ Required selection evidence_file is a /tmp JSON object with cases:[{id,status,
  dependency_blocked defaults to false and must be a boolean, request_ids defaults
  to [] and must contain strings matching [A-Za-z0-9_.:-]{1,160}, and kind
  (when present) must be infra or product.
- Malformed fields are harness evidence errors. Non-pass cases classify as known-harness-defect when
- dependency_blocked=true, status="dependency-blocked", or matching a literal
- substring in spec known_harness_defects;
+ Malformed fields are harness evidence errors. Non-pass cases classify in order:
+ known-harness-defect when dependency_blocked=true or status="dependency-blocked";
+ then product when the ID is in known_product_failures;
+ then known-harness-defect when matching a literal substring in known_harness_defects;
  then infra when kind=infra or matching infra_signatures (e.g. a known outage);
  then product when kind=product; otherwise uncertain. Passes classify as pass.
  Only infra/uncertain are eligible for one retry. Selection retry_reset:[STEP]
@@ -64,7 +77,10 @@ Required selection evidence_file is a /tmp JSON object with cases:[{id,status,
  skipped when it would rerun an attempted case or a currently known-defect/product case. Never rerun
  all lane selections. Missing reset/selection records a skipped retry. Retry
  commands must write updated evidence_file; known defects/product are never
- retry targets. Newly reported retry cases remain in verdicts and reports; newly
+ retry targets. For IDs in known_product_failures, the first non-pass status and
+ evidence are retained within the selection, including dependency-blocked cases;
+ overlapping retry evidence cannot replace them in retry or final reports.
+ Newly reported retry cases remain in verdicts and reports; newly
  observed infra/uncertain cases are recorded without adding retry targets.
  Infra transport/timeout failures without readable case evidence
  remain harness/timeout verdicts, not invented product cases.
@@ -98,7 +114,8 @@ report.jsonl appends a fsynced record immediately after each selection/retry and
  lane finish: lane, box, profile, duration_seconds, cases (id/status/classification/
  request_ids/retry_decision), case_counts, failures and spend_so_far_usd. Each
  append recomputes overall_totals from the latest case result per lane/selection/id
- (retries replace their original result). report.md is atomically replaced after
+ (retries replace their original result except for retained listed failures).
+ report.md is atomically replaced after
  every append and readable mid-run. Only structural evidence is recorded, never
  arbitrary request bodies, credentials, commands or remote stdout/stderr.
 
@@ -372,6 +389,12 @@ def validate(spec):
     steps += [(spec.get("guard"), False)]
     steps += [(step, False) for step in spec.get("finish", [])]
     for lane in lanes:
+        lane_ttl = lane.get("ttl_seconds", ttl)
+        if not isinstance(lane_ttl, int) or isinstance(lane_ttl, bool) or not 60 <= lane_ttl <= 86400:
+            raise Refusal("lane TTL must be 60..86400 seconds")
+        continue_on_failure = lane.get("continue_on_failure", False)
+        if type(continue_on_failure) is not bool:
+            raise Refusal("continue_on_failure must be a boolean")
         selections = lane.get("selections")
         if not isinstance(selections, list) or not selections:
             raise Refusal("each lane requires real selections")
@@ -419,11 +442,19 @@ def validate(spec):
         if not isinstance(spec.get(key, []), list) or any(not isinstance(x, str) or not x
                 for x in spec.get(key, [])):
             raise Refusal(f"{key} must contain nonempty literal signatures")
+    known_products = spec.get("known_product_failures", [])
+    if (not isinstance(known_products, list)
+            or any(not isinstance(value, str)
+                   or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", value)
+                   for value in known_products)
+            or len(set(known_products)) != len(known_products)):
+        raise Refusal("known_product_failures must be unique case IDs")
 
 
 class Runner:
     def __init__(self, args, spec):
         self.args, self.spec = args, spec
+        self.known_product_failures = frozenset(spec.get("known_product_failures", []))
         self.stop = threading.Event()
         self.executor = Executor(self.stop)
         # Use the existing Boat client's JSON/API/credential implementation.
@@ -464,19 +495,21 @@ class Runner:
         self.stop.set()
 
     def create(self, lane):
+        lane_id = lane["id"]
+        ttl = lane.get("ttl_seconds", self.spec["ttl_seconds"])
         with self.lock:
             if self.stop.is_set() or self.systemic:
                 raise Interrupted()
-            reserve = client.RATES[self.spec["size"]] * self.spec["ttl_seconds"] / 3600
+            reserve = client.RATES[self.spec["size"]] * ttl / 3600
             if self.spent + self.reserved + reserve > self.args.cap_usd + 1e-12:
-                self.event("refused", lane=lane, reason="projected spend exceeds cap",
+                self.event("refused", lane=lane_id, reason="projected spend exceeds cap",
                            spent_usd=self.spent, reserved_usd=self.reserved, new_usd=reserve)
                 self.stop.set()
                 raise Refusal("projected spend exceeds cap")
-            name = f"fm-lanes-{self.token}-{lane}"
+            name = f"fm-lanes-{self.token}-{lane_id}"
             self.reserved += reserve
-            self.event("create_intent", lane=lane, name=name, reserved_usd=reserve,
-                       ttl_seconds=self.spec["ttl_seconds"])
+            self.event("create_intent", lane=lane_id, name=name, reserved_usd=reserve,
+                       ttl_seconds=ttl)
             # Do not interrupt creation between its response and durable ID publication.
             # If transport dies ambiguously, the intent/name and reservation remain.
             cleaning = self.executor.cleaning
@@ -484,16 +517,17 @@ class Runner:
             try:
                 body = client.cli("new", "--json", "--personal", "--no-env",
                                   "--environment", "base", "--type", self.spec["size"],
-                                  "--ttl", str(self.spec["ttl_seconds"]), "--no-update")
+                                  "--ttl", str(ttl), "--no-update")
                 nested = body.get("sandbox", {})
                 box = body.get("id") or (nested.get("id") if isinstance(nested, dict) else None)
                 if not isinstance(box, str) or not re.fullmatch(r"bx_[A-Za-z0-9]+", box):
                     raise Refusal("creation returned invalid identity; inspect create intent")
-                self.boxes[box] = dict(lane=lane, name=name, reserve=reserve, deleted=False)
-                self.event("created", lane=lane, box=box, name=name, reserved_usd=reserve)
+                self.boxes[box] = dict(lane=lane_id, name=name, reserve=reserve,
+                                       ttl_seconds=ttl, deleted=False)
+                self.event("created", lane=lane_id, box=box, name=name, reserved_usd=reserve)
             except Exception:
                 self.stop.set()  # An ambiguous create must never be followed by fan-out.
-                self.event("creation_uncertain", lane=lane, name=name)
+                self.event("creation_uncertain", lane=lane_id, name=name)
                 raise
             finally:
                 self.executor.cleaning = cleaning
@@ -644,8 +678,11 @@ class Runner:
                     raise ValueError()
                 if status == "pass":
                     classification = "pass"
-                elif blocked or status == "dependency-blocked" or any(
-                        x in signature for x in self.spec.get("known_harness_defects", [])):
+                elif blocked or status == "dependency-blocked":
+                    classification = "known-harness-defect"
+                elif identity in self.known_product_failures:
+                    classification = "product"
+                elif any(x in signature for x in self.spec.get("known_harness_defects", [])):
                     classification = "known-harness-defect"
                 elif kind == "infra" or any(
                         x in signature for x in self.spec.get("infra_signatures", [])):
@@ -781,6 +818,8 @@ class Runner:
                     cases.append(row)
             for row in cases:
                 if row["id"] in latest:
+                    if row["id"] in self.known_product_failures and row["status"] != "pass":
+                        continue
                     decision = ("exhausted" if row["id"] in attempted else
                                 "not-needed" if latest[row["id"]]["status"] == "pass" else
                                 "never" if latest[row["id"]]["classification"] in ("known-harness-defect", "product")
@@ -843,9 +882,10 @@ class Runner:
         started = time.monotonic()
         phase = "create"
         try:
-            box = self.create(name)
+            box = self.create(lane)
             owned_name = self.boxes[box]["name"]
-            client.api("PATCH", box, {"name": owned_name, "ttlSeconds": self.spec["ttl_seconds"]})
+            client.api("PATCH", box, {"name": owned_name,
+                                      "ttlSeconds": self.boxes[box]["ttl_seconds"]})
             self.event("named", box=box, name=owned_name)
             phase = "clean_substrate"
             result = self.remote(box, name, "docker ps -aq", 30)
@@ -863,10 +903,12 @@ class Runner:
                 phase = "selection"
                 code, failure_verdict = self.selection(box, lane, selection, index)
                 if code:
-                    verdict = failure_verdict
+                    verdict = max(verdict, failure_verdict, key=(
+                        "pass", "known_harness_defect", "uncertain_failure", "product_failure").index)
                     with self.lock:
                         signature = sorted(value for value, seen in self.signatures.items() if name in seen)
-                    break
+                    if not lane.get("continue_on_failure", False) or self.stop.is_set():
+                        break
         except Deadline:
             verdict, signature = "timeout", phase + ":timeout"
         except Interrupted:
