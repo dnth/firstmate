@@ -78,6 +78,7 @@ case "${1:-}" in
           if [ -e "$D/remote-relaunch-start" ] && [ ! -e "$D/remote-relaunch-end" ]; then
             : > "$D/local-relaunch-during-remote"
           fi
+          if [ -n "${FM_TEST_OWNER_GONE:-}" ]; then : > "$FM_TEST_OWNER_GONE"; fi
           printf 'zsh' > "$D/command.$target"
           ;;
         "/bin/bash "*.fm-launch-*.sh\'*) cat "$D/becomes" > "$D/command.$target" ;;
@@ -938,6 +939,26 @@ EOF
   assert_contains "$out" 'primary marker owner is still live' "live marker-owner refusal was not actionable"
   assert_preserved
 
+  cat > "$dir/stoppable-owner" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -0 ]; then
+  [ ! -e "$FM_TEST_SIGNAL_LOG" ]
+  exit $?
+fi
+printf '%s\n' "$1" >> "$FM_TEST_SIGNAL_LOG"
+SH
+  chmod +x "$dir/stoppable-owner"
+  for marker_pid in "$lock_pid" 99999999; do
+    reset_fixture
+    if out=$(FM_RESTART_STOP_CMD="$dir/stoppable-owner" FM_TEST_SIGNAL_LOG="$dir/signals" prepare_fixture); then
+      fail "OMP preparation accepted a live stoppable marker owner $marker_pid"
+    fi
+    assert_contains "$out" 'primary marker owner is still live' \
+      "live stoppable marker-owner refusal was not actionable"
+    assert_absent "$dir/signals" "OMP preparation signaled an owner despite a live primary marker"
+    assert_preserved
+  done
+
   marker_pid=99999999
   reset_fixture
   write_fixture_marker "$version" "$marker_pid" "$bash_bin" "$dir/foreign-omp"
@@ -1213,8 +1234,10 @@ test_omp_restart_stops_proves_cleans_then_relaunches() {
 
   # 1 + 2. The owner was stopped, and its absence was PROVEN while every session
   # artifact was still on disk.
-  stop_first=$(sed -n 1p "$dir/stop.log")
-  stop_probe=$(sed -n 2p "$dir/stop.log")
+  stop_first=$(sed -n 2p "$dir/stop.log")
+  stop_probe=$(sed -n 3p "$dir/stop.log")
+  [ "$(sed -n 1p "$dir/stop.log")" = "probe $owner absent markers_present=4" ] \
+    || fail "the graceful exit did not retire the marker owner before preparation"
   [ "$stop_first" = "stopped $owner markers_present=4" ] \
     || fail "the restart did not stop the mate's session owner first: '$stop_first'"$'\n'"$(cat "$dir/stop.log")"
   [ "$stop_probe" = "probe $owner absent markers_present=4" ] \

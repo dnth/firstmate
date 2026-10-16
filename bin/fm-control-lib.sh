@@ -285,7 +285,7 @@ fm_control_omp_secondmate_prepare_relaunch() {  # <state> <id> <worktree> <backe
     lock_present=1
   fi
   if owner_pid=$(fm_control_omp_home_owner_pid "$worktree/state"); then
-    if [ -n "$marker_pid" ] && [ "$marker_pid" != "$owner_pid" ] \
+    if [ -n "$marker_pid" ] \
       && "$stop_cmd" -0 "$marker_pid" >/dev/null 2>&1; then
       printf 'error: OMP primary marker owner is still live; refusing relaunch\n' >&2
       return 1
@@ -303,7 +303,7 @@ fm_control_omp_secondmate_prepare_relaunch() {  # <state> <id> <worktree> <backe
       elapsed=$((elapsed + stop_poll))
     done
     [ "$proven" -eq 1 ] || return 1
-    if [ -n "$marker_pid" ] && [ "$marker_pid" != "$owner_pid" ] \
+    if [ -n "$marker_pid" ] \
       && "$stop_cmd" -0 "$marker_pid" >/dev/null 2>&1; then
       printf 'error: OMP primary marker owner is still live; refusing relaunch\n' >&2
       return 1
