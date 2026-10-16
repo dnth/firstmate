@@ -892,7 +892,7 @@ test_legacy_launch_rejects_runtime_fallback() {
 }
 
 test_duplicate_recovery_states() {
-  local out before after mode expected version invalid_lock
+  local out before after mode expected version invalid_lock lock_pid marker_pid old_version
 
   for row in 'live already has a live agent' 'ambiguous has an ambiguous agent process' 'unreadable endpoint state is unreadable'; do
     mode=${row%% *}
@@ -933,13 +933,78 @@ test_duplicate_recovery_states() {
   assert_contains "$out" 'unowned or malformed primary-integration marker' "trailing integration marker refusal was not actionable"
   [ "$(count_new_windows)" = 0 ] || fail "trailing integration marker refusal created another endpoint"
 
-  setup_case duplicate-owned-stale-marker
+  setup_case duplicate-old-version-marker-refused
   write_meta
   version=$(fm_primary_watch_version "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "$HOME_DIR")
-  printf '%s\n99999999\n%s\n%s\n' "$version" "$TEST_OMP_BUN" "$TEST_OMP_BIN" > "$HOME_DIR/state/.omp-primary-extension-loaded"
+  sleep 0.05 &
+  lock_pid=$!
+  sleep 0.05 &
+  marker_pid=$!
+  wait "$lock_pid" || fail "fixture lock owner did not exit"
+  wait "$marker_pid" || fail "fixture marker owner did not exit"
+  old_version="${version%?}0"
+  [ "$old_version" != "$version" ] || old_version="${version%?}1"
+  [ "$lock_pid" != "$marker_pid" ] || fail "fixture lock and marker owners unexpectedly share a PID"
+  if kill -0 "$lock_pid" 2>/dev/null || kill -0 "$marker_pid" 2>/dev/null; then
+    fail "fixture lock or marker owner is still alive"
+  fi
+  printf '%s\n%s\n%s\n%s\n' "$old_version" "$marker_pid" "$TEST_OMP_BUN" "$TEST_OMP_BIN" \
+    > "$HOME_DIR/state/.omp-primary-extension-loaded"
+  printf '%s\n' "$lock_pid" > "$HOME_DIR/state/.lock"
+  out=$(FM_TEST_STATE_MODE=missing run_spawn 2>&1) \
+    && fail "direct OMP launch bypassed the owner relaunch path for an old-version marker"
+  assert_contains "$out" 'unowned or malformed primary-integration marker' \
+    "direct OMP launch did not preserve its refusal for an old-version marker"
+  [ "$(count_new_windows)" = 0 ] || fail "old-version marker refusal created another endpoint"
+  printf 'fixture stale marker: version=%s current=%s lock_pid=%s alive=no marker_pid=%s alive=no\n' \
+    "$old_version" "$version" "$lock_pid" "$marker_pid"
+
+  setup_case duplicate-live-marker-owner
+  write_meta
+  version=$(fm_primary_watch_version "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "$HOME_DIR")
+  printf '%s\n%s\n%s\n%s\n' "$version" "$AGENT_PID" "$TEST_OMP_BUN" "$TEST_OMP_BIN" \
+    > "$HOME_DIR/state/.omp-primary-extension-loaded"
+  printf '%s\n' "$AGENT_PID" > "$HOME_DIR/state/.lock"
+  out=$(FM_TEST_STATE_MODE=missing run_spawn 2>&1) \
+    && fail "OMP secondmate replaced a marker owned by a live process"
+  assert_contains "$out" 'already has a live session-lock owner' "live marker-owner refusal was not actionable"
+  [ "$(count_new_windows)" = 0 ] || fail "live marker refusal created another endpoint"
+
+  setup_case duplicate-foreign-marker
+  write_meta
+  version=$(fm_primary_watch_version "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "$HOME_DIR")
+  printf '%s\n99999999\n%s\n%s\n' "$version" "$TEST_OMP_BUN" "$CASE/foreign-omp" \
+    > "$HOME_DIR/state/.omp-primary-extension-loaded"
   printf '99999999\n' > "$HOME_DIR/state/.lock"
-  out=$(FM_TEST_STATE_MODE=missing run_spawn 2>&1) || fail "OMP secondmate did not recover from its proven stale integration marker: $out"
-  assert_contains "$(cat "$TMUX_LOG")" 'new-window' "proven stale integration marker did not permit recovery"
+  out=$(FM_TEST_STATE_MODE=missing run_spawn 2>&1) \
+    && fail "OMP secondmate replaced a foreign integration marker"
+  assert_contains "$out" 'unowned or malformed primary-integration marker' \
+    "foreign marker refusal was not actionable"
+  [ "$(count_new_windows)" = 0 ] || fail "foreign marker refusal created another endpoint"
+
+  for marker_shape in symlink directory reserved-pid; do
+    setup_case "duplicate-marker-$marker_shape"
+    write_meta
+    version=$(fm_primary_watch_version "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "$HOME_DIR")
+    case "$marker_shape" in
+      symlink)
+        printf 'outside marker target\n' > "$CASE/marker-target"
+        ln -s "$CASE/marker-target" "$HOME_DIR/state/.omp-primary-extension-loaded"
+        ;;
+      directory)
+        mkdir "$HOME_DIR/state/.omp-primary-extension-loaded"
+        ;;
+      reserved-pid)
+        printf '%s\n1\n%s\n%s\n' "$version" "$TEST_OMP_BUN" "$TEST_OMP_BIN" \
+          > "$HOME_DIR/state/.omp-primary-extension-loaded"
+        ;;
+    esac
+    printf '99999999\n' > "$HOME_DIR/state/.lock"
+    out=$(FM_TEST_STATE_MODE=missing run_spawn 2>&1) \
+      && fail "OMP secondmate accepted $marker_shape primary marker"
+    assert_contains "$out" 'primary-integration marker' "$marker_shape marker refusal was not actionable"
+    [ "$(count_new_windows)" = 0 ] || fail "$marker_shape marker refusal created another endpoint"
+  done
 
   setup_case duplicate-dead
   write_meta

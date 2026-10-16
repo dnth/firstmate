@@ -1332,36 +1332,39 @@ pass "remote spawn refuses a retired route without republishing its metadata"
 # accepted independently, then a second route drives the real OMP launch across
 # the encoded SSH/job boundary into the remote Herdr pane and back into parent
 # metadata.
-FALLBACK_REMOTE_HOME="$TMP_ROOT/remote-fallback-omp-home"
+FALLBACK_ID="fallback-omp-$BASHPID"
+FALLBACK_REMOTE_HOME="$TMP_ROOT/remote-$FALLBACK_ID-home"
 printf 'claude opus medium\n' > "$PARENT/config/secondmate-harness"
 printf 'omp test/model low\n' > "$PARENT/config/secondmate-harness-fallback"
 FM_SECONDMATE_CHARTER='Exercise an OMP remote fallback configuration.' \
   FM_SECONDMATE_SCOPE='remote fallback validation' \
-  remote_env "$ROOT/bin/fm-remote-home-seed.sh" fallback-omp remote-mac "$REMOTE_ROOT" \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" "$FALLBACK_ID" remote-mac "$REMOTE_ROOT" \
   "$FALLBACK_REMOTE_HOME" --no-projects >/dev/null \
   || fail "remote OMP fallback route seeding failed"
-remote_env "$ROOT/bin/fm-spawn.sh" fallback-omp --secondmate > "$TMP_ROOT/fallback-omp.out" 2>&1 \
-  || fail "remote spawn rejected OMP as the verified fallback harness: $(cat "$TMP_ROOT/fallback-omp.out")"
-assert_grep 'harness=claude' "$PARENT/state/fallback-omp.meta" \
+remote_env "$ROOT/bin/fm-spawn.sh" "$FALLBACK_ID" --secondmate \
+  > "$TMP_ROOT/$FALLBACK_ID.out" 2>&1 \
+  || fail "remote spawn rejected OMP as the verified fallback harness: $(cat "$TMP_ROOT/$FALLBACK_ID.out")"
+assert_grep 'harness=claude' "$PARENT/state/$FALLBACK_ID.meta" \
   "fresh primary quota unexpectedly selected the OMP fallback"
-assert_grep 'secondmate_model_source=primary' "$PARENT/state/fallback-omp.meta" \
+assert_grep 'secondmate_model_source=primary' "$PARENT/state/$FALLBACK_ID.meta" \
   "accepted OMP fallback configuration lost the remote primary selection record"
 
+OMP_ID="remote-omp-$BASHPID"
 OMP_REMOTE_HOME="$TMP_ROOT/remote-omp-home"
 printf 'omp test/model low\n' > "$PARENT/config/secondmate-harness"
 rm -f "$PARENT/config/secondmate-harness-fallback"
 FM_SECONDMATE_CHARTER='Exercise the remote OMP agent launch.' \
   FM_SECONDMATE_SCOPE='remote OMP launch validation' \
-  remote_env "$ROOT/bin/fm-remote-home-seed.sh" remote-omp remote-mac "$REMOTE_ROOT" \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" "$OMP_ID" remote-mac "$REMOTE_ROOT" \
   "$OMP_REMOTE_HOME" --no-projects >/dev/null \
   || fail "remote OMP route seeding failed"
-if remote_env "$ROOT/bin/fm-spawn.sh" remote-omp --secondmate --harness 'raw-agent --flag' \
+if remote_env "$ROOT/bin/fm-spawn.sh" "$OMP_ID" --secondmate --harness 'raw-agent --flag' \
   > "$TMP_ROOT/remote-omp-raw.out" 2>&1; then
   fail "remote secondmate accepted a raw launch command after OMP was allowlisted"
 fi
 assert_grep 'requires a verified harness adapter, not a raw launch command' \
   "$TMP_ROOT/remote-omp-raw.out" "remote raw-command refusal weakened while allowlisting OMP"
-if remote_env "$ROOT/bin/fm-spawn.sh" remote-omp --secondmate --harness omp \
+if remote_env "$ROOT/bin/fm-spawn.sh" "$OMP_ID" --secondmate --harness omp \
   --prewalk-into test/model > "$TMP_ROOT/remote-omp-prewalk.out" 2>&1; then
   fail "remote secondmate accepted a Prewalk target that its control protocol cannot carry"
 fi
@@ -1453,9 +1456,9 @@ setInterval(() => {}, 1_000);
 JS
 chmod +x "$REMOTE_ROOT/bin/omp"
 OMP_CONTROL_STATE="$OMP_REMOTE_HOME/state/parent-route"
-OMP_READY="$OMP_CONTROL_STATE/remote-omp.omp-doorbell-ready"
-OMP_INBOX="$OMP_CONTROL_STATE/remote-omp.inbox"
-OMP_TURN_STARTED="$OMP_CONTROL_STATE/remote-omp.omp-started"
+OMP_READY="$OMP_CONTROL_STATE/$OMP_ID.omp-doorbell-ready"
+OMP_INBOX="$OMP_CONTROL_STATE/$OMP_ID.inbox"
+OMP_TURN_STARTED="$OMP_CONTROL_STATE/$OMP_ID.omp-started"
 OMP_SENT="$TMP_ROOT/remote-omp-send-message.log"
 OMP_SKIP_HANDLED="$TMP_ROOT/remote-omp-skip-handled"
 OMP_DELAYED_HANDLED="$TMP_ROOT/remote-omp-delayed-handled"
@@ -1483,21 +1486,21 @@ env -u OMP_SKIP_SETUP "$REMOTE_ROOT/bin/bun" "$REMOTE_ROOT/bin/omp" \
 [ "$setup_rc" = 42 ] || fail 'remote OMP fixture accepted a launch without setup bypass'
 assert_absent "$TMP_ROOT/remote-omp-first-turn" 'setup refusal published a first turn'
 : > "$HERDR_LOG"
-remote_env "$ROOT/bin/fm-spawn.sh" remote-omp --secondmate > "$TMP_ROOT/remote-omp-launch.out" 2>&1 \
+remote_env "$ROOT/bin/fm-spawn.sh" "$OMP_ID" --secondmate > "$TMP_ROOT/remote-omp-launch.out" 2>&1 \
   || fail "verified remote OMP secondmate launch failed: $(cat "$TMP_ROOT/remote-omp-launch.out") $(cat "$TMP_ROOT/execute-omp-launch.out")"
-assert_grep 'harness=omp' "$PARENT/state/remote-omp.meta" \
+assert_grep 'harness=omp' "$PARENT/state/$OMP_ID.meta" \
   "parent metadata rejected the OMP harness returned by the remote launch"
-assert_grep 'harness=omp' "$OMP_REMOTE_HOME/state/parent-route/remote-omp.meta" \
+assert_grep 'harness=omp' "$OMP_REMOTE_HOME/state/parent-route/$OMP_ID.meta" \
   "remote endpoint metadata did not preserve its OMP harness"
-assert_grep "omp_bun=$REMOTE_OMP_BUN" "$PARENT/state/remote-omp.meta" \
+assert_grep "omp_bun=$REMOTE_OMP_BUN" "$PARENT/state/$OMP_ID.meta" \
   "parent route metadata did not preserve the remote OMP runtime identity"
-assert_grep "omp_bin=$REMOTE_OMP_BIN" "$PARENT/state/remote-omp.meta" \
+assert_grep "omp_bin=$REMOTE_OMP_BIN" "$PARENT/state/$OMP_ID.meta" \
   "parent route metadata did not preserve the remote OMP entrypoint identity"
 OMP_REMOTE_LAUNCH=$(grep -F 'FM_OMP_SESSION_POINTER=' "$HERDR_LOG" | tail -1 || true)
 assert_contains "$OMP_REMOTE_LAUNCH" \
   "FM_OMP_BUN='$REMOTE_OMP_BUN' FM_OMP_BIN='$REMOTE_OMP_BIN'" \
   "remote OMP pane did not receive the canonical runtime and entrypoint identities"
-OMP_REMOTE_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_REMOTE_HOME/state/parent-route/remote-omp.meta")
+OMP_REMOTE_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_REMOTE_HOME/state/parent-route/$OMP_ID.meta")
 assert_grep "pane run $OMP_REMOTE_PANE /bin/bash '" "$HERDR_LOG" \
   "remote OMP pane did not stage its Bash-owned script invocation"
 assert_contains "$OMP_REMOTE_LAUNCH" "PATH='$REMOTE_ROOT/bin:" \
@@ -1511,13 +1514,13 @@ assert_contains "$OMP_REMOTE_LAUNCH" \
 assert_contains "$OMP_REMOTE_LAUNCH" "--session-dir '$OMP_REMOTE_HOME/state/omp-sessions'" \
   "remote OMP pane did not receive its home-owned durable session directory"
 assert_contains "$OMP_REMOTE_LAUNCH" \
-  "FM_OMP_TASK_INBOX_DIR='$OMP_REMOTE_HOME/state/parent-route/remote-omp.inbox'" \
+  "FM_OMP_TASK_INBOX_DIR='$OMP_REMOTE_HOME/state/parent-route/$OMP_ID.inbox'" \
   "remote OMP extension did not receive its parent-route canonical inbox"
 assert_contains "$OMP_REMOTE_LAUNCH" \
-  "FM_OMP_TASK_DOORBELL_READY='$OMP_REMOTE_HOME/state/parent-route/remote-omp.omp-doorbell-ready'" \
+  "FM_OMP_TASK_DOORBELL_READY='$OMP_REMOTE_HOME/state/parent-route/$OMP_ID.omp-doorbell-ready'" \
   "remote OMP extension did not receive its parent-route doorbell readiness marker"
 assert_contains "$OMP_REMOTE_LAUNCH" \
-  "FM_OMP_TASK_TURN_STARTED='$OMP_REMOTE_HOME/state/parent-route/remote-omp.omp-started'" \
+  "FM_OMP_TASK_TURN_STARTED='$OMP_REMOTE_HOME/state/parent-route/$OMP_ID.omp-started'" \
   "remote OMP extension did not receive its parent-route turn-start marker"
 
 OMP_LISTENER_PID=$(cat "$OMP_ACTIVE_PID")
@@ -1542,15 +1545,15 @@ PATH="$REMOTE_ROOT/bin:$PATH" FM_OMP_PROCESS_EXPECTED_BUN="$REMOTE_OMP_BUN" \
     fm_omp_process_matches "$comm" "$args" "$2"
   ' _ "$REMOTE_ROOT" "$OMP_LISTENER_PID" \
   || fail "remote OMP listener process did not satisfy the exact delivery identity:"$'\n'"$OMP_PROCESS"
-[ "$(remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh state remote-omp)" = alive ] \
+[ "$(remote_env "$ROOT/bin/fm-on.sh" "$OMP_ID" fm-remote-secondmate-control.sh state "$OMP_ID")" = alive ] \
   || fail 'executed remote OMP launch did not bind its endpoint'
 [ "$(sed -n '2p' "$OMP_REMOTE_HOME/state/.omp-primary-extension-loaded")" = "$OMP_LISTENER_PID" ] \
   || fail 'remote OMP bind retained a manufactured owner instead of the launched process'
 OMP_TARGET=$(FM_ROOT_OVERRIDE="$REMOTE_ROOT" /bin/bash -c \
   '. "$1/bin/fm-backend.sh"; fm_backend_target_of_meta "$2"' _ "$REMOTE_ROOT" \
-  "$OMP_CONTROL_STATE/remote-omp.meta") \
+  "$OMP_CONTROL_STATE/$OMP_ID.meta") \
   || fail "could not recover the legacy explicit remote OMP target"
-OMP_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_CONTROL_STATE/remote-omp.meta")
+OMP_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_CONTROL_STATE/$OMP_ID.meta")
 [ -n "$OMP_PANE" ] || fail "remote OMP endpoint metadata omitted its Herdr pane identity"
 "$REMOTE_ROOT/bin/herdr" agent get "$OMP_PANE" >/dev/null
 rm -f "$OMP_ACTIVE_PID"
@@ -1576,7 +1579,7 @@ printf '%s\n' "$OMP_LISTENER_PID" > "$OMP_ACTIVE_PID"
 # /exit to fall through into the remote OMP inbox plane.
 : > "$HERDR_LOG"
 : > "$OMP_TYPED_INPUT"
-remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp /exit \
+remote_env "$ROOT/bin/fm-send.sh" "fm-$OMP_ID" /exit \
   > "$TMP_ROOT/remote-omp-exit.out" 2>&1 || true
 assert_grep 'pane send-text' "$HERDR_LOG" \
   "remote OMP /exit stopped using the typed lifecycle path"
@@ -1590,7 +1593,7 @@ assert_grep 'pane send-text' "$HERDR_LOG" \
 # worker's durable handled move as the acknowledgement.
 : > "$HERDR_LOG"
 : > "$OMP_SENT"
-remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "ordinary remote OMP steer" \
+remote_env "$ROOT/bin/fm-send.sh" "fm-$OMP_ID" "ordinary remote OMP steer" \
   > "$TMP_ROOT/remote-omp-delivery.out" 2>&1 \
   || fail "bound remote OMP inbox delivery failed:"$'\n'"$(cat "$TMP_ROOT/remote-omp-delivery.out")"$'\n'"listener:"$'\n'"$(cat "$TMP_ROOT/execute-omp-launch.out")"$'\n'"programmatic sends:"$'\n'"$(cat "$OMP_SENT" 2>/dev/null)"
 grep -Eq '^request=[0-9a-f]{16} record=001 state=(recorded|handled)$' "$TMP_ROOT/remote-omp-delivery.out" \
@@ -1612,7 +1615,7 @@ assert_no_grep 'pane send-keys' "$HERDR_LOG" \
 
 BAD_EXIT="[fm-from-firstmate]"$'\xE2\x81\xA3'"/exit"
 set +e
-remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh send remote-omp "$BAD_EXIT" \
+remote_env "$ROOT/bin/fm-on.sh" "$OMP_ID" fm-remote-secondmate-control.sh send "$OMP_ID" "$BAD_EXIT" \
   > "$TMP_ROOT/remote-omp-bad-exit.out" 2>&1
 bad_exit_rc=$?
 set -e
@@ -1622,7 +1625,7 @@ assert_grep 'canonical parent correlation' "$TMP_ROOT/remote-omp-bad-exit.out" \
 
 rm -f "$OMP_READY"
 set +e
-remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "extension unavailable" \
+remote_env "$ROOT/bin/fm-send.sh" "fm-$OMP_ID" "extension unavailable" \
   > "$TMP_ROOT/remote-omp-unavailable.out" 2>&1
 unavailable_rc=$?
 set -e
@@ -1638,7 +1641,7 @@ printf '%s\n' "$OMP_LISTENER_PID" > "$OMP_READY"
 # state=recorded, and the later handled/ move remains only an acknowledgement.
 touch "$OMP_DELAYED_HANDLED"
 set +e
-remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "delayed acknowledgement" \
+remote_env "$ROOT/bin/fm-send.sh" "fm-$OMP_ID" "delayed acknowledgement" \
   > "$TMP_ROOT/remote-omp-delayed.out" 2>&1
 delayed_rc=$?
 set -e
@@ -1654,7 +1657,7 @@ rm -f "$OMP_DELAYED_HANDLED"
 # one programmatic doorbell, never a replay of a prior request.
 sent_before_retry=$(wc -l < "$OMP_SENT" | tr -d ' ')
 set +e
-remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh send remote-omp \
+remote_env "$ROOT/bin/fm-on.sh" "$OMP_ID" fm-remote-secondmate-control.sh send "$OMP_ID" \
   "[fm-from-firstmate]"$'\xE2\x81\xA3'"corr=0123456789abcdef durable contract" \
   > "$TMP_ROOT/remote-omp-retry.out" 2>&1
 control_rc=$?
@@ -1668,23 +1671,23 @@ grep -Eq '^request=0123456789abcdef record=003 state=recorded$' "$TMP_ROOT/remot
 [ "$(wc -l < "$OMP_SENT" | tr -d ' ')" = "$((sent_before_retry + 1))" ] \
   || fail "remote OMP control send replayed a prior programmatic request"
 
-cp "$OMP_CONTROL_STATE/remote-omp.meta" "$TMP_ROOT/remote-omp.meta.before-stale"
-meta_tmp="$OMP_CONTROL_STATE/remote-omp.meta.tmp"
-sed 's/^endpoint_task_id=.*/endpoint_task_id=stale-endpoint/' "$OMP_CONTROL_STATE/remote-omp.meta" > "$meta_tmp"
-mv "$meta_tmp" "$OMP_CONTROL_STATE/remote-omp.meta"
+cp "$OMP_CONTROL_STATE/$OMP_ID.meta" "$TMP_ROOT/remote-omp.meta.before-stale"
+meta_tmp="$OMP_CONTROL_STATE/$OMP_ID.meta.tmp"
+sed 's/^endpoint_task_id=.*/endpoint_task_id=stale-endpoint/' "$OMP_CONTROL_STATE/$OMP_ID.meta" > "$meta_tmp"
+mv "$meta_tmp" "$OMP_CONTROL_STATE/$OMP_ID.meta"
 set +e
-remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "stale binding" \
+remote_env "$ROOT/bin/fm-send.sh" "fm-$OMP_ID" "stale binding" \
   > "$TMP_ROOT/remote-omp-stale.out" 2>&1
 stale_rc=$?
 set -e
 [ "$stale_rc" = 9 ] || fail "stale remote OMP identity did not return a binding refusal (rc=$stale_rc)"
 assert_grep 'remote-omp-binding-refused' "$TMP_ROOT/remote-omp-stale.out" \
   "stale remote OMP identity did not report its named refusal"
-mv "$TMP_ROOT/remote-omp.meta.before-stale" "$OMP_CONTROL_STATE/remote-omp.meta"
+mv "$TMP_ROOT/remote-omp.meta.before-stale" "$OMP_CONTROL_STATE/$OMP_ID.meta"
 
 "$REMOTE_ROOT/bin/herdr" pane close "$OMP_PANE"
 set +e
-remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "missing live endpoint" \
+remote_env "$ROOT/bin/fm-send.sh" "fm-$OMP_ID" "missing live endpoint" \
   > "$TMP_ROOT/remote-omp-missing.out" 2>&1
 missing_rc=$?
 set -e
@@ -1714,7 +1717,7 @@ if ! kill -0 "$OMP_LISTENER_PID" 2>/dev/null; then
   printf '%s\n' "$OMP_LISTENER_PID" > "$OMP_REMOTE_HOME/state/.lock"
 fi
 set +e
-remote_env "$ROOT/bin/fm-spawn.sh" remote-omp --secondmate \
+remote_env "$ROOT/bin/fm-spawn.sh" "$OMP_ID" --secondmate \
   > "$TMP_ROOT/remote-omp-live-relaunch.out" 2>&1
 live_relaunch_rc=$?
 set -e
@@ -1743,18 +1746,18 @@ assert_present "$OMP_TURN_STARTED" \
 # An awake compute-managed route takes the wake-on-delivery restore path: the
 # ordinary secondmate launch must accept the slept generation's leftovers.
 mkdir -p "$PARENT/data/boat"
-printf 'lifecycle=ready\n' > "$PARENT/data/boat/remote-omp.meta"
+printf 'lifecycle=ready\n' > "$PARENT/data/boat/$OMP_ID.meta"
 : > "$OMP_ACTIVE_PID"
 sent_before_restore=$(wc -l < "$OMP_SENT" | tr -d ' ')
 records_before_restore=$(find "$OMP_INBOX" -name '*.msg' | wc -l | tr -d ' ')
-remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp \
+remote_env "$ROOT/bin/fm-send.sh" "fm-$OMP_ID" \
   "wake-on-delivery restore after a successful generation" \
   > "$TMP_ROOT/remote-omp-restore.out" 2>&1 \
   || fail "wake-on-delivery restore after a successful generation failed:"$'\n'"$(cat "$TMP_ROOT/remote-omp-restore.out")"
 grep -Eq '^request=[0-9a-f]{16} record=[0-9]+ state=(recorded|handled)$' \
   "$TMP_ROOT/remote-omp-restore.out" \
   || fail "restored remote OMP delivery did not report its durable machine line:"$'\n'"$(cat "$TMP_ROOT/remote-omp-restore.out")"
-[ "$(remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh state remote-omp)" = alive ] \
+[ "$(remote_env "$ROOT/bin/fm-on.sh" "$OMP_ID" fm-remote-secondmate-control.sh state "$OMP_ID")" = alive ] \
   || fail "wake-on-delivery restore did not reach a live endpoint"
 OMP_RESTORED_PID=$(cat "$OMP_ACTIVE_PID")
 case "$OMP_RESTORED_PID" in
@@ -1773,8 +1776,8 @@ assert_grep '"deliverAs":"steer","triggerTurn":true' "$OMP_SENT" \
   "restored remote OMP delivery did not use programmatic triggerTurn"
 [ "$(cat "$OMP_TURN_STARTED")" != "$OMP_PRIOR_STARTED" ] \
   || fail "restored remote OMP generation kept the prior generation's turn-start marker"
-rm -f "$PARENT/data/boat/remote-omp.meta"
-OMP_RESTORED_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_CONTROL_STATE/remote-omp.meta")
+rm -f "$PARENT/data/boat/$OMP_ID.meta"
+OMP_RESTORED_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_CONTROL_STATE/$OMP_ID.meta")
 [ -z "$OMP_RESTORED_PANE" ] || "$REMOTE_ROOT/bin/herdr" pane close "$OMP_RESTORED_PANE"
 pass "a successful remote OMP generation slept and restored on delivery retires its prior runtime markers and delivers exactly once"
 
@@ -1788,6 +1791,7 @@ pass "a successful remote OMP generation slept and restored on delivery retires 
 # and real session files untouched.
 
 rm -f "$TMP_ROOT/execute-omp-launch"
+OMP_BROKEN_ID="remote-omp-broken-$BASHPID"
 OMP_BROKEN_HOME="$TMP_ROOT/remote-omp-broken-home"
 printf 'omp test/model low\n' > "$PARENT/config/secondmate-harness"
 rm -f "$PARENT/config/secondmate-harness-fallback"
@@ -1818,7 +1822,7 @@ chmod +x "$REMOTE_ROOT/bin/omp"
 rm -f "$OMP_ACTIVE_PID"
 FM_SECONDMATE_CHARTER='Exercise a remote OMP bind that dies before acknowledgement.' \
   FM_SECONDMATE_SCOPE='remote failed-bind cleanup validation' \
-  remote_env "$ROOT/bin/fm-remote-home-seed.sh" remote-omp-broken remote-mac "$REMOTE_ROOT" \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" "$OMP_BROKEN_ID" remote-mac "$REMOTE_ROOT" \
   "$OMP_BROKEN_HOME" --no-projects >/dev/null \
   || fail "broken-bind remote OMP route seeding failed"
 OMP_BROKEN_STATE="$OMP_BROKEN_HOME/state"
@@ -1826,7 +1830,7 @@ OMP_BROKEN_CONTROL="$OMP_BROKEN_STATE/parent-route"
 
 : > "$TMP_ROOT/omp-broken-ack"
 set +e
-remote_env "$ROOT/bin/fm-spawn.sh" remote-omp-broken --secondmate \
+remote_env "$ROOT/bin/fm-spawn.sh" "$OMP_BROKEN_ID" --secondmate \
   > "$TMP_ROOT/remote-omp-broken.out" 2>&1
 broken_rc=$?
 set -e
@@ -1840,19 +1844,19 @@ assert_absent "$OMP_BROKEN_STATE/.omp-primary-extension-loaded" \
   "failed remote bind left a stale integration marker"
 assert_absent "$OMP_BROKEN_STATE/.lock" \
   "failed remote bind left a dead session lock"
-assert_absent "$OMP_BROKEN_CONTROL/remote-omp-broken.omp-ext.ts" \
+assert_absent "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.omp-ext.ts" \
   "failed remote bind left its generated adapter file"
-assert_absent "$OMP_BROKEN_CONTROL/remote-omp-broken.omp-ready" \
+assert_absent "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.omp-ready" \
   "failed remote bind left a stale readiness marker"
-assert_absent "$OMP_BROKEN_CONTROL/remote-omp-broken.omp-started" \
+assert_absent "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.omp-started" \
   "failed remote bind left a stale turn-start marker"
-assert_absent "$OMP_BROKEN_CONTROL/remote-omp-broken.omp-doorbell-ready" \
+assert_absent "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.omp-doorbell-ready" \
   "failed remote bind left a stale doorbell marker"
-assert_absent "$OMP_BROKEN_CONTROL/remote-omp-broken.omp-doorbell-failed" \
+assert_absent "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.omp-doorbell-failed" \
   "failed remote bind left a stale doorbell failure marker"
-assert_absent "$OMP_BROKEN_CONTROL/remote-omp-broken.omp-doorbell-ready.requests" \
+assert_absent "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.omp-doorbell-ready.requests" \
   "failed remote bind left a stale request directory"
-assert_present "$OMP_BROKEN_CONTROL/remote-omp-broken.meta" \
+assert_present "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.meta" \
   "failed remote bind dropped the endpoint recovery record"
 assert_present "$OMP_BROKEN_HOME/.fm-secondmate-home" \
   "failed remote bind removed the persistent remote home"
@@ -1862,11 +1866,11 @@ assert_present "$OMP_BROKEN_HOME/.fm-secondmate-home" \
 # The next launch is accepted on the cleaned state rather than refusing on
 # the dead generation's leftovers.
 rm -f "$TMP_ROOT/omp-broken-ack"
-remote_env "$ROOT/bin/fm-spawn.sh" remote-omp-broken --secondmate \
+remote_env "$ROOT/bin/fm-spawn.sh" "$OMP_BROKEN_ID" --secondmate \
   > "$TMP_ROOT/remote-omp-relaunch.out" 2>&1 \
   || fail "remote OMP relaunch after a failed bind was refused:"$'\n'"$(cat "$TMP_ROOT/remote-omp-relaunch.out")"
-[ "$(remote_env "$ROOT/bin/fm-on.sh" remote-omp-broken \
-    fm-remote-secondmate-control.sh state remote-omp-broken)" = alive ] \
+[ "$(remote_env "$ROOT/bin/fm-on.sh" "$OMP_BROKEN_ID" \
+    fm-remote-secondmate-control.sh state "$OMP_BROKEN_ID")" = alive ] \
   || fail "remote OMP relaunch after a failed bind did not reach a live endpoint"
 OMP_BROKEN_RETAINED=$(cat "$OMP_BROKEN_STATE/.omp-session")
 [ -f "$OMP_BROKEN_RETAINED" ] \
@@ -1876,7 +1880,7 @@ OMP_BROKEN_RETAINED=$(cat "$OMP_BROKEN_STATE/.omp-session")
 # rather than dropping or rewriting the binding. The live endpoint is closed
 # first: the second failure must come from a bind that died, not from a
 # refused duplicate launch against a live agent.
-OMP_BROKEN_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_BROKEN_CONTROL/remote-omp-broken.meta")
+OMP_BROKEN_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.meta")
 [ -n "$OMP_BROKEN_PANE" ] || fail "remote OMP endpoint metadata omitted its Herdr pane identity"
 "$REMOTE_ROOT/bin/herdr" pane close "$OMP_BROKEN_PANE"
 omp_dead_pid=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
@@ -1887,7 +1891,7 @@ printf '%s\n%s\n%s\n%s\n' "$OMP_BROKEN_VERSION" "$omp_dead_pid" "$REMOTE_OMP_BUN
   > "$OMP_BROKEN_STATE/.omp-primary-extension-loaded"
 : > "$TMP_ROOT/omp-broken-ack"
 set +e
-remote_env "$ROOT/bin/fm-spawn.sh" remote-omp-broken --secondmate \
+remote_env "$ROOT/bin/fm-spawn.sh" "$OMP_BROKEN_ID" --secondmate \
   > "$TMP_ROOT/remote-omp-broken2.out" 2>&1
 broken2_rc=$?
 set -e
@@ -1902,21 +1906,21 @@ assert_absent "$OMP_BROKEN_STATE/.omp-primary-extension-loaded" \
   "failed relaunch left a stale integration marker"
 assert_absent "$OMP_BROKEN_STATE/.lock" \
   "failed relaunch left a dead session lock"
-assert_absent "$OMP_BROKEN_CONTROL/remote-omp-broken.omp-started" \
+assert_absent "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.omp-started" \
   "failed relaunch left a stale turn-start marker"
-assert_absent "$OMP_BROKEN_CONTROL/remote-omp-broken.omp-doorbell-ready" \
+assert_absent "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.omp-doorbell-ready" \
   "failed relaunch left a stale doorbell marker"
 rm -f "$TMP_ROOT/omp-broken-ack"
-remote_env "$ROOT/bin/fm-spawn.sh" remote-omp-broken --secondmate \
+remote_env "$ROOT/bin/fm-spawn.sh" "$OMP_BROKEN_ID" --secondmate \
   > "$TMP_ROOT/remote-omp-relaunch2.out" 2>&1 \
   || fail "remote OMP launch after a failed retained-session bind was refused:"$'\n'"$(cat "$TMP_ROOT/remote-omp-relaunch2.out")"
-[ "$(remote_env "$ROOT/bin/fm-on.sh" remote-omp-broken \
-    fm-remote-secondmate-control.sh state remote-omp-broken)" = alive ] \
+[ "$(remote_env "$ROOT/bin/fm-on.sh" "$OMP_BROKEN_ID" \
+    fm-remote-secondmate-control.sh state "$OMP_BROKEN_ID")" = alive ] \
   || fail "remote OMP launch after a failed retained-session bind did not reach a live endpoint"
 pass "a failed remote OMP bind retires its generation artifacts, preserves the retained session, and accepts the next launch"
 
 for pointer_state in absent malformed; do
-  orphan_id="remote-omp-orphan-$pointer_state"
+  orphan_id="remote-omp-orphan-$pointer_state-$BASHPID"
   orphan_home="$TMP_ROOT/$orphan_id-home"
   FM_SECONDMATE_CHARTER='Exercise failed-bind session-pointer reconciliation.' \
     FM_SECONDMATE_SCOPE='remote orphan-session validation' \
@@ -1958,28 +1962,63 @@ printf 'tmux\n' > "$OMP_BROKEN_BACKEND_CFG"
 # Relaunch on a dead endpoint skips graceful exit entirely, so the fixture's
 # missing exit semantics do not matter: close the live pane and model the
 # session lock the same way the failed-bind case does (dead pid).
-OMP_BROKEN_LIVE_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_BROKEN_CONTROL/remote-omp-broken.meta")
+OMP_BROKEN_LIVE_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.meta")
 [ -n "$OMP_BROKEN_LIVE_PANE" ] || fail "live remote OMP endpoint metadata omitted its Herdr pane identity"
 "$REMOTE_ROOT/bin/herdr" pane close "$OMP_BROKEN_LIVE_PANE"
-omp_dead_pid=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
-printf '%s\n' "$omp_dead_pid" > "$OMP_BROKEN_STATE/.lock"
+sleep 0.05 &
+omp_dead_lock_pid=$!
+sleep 0.05 &
+omp_dead_marker_pid=$!
+wait "$omp_dead_lock_pid" || fail "fixture lock owner did not exit"
+wait "$omp_dead_marker_pid" || fail "fixture marker owner did not exit"
+OMP_BROKEN_OLD_VERSION=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
+  _ "$REMOTE_ROOT" "$OMP_BROKEN_HOME")
+# Bring the code root up to its origin, publish a tracked extension update, and
+# use the host-local update owner to fast-forward this secondmate home.
+git -C "$REMOTE_ROOT" checkout -- bin/omp
+git -C "$REMOTE_ROOT" fetch -q origin main
+git -C "$REMOTE_ROOT" merge --ff-only -q origin/main
+printf '\n// relaunch fixture advances the loaded OMP closure\n' \
+  >> "$REMOTE_SEED/.omp/extensions/fm-primary-omp.ts"
+git -C "$REMOTE_SEED" add .omp/extensions/fm-primary-omp.ts
+git -C "$REMOTE_SEED" commit -qm 'advance the OMP closure for relaunch recovery'
+git -C "$REMOTE_SEED" push -q origin main
+OMP_UPDATE_OUT=$(remote_env "$ROOT/bin/fm-on.sh" "$OMP_BROKEN_ID" \
+  fm-remote-secondmate-control.sh update "$OMP_BROKEN_ID")
+assert_contains "$OMP_UPDATE_OUT" 'synced:' \
+  "remote home update did not fast-forward the OMP extension fixture"
 OMP_BROKEN_VERSION=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
   _ "$REMOTE_ROOT" "$OMP_BROKEN_HOME")
-printf '%s\n%s\n%s\n%s\n' "$OMP_BROKEN_VERSION" "$omp_dead_pid" "$REMOTE_OMP_BUN" "$REMOTE_OMP_BIN" \
+[ "$OMP_BROKEN_OLD_VERSION" != "$OMP_BROKEN_VERSION" ] \
+  || fail "fixture update did not change the OMP primary closure"
+[ "$omp_dead_lock_pid" != "$omp_dead_marker_pid" ] \
+  || fail "fixture lock and marker owners unexpectedly share a PID"
+if kill -0 "$omp_dead_lock_pid" 2>/dev/null || kill -0 "$omp_dead_marker_pid" 2>/dev/null; then
+  fail "fixture lock or marker owner is still alive"
+fi
+printf '%s\n%s\n%s\n%s\n' "$OMP_BROKEN_OLD_VERSION" "$omp_dead_marker_pid" "$REMOTE_OMP_BUN" "$REMOTE_OMP_BIN" \
   > "$OMP_BROKEN_STATE/.omp-primary-extension-loaded"
-remote_env "$ROOT/bin/fm-on.sh" remote-omp-broken \
-  fm-remote-secondmate-control.sh relaunch remote-omp-broken omp - - \
+printf '%s\n' "$omp_dead_lock_pid" > "$OMP_BROKEN_STATE/.lock"
+printf 'fixture marker contents:\n'
+cat "$OMP_BROKEN_STATE/.omp-primary-extension-loaded"
+printf 'fixture current closure=%s lock_pid=%s alive=no\n' "$OMP_BROKEN_VERSION" "$omp_dead_lock_pid"
+remote_env "$ROOT/bin/fm-on.sh" "$OMP_BROKEN_ID" \
+  fm-remote-secondmate-control.sh relaunch "$OMP_BROKEN_ID" omp - - \
   > "$TMP_ROOT/remote-omp-broken-relaunch.out" 2>&1 \
   || fail "remote OMP relaunch on a tmux-configured home was refused:"$'\n'"$(cat "$TMP_ROOT/remote-omp-broken-relaunch.out")"
-assert_grep 'backend=herdr' "$OMP_BROKEN_CONTROL/remote-omp-broken.meta" \
+assert_grep 'backend=herdr' "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.meta" \
   "the relaunched remote OMP endpoint record does not name the herdr backend"
-assert_grep 'herdr_session=fm-remote' "$OMP_BROKEN_CONTROL/remote-omp-broken.meta" \
+assert_grep 'herdr_session=fm-remote' "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.meta" \
   "the relaunched remote OMP endpoint record does not name the fm-remote session"
-assert_no_grep 'window=firstmate:' "$OMP_BROKEN_CONTROL/remote-omp-broken.meta" \
+assert_no_grep 'window=firstmate:' "$OMP_BROKEN_CONTROL/$OMP_BROKEN_ID.meta" \
   "the remote OMP relaunch landed on the home's configured tmux backend instead of herdr"
-[ "$(remote_env "$ROOT/bin/fm-on.sh" remote-omp-broken \
-    fm-remote-secondmate-control.sh state remote-omp-broken)" = alive ] \
+[ "$(remote_env "$ROOT/bin/fm-on.sh" "$OMP_BROKEN_ID" \
+    fm-remote-secondmate-control.sh state "$OMP_BROKEN_ID")" = alive ] \
   || fail "remote OMP relaunch on a tmux-configured home did not reach a live endpoint"
+[ "$(cat "$OMP_BROKEN_STATE/.omp-session")" = "$OMP_BROKEN_RETAINED" ] \
+  || fail "stale-marker recovery changed the retained session pointer"
+[ -f "$OMP_BROKEN_RETAINED" ] \
+  || fail "stale-marker recovery removed the retained session"
 if [ "$omp_broken_backend_prior" = 1 ]; then
   mv -f "$TMP_ROOT/omp-broken-backend.prior" "$OMP_BROKEN_BACKEND_CFG"
 else

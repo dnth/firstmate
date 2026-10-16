@@ -153,15 +153,32 @@ new_case() {
 }
 
 # add_local_mate <case-dir> <id> [harness] [backend-line]
-# A live LOCAL second mate: a real git worktree for its home, plus the durable
-# record this home keeps for it.
+# OMP local second mates use a persistent git home so the relaunch owner can
+# verify the fixture's tracked extension closure against HEAD.
+#
 add_local_mate() {
   local dir=$1 id=$2 harness=${3:-claude} backend=${4:-}
   local home="$dir/home" smhome="$dir/$id-home"
-  fm_git_worktree "$dir/$id-repo" "$smhome" "sm-$id"
+  if [ "$harness" = omp ]; then
+    local seed="$dir/local-seed" origin="$dir/local-origin.git" root="$dir/local-primary"
+    if [ ! -d "$origin" ]; then
+      fm_git_init_commit "$seed"
+      printf '/data/\n/state/\n/config/\n/projects/\n/.no-mistakes/\n.fm-secondmate-home\n' \
+        > "$seed/.gitignore"
+      printf '# agents\n' > "$seed/AGENTS.md"
+      git -C "$seed" add .gitignore AGENTS.md
+      git -C "$seed" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+        commit -qm 'persistent home fixture layout'
+      fm_git_add_origin "$seed" "$origin"
+      git clone --quiet "$origin" "$root"
+    fi
+    git clone --quiet "$origin" "$smhome"
+  else
+    fm_git_worktree "$dir/$id-repo" "$smhome" "sm-$id"
+    printf '# agents\n' > "$smhome/AGENTS.md"
+  fi
   mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin" "$home/data/$id"
   printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
-  printf '# agents\n' > "$smhome/AGENTS.md"
   printf '# charter\n' > "$home/data/$id/brief.md"
   {
     echo "window=fmses:fm-$id"
@@ -247,8 +264,14 @@ arm_answer() {
 }
 
 run_restart() {  # <case-dir> <args...>
-  local dir=$1; shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  local dir=$1 root="$ROOT"
+  shift
+  if [ -d "$dir/fmrepo/.git" ]; then
+    root="$dir/fmrepo"
+  elif [ -d "$dir/local-primary/.git" ]; then
+    root="$dir/local-primary"
+  fi
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$root" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_PERSIST_POLL=1 \
     FM_SECONDMATE_PERSIST_WAIT="${FM_TEST_PERSIST_WAIT:-30}" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
@@ -840,31 +863,151 @@ EOF
 }
 
 test_omp_secondmate_prepare_relaunch_clears_owned_markers() {
-  local dir smhome state meta log
+  local dir smhome state meta marker bash_bin version lock_pid marker_pid invalid_lock out path
   dir=$(new_case omp-prepare)
-  smhome="$dir/omp-home"; state="$dir/home/state"; meta="$state/omp1.meta"; log="$dir/fake/omp-log"
+  smhome="$dir/omp-home"; state="$dir/home/state"; meta="$state/omp1.meta"
+  marker="$smhome/state/.omp-primary-extension-loaded"
   mkdir -p "$smhome/state"
-  : > "$state/omp1.omp-ext.ts"; : > "$state/omp1.omp-ready"; : > "$state/omp1.omp-started"
-  : > "$smhome/state/.omp-primary-extension-loaded"
-  : > "$log"
+  bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_omp_primary_closure_paths' \
+    _ "$ROOT" > "$dir/closure-paths"
+  while IFS= read -r path; do
+    mkdir -p "$smhome/$(dirname "$path")"
+    cp "$ROOT/$path" "$smhome/$path"
+  done < "$dir/closure-paths"
+  bash_bin=$(fm_test_realpath "$(command -v bash)")
+  version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
+    _ "$ROOT" "$smhome") || fail "could not derive the fixture OMP closure"
+  lock_pid=99999998
+  marker_pid=99999999
   cat > "$meta" <<EOF
 window=fm:omp1
 harness=omp
 kind=secondmate
+omp_bun=$bash_bin
+omp_bin=$bash_bin
 EOF
-  out=$(FAKE_OMP_ALIVE="$dir/fake/omp-alive" FAKE_OMP_LOG="$log" bash -c '
-    . "$1/bin/fm-control-lib.sh"
-    fm_backend_agent_state() { [ -e "$FAKE_OMP_ALIVE" ] && printf alive || printf missing; }
-    fm_backend_kill() { printf kill > "$FAKE_OMP_LOG"; rm -f "$FAKE_OMP_ALIVE"; }
-    fm_control_omp_secondmate_prepare_relaunch "$2" omp1 "$3" tmux fm:omp1 "$4"
-  ' _ "$ROOT" "$state" "$smhome" "$meta") || fail "OMP preparation rejected an absent endpoint"
+  : > "$state/omp1.omp-ext.ts"; : > "$state/omp1.omp-ready"; : > "$state/omp1.omp-started"
+  mkdir -p "$smhome/state/omp-sessions"
+  printf 'saved session\n' > "$smhome/state/omp-sessions/saved.jsonl"
+  printf '%s\n' "$smhome/state/omp-sessions/saved.jsonl" > "$smhome/state/.omp-session"
+
+  write_fixture_marker() {
+    printf '%s\n%s\n%s\n%s\n' "$1" "$2" "$3" "$4" > "$marker"
+  }
+  reset_fixture() {
+    : > "$state/omp1.omp-ext.ts"; : > "$state/omp1.omp-ready"; : > "$state/omp1.omp-started"
+    rm -f "$marker"
+    printf '%s\n' "$lock_pid" > "$smhome/state/.lock"
+    write_fixture_marker "$version" "$marker_pid" "$bash_bin" "$bash_bin"
+  }
+  prepare_fixture() {
+    FM_RESTART_STOP_WAIT=0 bash -c '
+      . "$1/bin/fm-backend.sh" || exit 1
+      . "$1/bin/fm-control-lib.sh" || exit 1
+      fm_backend_agent_state() { printf missing; }
+      fm_backend_kill() { return 0; }
+      fm_control_omp_secondmate_prepare_relaunch "$2" omp1 "$3" tmux fm:omp1 "$4"
+    ' _ "$ROOT" "$state" "$smhome" "$meta" 2>&1
+  }
+  assert_preserved() {
+    [ -e "$marker" ] || [ -L "$marker" ] || fail "refused OMP relaunch removed the primary marker"
+    [ -f "$state/omp1.omp-ext.ts" ] && [ -f "$state/omp1.omp-ready" ] \
+      && [ -f "$state/omp1.omp-started" ] \
+      || fail "refused OMP relaunch removed session artifacts"
+    [ "$(cat "$smhome/state/.omp-session")" = "$smhome/state/omp-sessions/saved.jsonl" ] \
+      || fail "refused OMP relaunch changed the saved-session pointer"
+    [ "$(cat "$smhome/state/omp-sessions/saved.jsonl")" = 'saved session' ] \
+      || fail "refused OMP relaunch changed the saved session"
+  }
+
+  reset_fixture
+  out=$(prepare_fixture) || fail "OMP preparation rejected two proven-dead marker owners: $out"
   [ "$out" = '' ] || fail "OMP preparation emitted unexpected output: $out"
-  [ ! -s "$log" ] || fail "OMP preparation killed an endpoint without a proven dead state"
   [ ! -e "$state/omp1.omp-ext.ts" ] || fail "OMP extension artifact survived preparation"
   [ ! -e "$state/omp1.omp-ready" ] || fail "OMP readiness artifact survived preparation"
   [ ! -e "$state/omp1.omp-started" ] || fail "OMP started marker survived preparation"
-  [ ! -e "$smhome/state/.omp-primary-extension-loaded" ] || fail "OMP primary marker survived preparation"
-  pass "OMP relaunch preparation proves stop and clears owned markers"
+  [ ! -e "$marker" ] || fail "OMP primary marker survived preparation"
+  [ "$(cat "$smhome/state/.omp-session")" = "$smhome/state/omp-sessions/saved.jsonl" ] \
+    || fail "OMP preparation changed the exact saved-session pointer"
+  [ "$(cat "$smhome/state/omp-sessions/saved.jsonl")" = 'saved session' ] \
+    || fail "OMP preparation changed the saved session"
+
+  marker_pid=$BASHPID
+  reset_fixture
+  if out=$(prepare_fixture); then fail "OMP preparation accepted a live marker owner"; fi
+  assert_contains "$out" 'primary marker owner is still live' "live marker-owner refusal was not actionable"
+  assert_preserved
+
+  marker_pid=99999999
+  reset_fixture
+  write_fixture_marker "$version" "$marker_pid" "$bash_bin" "$dir/foreign-omp"
+  if out=$(prepare_fixture); then fail "OMP preparation accepted a foreign OMP runtime marker"; fi
+  assert_contains "$out" 'runtime does not match the recorded home' "foreign-runtime refusal was not actionable"
+  assert_preserved
+
+  reset_fixture
+  printf 'sha256:unrecognized\n%s\n%s\n%s\n' "$marker_pid" "$bash_bin" "$bash_bin" > "$marker"
+  if out=$(prepare_fixture); then fail "OMP preparation accepted an unexplained marker version"; fi
+  assert_contains "$out" 'refusing relaunch' "unexplained marker-version refusal was not actionable"
+  assert_preserved
+
+  reset_fixture
+  rm -f "$marker"
+  ln -s "$dir/absent-marker-target" "$marker"
+  if out=$(prepare_fixture); then fail "OMP preparation accepted a symlink marker"; fi
+  assert_contains "$out" 'not an ordinary file' "symlink marker refusal was not actionable"
+  assert_preserved
+
+  reset_fixture
+  rm -f "$marker"
+  mkdir "$marker"
+  if out=$(prepare_fixture); then fail "OMP preparation accepted a non-file marker"; fi
+  assert_contains "$out" 'not an ordinary file' "non-file marker refusal was not actionable"
+  rmdir "$marker"
+  write_fixture_marker "$version" "$marker_pid" "$bash_bin" "$bash_bin"
+  assert_preserved
+  reset_fixture
+  rm -f "$marker" "$smhome/state/.lock"
+  mv "$smhome/state" "$dir/omp-home-state"
+  ln -s "$dir/omp-home-state" "$smhome/state"
+  if out=$(prepare_fixture); then fail "OMP preparation accepted a symlink home state directory"; fi
+  assert_contains "$out" 'OMP home state is not an ordinary directory' \
+    "symlink home-state refusal was not actionable"
+  [ -f "$state/omp1.omp-ext.ts" ] && [ -f "$state/omp1.omp-ready" ] \
+    && [ -f "$state/omp1.omp-started" ] \
+    || fail "symlink home-state refusal removed the task's OMP artifacts"
+  rm "$smhome/state"
+  mv "$dir/omp-home-state" "$smhome/state"
+
+
+  for invalid_lock in not-a-pid 0 00 01 1; do
+    reset_fixture
+    printf '%s\n' "$invalid_lock" > "$smhome/state/.lock"
+    if out=$(prepare_fixture); then fail "OMP preparation accepted unverifiable lock owner $invalid_lock"; fi
+    assert_contains "$out" 'lock owner is unverifiable' \
+      "unverifiable lock refusal was not actionable for PID '$invalid_lock'"
+    assert_preserved
+  done
+  reset_fixture
+  printf '%s\n%s\n' "$lock_pid" "$marker_pid" > "$smhome/state/.lock"
+  if out=$(prepare_fixture); then fail "OMP preparation accepted a multi-line lock PID"; fi
+  assert_contains "$out" 'lock owner is unverifiable' \
+    "multi-line lock PID refusal was not actionable"
+  assert_preserved
+
+
+  cat > "$dir/fake-live-lock" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-0" ] && [ "${2:-}" = "$FM_TEST_LOCK_PID" ]; then exit 0; fi
+exit 1
+SH
+  chmod +x "$dir/fake-live-lock"
+  reset_fixture
+  if out=$(FM_RESTART_STOP_CMD="$dir/fake-live-lock" FM_TEST_LOCK_PID="$lock_pid" prepare_fixture); then
+    fail "OMP preparation accepted a live lock owner"
+  fi
+  assert_preserved
+  pass "OMP relaunch preparation accepts only owned dead markers and preserves sessions on every refusal"
 }
 
 # --- T17: an OMP mate's restart, driven end to end with both real side effects
@@ -894,6 +1037,15 @@ omp_marker_list() {  # <case-dir> <id>
 # the composer. The process receipts each request and then answers the persist
 # question on the parent channel, which is the same modelling the tmux stub does
 # for every other adapter in this file.
+copy_omp_primary_closure() {  # <case-dir> <home>
+  local dir=$1 home=$2 path
+  bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_omp_primary_closure_paths' \
+    _ "$ROOT" > "$dir/closure-paths"
+  while IFS= read -r path; do
+    mkdir -p "$home/$(dirname "$path")"
+    cp "$ROOT/$path" "$home/$path"
+  done < "$dir/closure-paths"
+}
 OMP_LISTENER_PID=
 add_omp_mate() {  # <case-dir> <id>
   add_local_mate "$1" "$2" omp
@@ -1025,15 +1177,32 @@ clear_omp_restart_stubs() {
 }
 
 test_omp_restart_stops_proves_cleans_then_relaunches() {
-  local dir out rc owner marker stop_first stop_probe spawn_line
+  local dir out rc owner marker primary_marker stop_first stop_probe spawn_line version bash_bin smhome
   dir=$(new_case omp)
   printf 'omp\n' > "$dir/home/config/secondmate-harness"
   add_omp_mate "$dir" sm1
+  smhome="$dir/sm1-home"
+  copy_omp_primary_closure "$dir" "$dir/local-primary"
+  git -C "$dir/local-primary" add -A .omp bin/fm-primary-watch-core.ts
+  git -C "$dir/local-primary" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'install the OMP primary closure'
+  git -C "$dir/local-primary" push -q origin HEAD
+  git -C "$smhome" pull -q --ff-only
   owner=987654
   make_omp_restart_stubs "$dir" sm1 "$owner"
-  # The session artifacts a live OMP mate is holding when the update lands.
-  while IFS= read -r marker; do printf 'live\n' > "$marker"; done < "$dir/markers"
-
+  # Keep the task-owned artifacts live until the recorded session owner is
+  # proven absent; the primary marker itself has the real four-line contract.
+  while IFS= read -r marker; do
+    case "$marker" in
+      "$smhome/state/.omp-primary-extension-loaded") ;;
+      *) printf 'live\n' > "$marker" ;;
+    esac
+  done < "$dir/markers"
+  version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
+    _ "$ROOT" "$smhome") || fail "could not derive the current OMP marker version"
+  bash_bin=$(fm_test_realpath "$(command -v bash)")
+  primary_marker="$smhome/state/.omp-primary-extension-loaded"
+  printf '%s\n%s\n%s\n%s\n' "$version" "$owner" "$bash_bin" "$bash_bin" > "$primary_marker"
   out=$(run_restart "$dir" fm-sm1); rc=$?
   stop_omp_mate
   clear_omp_restart_stubs
@@ -1078,7 +1247,7 @@ test_omp_restart_stops_proves_cleans_then_relaunches() {
 # placement's delivery binds no closure, so the same update must still reach the
 # running local session, have it persist, and only then stop and relaunch it.
 test_local_omp_restart_after_extension_closure_update() {
-  local dir out rc seed repo smhome marker bash_bin loaded tracked persisted_line stop_line
+  local dir out rc seed repo smhome marker bash_bin loaded tracked persisted_line stop_line owner
   dir=$(new_case local-omp-update)
   printf 'omp\n' > "$dir/home/config/secondmate-harness"
   add_repo_backed_mate "$dir" sm1 omp
@@ -1097,13 +1266,14 @@ test_local_omp_restart_after_extension_closure_update() {
   git -C "$repo" pull -q --ff-only
   git -C "$smhome" checkout -q --detach main
 
-  make_omp_restart_stubs "$dir" sm1 987654
+  owner=987654
+  make_omp_restart_stubs "$dir" sm1 "$owner"
   FM_TEST_OMP_EVENTS="$dir/stop.log" start_omp_session "$dir" sm1
   bash_bin=$(fm_test_realpath "$(command -v bash)")
   loaded=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
     _ "$ROOT" "$smhome") || fail "could not derive the session's loaded closure"
   marker="$smhome/state/.omp-primary-extension-loaded"
-  printf '%s\n%s\n%s\n%s\n' "$loaded" "$OMP_LISTENER_PID" "$bash_bin" "$bash_bin" > "$marker"
+  printf '%s\n%s\n%s\n%s\n' "$loaded" "$owner" "$bash_bin" "$bash_bin" > "$marker"
 
   # The update crosses an extension change while that session keeps running.
   printf '// extension change shipped by the update\n' >> "$seed/bin/fm-primary-watch-core.ts"
@@ -1127,7 +1297,7 @@ test_local_omp_restart_after_extension_closure_update() {
   assert_contains "$(cat "$dir/home/state/sm1.inbox"/*.msg)" "Open-record persistence" \
     "the superseded local session never received the persist request"
   persisted_line=$(grep -n '^persisted corr=' "$dir/stop.log" | head -1 | cut -d: -f1)
-  stop_line=$(grep -n '^stopped 987654 ' "$dir/stop.log" | head -1 | cut -d: -f1)
+  stop_line=$(grep -n "^stopped $owner " "$dir/stop.log" | head -1 | cut -d: -f1)
   [ -n "$persisted_line" ] && [ -n "$stop_line" ] && [ "$persisted_line" -lt "$stop_line" ] \
     || fail "the superseded local session was not asked to persist before it stopped"$'\n'"$(cat "$dir/stop.log")"
   pass "T18 a local OMP mate persists and restarts after an update changes its loaded closure"
@@ -1196,6 +1366,12 @@ test_unlistable_state_still_refuses_restart() {
   assert_no_grep '^/exit$' "$dir/fake/literal" "an unlistable state refusal must not have stopped the agent"
   pass "T20 a mate home whose state cannot be listed still refuses the restart"
 }
+if [ "${FM_TEST_OMP_RESTART_ONLY:-0}" = 1 ]; then
+  test_omp_secondmate_prepare_relaunch_clears_owned_markers
+  test_omp_restart_stops_proves_cleans_then_relaunches
+  test_local_omp_restart_after_extension_closure_update
+  exit 0
+fi
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
