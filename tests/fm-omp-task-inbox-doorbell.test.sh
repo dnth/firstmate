@@ -593,6 +593,85 @@ JS
   pass "OMP extension activation reports failures, journals their reasons, and retires cleanly"
 }
 
+# A native OMP subagent runs its child session inside the worker's own OS
+# process, and binding the explicit Firstmate extension again constructs a
+# second doorbell instance for the same inbox and ready marker. The marker is
+# the process's handshake, not the session's: exactly one instance may own it,
+# so the child's normal shutdown must not clear the live worker's marker and
+# the child must not become a second consumer of the same request channel. The
+# marker keeps the foreground-PID format the shell identity checks read.
+test_single_process_owner_per_marker() {
+  local dir="$TMP_ROOT/single-owner"
+  mkdir -p "$dir/state/t1.inbox"
+  HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
+    node --input-type=module <<'JS' || fail "the single-process doorbell owner contract regressed"
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
+  await import(pathToFileURL(process.env.HELPER).href);
+const requestDir = `${process.env.READY}.requests`;
+const line = `Firstmate instruction waiting: list ${process.env.INBOX}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.INBOX}/handled/.`;
+const ownerMarker = () => readFileSync(process.env.READY, "utf8");
+
+// Parent A and child B: one OS process, the same inbox and ready marker, and a
+// separate recording delivery channel each.
+const parentSent = [];
+const childSent = [];
+const parent = installTaskInboxDoorbell(
+  { sendMessage(message) { parentSent.push(message); } },
+  { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
+);
+const child = installTaskInboxDoorbell(
+  { sendMessage(message) { childSent.push(message); } },
+  { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
+);
+assert.equal(parent.activate(), true);
+assert.equal(ownerMarker(), `${process.pid}\n`);
+assert.equal(child.activate(), true, "a duplicate reports the process-owned handshake it joined");
+
+// The child's normal session shutdown retires its own instance. The live
+// parent's marker is not the child's to clear.
+child.retire();
+assert.equal(existsSync(process.env.READY), true, "a child retire cleared the owner's ready marker");
+assert.equal(ownerMarker(), `${process.pid}\n`, "a child retire left a marker that is not the owner's");
+assert.equal(
+  process.listenerCount(FM_TASK_INBOX_DOORBELL_SIGNAL),
+  1,
+  "a duplicate same-process instance installed a second request channel",
+);
+
+// The owner still consumes the channel exactly once - never the duplicate.
+writeFileSync(`${requestDir}/first.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(parentSent.length, 1, "the owning doorbell did not deliver the request");
+assert.equal(childSent.length, 0, "a duplicate same-process instance delivered the request");
+assert.equal(existsSync(`${requestDir}/first.pending.delivered`), true);
+
+// Negative control: the owner's own retire removes the marker it published.
+parent.retire();
+assert.equal(existsSync(process.env.READY), false, "the owner's retire left its ready marker behind");
+
+// A later legitimate owner takes over after the first owner retires: a
+// process-global owner must not outlive the instance that held it.
+const successorSent = [];
+const successor = installTaskInboxDoorbell(
+  { sendMessage(message) { successorSent.push(message); } },
+  { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
+);
+assert.equal(successor.activate(), true, "a later instance could not take over the retired owner's marker");
+assert.equal(ownerMarker(), `${process.pid}\n`);
+writeFileSync(`${requestDir}/second.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(successorSent.length, 1, "the successor owner did not deliver the request");
+assert.equal(existsSync(`${requestDir}/second.pending.delivered`), true);
+successor.retire();
+assert.equal(existsSync(process.env.READY), false);
+JS
+  pass "OMP doorbell: one process-global owner per ready marker survives a duplicate child's retire"
+}
+
 test_ring_routing_matrix() {
   local dir="$TMP_ROOT/routing" rec log
   mkdir -p "$dir/state/t1.inbox/handled"
@@ -1459,6 +1538,7 @@ test_extension_signal_uses_trigger_turn
 test_extension_requires_turn_proof_or_redrives
 test_extension_external_notify_drives_turn_proof
 test_extension_activate_reports_and_journals_failures
+test_single_process_owner_per_marker
 test_ring_routing_matrix
 test_request_terminal_states
 test_fm_send_rings_one_programmatic_doorbell

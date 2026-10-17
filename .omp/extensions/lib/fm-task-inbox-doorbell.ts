@@ -10,7 +10,7 @@ import {
 	watch,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export const FM_TASK_INBOX_DOORBELL_SIGNAL = "SIGUSR2";
 
@@ -92,6 +92,20 @@ function configuredOptions(options: TaskInboxDoorbellOptions): Required<TaskInbo
 	return { inboxDir, readyMarker, turnGraceMs, observeTurns: options.observeTurns !== false,
 		deferUntilTurnStart: options.deferUntilTurnStart === true };
 }
+
+// One process-global owner per ready-marker path. OMP binds the explicit
+// Firstmate extension once per session, and it runs a native subagent's child
+// session inside the worker's own OS process, so one process can hold several
+// instances of this helper for the same marker. That marker - and the request
+// channel beside it - is the process's handshake, not a session's: only the
+// first instance to activate may publish readiness, watch for requests,
+// consume them, or retire the marker, and a duplicate instance stays inert.
+// The registry rides the shared symbol registry rather than module scope so a
+// runtime that re-evaluates the extension module per session still shares it.
+const DOORBELL_OWNERS_KEY = Symbol.for("firstmate.task-inbox-doorbell.owners");
+const doorbellOwners: Map<string, object> =
+	(globalThis as unknown as Record<symbol, Map<string, object>>)[DOORBELL_OWNERS_KEY]
+	??= new Map<string, object>();
 
 function publishReadyMarker(marker: string): void {
 	mkdirSync(dirname(marker), { recursive: true });
@@ -212,6 +226,11 @@ export function installTaskInboxDoorbell(
 	}
 
 	const requestDir = `${configured.readyMarker}.requests`;
+	// Ownership is keyed by the canonical marker path and held by this
+	// instance, not by the process: a duplicate child instance in the same
+	// process must never be able to retire the owner's marker.
+	const ownerKey = resolve(configured.readyMarker);
+	const ownerToken = {};
 	const turnGraceMs = configured.turnGraceMs;
 	const turnEventsReachable = typeof omp.on === "function";
 	const canObserveTurns = options.observeTurns !== false && turnEventsReachable;
@@ -314,6 +333,9 @@ export function installTaskInboxDoorbell(
 	const retire = (): void => {
 		if (!active) return;
 		retireOwnedReadyMarker(configured.readyMarker);
+		// Release the marker only while this instance still holds it, so a
+		// late retire from a superseded closure cannot strand the successor.
+		if (doorbellOwners.get(ownerKey) === ownerToken) doorbellOwners.delete(ownerKey);
 		active = false;
 		for (const timer of awaitingTurns.values()) clearTimeout(timer);
 		awaitingTurns.clear();
@@ -404,6 +426,13 @@ export function installTaskInboxDoorbell(
 	};
 	const activate = (): boolean | Promise<boolean> => {
 		if (active) return true;
+		// A duplicate instance for this marker - the child session OMP runs in
+		// this same process - joins the handshake the owner already published
+		// instead of competing for it: no second watcher or signal receiver, no
+		// request consumption, no marker publication, and nothing of the
+		// owner's to clear. The handshake it reports is the process's, and that
+		// one is live.
+		if (doorbellOwners.has(ownerKey)) return true;
 		try {
 			mkdirSync(requestDir, { recursive: true, mode: 0o700 });
 			reconcileAmbiguousClaims(requestDir);
@@ -411,6 +440,7 @@ export function installTaskInboxDoorbell(
 			installTurnListeners();
 			watcher = watch(requestDir, drain);
 			active = true;
+			doorbellOwners.set(ownerKey, ownerToken);
 			if (!signalHandlerInstalled) {
 				process.on(FM_TASK_INBOX_DOORBELL_SIGNAL, drain);
 				signalHandlerInstalled = true;
