@@ -220,6 +220,23 @@ case "$cmd" in
     line=$(resolve "$target") || exit 1
     ses=${line%%	*}
     wid=$(printf '%s' "$line" | awk -F '\t' '{print $2}')
+    # A pane can also vanish with the exit command instead of returning to its
+    # shell: the endpoint is still the task's, but it is gone. The exit line is
+    # typed first and the submit Enter is what makes the agent leave, so the
+    # endpoint disappears under the Enter that follows it.
+    enter_key=0
+    for a in "$@"; do
+      case "$a" in
+        Enter) enter_key=1 ;;
+        /exit) : > "$STATE/.exit-typed.$wid" ;;
+      esac
+    done
+    if [ "$enter_key" -eq 1 ] && [ "${FM_FAKE_TMUX_EXIT_DROPS_WINDOW:-0}" = 1 ] \
+       && [ -f "$STATE/.exit-typed.$wid" ]; then
+      rm -f "$STATE/.exit-typed.$wid"
+      drop_window "$ses" "$wid"
+      exit 0
+    fi
     exit_sent=0
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       for a in "$@"; do
@@ -530,6 +547,25 @@ run_recovery() {
   RECOVERY_STATUS=$?
 }
 
+# run_exit <case_dir> <home> <id> [env assignments...]: the real control-plane
+# exit against the case's fake backend.
+run_exit() {
+  local case_dir=$1 home=$2 id=$3
+  shift 3
+  CONTROL_OUT=$(env -u HERDR_PANE_ID -u HERDR_SESSION -u ZELLIJ_SESSION_NAME \
+    FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" \
+    FM_FAKE_TMUX_STATE="$case_dir/fake/tmux-state" \
+    FM_FAKE_TMUX_LOG="$case_dir/fake/tmux.log" \
+    FM_FAKE_AGENT_PID_FILE="$case_dir/fake/agent.pid" \
+    FM_FAKE_OMP_BIN="$FAKEBIN_DIR/omp" \
+    FM_CONTROL_POLL=0.05 FM_CONTROL_EXIT_WAIT=5 TMUX='fake,1,0' \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$@" "$CONTROL" "$id" exit 2>&1)
+  CONTROL_STATUS=$?
+}
+
 # --- tests -------------------------------------------------------------------
 
 # Missing endpoint + unhandled record + clean custody: the real fm-control
@@ -572,6 +608,36 @@ test_missing_endpoint_recovers_via_control() {
   assert_present "$record" "the unhandled instruction record was moved or deleted"
   assert_grep "stall auto-recovery" "$HOME_DIR/state/$id.status" "no audit note was appended to the task status"
   pass "missing endpoint: real relaunch publishes, ladder resets, stale receipts retire, record stays unhandled"
+}
+
+# The control plane's exit postcondition: an owned, live endpoint that vanishes
+# with the exit command is a stopped agent, not an unconfirmed failure. The
+# endpoint was validated and owned before anything was sent, so nothing can
+# still be running there - and nothing outside that endpoint is touched.
+test_exit_reports_stopped_when_owned_endpoint_vanishes() {
+  local rec id other other_before
+  id=$(case_id exit-vanished)
+  other=$(case_id exit-other)
+  rec=$(make_case exit-vanished "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  live_window "$CASE_DIR" "$id" bun
+  # A second live task sits in the same fleet; the exit must not reach it.
+  live_window "$CASE_DIR" "$other" bun
+  other_before=$(cat "$CASE_DIR/fake/tmux-state/ses-$other.windows")
+
+  run_exit "$CASE_DIR" "$HOME_DIR" "$id" FM_FAKE_TMUX_EXIT_DROPS_WINDOW=1
+  expect_code 0 "$CONTROL_STATUS" \
+    "exit on an owned endpoint that vanished with the exit command must report stopped; got: $CONTROL_OUT"
+  assert_contains "$CONTROL_OUT" "stopped" "control exit did not report the stopped agent"
+  assert_not_contains "$CONTROL_OUT" "exit=unconfirmed" "control exit reported an unconfirmed stop"
+  assert_equals "$other_before" "$(cat "$CASE_DIR/fake/tmux-state/ses-$other.windows")" \
+    "an unrelated endpoint's window changed during exit"
+  assert_no_grep "$other" "$CASE_DIR/fake/tmux.log" "the exit addressed an unrelated endpoint"
+  pass "fm-control exit: an owned endpoint that vanished with the exit command reports stopped"
 }
 
 # A live endpoint is detected and escalated only: recovery never interrupts,
@@ -1046,6 +1112,7 @@ test_unterminated_marker_suffix_escalates() {
 # --- run ---------------------------------------------------------------------
 
 test_missing_endpoint_recovers_via_control
+test_exit_reports_stopped_when_owned_endpoint_vanishes
 test_live_idle_escalates
 test_live_busy_escalates
 test_unknown_crew_state_escalates
