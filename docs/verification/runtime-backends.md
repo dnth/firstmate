@@ -1332,6 +1332,31 @@ ok - fm-send: an unproven OMP session binding is refused, never redirected to th
 ok - OMP primary extension binds secondmate doorbells after session readiness
 ```
 
+The deferred live OMP-under-Herdr smoke ran on 2026-10-17 against OMP 18.10.1 and Herdr 0.9.3 on Linux x86_64, inside one guarded non-default lab session created by `bin/fm-herdr-lab.sh`, with `opencode-go-neuralengine-1/deepseek-v4.1-flash` at low effort.
+It spawned a real worker through `bin/fm-spawn.sh`, let that worker invoke one native `task` subagent and dispose of it normally - the child session OMP runs inside the worker's own OS process, and that shutdown is exactly what used to retire the live parent's ready marker - and then steered the parent through `bin/fm-send.sh`.
+The steer reported `omp-native-received` bound to the session process the ready marker names, and the marker was still present afterwards, so the worker stayed reachable across a native subagent's full lifecycle.
+
+```sh
+# Guarded non-default lab session: every lifecycle call goes through the helper,
+# and the pane's own herdr is a wrapper that refuses any call not bound to it.
+HERDR_LAB_SESSION=$(bin/fm-herdr-lab.sh name fm-omp-doorbell)
+bin/fm-herdr-lab.sh provision "$HERDR_LAB_SESSION"
+bin/fm-spawn.sh <task-id> <project> --harness omp --model <model> --effort low --mode direct-PR --yolo off
+# the worker runs one native `task` subagent, which then disposes normally
+bin/fm-send.sh <task-id> '<instruction>'
+bin/fm-herdr-lab.sh teardown "$HERDR_LAB_SESSION"
+```
+
+Observed result:
+
+```text
+omp/18.10.1
+child exit record: session_exit","data":{"reason":"dispose","kind":"normal
+fm-send: omp-native-received: the bound OMP session acknowledged the request (session-pid=<ready-marker pid>)
+marker intact after the steer
+lab teardown ok: <lab session> deleted, default-session tripwire unchanged
+```
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.
