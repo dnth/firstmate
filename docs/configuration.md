@@ -950,7 +950,9 @@ Names prefer Firstmate's title from the reply that successfully creates the thre
 The poster validates names against the stored request text and creating title before creating or renaming a thread.
 Legacy label-plus-time names remain valid for the same source message when no valid creating title takes precedence, including contexts recorded before request text was retained.
 Anything else falls back to the fresh derivation.
-Once a thread exists, later titles do not replace its name; status changes preserve the original base name.
+Once a thread exists, a later title recorded on a reply does not replace its name, and a status change preserves its current base name.
+A reply may instead retitle the thread, carrying `--thread-retitle "<Project> · <topic>"` into `bin/fm-ext-emit.sh` or `bin/fm-ext-ask.sh`, which passes it through, when the conversation has moved on from the name the thread wears: the new title passes the same screen and bounds as a creating title, keeps whatever `❓ ` or `✅ ` marker the thread has, and becomes its stored base name, so every later marker, auto-clear, and reconciliation builds on the new name rather than the original.
+A retitle shares a marker's eligibility and is equally best effort: it only ever reaches a thread this home created in the dedicated channel, and a refused, unusable, or ineligible one is ignored with the reply text still posted.
 A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
 The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name to match the requested state.
 Before trusting a stored name that already matches, the poster reads the name Discord shows, so a manual rename never wedges a later marker; when that name cannot be read it renames anyway.
@@ -988,7 +990,7 @@ The [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#the-reply-is-publ
 The intake records the fallback name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record so every generation shares the same thread.
 [`save_thread_record` in the poster](../contrib/hermes-gateway-firstmate-comms/outbox_poster.py) owns the record fields.
 A marker applied from inside the thread, or by the periodic sweep, updates that same record rather than writing a second one, so the next change on any path builds on the same name.
-The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, marker, auto-clear, drift, rename-retry, opened-thread, and unchanged-allowlist coverage.
+The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, retitle, marker, auto-clear, drift, rename-retry, opened-thread, and unchanged-allowlist coverage.
 
 ### Thread context (name, project, history)
 

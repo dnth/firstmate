@@ -8,7 +8,7 @@
 #     (--text-file <path> | --text-file -) [--explanation-file <path>]
 #     --option <label> [--recommended] [--confirm]
 #     [--option <label> [--recommended] [--confirm]] ... (1-5 options)
-#     --mode done|release [--thread-title <text>]
+#     --mode done|release [--thread-title <text>] [--thread-retitle <text>]
 #
 # This is the one way to post a choice. It does the three steps a choice post
 # needs, in order, so none can be skipped:
@@ -18,7 +18,8 @@
 #      follows that command's rules, including no parentheses);
 #   2. writes the decision file (key hold:<task-id>, the mode, the options);
 #   3. posts through bin/fm-ext-emit.sh --decision-file with
-#      --thread-state needs-you.
+#      --thread-state needs-you; --thread-title and --thread-retitle pass
+#      straight through to that post, and the emit header owns what each does.
 # The post text keeps the question, optional explanation, numbered option
 # lines, and reply cue as separate sections for safe chunking and settlement.
 # The numbered option lines follow button order, and a recommended option shows
@@ -58,7 +59,7 @@ usage: fm-ext-ask.sh --request-id discord:<guild>:<channel>:<thread>:<message>
          --task <task-id> [--title <title>] [--repo <repo>] --reason <reason>
          (--text-file <path> | --text-file -) [--explanation-file <path>]
          --option <label> [--recommended] [--confirm] [--option <label> ...]
-         --mode done|release [--thread-title <text>]
+         --mode done|release [--thread-title <text>] [--thread-retitle <text>]
 EOF
 }
 
@@ -79,6 +80,7 @@ TEXT_FILE=
 EXPLANATION_FILE=
 MODE=
 THREAD_TITLE=
+THREAD_RETITLE=
 OPTIONS_JSON='[]'
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
@@ -99,6 +101,7 @@ while [ "$#" -gt 0 ]; do
     --explanation-file) shift; EXPLANATION_FILE=${1:-} ;;
     --mode) shift; MODE=${1:-} ;;
     --thread-title) shift; THREAD_TITLE=${1:-} ;;
+    --thread-retitle) shift; THREAD_RETITLE=${1:-} ;;
     --option)
       shift
       OPTIONS_JSON=$(jq -c --arg lbl "${1:-}" '. + [{"label": $lbl}]' <<<"$OPTIONS_JSON") \
@@ -187,6 +190,7 @@ emit=("$SCRIPT_DIR/fm-ext-emit.sh" --request-id "$REQUEST_ID" --kind "$KIND"
   --generation "$GENERATION" --text-file - --decision-file "$WORK/decision.json"
   --thread-state needs-you)
 [ -z "$THREAD_TITLE" ] || emit+=(--thread-title "$THREAD_TITLE")
+[ -z "$THREAD_RETITLE" ] || emit+=(--thread-retitle "$THREAD_RETITLE")
 
 SLUG=$(fm_ext_request_slug "$REQUEST_ID") || die "could not derive request slug" 1
 OUTBOX=$(fm_ext_outbox_dir)

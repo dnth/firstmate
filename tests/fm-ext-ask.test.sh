@@ -129,6 +129,13 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
     --option "North" --option "South" >/dev/null || fail "refreshing an active hold must succeed"
   jq -e '.decision.options | length == 2' "$(payload_of "$home" followup 2)" >/dev/null \
     || fail "the refreshed post lost its buttons"
+  # A choice post may also retitle the thread it lands in.
+  home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 3 \
+    --task "$TASK" --reason "still pending" --mode "done" --text-file "$home/body.txt" \
+    --option "North" --option "South" --thread-retitle "InfoConnect · route decision" >/dev/null \
+    || fail "a retitle on a choice post must pass through to the emit"
+  jq -e '.thread_retitle == "InfoConnect · route decision" and .thread_state == "needs-you"' \
+    "$(payload_of "$home" followup 3)" >/dev/null || fail "the choice post lost its retitle"
   pass "1 fm-ext-ask holds the call, writes the decision, and posts buttons that match the numbered text"
 }
 

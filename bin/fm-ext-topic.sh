@@ -5,10 +5,13 @@
 #   fm-ext-topic.sh --check-title --title-file <path>
 #   fm-ext-topic.sh --text-file <path> --origin slash|message|open
 #     --thread-id <id> --channel-id <id> --message-id <id>
-#     [--title-file <path>] [--validate-name --stored-file <path>]
+#     [--title-file <path>] [--retitle-file <path>]
+#     [--validate-name --stored-file <path>]
 #
 # --check-title prints the cleaned title or fails when its bounds or safety
-# screen rejects it; destination and request arguments are not required.
+# screen rejects it; destination and request arguments are not required. The
+# same screen judges the retitle bin/fm-ext-emit.sh records for a thread that
+# already exists, so only a name a creation could produce is ever stored.
 # Naming, in priority order: Firstmate's title, the request-text fallback, the
 # label-plus-time last fallback. Admission and authority stay owned by
 # bin/fm-ext-intake.sh; docs/configuration.md owns the contract.
@@ -21,6 +24,11 @@
 # --title-file carries Firstmate's "<Project> · <topic>" title: one line, at
 # most 60 characters, screened like reply text. Over-long, multi-line, or
 # unsafe titles fall through to the request-text fallback instead of cutting.
+# --retitle-file carries the base name a thread's record now keeps, set when a
+# reply retitled an existing thread. It passes the same screen; an unusable one
+# is ignored. An opened thread, whose title is its only name, is named by the
+# retitle when one is given, and --validate-name accepts a stored name equal to
+# it so a thread renamed to follow its conversation keeps that name.
 # The request-text fallback uses the first non-empty line of the request with
 # Discord mention, role, channel, emoji, and timestamp tokens stripped,
 # whitespace collapsed, control characters dropped, cut to at most 90
@@ -37,7 +45,7 @@
 set -u
 
 usage() {
-  echo "usage: fm-ext-topic.sh --check-title --title-file <path> | --text-file <path> --origin slash|message|open --thread-id <id> --channel-id <id> --message-id <id> [--title-file <path>] [--validate-name --stored-file <path>]" >&2
+  echo "usage: fm-ext-topic.sh --check-title --title-file <path> | --text-file <path> --origin slash|message|open --thread-id <id> --channel-id <id> --message-id <id> [--title-file <path>] [--retitle-file <path>] [--validate-name --stored-file <path>]" >&2
 }
 
 help() {
@@ -54,6 +62,7 @@ MESSAGE_ID=
 VALIDATE=0
 CHECK_TITLE=0
 TITLE_FILE=
+RETITLE_FILE=
 STORED_FILE=
 
 case "${1:-}" in
@@ -72,6 +81,7 @@ while [ "$#" -gt 0 ]; do
     --check-title) CHECK_TITLE=1 ;;
     --stored-file) shift; STORED_FILE=${1:-} ;;
     --title-file) shift; TITLE_FILE=${1:-} ;;
+    --retitle-file) shift; RETITLE_FILE=${1:-} ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -118,6 +128,18 @@ if [ -n "${TITLE_FILE:-}" ]; then
   fi
 fi
 
+RETITLE_TEXT=
+if [ -n "${RETITLE_FILE:-}" ]; then
+  if [ "$RETITLE_FILE" = '-' ]; then
+    [ "$TEXT_FILE" != '-' ] && [ "$TITLE_FILE" != '-' ] \
+      || die "text, title, and retitle cannot share stdin"
+    RETITLE_TEXT=$(cat)
+  else
+    [ -f "$RETITLE_FILE" ] && [ ! -L "$RETITLE_FILE" ] || die "retitle file not found: $RETITLE_FILE"
+    RETITLE_TEXT=$(cat -- "$RETITLE_FILE")
+  fi
+fi
+
 STORED=
 if [ "$VALIDATE" = 1 ]; then
   [ -n "${STORED_FILE:-}" ] || die "--validate-name needs --stored-file"
@@ -132,7 +154,7 @@ fi
 
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 FM_HOME=${FM_HOME:-$FM_ROOT}
-python3 - "$FM_ROOT" "$FM_HOME" "$CHANNEL_ID" "${MESSAGE_ID:-0}" "$VALIDATE" "$CHECK_TITLE" "${ORIGIN:-}" 3<<< "$TEXT" 4<<< "$TITLE_TEXT" 5<<< "$STORED" <<'PY'
+python3 - "$FM_ROOT" "$FM_HOME" "$CHANNEL_ID" "${MESSAGE_ID:-0}" "$VALIDATE" "$CHECK_TITLE" "${ORIGIN:-}" 3<<< "$TEXT" 4<<< "$TITLE_TEXT" 5<<< "$STORED" 6<<< "$RETITLE_TEXT" <<'PY'
 import os
 import re
 import sys
@@ -144,6 +166,7 @@ if sys.argv[6] != "1" and dedicated_channel(Path(sys.argv[2])) != sys.argv[3]:
     sys.exit(0)
 text = os.fdopen(3).read()
 title_raw = os.fdopen(4).read()
+retitle_raw = os.fdopen(6).read()
 message_ms = (int(sys.argv[4]) >> 22) + 1420070400000
 clock = datetime.fromtimestamp(message_ms / 1000, timezone(timedelta(hours=8))).strftime("%H:%M")
 labels = {"aceh": "Aceh", "infoconnect": "InfoConnect", "firstmate": "Firstmate", "question": "Question"}
@@ -222,10 +245,12 @@ if sys.argv[6] == "1":
     sys.exit(0)
 
 if sys.argv[7] == "open":
-    # An opened thread has no request text: its title is its only name.
-    # A stored name is accepted only by equalling it, so validation prints the
-    # title either way, like a fresh derivation replacing a tampered name.
-    fresh = clean_title(title_raw)
+    # An opened thread has no request text: its title is its only name, and a
+    # retitle recorded for it is its current base name.
+    # A stored name is accepted only by equalling one of them, so validation
+    # prints that name either way, like a fresh derivation replacing a tampered
+    # one.
+    fresh = clean_title(retitle_raw) or clean_title(title_raw)
     if fresh:
         print(fresh)
     sys.exit(0)
@@ -234,9 +259,12 @@ fresh = derive()
 if sys.argv[5] == "1":
     stored = os.fdopen(5).read().strip()
     allowed = legacy_names()
-    if stored == fresh or (not clean_title(title_raw) and stored in allowed):
-        # A title or request-text name must equal the fresh one; a legacy
-        # label-plus-time name stays valid only for its own message time.
+    retitle = clean_title(retitle_raw)
+    if (stored == fresh or (not clean_title(title_raw) and stored in allowed)
+            or (retitle and stored == retitle)):
+        # A title, request-text, or retitle name must equal the fresh one; a
+        # legacy label-plus-time name stays valid only for its own message
+        # time.
         print(stored)
     else:
         print(fresh)

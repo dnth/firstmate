@@ -6,7 +6,8 @@
 #     --kind ack|answer|followup|final --generation <n>
 #     (--text-file <path> | --text-file -) [--decision-file <path>]
 #     [--no-buttons "<reason>"]
-#     [--thread-title <text>] [--thread-state needs-you|done|none]
+#     [--thread-title <text>] [--thread-retitle <text>]
+#     [--thread-state needs-you|done|none]
 #
 # To ask the captain a choice, use bin/fm-ext-ask.sh: it holds the call, writes
 # the decision file, numbers the options in the text, and posts through this
@@ -16,10 +17,16 @@
 # line, at most 60 characters, screened like reply text) on the reply that
 # creates it; once the thread exists, later titles are recorded but do not
 # replace its name. Over-long, multi-line, or unsafe titles are
-# refused here instead of silently cut. --thread-state renames the existing
-# topic thread: needs-you prefixes "❓ ", done prefixes "✅ ", none removes the
-# prefix. docs/configuration.md "Topic threads" owns rename eligibility,
-# best-effort delivery, auto-clear, and retry behaviour.
+# refused here instead of silently cut. --thread-retitle replaces that name on
+# any reply into an existing Firstmate-created topic thread when the
+# conversation has moved on from it: it passes the same screen and bounds,
+# keeps the thread's current marker, and becomes the thread's base name, so
+# every later marker, auto-clear, and reconciliation builds on it. It cannot
+# be combined with --thread-title on the reply that creates the thread.
+# --thread-state renames the existing topic thread: needs-you prefixes "❓ ",
+# done prefixes "✅ ", none removes the prefix. docs/configuration.md
+# "Topic threads" owns rename eligibility, best-effort delivery, auto-clear,
+# and retry behaviour; the ext-respond skill owns when Firstmate retitles.
 #
 # Writes state/ext-outbox/<slug>.<kind>.<generation>.json once. Re-emitting the
 # same identity is a no-op success. A posting marker without a receipt is
@@ -91,7 +98,8 @@ usage: fm-ext-emit.sh --request-id discord:<guild>:<channel>:<thread>:<message>
          --kind ack|answer|followup|final --generation <n>
          (--text-file <path> | --text-file -) [--decision-file <path>]
          [--no-buttons "<reason>"]
-         [--thread-title <text>] [--thread-state needs-you|done|none]
+         [--thread-title <text>] [--thread-retitle <text>]
+         [--thread-state needs-you|done|none]
 EOF
 }
 
@@ -109,6 +117,7 @@ DECISION_FILE=
 NO_BUTTONS=
 NO_BUTTONS_SET=
 THREAD_TITLE=
+THREAD_RETITLE=
 THREAD_STATE=
 
 case "${1:-}" in
@@ -125,6 +134,7 @@ while [ "$#" -gt 0 ]; do
     --decision-file) shift; DECISION_FILE=${1:-} ;;
     --no-buttons) shift; NO_BUTTONS=${1:-}; NO_BUTTONS_SET=1 ;;
     --thread-title) shift; THREAD_TITLE=${1:-} ;;
+    --thread-retitle) shift; THREAD_RETITLE=${1:-} ;;
     --thread-state) shift; THREAD_STATE=${1:-} ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
@@ -143,6 +153,12 @@ fm_ext_generation_valid "$GENERATION" || die "generation must be a positive inte
 if [ -n "$THREAD_TITLE" ]; then
   THREAD_TITLE=$(printf '%s' "$THREAD_TITLE" | bash "$SCRIPT_DIR/fm-ext-topic.sh" --check-title --title-file -) \
     || die "thread title failed the shared bounds or safety check"
+fi
+if [ -n "$THREAD_RETITLE" ]; then
+  [ -z "$THREAD_TITLE" ] \
+    || die "--thread-retitle cannot be combined with --thread-title; a creating reply names the thread with --thread-title"
+  THREAD_RETITLE=$(printf '%s' "$THREAD_RETITLE" | bash "$SCRIPT_DIR/fm-ext-topic.sh" --check-title --title-file -) \
+    || die "thread retitle failed the shared bounds or safety check"
 fi
 case "${THREAD_STATE:-}" in
   ''|needs-you|done|none) ;;
@@ -340,6 +356,7 @@ OUTBOX_JSON=$(jq -cn \
   --arg origin "$ORIGIN" \
   --arg text "$TEXT" \
   --arg thread_title "$THREAD_TITLE" \
+  --arg thread_retitle "$THREAD_RETITLE" \
   --arg thread_state "$THREAD_STATE" \
   --arg no_buttons "$NO_BUTTONS" \
   --argjson decision "$DECISION_JSON" \
@@ -350,6 +367,7 @@ OUTBOX_JSON=$(jq -cn \
     message_id:$message_id, origin:$origin, text:$text,
     recorded_at:$recorded_at}
    + if $thread_title == "" then {} else {thread_title:$thread_title} end
+   + if $thread_retitle == "" then {} else {thread_retitle:$thread_retitle} end
    + if $thread_state == "" then {} else {thread_state:$thread_state} end
    + if $no_buttons == "" then {} else {no_buttons_reason:$no_buttons} end
    + if $decision == null then {} else {decision:$decision} end') \

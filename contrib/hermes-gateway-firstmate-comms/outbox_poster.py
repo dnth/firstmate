@@ -566,6 +566,7 @@ def _read_thread_record(path: Path) -> dict:
     name = data.get("topic_name") or ""
     state = data.get("thread_state") or ""
     creating = data.get("creating_title") or ""
+    retitle = data.get("retitle") or ""
     creator = data.get("creator") or ""
     state_at = data.get("state_at")
     rename = data.get("rename")
@@ -580,6 +581,7 @@ def _read_thread_record(path: Path) -> dict:
             "thread_state": state if isinstance(state, str) else "",
             "creator": creator if isinstance(creator, str) else "",
             "creating_title": creating if isinstance(creating, str) else "",
+            "retitle": retitle if isinstance(retitle, str) else "",
             "state_at": _epoch(state_at),
             "rename": rename if isinstance(rename, dict) else {},
             "marked_open": data.get("marked_open") is True}
@@ -672,7 +674,8 @@ def save_request_thread(payload: dict, thread_id: str, home: Path,
 
 def save_thread_record(path: Path, request_id: object, thread_id: str,
                        topic_name: str = "", thread_state: str = "",
-                       creating_title: str = "", creator: str = "",
+                       creating_title: str = "", retitle: str | None = None,
+                       creator: str = "",
                        state_at: float | None = None, rename: dict | None = None,
                        marked_open: bool | None = None,
                        open_attempt: bool | None = None,
@@ -690,6 +693,10 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     rename stays visible and can be retried. It keeps ``name``, ``at``, and
     ``outcome`` (applied, unchanged, or failed); a failure also keeps ``error``,
     ``retryable``, and ``attempts`` (consecutive failed attempts).
+    ``creating_title`` is the title the creating reply supplied, kept so a
+    stored name can be re-derived from it. ``retitle`` is the base name a later
+    reply replaced that title with, kept once set so every later marker,
+    auto-clear, and reconciliation builds on the name the thread now wears.
     ``marked_open`` records whether the marker was associated with an open
     decision, preserving that association when a reminder postdates it.
 
@@ -720,6 +727,9 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     kept_creator = creator or (prior_creator if isinstance(prior_creator, str) else "")
     if kept_creator:
         record["creator"] = kept_creator
+    kept_retitle = retitle if retitle is not None else prior.get("retitle")
+    if isinstance(kept_retitle, str) and kept_retitle:
+        record["retitle"] = kept_retitle
     kept_state_at = _epoch(state_at if state_at is not None else prior.get("state_at"))
     if kept_state_at:
         record["state_at"] = kept_state_at
@@ -763,23 +773,27 @@ def public_topic_name(
     home: Path | None = None,
     request_text: str = "",
     title: str = "",
+    retitle: str = "",
 ) -> str:
     """Re-derive this request's thread name and check the stored one.
 
-    The request text (plus Firstmate's title when the creating payload
-    carries one) goes through bin/fm-ext-topic.sh, and the stored name is
-    accepted only when it equals that fresh derivation, or a legacy
+    The request text (plus Firstmate's title and, when the thread's record
+    keeps one, its retitle) goes through bin/fm-ext-topic.sh, and the stored
+    name is accepted only when it equals that fresh derivation, a legacy
     label-plus-time name for the same message when no valid title takes
-    precedence. Anything else falls back to the fresh name.
+    precedence, or the retitle the thread now wears. Anything else falls back
+    to the fresh name.
     """
-    with _temp_text(request_text) as text_file, _temp_text(title) as title_file, _temp_text(name) as stored_file:
+    with _temp_text(request_text) as text_file, _temp_text(title) as title_file, \
+            _temp_text(retitle) as retitle_file, _temp_text(name) as stored_file:
         result = subprocess.run(
             [str(firstmate_root() / "bin" / "fm-ext-topic.sh"),
              "--text-file", text_file, "--origin", str(payload.get("origin") or "slash"),
              "--thread-id", str(payload.get("thread_id") or ""),
              "--channel-id", str(payload.get("channel_id") or ""),
              "--message-id", str(payload.get("message_id") or ""),
-             "--title-file", title_file, "--validate-name", "--stored-file", stored_file],
+             "--title-file", title_file, "--retitle-file", retitle_file,
+             "--validate-name", "--stored-file", stored_file],
             capture_output=True, text=True, check=False,
             env=_env_for(home or firstmate_home()),
         )
@@ -819,13 +833,16 @@ def thread_name_for(payload: dict, home: Path) -> str:
         return ""
     recorded = load_request_topic(payload, home)
     recorded_name = recorded.get("topic_name") or ""
-    if recorded_name:
-        # A thread already exists: its recorded base name wins over any
-        # later title, so state renames build on the name Discord shows.
-        # The base re-validates against the creating title the record keeps,
-        # so a tampered record still falls back to a fresh derivation.
-        return public_topic_name(payload, state_thread_name(recorded_name, "none"), home, request_text,
-                                 recorded.get("creating_title") or "")
+    retitle = recorded.get("retitle") or ""
+    if recorded_name or retitle:
+        # A thread already exists: a retitle its record keeps is its current
+        # base name, so the thread follows its conversation; otherwise the name
+        # Discord was last seen showing, with its marker stripped, wins over
+        # any later title, so state renames build on the name Discord shows.
+        # Either re-validates against the creating title the record keeps, so a
+        # tampered record still falls back to a fresh derivation.
+        return public_topic_name(payload, retitle or state_thread_name(recorded_name, "none"), home,
+                                 request_text, recorded.get("creating_title") or "", retitle)
     return public_topic_name(payload, name, home, request_text,
                              "" if recorded else _title_for(payload))
 
@@ -848,6 +865,26 @@ def _request_text_for(payload: dict, home: Path | None) -> str:
 def _title_for(payload: dict) -> str:
     title = payload.get("thread_title") or ""
     return title if isinstance(title, str) else ""
+
+
+def screened_title(text: object, home: Path) -> str:
+    """The shared title screen's verdict on one candidate name, or "".
+
+    ``bin/fm-ext-topic.sh --check-title`` owns the bounds and safety rules a
+    creating title passes, and it judges a retitle too, so a retitle can never
+    put a name on a thread that a creation could not. An absent, unusable, or
+    unscreened candidate reads as "".
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    with _temp_text(text) as title_file:
+        result = subprocess.run(
+            [str(firstmate_root() / "bin" / "fm-ext-topic.sh"),
+             "--check-title", "--title-file", title_file],
+            capture_output=True, text=True, check=False,
+            env=_env_for(home),
+        )
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def state_prefix(state: object) -> str | None:
@@ -995,6 +1032,7 @@ def apply_thread_state(
     thread_owner=None,
     read_thread=None,
     marked_open: bool | None = None,
+    retitle: str = "",
 ) -> str:
     """Show ``state`` on one recorded topic thread and record the outcome.
 
@@ -1003,7 +1041,8 @@ def apply_thread_state(
     renamed, which records nothing. A stored name that already matches is
     checked against the name Discord shows before it is trusted, so a manual
     rename can never wedge a later marker; an unreadable name renames anyway.
-    Never raises.
+    ``retitle`` replaces the base name the state is applied to and is stored
+    with it, so later markers build on the new name. Never raises.
     """
     thread_id = recorded.get("topic_thread_id") or ""
     provenance = recorded.get("creator") or ""
@@ -1023,7 +1062,7 @@ def apply_thread_state(
         provenance = "firstmate"
     try:
         creator = _creating_request(recorded)
-        base = thread_name_for(creator, home) if creator else ""
+        base = retitle or (thread_name_for(creator, home) if creator else "")
     except Exception as err:
         print(f"fm-ext-poster: thread name check skipped: {err}", file=sys.stderr)
         return "skipped"
@@ -1056,6 +1095,7 @@ def apply_thread_state(
                            topic_name="" if rename["outcome"] == "failed" else want,
                            thread_state=state, creator=provenance,
                            creating_title=recorded.get("creating_title") or "",
+                           retitle=retitle or None,
                            state_at=state_at, rename=rename, marked_open=marked_open)
     except Exception as err:
         print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
@@ -1070,19 +1110,22 @@ def maybe_rename_topic_thread(
     thread_owner=None,
     read_thread=None,
 ) -> str:
-    """Apply this generation's thread_state to its topic thread, best effort.
+    """Apply this generation's retitle and thread_state to its topic thread.
 
-    docs/configuration.md's topic-thread contract owns eligibility and state
-    semantics. A request of any origin that arrived inside a topic thread
-    resolves it through the thread's own record, so name validation and later
-    changes share the creating request's context. A reply without a state
-    retries its thread's last failed rename. Ownership lookup, rename, and
-    record-update failures must not escape into delivery: this runs after the
-    reply and its receipt are already durable.
+    docs/configuration.md's topic-thread contract owns eligibility, state
+    semantics, and the retitle rule. A request of any origin that arrived
+    inside a topic thread resolves it through the thread's own record, so name
+    validation and later changes share the creating request's context. A
+    reply without a state retries its thread's last failed rename.
+    Ownership lookup, rename, and record-update failures must not escape into
+    delivery: this runs after the reply and its receipt are already durable.
     """
     state = payload.get("thread_state")
     if state_prefix(state) is None:
         state = None
+    retitle = payload.get("thread_retitle") or ""
+    if retitle:
+        retitle = screened_title(retitle, home)
     if str(payload.get("channel_id") or "") != dedicated_channel(home):
         return thread_id
     thread_field = str(payload.get("thread_id") or "")
@@ -1100,13 +1143,13 @@ def maybe_rename_topic_thread(
         if not recorded:
             return thread_id
     state_at = marked_open = None
-    if state is None:
+    if state is None and not retitle:
         if (recorded.get("rename") or {}).get("outcome") != "failed":
             return thread_id
         state = recorded.get("thread_state")
         if state_prefix(state) is None:
             return thread_id
-    else:
+    elif state is not None:
         state_at = _epoch(payload.get("recorded_at")) or time.time()
         # A needs-you marked while a decision post in the thread is still
         # open belongs to that decision, however late the reminder came.
@@ -1116,8 +1159,18 @@ def maybe_rename_topic_thread(
                 marked_open = decision_threads(home, thread_id).get(thread_id, {}).get("open", 0) > 0
             except Exception:
                 marked_open = False
+    if retitle:
+        # The retitle becomes this thread's stored base name, so this rename
+        # and every later marker, auto-clear, and reconciliation builds on it.
+        # The state it keeps is the one the reply asked for, or else whatever
+        # marker the thread wears now.
+        if state is None:
+            state = recorded.get("thread_state")
+            if state_prefix(state) is None:
+                state = "none"
     apply_thread_state(recorded, state, home, state_at=state_at, rename_thread=rename_thread,
-                       thread_owner=thread_owner, read_thread=read_thread, marked_open=marked_open)
+                       thread_owner=thread_owner, read_thread=read_thread, marked_open=marked_open,
+                       retitle=retitle)
     return thread_id
 
 
