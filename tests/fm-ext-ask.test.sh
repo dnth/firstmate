@@ -466,10 +466,18 @@ test_12_force_push_flags_require_confirmation() {
     'git push origin main --force-with-lease=main:abc' 'Force-push main' \
     'git push -uf origin main' 'git push -fu origin main' 'git push -foo' \
     'git push origin main -qvf' 'git push -4f origin main' \
+    'git push origin +HEAD:main' 'git push origin +main' 'git push origin +:' \
+    'git push -d origin old' 'git push origin -d old' 'git push -qd origin old' \
+    'git push -dq origin old' 'git push origin :old' 'git push origin :refs/heads/old' \
+    'git push --mirror origin' 'git push origin --mirror' \
+    'git push --prune origin' 'git push origin --prune' \
     'git push' 'Push main' 'git push origin main' 'git push --follow-tags' \
-    'git push --forceful' 'git push -u origin main' 'git push -ofast'; do
+    'git push --forceful' 'git push -u origin main' 'git push -ofast' \
+    'git push origin HEAD:main' 'git push origin :' 'git push origin --no-prune' \
+    'git push origin --no-mirror' 'git push -o debug origin main'; do
     case "$label" in
       'git push'|'Push main'|'git push origin main'|'git push --follow-tags'|'git push --forceful'|'git push -u origin main'|'git push -ofast') expected=false ;;
+      'git push origin HEAD:main'|'git push origin :'|'git push origin --no-prune'|'git push origin --no-mirror'|'git push -o debug origin main') expected=false ;;
       *) expected=true ;;
     esac
     for recommended in false true; do
