@@ -144,7 +144,7 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
       6) bad=$'two\nlines' ;;
     esac
     home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation "$generation" \
-      --task "$TASK" --reason "still pending" --mode done --text-file "$home/body.txt" \
+      --task "$TASK" --reason "still pending" --mode "done" --text-file "$home/body.txt" \
       --option "North" --option "South" --thread-retitle "$bad" \
       >/dev/null 2>"$home/retitle-warning" || fail "a rejected ask retitle must still queue"
     assert_contains "$(cat "$home/retitle-warning")" 'warning: thread retitle ignored' "missing ask warning"
