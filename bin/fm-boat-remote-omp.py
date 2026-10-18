@@ -92,7 +92,7 @@ def _provider_key(line):
 
 def _providers_range(lines):
     matches = [index for index, line in enumerate(lines)
-               if re.fullmatch(r'providers:\s*(?:#.*)?\n?', line.rstrip('\r\n'))]
+               if re.match(r"""^(?:providers|'providers'|"providers")\s*:""", line)]
     if len(matches) > 1:
         raise HelperError('OMP providers mapping is ambiguous')
     if not matches:
@@ -104,6 +104,8 @@ def _providers_range(lines):
                 raise HelperError('OMP models config is not a root mapping')
         return None
     start = matches[0]
+    if not re.fullmatch(r'providers:\s*(?:#.*)?', lines[start].rstrip('\r\n')):
+        raise HelperError('OMP providers mapping representation is unsupported')
     end = len(lines)
     for index in range(start + 1, len(lines)):
         raw = lines[index].rstrip('\r\n')
@@ -214,6 +216,7 @@ def check_models():
     if (helper.stat().st_mode & 0o777) != 0o700:
         raise HelperError('OMP broker helper permissions are unsafe')
     text = path.read_text(encoding='utf-8')
+    _providers_range(text.splitlines(keepends=True))
     expected = model_block(helper)
     if expected not in text:
         raise HelperError('OMP brokered model config is incomplete')

@@ -151,7 +151,7 @@ class ModelConfigTests(unittest.TestCase):
                     home = Path(directory)
                     models = home / 'models.yml'
                     before = '  private-before:\n    baseUrl: https://before.example/v1\n'
-                    after = f'  {quote}private-after{quote}:\n    baseUrl: https://after.example/v1\n'
+                    after = f'  {quote}private-provider{quote}:\n    baseUrl: https://after.example/v1\n'
                     models.write_text('providers:\n' + before +
                                       f'  {quote}{provider}{quote}:\n    apiKey: fixture_old_key\n' + after)
                     env = dict(os.environ, PI_CODING_AGENT_DIR=str(home), FM_BOAT_REMOTE_AUTH_DIR=str(home))
@@ -161,9 +161,37 @@ class ModelConfigTests(unittest.TestCase):
                     self.assertIn(before, installed)
                     self.assertIn(after, installed)
                     self.assertNotIn('fixture_old_key', installed)
-                    self.assertEqual(installed.count(f'  {provider}:'), 1)
+                    for account in ('opencode-go-dnth', 'opencode-go-dnth-1',
+                                    'opencode-go-neuralengine', 'opencode-go-neuralengine-1'):
+                        self.assertEqual(installed.count(f'  {account}:'), 1)
                     subprocess.run(command, env=env, check=True, capture_output=True)
                     self.assertEqual(models.read_text(), installed)
+
+    def test_unsupported_providers_mapping_refuses_without_writing(self):
+        inline = 'providers: {private-provider: {baseUrl: https://private.example/v1}}\n'
+        for original in (inline, inline.replace('providers:', 'providers :'),
+                         inline.replace('providers:', '"providers":'),
+                         inline.replace('providers:', "'providers':"),
+                         inline + 'providers:\n', 'providers:\n' + inline):
+            with self.subTest(original=original), tempfile.TemporaryDirectory(dir=BASE) as directory:
+                home = Path(directory)
+                models = home / 'models.yml'
+                env = dict(os.environ, PI_CODING_AGENT_DIR=str(home), FM_BOAT_REMOTE_AUTH_DIR=str(home))
+                command = [sys.executable, str(ROOT / 'bin/fm-boat-remote-omp.py')]
+                models.write_bytes(original.encode())
+                result = subprocess.run(command + ['install-models'], env=env, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(models.read_bytes(), original.encode())
+                models.unlink()
+                subprocess.run(command + ['install-models'], env=env, check=True, capture_output=True)
+                installed = models.read_bytes()
+                helper = home / 'boat-omp-remote.py'
+                helper.touch(mode=0o700)
+                subprocess.run(command + ['check-models'], env=env, check=True, capture_output=True)
+                models.write_bytes(original.encode() + installed)
+                result = subprocess.run(command + ['check-models'], env=env, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(models.read_bytes(), original.encode() + installed)
 
 
 class CredentialTests(unittest.TestCase):
