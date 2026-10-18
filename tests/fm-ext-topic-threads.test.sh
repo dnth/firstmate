@@ -1914,19 +1914,25 @@ test_31_retitle_follows_the_conversation() {
   out=$(deliver "$home")
   assert_contains "$out" "thread-rename=777777777777777777/✅ InfoConnect · ledger import" \
     "a marker after an in-thread retitle must use the new base name"
+  emit_as "$home" "$rid2" followup 3 "Need a detail." "" "needs-you" >/dev/null
+  deliver "$home" >/dev/null
+  emit_as "$home" "$rid2" followup 4 "The topic moved." "" "" "InfoConnect · ledger export" >/dev/null
+  out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"InfoConnect · ledger import"}')
+  assert_contains "$out" "thread-rename=777777777777777777/InfoConnect · ledger export" \
+    "a retitle must preserve the captain's cleared marker"
+  assert_not_contains "$out" "❓" "a retitle must not restore a manually cleared marker"
   pass "31 a retitle renames the thread and every later marker builds on it"
 }
 
 # --- 32. retitles pass the shared screen and stay inside Firstmate threads ---
 #
 # A retitle carries exactly the bounds and safety screen a creating title
-# passes, so an unsafe, multi-line, or over-long one is refused at the emit
-# and, arriving by any other route, is ignored rather than renamed onto a
+# passes, so an unsafe, multi-line, or over-long one is ignored rather than renamed onto a
 # thread. A thread this home did not create is never retitled either, and the
 # reply text always posts.
 
 test_32_retitles_are_screened_and_never_leave_home() {
-  local home slug out rc queued
+  local home slug out rc
   home="$TMP_ROOT/c32"
   setup_home "$home"
   slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
@@ -1934,17 +1940,28 @@ test_32_retitles_are_screened_and_never_leave_home() {
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
   assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/Aceh · login fix" "the thread must exist"
 
-  queued=$(find "$home/state/ext-outbox" -name '*.json' | wc -l | tr -d ' ')
-  emit_as "$home" "$RID" followup 2 "x" "" "" "fix fm-ship-login now" >/dev/null 2>&1; rc=$?
-  expect_code 2 "$rc" "a retitle naming a task id"
-  emit_as "$home" "$RID" followup 3 "x" "" "" "$(printf 'A%.0s' $(seq 61))" >/dev/null 2>&1; rc=$?
-  expect_code 2 "$rc" "an over-long retitle"
-  emit_as "$home" "$RID" followup 4 "x" "" "" "$(printf 'two\nlines')" >/dev/null 2>&1; rc=$?
-  expect_code 2 "$rc" "a multi-line retitle"
-  [ "$(find "$home/state/ext-outbox" -name '*.json' | wc -l | tr -d ' ')" = "$queued" ] \
-    || fail "a refused retitle must queue nothing"
-  emit_as "$home" "$RID" followup 5 "x" "Aceh · login fix" "" "InfoConnect · migration" >/dev/null 2>&1; rc=$?
-  expect_code 2 "$rc" "a retitle on the reply that carries a creating title"
+  local generation bad reason
+  generation=2
+  for reason in safety 'at most 60 characters' 'one line'; do
+    case "$generation" in
+      2) bad='fix fm-ship-login now' ;;
+      3) bad=$(printf 'A%.0s' $(seq 61)) ;;
+      4) bad=$'two\nlines' ;;
+    esac
+    emit_as "$home" "$RID" followup "$generation" "Reply remains intact." "" "" "$bad" \
+      >/dev/null 2>"$home/retitle-warning"; rc=$?
+    expect_code 0 "$rc" "a rejected retitle must still queue its reply"
+    assert_contains "$(cat "$home/retitle-warning")" 'warning: thread retitle ignored' "missing retitle warning"
+    assert_contains "$(cat "$home/retitle-warning")" "$reason" "missing rejection reason"
+    jq -e '.text == "Reply remains intact." and (has("thread_retitle") | not)' \
+      "$home/state/ext-outbox/$slug.followup.$generation.json" >/dev/null \
+      || fail "a rejected retitle must leave only the unchanged reply"
+    generation=$((generation + 1))
+  done
+  emit_as "$home" "$RID" followup 5 "Both flags." "Aceh · login fix" "" "InfoConnect · migration" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/InfoConnect · migration" \
+    "an explicit retitle must win over a later creation title"
   emit_as "$home" "$RID" followup 6 "x" "" "done" "InfoConnect · migration" >/dev/null 2>&1; rc=$?
   expect_code 0 "$rc" "a retitle with a state"
   deliver "$home" >/dev/null
@@ -1985,8 +2002,29 @@ for bad in ("fm-ship-login now", "A" * 61, "two\nlines", "", 7, None):
 # thread with no record of ours never does.
 calls.clear()
 poster.maybe_rename_topic_thread(dict(base, thread_retitle="InfoConnect · ledger import"),
-                                 "777777777777777777", home, rename_thread=rename)
+                                 "777777777777777777", home, rename_thread=rename, read_thread=lambda _: "")
 assert calls == ["✅ InfoConnect · ledger import"], calls
+for shown, requested, expected in (
+    ("❓ old topic", None, "❓ "),
+    ("✅ old topic", None, "✅ "),
+    ("old topic", None, ""),
+    ("❓ old topic", "done", "✅ "),
+    ("✅ old topic", "none", ""),
+    ("old topic", "needs-you", "❓ "),
+    ("", None, "❓ "),
+    (None, None, "❓ "),
+):
+    def read(thread_id):
+        if shown is None:
+            raise RuntimeError("unreadable")
+        return shown
+    calls.clear()
+    payload = dict(base, thread_retitle="InfoConnect · ledger import")
+    if requested is not None:
+        payload["thread_state"] = requested
+    poster.maybe_rename_topic_thread(payload, "777777777777777777", home,
+                                     rename_thread=rename, read_thread=read)
+    assert calls == [expected + "InfoConnect · ledger import"], (shown, requested, calls)
 for guarded in (dict(base, thread_retitle="InfoConnect · ledger import", thread_id="444444444444444444"),
                 dict(base, thread_retitle="InfoConnect · ledger import", channel_id="555555555555555555",
                      thread_id="555555555555555555"),

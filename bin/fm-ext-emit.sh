@@ -21,8 +21,9 @@
 # any reply into an existing Firstmate-created topic thread when the
 # conversation has moved on from it: it passes the same screen and bounds,
 # keeps the thread's current marker, and becomes the thread's base name, so
-# every later marker, auto-clear, and reconciliation builds on it. It cannot
-# be combined with --thread-title on the reply that creates the thread.
+# every later marker, auto-clear, and reconciliation builds on it. A rejected
+# retitle is dropped with a warning while the reply still posts. Both title
+# flags may be given; --thread-title only names a thread at creation.
 # --thread-state renames the existing topic thread: needs-you prefixes "❓ ",
 # done prefixes "✅ ", none removes the prefix. docs/configuration.md
 # "Topic threads" owns rename eligibility, best-effort delivery, auto-clear,
@@ -155,10 +156,12 @@ if [ -n "$THREAD_TITLE" ]; then
     || die "thread title failed the shared bounds or safety check"
 fi
 if [ -n "$THREAD_RETITLE" ]; then
-  [ -z "$THREAD_TITLE" ] \
-    || die "--thread-retitle cannot be combined with --thread-title; a creating reply names the thread with --thread-title"
-  THREAD_RETITLE=$(printf '%s' "$THREAD_RETITLE" | bash "$SCRIPT_DIR/fm-ext-topic.sh" --check-title --title-file -) \
-    || die "thread retitle failed the shared bounds or safety check"
+  if RETITLE_RESULT=$(printf '%s' "$THREAD_RETITLE" | bash "$SCRIPT_DIR/fm-ext-topic.sh" --check-title --title-file - 2>&1); then
+    THREAD_RETITLE=$RETITLE_RESULT
+  else
+    printf 'fm-ext-emit: warning: thread retitle ignored: %s\n' "$RETITLE_RESULT" >&2
+    THREAD_RETITLE=
+  fi
 fi
 case "${THREAD_STATE:-}" in
   ''|needs-you|done|none) ;;

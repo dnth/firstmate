@@ -1165,9 +1165,17 @@ def maybe_rename_topic_thread(
         # The state it keeps is the one the reply asked for, or else whatever
         # marker the thread wears now.
         if state is None:
-            state = recorded.get("thread_state")
-            if state_prefix(state) is None:
-                state = "none"
+            try:
+                shown = (read_thread or discord_thread_name)(thread_id)
+            except Exception:
+                shown = ""
+            if shown:
+                state = next((key for key, prefix in _THREAD_STATES.items()
+                              if prefix and shown.startswith(prefix)), "none")
+            else:
+                state = recorded.get("thread_state")
+                if state_prefix(state) is None:
+                    state = "none"
     apply_thread_state(recorded, state, home, state_at=state_at, rename_thread=rename_thread,
                        thread_owner=thread_owner, read_thread=read_thread, marked_open=marked_open,
                        retitle=retitle)

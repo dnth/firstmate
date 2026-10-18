@@ -8,9 +8,9 @@
 #     [--title-file <path>] [--retitle-file <path>]
 #     [--validate-name --stored-file <path>]
 #
-# --check-title prints the cleaned title or fails when its bounds or safety
-# screen rejects it; destination and request arguments are not required. The
-# same screen judges the retitle bin/fm-ext-emit.sh records for a thread that
+# --check-title prints the cleaned title or fails with a reason on stderr
+# when its bounds or safety screen rejects it; destination and request
+# arguments are not required. The same screen judges the retitle bin/fm-ext-emit.sh records for a thread that
 # already exists, so only a name a creation could produce is ever stored.
 # Naming, in priority order: Firstmate's title, the request-text fallback, the
 # label-plus-time last fallback. Admission and authority stay owned by
@@ -192,18 +192,25 @@ TITLE_MAX = 60
 NAME_MAX = 90
 
 
-def clean_title(raw):
+def clean_title(raw, report=False):
+    def reject(reason):
+        if report:
+            print(reason, file=sys.stderr)
+        return ""
+
     raw = raw.strip()
     if "\n" in raw or "\r" in raw:
-        return ""
+        return reject("title must be one line")
     cleaned = "".join(ch for ch in raw if ord(ch) >= 32 or ch == "\t")
     cleaned = " ".join(cleaned.split())
-    if not cleaned or len(cleaned) > TITLE_MAX:
-        return ""
+    if len(cleaned) > TITLE_MAX:
+        return reject("title must be at most 60 characters")
+    if not cleaned:
+        return reject("title must not be empty")
     if not cleaned.strip(" .!?,;:"):
-        return ""
+        return reject("title must contain topic text")
     if UNSAFE_RE.search(cleaned):
-        return ""
+        return reject("title failed the safety screen")
     return cleaned
 
 
@@ -238,7 +245,7 @@ def derive():
 
 
 if sys.argv[6] == "1":
-    title = clean_title(title_raw)
+    title = clean_title(title_raw, report=True)
     if not title:
         sys.exit(2)
     print(title)

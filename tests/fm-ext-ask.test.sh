@@ -136,6 +136,25 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
     || fail "a retitle on a choice post must pass through to the emit"
   jq -e '.thread_retitle == "InfoConnect · route decision" and .thread_state == "needs-you"' \
     "$(payload_of "$home" followup 3)" >/dev/null || fail "the choice post lost its retitle"
+  local bad reason generation=4
+  for reason in safety 'at most 60 characters' 'one line'; do
+    case "$generation" in
+      4) bad='fm-ship-login now' ;;
+      5) bad=$(printf 'A%.0s' $(seq 61)) ;;
+      6) bad=$'two\nlines' ;;
+    esac
+    home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation "$generation" \
+      --task "$TASK" --reason "still pending" --mode done --text-file "$home/body.txt" \
+      --option "North" --option "South" --thread-retitle "$bad" \
+      >/dev/null 2>"$home/retitle-warning" || fail "a rejected ask retitle must still queue"
+    assert_contains "$(cat "$home/retitle-warning")" 'warning: thread retitle ignored' "missing ask warning"
+    assert_contains "$(cat "$home/retitle-warning")" "$reason" "missing ask rejection reason"
+    jq -e '(has("thread_retitle") | not) and .thread_state == "needs-you"
+      and .decision.options[0].label == "North"
+      and (.text | startswith("The fix can go two ways."))' \
+      "$(payload_of "$home" followup "$generation")" >/dev/null || fail "ask lost its reply or kept a bad retitle"
+    generation=$((generation + 1))
+  done
   pass "1 fm-ext-ask holds the call, writes the decision, and posts buttons that match the numbered text"
 }
 
