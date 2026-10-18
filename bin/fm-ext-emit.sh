@@ -15,19 +15,19 @@
 #
 # --thread-title names the request's topic thread ("<Project> · <topic>", one
 # line, at most 60 characters, screened like reply text) on the reply that
-# creates it; once the thread exists, later titles are recorded but do not
-# replace its name. Over-long, multi-line, or unsafe titles are
+# creates it; once the thread exists, plain later --thread-title values are
+# recorded without replacing its name. Over-long, multi-line, or unsafe titles are
 # refused here instead of silently cut. --thread-retitle replaces that name on
-# any reply into an existing Firstmate-created topic thread when the
-# conversation has moved on from it: it passes the same screen and bounds,
-# keeps the thread's current marker, and becomes the thread's base name, so
-# every later marker, auto-clear, and reconciliation builds on it. A rejected
+# any reply into an existing Firstmate-created topic thread: it passes the
+# same screen and bounds and becomes the thread's base name. A rejected
 # retitle is dropped with a warning while the reply still posts. Both title
-# flags may be given; --thread-title only names a thread at creation.
+# flags may be given; the explicit retitle sets the existing thread's base,
+# while --thread-title only names a thread at creation.
 # --thread-state renames the existing topic thread: needs-you prefixes "❓ ",
 # done prefixes "✅ ", none removes the prefix. docs/configuration.md
-# "Topic threads" owns rename eligibility, best-effort delivery, auto-clear,
-# and retry behaviour; the ext-respond skill owns when Firstmate retitles.
+# "Topic threads" owns marker preservation and state overrides, rename
+# eligibility, best-effort delivery, auto-clear, and retry behaviour;
+# the ext-respond skill owns when Firstmate retitles.
 #
 # Writes state/ext-outbox/<slug>.<kind>.<generation>.json once. Re-emitting the
 # same identity is a no-op success. A posting marker without a receipt is

@@ -10,15 +10,16 @@
 #
 # --check-title prints the cleaned title or fails with a reason on stderr
 # when its bounds or safety screen rejects it; destination and request
-# arguments are not required. The same screen judges the retitle bin/fm-ext-emit.sh records for a thread that
-# already exists, so only a name a creation could produce is ever stored.
+# arguments are not required. The same screen judges the retitle
+# bin/fm-ext-emit.sh records for a thread that already exists, so only a name
+# a creation could produce is ever stored.
 # Naming, in priority order: Firstmate's title, the request-text fallback, the
 # label-plus-time last fallback. Admission and authority stay owned by
 # bin/fm-ext-intake.sh; docs/configuration.md owns the contract.
 # Only top-level message requests in config/ext-channel receive a name, plus
 # threads bin/fm-ext-open.sh opens there (origin open), whose name is
-# Firstmate's title alone: an open has no request text, so an unusable title
-# prints nothing rather than falling back.
+# Firstmate's title or recorded retitle: an open has no request text, so
+# unusable titles print nothing rather than falling back.
 # Slash requests, existing threads, and other channels print nothing.
 # --message-id supplies the Discord snowflake containing the message timestamp.
 # --title-file carries Firstmate's "<Project> · <topic>" title: one line, at
@@ -26,7 +27,7 @@
 # unsafe titles fall through to the request-text fallback instead of cutting.
 # --retitle-file carries the base name a thread's record now keeps, set when a
 # reply retitled an existing thread. It passes the same screen; an unusable one
-# is ignored. An opened thread, whose title is its only name, is named by the
+# is ignored. An opened thread, which has no request text, is named by the
 # retitle when one is given, and --validate-name accepts a stored name equal to
 # it so a thread renamed to follow its conversation keeps that name.
 # The request-text fallback uses the first non-empty line of the request with
@@ -40,8 +41,9 @@
 # or Firstmate request) plus the source message's MYT time as HH:MM.
 # --validate-name checks --stored-file's name against the same priority order
 # re-derived from --text-file's request text (plus --title-file when given):
-# the fresh name, or a legacy label-plus-time name for this message when no
-# valid title takes precedence. Anything else uses the freshly derived name.
+# the fresh name, a screened --retitle-file name, or a legacy label-plus-time
+# name for this message when no valid title takes precedence.
+# Anything else uses the freshly derived name.
 set -u
 
 usage() {
@@ -252,8 +254,8 @@ if sys.argv[6] == "1":
     sys.exit(0)
 
 if sys.argv[7] == "open":
-    # An opened thread has no request text: its title is its only name, and a
-    # retitle recorded for it is its current base name.
+    # An opened thread has no request text: its title supplies the initial
+    # base name, and a recorded retitle replaces it.
     # A stored name is accepted only by equalling one of them, so validation
     # prints that name either way, like a fresh derivation replacing a tampered
     # one.

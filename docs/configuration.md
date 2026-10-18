@@ -947,11 +947,13 @@ The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#dedicate
 A top-level message request in the configured dedicated channel creates a Discord thread on its message with its first reply, and every later `ack`/`answer`/`followup`/`final` for that request posts into the same thread, including work linked to it after the inbox is gone.
 Replies to Firstmate posts outside the dedicated channel keep their existing routing without creating a thread.
 Names prefer Firstmate's title from the reply that successfully creates the thread, then the request-text fallback, then a label-plus-time fallback; [`bin/fm-ext-topic.sh`](../bin/fm-ext-topic.sh) owns the exact derivation, bounds, and shared title screen.
-The poster validates names against the stored request text and creating title before creating or renaming a thread.
+The poster validates names against the stored request text, creating title, and any screened retitle before creating or renaming a thread.
 Legacy label-plus-time names remain valid for the same source message when no valid creating title takes precedence, including contexts recorded before request text was retained.
 Anything else falls back to the fresh derivation.
-Once a thread exists, a later title recorded on a reply does not replace its name, and a status change preserves its current base name.
-A reply may instead retitle the thread, carrying `--thread-retitle "<Project> · <topic>"` into `bin/fm-ext-emit.sh` or `bin/fm-ext-ask.sh`, which passes it through, when the conversation has moved on from the name the thread wears: the new title passes the same screen and bounds as a creating title, keeps whatever `❓ ` or `✅ ` marker the thread has, and becomes its stored base name, so every later marker, auto-clear, and reconciliation builds on the new name rather than the original.
+Once a thread exists, a plain later `--thread-title` does not replace its name; an explicit retitle sets its new base even when both title flags are present.
+A retitle passes the same screen and bounds as a creating title and becomes the stored base name for later markers, auto-clear, and reconciliation.
+It preserves the marker Discord currently shows (`❓ `, `✅ `, or none), falling back to the recorded state only when the live name cannot be read; an explicit state on the same reply sets the marker instead.
+The [emit header and help](../bin/fm-ext-emit.sh) own the title flags and rejection warnings, the [ask header](../bin/fm-ext-ask.sh) owns their passthrough, and the [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#name-the-thread-then-mark-its-state) owns when Firstmate retitles.
 A retitle shares a marker's eligibility and is equally best effort: it only ever reaches a thread this home created in the dedicated channel, and a refused, unusable, or ineligible one is ignored with the reply text still posted.
 A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
 The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name to match the requested state.
@@ -970,7 +972,7 @@ A request that arrives inside a thread stays in that thread: no new thread is cr
 Firstmate can also open a topic thread no captain request started, for example one thread per tracked item, with [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh).
 It opens a titled public thread directly in the dedicated channel and posts its first message there through the same outbox, poster, receipts, chunking, and posting markers as any reply; its header owns the flags, key format, and lookup output.
 A private key names the tracked item and maps to one stable request id, printed on success and recorded in the destination context, so re-running the same open never opens a second thread and later `followup`/`final` emits and thread states land in that thread exactly as for a request-created one.
-The title is required and passes the shared title screen; an opened thread has no request text, so its title is its only name.
+The title is required and passes the shared title screen; an opened thread has no request text, so its title supplies the initial base name until an explicit retitle replaces it.
 The open has no channel argument, and the poster re-checks the dedicated channel before creating the thread: a payload whose channel is no longer dedicated fails terminally rather than opening a thread anywhere else.
 The guild is the one valid allowlist rules name for the dedicated channel, and an open refuses when those rules name none or more than one; malformed rules admit nothing.
 Unlike a request thread, an opened thread never falls back to posting in place: a create refused for a missing permission fails the first message with a reason naming the permissions the bot needs, and a create with an unknown outcome is never retried into a second thread.
