@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
+import yaml
 import subprocess
 import sys
 import tempfile
@@ -23,6 +25,31 @@ ENV_ENTRY = {'generation': 1, 'generatedAt': 1, 'serverNowMs': 1,
 ENTRY = {'provider': 'openai-codex', 'id': 2, 'identityKey': 'must-not-egress', 'rotatesInMs': 99,
          'credential': {'type': 'oauth', 'access': 'fixture_access', 'expires': 4102444800000,
                         'refresh': 'upstream-refresh-must-not-egress', 'key': 'upstream-api-key'}}
+
+GO_PROVIDERS = ('opencode-go-dnth', 'opencode-go-dnth-1',
+                'opencode-go-neuralengine', 'opencode-go-neuralengine-1')
+
+class UniqueYamlLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        mapping = super().construct_mapping(node, deep=deep)
+        if len(mapping) != len(node.value):
+            raise ValueError('duplicate YAML mapping key')
+        return mapping
+
+
+def assert_go_models(case, text, helper):
+    config = yaml.load(text, Loader=UniqueYamlLoader)
+    providers = config['providers']
+    for account in GO_PROVIDERS:
+        entry = providers[account]
+        case.assertEqual(entry['baseUrl'], 'https://opencode.ai/zen/go/v1')
+        case.assertTrue(entry['apiKey'].startswith('!'))
+        case.assertEqual(shlex.split(entry['apiKey'][1:]), ['python3', str(helper), 'api-key', account])
+        case.assertEqual({model['id']: model['api'] for model in entry['models']},
+                         {'deepseek-v4.1-flash': 'openai-completions',
+                          'muse-spark-1.3-contributor': 'openai-responses'})
+    return providers
+
 
 def rows(path):
     return dict(line.split('=', 1) for line in path.read_text().splitlines())
@@ -144,8 +171,7 @@ class Lab:
 
 class ModelConfigTests(unittest.TestCase):
     def test_replacement_preserves_siblings(self):
-        for provider in ('opencode-go-dnth', 'opencode-go-dnth-1',
-                         'opencode-go-neuralengine', 'opencode-go-neuralengine-1'):
+        for provider in GO_PROVIDERS:
             for quote in ('', "'", '"'):
                 with self.subTest(provider=provider, quote=quote), tempfile.TemporaryDirectory(dir=BASE) as directory:
                     home = Path(directory)
@@ -158,12 +184,10 @@ class ModelConfigTests(unittest.TestCase):
                     command = [sys.executable, str(ROOT / 'bin/fm-boat-remote-omp.py'), 'install-models']
                     subprocess.run(command, env=env, check=True, capture_output=True)
                     installed = models.read_text()
-                    self.assertIn(before, installed)
-                    self.assertIn(after, installed)
-                    self.assertNotIn('fixture_old_key', installed)
-                    for account in ('opencode-go-dnth', 'opencode-go-dnth-1',
-                                    'opencode-go-neuralengine', 'opencode-go-neuralengine-1'):
-                        self.assertEqual(installed.count(f'  {account}:'), 1)
+                    providers = assert_go_models(self, installed, home / 'boat-omp-remote.py')
+                    self.assertEqual(providers['private-before'], {'baseUrl': 'https://before.example/v1'})
+                    self.assertEqual(providers['private-provider'], {'baseUrl': 'https://after.example/v1'})
+                    self.assertEqual(set(providers), {*GO_PROVIDERS, 'private-before', 'private-provider'})
                     subprocess.run(command, env=env, check=True, capture_output=True)
                     self.assertEqual(models.read_text(), installed)
 
@@ -172,7 +196,11 @@ class ModelConfigTests(unittest.TestCase):
         for original in (inline, inline.replace('providers:', 'providers :'),
                          inline.replace('providers:', '"providers":'),
                          inline.replace('providers:', "'providers':"),
-                         inline + 'providers:\n', 'providers:\n' + inline):
+                         inline + 'providers:\n', 'providers:\n' + inline,
+                         'providers:\n    private-provider:\n        baseUrl: https://private.example/v1\n',
+                         'providers:\n private-provider:\n  baseUrl: https://private.example/v1\n',
+                         'providers:\n  private-provider: {}\n  private-provider: {}\n',
+                         'providers:\n  private-provider: [unterminated\n'):
             with self.subTest(original=original), tempfile.TemporaryDirectory(dir=BASE) as directory:
                 home = Path(directory)
                 models = home / 'models.yml'
@@ -188,10 +216,30 @@ class ModelConfigTests(unittest.TestCase):
                 helper = home / 'boat-omp-remote.py'
                 helper.touch(mode=0o700)
                 subprocess.run(command + ['check-models'], env=env, check=True, capture_output=True)
-                models.write_bytes(original.encode() + installed)
-                result = subprocess.run(command + ['check-models'], env=env, capture_output=True)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(models.read_bytes(), original.encode() + installed)
+                for corrupted in (original.encode() + installed,
+                                  original.encode() + installed.removeprefix(b'providers:\n')):
+                    models.write_bytes(corrupted)
+                    result = subprocess.run(command + ['check-models'], env=env, capture_output=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(models.read_bytes(), corrupted)
+
+    def test_check_rejects_changed_broker_command(self):
+        with tempfile.TemporaryDirectory(dir=BASE) as directory:
+            home = Path(directory)
+            models = home / 'models.yml'
+            helper = home / 'boat-omp-remote.py'
+            helper.touch(mode=0o700)
+            env = dict(os.environ, PI_CODING_AGENT_DIR=str(home), FM_BOAT_REMOTE_AUTH_DIR=str(home))
+            command = [sys.executable, str(ROOT / 'bin/fm-boat-remote-omp.py')]
+            subprocess.run(command + ['install-models'], env=env, check=True, capture_output=True)
+            config = yaml.load(models.read_text(), Loader=UniqueYamlLoader)
+            config['providers']['opencode-go-dnth']['apiKey'] = '!cat /tmp/fixture-key'
+            changed = yaml.safe_dump(config).encode()
+            models.write_bytes(changed)
+            result = subprocess.run(command + ['check-models'], env=env, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(models.read_bytes(), changed)
+
 
 
 class CredentialTests(unittest.TestCase):
@@ -480,15 +528,10 @@ class CredentialTests(unittest.TestCase):
         helper = remote / 'boat-omp-remote.py'
         models = remote / '.omp/agent/models.yml'
         self.assertTrue(helper.is_file())
-        self.assertIn(f'api-key {provider}', models.read_text())
-        self.assertNotIn(old_key, models.read_text())
-        model_text = models.read_text()
-        self.assertIn('private-provider:', model_text)
-        self.assertIn('  private-after:\n    baseUrl: https://private.example/v1\n', model_text)
-        self.assertNotIn('auth.json', model_text)
-        self.assertEqual(model_text.count(f'  {provider}:'), 1)
-        for account in providers[2:]:
-            self.assertIn(f'  {account}:', model_text)
+        configured = assert_go_models(self, models.read_text(), remote / 'boat-omp-remote.py')
+        self.assertEqual(configured['private-provider'], {'api': 'openai-completions'})
+        self.assertEqual(configured['private-after'], {'baseUrl': 'https://private.example/v1'})
+        self.assertEqual(set(configured), {*GO_PROVIDERS, 'private-provider', 'private-after'})
         self.assertFalse((remote / '.local/share/opencode/auth.json').exists())
         token = (remote / 'omp-auth-broker.token').read_text()
         resolver_env = dict(self.lab.env, HOME=str(remote), FM_BOAT_REMOTE_AUTH_DIR=str(remote),

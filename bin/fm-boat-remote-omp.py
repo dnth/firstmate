@@ -83,14 +83,35 @@ def model_block(helper):
     return '\n'.join(lines) + '\n'
 
 
-def _provider_key(line):
-    match = re.match(r"""^  (?:"((?:\\.|[^"\\])*)"|'((?:''|[^'])*)'|([^'"\s#].*?))\s*:(?:\s|$)""", line)
-    if match:
-        return next(value for value in match.groups() if value is not None)
-    return None
+def _parse_models(text):
+    import yaml
+
+    class UniqueLoader(yaml.SafeLoader):
+        def construct_mapping(self, node, deep=False):
+            self.flatten_mapping(node)
+            mapping = {}
+            for key_node, value_node in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                if key in mapping:
+                    raise HelperError('duplicate OMP model config key')
+                mapping[key] = self.construct_object(value_node, deep=deep)
+            return mapping
+
+    loader = UniqueLoader(text)
+    try:
+        node = loader.get_single_node()
+        config = loader.construct_document(node) if node is not None else {}
+    finally:
+        loader.dispose()
+    if not isinstance(config, dict):
+        raise HelperError('OMP models config is not a root mapping')
+    if config.get('providers') is not None and not isinstance(config['providers'], dict):
+        raise HelperError('OMP providers config is not a mapping')
+    return config, node
 
 
 def _providers_range(lines):
+    _, root = _parse_models(''.join(lines))
     matches = [index for index, line in enumerate(lines)
                if re.match(r"""^(?:providers|'providers'|"providers")\s*:""", line)]
     if len(matches) > 1:
@@ -114,7 +135,14 @@ def _providers_range(lines):
         if not raw.startswith((' ', '\t')):
             end = index
             break
-    return start, end
+    provider_node = next(value for key, value in root.value if key.value == 'providers')
+    siblings = []
+    if provider_node.tag != 'tag:yaml.org,2002:null':
+        for key, _ in provider_node.value:
+            if key.start_mark.column != 2 or key.start_mark.line <= start:
+                raise HelperError('OMP provider indentation is unsupported')
+            siblings.append((key.start_mark.line, key.value))
+    return start, end, siblings
 
 
 def _rendered_lines(helper):
@@ -128,7 +156,7 @@ def _merge_models(text, helper):
     if location is None:
         suffix = '' if not text or text.endswith('\n') else '\n'
         return text + suffix + 'providers:\n' + ''.join(block)
-    start, end = location
+    start, end, sibling_keys = location
     begins = [index for index, line in enumerate(lines) if line.rstrip('\r\n') == BEGIN]
     ends = [index for index, line in enumerate(lines) if line.rstrip('\r\n') == END]
     if len(begins) != len(ends) or len(begins) > 1:
@@ -136,18 +164,13 @@ def _merge_models(text, helper):
     if begins:
         if begins[0] >= ends[0] or not (start < begins[0] < ends[0] < end):
             raise HelperError('OMP brokered model block is malformed')
-        outside_targets = [
-            provider for index, line in enumerate(lines[start + 1:end], start + 1)
-            if index <= begins[0] or index > ends[0]
-            for provider in [_provider_key(line)] if provider in PROVIDERS
-        ]
+        outside_targets = [provider for index, provider in sibling_keys
+                           if (index <= begins[0] or index > ends[0]) and provider in PROVIDERS]
         if outside_targets:
             raise HelperError('duplicate OMP Go provider config')
         return ''.join(lines[:begins[0]] + block + lines[ends[0] + 1:])
 
     target_blocks = []
-    sibling_keys = [(index, _provider_key(line)) for index, line in enumerate(lines[start + 1:end], start + 1)]
-    sibling_keys = [(index, provider) for index, provider in sibling_keys if provider is not None]
     for position, (index, provider) in enumerate(sibling_keys):
         if provider not in PROVIDERS:
             continue
@@ -162,9 +185,7 @@ def _merge_models(text, helper):
             if not raw.strip() or (raw.startswith('  #') and not raw.startswith('    ')):
                 retained.append(line)
         lines[first:stop] = retained
-    start, end = _providers_range(lines)
-    if end is None:
-        end = len(lines)
+    start, end, _ = _providers_range(lines)
     if end and not lines[end - 1].endswith('\n'):
         lines[end - 1] += '\n'
     return ''.join(lines[:end] + block + lines[end:])
@@ -205,7 +226,15 @@ def install_models():
         text = path.read_text(encoding='utf-8')
     else:
         text = ''
-    _write_models(path, _merge_models(text, base_dir() / 'boat-omp-remote.py'))
+    helper = base_dir() / 'boat-omp-remote.py'
+    original, _ = _parse_models(text)
+    merged = _merge_models(text, helper)
+    installed, _ = _parse_models(merged)
+    expected, _ = _parse_models('providers:\n' + model_block(helper))
+    original['providers'] = {**(original.get('providers') or {}), **expected['providers']}
+    if installed != original:
+        raise HelperError('OMP models merge would change unrelated configuration')
+    _write_models(path, merged)
 
 
 def check_models():
@@ -216,9 +245,10 @@ def check_models():
     if (helper.stat().st_mode & 0o777) != 0o700:
         raise HelperError('OMP broker helper permissions are unsafe')
     text = path.read_text(encoding='utf-8')
-    _providers_range(text.splitlines(keepends=True))
-    expected = model_block(helper)
-    if expected not in text:
+    config, _ = _parse_models(text)
+    expected, _ = _parse_models('providers:\n' + model_block(helper))
+    providers = config.get('providers') or {}
+    if any(providers.get(provider) != value for provider, value in expected['providers'].items()):
         raise HelperError('OMP brokered model config is incomplete')
 
 

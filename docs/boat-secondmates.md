@@ -105,6 +105,8 @@ OAuth entries are reconstructed from the explicit fields below; upstream refresh
 For `api_key`, the facade reconstructs only `{provider,id,identityKey:null,rotatesInMs:null,credential:{type:'api_key',key}}` and serves it only when its provider is allowlisted and its ID is in that lease's credential-ID scope. Refresh accepts OAuth entries only.
 The four OpenCode Go provider names (`opencode-go-dnth`, `opencode-go-dnth-1`, `opencode-go-neuralengine`, `opencode-go-neuralengine-1`) must be present in the captain-private `config/boat/providers.json` allowlist. Keep that file mode 600; it contains provider names, never keys.
 
+Boat's Python 3 must have PyYAML available for model-configuration installation and checks; API-key resolution uses only the Python standard library.
+
 At lease start, the host reads the allowlisted OpenCode Go keys from its local `auth.json` and imports them into the host OMP broker. The lease facade scopes API-key egress to those imported credential IDs, excluding unrelated credentials even for the same provider. The Boat's keyless `models.yml` entries call a remote helper that reads the scoped broker snapshot. During a live lease, OMP can hold a routed key in process memory for requests; no key is written to Boat disk, environment, command line, or logs. The broker snapshot disk cache is disabled for Boat OMP launches. The workstation must stay online for the lease so the helper can reach the broker.
 
 When an OpenCode key changes, the next lease imports the new value and disables the previously imported broker credential. Revoke access by rotating or revoking the key at OpenCode; the provider then rejects the old value, including one still held in an active process's memory.
