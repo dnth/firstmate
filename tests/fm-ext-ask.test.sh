@@ -456,6 +456,34 @@ test_11_bold_headings_allow_colons_inside_or_outside() {
   pass "11 bold choice headings require buttons with colons inside, outside, or omitted"
 }
 
+test_12_force_push_flags_require_confirmation() {
+  local home=$TMP_ROOT/c12 generation=0 label expected recommended
+  setup_home "$home"
+  fm_write_meta "$home/state/$TASK.meta" "window=sess:fm-$TASK" "kind=ship"
+  printf 'needs-decision [key=route]: pick a route\n' >> "$home/state/$TASK.status"
+  for label in 'git push -f' 'Push main --force' 'git push origin main -f' \
+    'git push --force origin main' 'git push origin main --force-with-lease' \
+    'git push origin main --force-with-lease=main:abc' 'Force-push main' \
+    'git push' 'Push main' 'git push origin main' 'git push --follow-tags' \
+    'git push --forceful' 'git push -foo'; do
+    case "$label" in
+      'git push'|'Push main'|'git push origin main'|'git push --follow-tags'|'git push --forceful'|'git push -foo') expected=false ;;
+      *) expected=true ;;
+    esac
+    for recommended in false true; do
+      generation=$((generation + 1))
+      jq -n --arg key "key:$TASK:route" --arg option_label "$label" --argjson recommended "$recommended" \
+        '{key:$key, options:[{label:$option_label, confirm:false, recommended:$recommended}]}' > "$home/decision.json"
+      emit_text "$home" "$generation" 'Choose the push action.' --decision-file "$home/decision.json"
+      [ "$RC" -eq 0 ] || fail "emit refused $label: $OUT"
+      jq -e --argjson expected "$expected" '.decision.options[0].confirm == $expected' \
+        "$(payload_of "$home" answer "$generation")" >/dev/null \
+        || fail "wrong confirmation for $label (recommended=$recommended)"
+    done
+  done
+  pass "12 force-push flags confirm with intervening targets while ordinary pushes take one click"
+}
+
 test_1_ask_holds_and_posts_buttons_in_text_order
 test_2_mode_is_required_and_pre_hold_refusals
 test_3_emit_refuses_a_choice_without_buttons
@@ -467,3 +495,4 @@ test_8_choice_cues_match_whole_words
 test_9_plural_choice_cues_require_buttons
 test_10_digit_choice_cues_and_headings_require_buttons
 test_11_bold_headings_allow_colons_inside_or_outside
+test_12_force_push_flags_require_confirmation
