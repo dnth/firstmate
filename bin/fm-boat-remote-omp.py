@@ -84,12 +84,9 @@ def model_block(helper):
 
 
 def _provider_key(line):
-    if not line.startswith('  ') or line.startswith('   '):
-        return None
-    value = line[2:].lstrip()
-    for provider in PROVIDERS:
-        if value.startswith(provider + ':') or value.startswith('"' + provider + '":') or value.startswith("'" + provider + "':"):
-            return provider
+    match = re.match(r"""^  (?:"((?:\\.|[^"\\])*)"|'((?:''|[^'])*)'|([^'"\s#].*?))\s*:(?:\s|$)""", line)
+    if match:
+        return next(value for value in match.groups() if value is not None)
     return None
 
 
@@ -140,7 +137,7 @@ def _merge_models(text, helper):
         outside_targets = [
             provider for index, line in enumerate(lines[start + 1:end], start + 1)
             if index <= begins[0] or index > ends[0]
-            for provider in [_provider_key(line)] if provider
+            for provider in [_provider_key(line)] if provider in PROVIDERS
         ]
         if outside_targets:
             raise HelperError('duplicate OMP Go provider config')
@@ -148,7 +145,7 @@ def _merge_models(text, helper):
 
     target_blocks = []
     sibling_keys = [(index, _provider_key(line)) for index, line in enumerate(lines[start + 1:end], start + 1)]
-    sibling_keys = [(index, provider) for index, provider in sibling_keys if provider]
+    sibling_keys = [(index, provider) for index, provider in sibling_keys if provider is not None]
     for position, (index, provider) in enumerate(sibling_keys):
         if provider not in PROVIDERS:
             continue

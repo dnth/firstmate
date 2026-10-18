@@ -142,6 +142,30 @@ class Lab:
                     raise AssertionError('helper survived release: ' + identity)
         self.end.set(); self.server.shutdown(); self.server.server_close(); self.thread.join()
 
+class ModelConfigTests(unittest.TestCase):
+    def test_replacement_preserves_siblings(self):
+        for provider in ('opencode-go-dnth', 'opencode-go-dnth-1',
+                         'opencode-go-neuralengine', 'opencode-go-neuralengine-1'):
+            for quote in ('', "'", '"'):
+                with self.subTest(provider=provider, quote=quote), tempfile.TemporaryDirectory(dir=BASE) as directory:
+                    home = Path(directory)
+                    models = home / 'models.yml'
+                    before = '  private-before:\n    baseUrl: https://before.example/v1\n'
+                    after = f'  {quote}private-after{quote}:\n    baseUrl: https://after.example/v1\n'
+                    models.write_text('providers:\n' + before +
+                                      f'  {quote}{provider}{quote}:\n    apiKey: fixture_old_key\n' + after)
+                    env = dict(os.environ, PI_CODING_AGENT_DIR=str(home), FM_BOAT_REMOTE_AUTH_DIR=str(home))
+                    command = [sys.executable, str(ROOT / 'bin/fm-boat-remote-omp.py'), 'install-models']
+                    subprocess.run(command, env=env, check=True, capture_output=True)
+                    installed = models.read_text()
+                    self.assertIn(before, installed)
+                    self.assertIn(after, installed)
+                    self.assertNotIn('fixture_old_key', installed)
+                    self.assertEqual(installed.count(f'  {provider}:'), 1)
+                    subprocess.run(command, env=env, check=True, capture_output=True)
+                    self.assertEqual(models.read_text(), installed)
+
+
 class CredentialTests(unittest.TestCase):
     def setUp(self): self.lab = Lab()
     def tearDown(self): self.lab.clean()
@@ -412,7 +436,8 @@ class CredentialTests(unittest.TestCase):
         models.parent.mkdir(parents=True)
         original_models = ('providers:\n  private-provider:\n    api: openai-completions\n'
                            '  opencode-go-dnth:\n'
-                           '    apiKey: \"!jq -er openai_go_key ~/.local/share/opencode/auth.json\"\n')
+                           '    apiKey: \"!jq -er openai_go_key ~/.local/share/opencode/auth.json\"\n'
+                           '  private-after:\n    baseUrl: https://private.example/v1\n')
         models.write_text(original_models)
         self.lab.start(model=f'{provider}/deepseek-v4.1-flash')
         self.assertEqual(self.lab.upload_calls, [{'provider': account, 'type': 'api_key'} for account in providers[2:]])
@@ -431,6 +456,7 @@ class CredentialTests(unittest.TestCase):
         self.assertNotIn(old_key, models.read_text())
         model_text = models.read_text()
         self.assertIn('private-provider:', model_text)
+        self.assertIn('  private-after:\n    baseUrl: https://private.example/v1\n', model_text)
         self.assertNotIn('auth.json', model_text)
         self.assertEqual(model_text.count(f'  {provider}:'), 1)
         for account in providers[2:]:
