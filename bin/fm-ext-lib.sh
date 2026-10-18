@@ -551,7 +551,7 @@ fm_ext_text_choice_shaped() {
 # decision-buttons contract owns that policy. Matched case-insensitively
 # anywhere in the label; only destruction still earns the extra click.
 # shellcheck disable=SC2034 # Read by the sourcing emit script.
-FM_EXT_DECISION_CONFIRM_PATTERN='delete|deletion|remove|destroy|discard|drop|wipe|purge|erase|reset|force ?-? ?push|push([[:space:]]+[^[:space:]]+)*[[:space:]]+(-f|--?force(-with-lease)?)([[:space:]=]|$)|overwrite|tear ?down|revoke|rotate|kill|money|pay|charge|refund|purchase|buy|invoice|billing|budget|credential|secret|token|password|api ?key'
+FM_EXT_DECISION_CONFIRM_PATTERN='delete|deletion|remove|destroy|discard|drop|wipe|purge|erase|reset|force ?-? ?push|push([[:space:]]+[^[:space:]]+)*[[:space:]]+(-[vqund46]*f[^[:space:]]*|--?force(-with-lease)?)([[:space:]=]|$)|overwrite|tear ?down|revoke|rotate|kill|money|pay|charge|refund|purchase|buy|invoice|billing|budget|credential|secret|token|password|api ?key'
 
 _fm_ext_decision_part_valid() {
   case "$1" in

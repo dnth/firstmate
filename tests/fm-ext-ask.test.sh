@@ -464,10 +464,12 @@ test_12_force_push_flags_require_confirmation() {
   for label in 'git push -f' 'Push main --force' 'git push origin main -f' \
     'git push --force origin main' 'git push origin main --force-with-lease' \
     'git push origin main --force-with-lease=main:abc' 'Force-push main' \
+    'git push -uf origin main' 'git push -fu origin main' 'git push -foo' \
+    'git push origin main -qvf' 'git push -4f origin main' \
     'git push' 'Push main' 'git push origin main' 'git push --follow-tags' \
-    'git push --forceful' 'git push -foo'; do
+    'git push --forceful' 'git push -u origin main' 'git push -ofast'; do
     case "$label" in
-      'git push'|'Push main'|'git push origin main'|'git push --follow-tags'|'git push --forceful'|'git push -foo') expected=false ;;
+      'git push'|'Push main'|'git push origin main'|'git push --follow-tags'|'git push --forceful'|'git push -u origin main'|'git push -ofast') expected=false ;;
       *) expected=true ;;
     esac
     for recommended in false true; do
