@@ -10,11 +10,13 @@ import json
 import os
 from pathlib import Path
 import re
-import socket
 import secrets
+import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 from fm_boat_common import (CONFIG, ROOT, STATE, Failure, directory, load, lock,
@@ -135,6 +137,7 @@ def acquire(id, alias, config, model):
             settings = json.loads(regular(base / 'settings.json', 0o600).read_text())
             if (settings['providers'] == allowed and settings['descriptor']['alias'] == alias
                     and settings['descriptor']['config'] == str(Path(config).resolve())
+                    and settings.get('model_provider') == model.split('/', 1)[0]
                     and properties(prior['unit']).get('ActiveState') == 'active'
                     and (base / 'facade.token').is_file() and (base / 'upstream.token').is_file()):
                 try:
@@ -150,7 +153,10 @@ def acquire(id, alias, config, model):
         settings = {
             'descriptor': {'ssh': executable(os.environ.get('FM_BOAT_SSH_BIN', os.environ.get('FM_SSH_BIN', 'ssh'))),
                            'alias': alias, 'config': str(Path(config).resolve())},
-            'providers': allowed, 'omp': executable(os.environ.get('FM_BOAT_OMP_BIN', 'omp')),
+            'providers': allowed,
+            'model_provider': model.split('/', 1)[0],
+            'opencode_auth_file': str(Path.home() / '.local' / 'share' / 'opencode' / 'auth.json'),
+            'omp': executable(os.environ.get('FM_BOAT_OMP_BIN', 'omp')),
             'node': executable(os.environ.get('FM_BOAT_NODE_BIN', 'node')),
             # A lease must not depend on a conventional port owned by another app.
             'broker': os.environ.get('FM_BOAT_BROKER_URL') or 'http://' + free_loopback(),
@@ -202,6 +208,143 @@ def free_loopback():
         listener.bind(('127.0.0.1', 0))
         return '127.0.0.1:' + str(listener.getsockname()[1])
 
+OPEN_CODE_GO_PROVIDERS = (
+    'opencode-go-dnth',
+    'opencode-go-dnth-1',
+    'opencode-go-neuralengine',
+    'opencode-go-neuralengine-1',
+)
+
+def broker_request(url, token, method, path, payload=None):
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        raise Failure('canonical broker URL is invalid') from None
+    if (parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1') or
+            not port or not 1 <= port <= 65535 or parsed.path not in ('', '/') or
+            parsed.query or parsed.fragment or parsed.username or parsed.password):
+        raise Failure('OpenCode Go credential import requires the loopback broker')
+    data = None if payload is None else json.dumps(payload).encode()
+    headers = {'Authorization': 'Bearer ' + token}
+    if data is not None:
+        headers['Content-Type'] = 'application/json'
+    request = urllib.request.Request(url.rstrip('/') + path, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            if response.status != 200:
+                raise Failure('canonical broker refused OpenCode Go credential operation')
+            body = response.read(4_000_000)
+        value = json.loads(body)
+    except Failure:
+        raise
+    except (OSError, ValueError, urllib.error.URLError):
+        raise Failure('canonical broker unavailable for OpenCode Go credentials') from None
+    if not isinstance(value, dict):
+        raise Failure('canonical broker returned an invalid OpenCode Go response')
+    return value
+
+def api_key_entries(snapshot, provider=None):
+    credentials = snapshot.get('credentials')
+    if not isinstance(credentials, list):
+        raise Failure('canonical broker returned an invalid credential snapshot')
+    return [entry for entry in credentials
+            if isinstance(entry, dict) and (provider is None or entry.get('provider') == provider) and
+            isinstance(entry.get('id'), int) and not isinstance(entry.get('id'), bool) and
+            0 <= entry['id'] <= 9007199254740991 and
+            isinstance(entry.get('credential'), dict) and
+            entry['credential'].get('type') == 'api_key' and
+            isinstance(entry['credential'].get('key'), str)]
+
+def credential_id_map(path):
+    if not path.exists() and not path.is_symlink():
+        return {}
+    try:
+        value = json.loads(regular(path, 0o600).read_text())
+    except (OSError, ValueError, Failure):
+        raise Failure('OpenCode Go credential ownership record is unsafe') from None
+    if not isinstance(value, dict) or any(provider not in OPEN_CODE_GO_PROVIDERS for provider in value):
+        raise Failure('OpenCode Go credential ownership record is invalid')
+    for item in value.values():
+        if (not isinstance(item, dict) or not isinstance(item.get('id'), int) or
+                isinstance(item.get('id'), bool) or not 0 <= item['id'] <= 9007199254740991 or
+                not isinstance(item.get('owned'), bool)):
+            raise Failure('OpenCode Go credential ownership record is invalid')
+    return value
+
+def source_auth(path, required):
+    try:
+        value = json.loads(regular(path, 0o600).read_text())
+        if not isinstance(value, dict):
+            raise ValueError
+        return value
+    except (OSError, ValueError, Failure):
+        if required:
+            raise Failure('selected OpenCode Go credential source is unavailable or invalid') from None
+        return None
+
+def sync_opencode_go_credentials(base, broker, token, allowed, model_provider, auth_path):
+    allowed = set(allowed)
+    go_allowed = [provider for provider in OPEN_CODE_GO_PROVIDERS if provider in allowed]
+    required = model_provider if model_provider in go_allowed else None
+    ownership_path = base / 'opencode-go-credential-ids.json'
+    ownership = credential_id_map(ownership_path)
+    auth = source_auth(auth_path, required is not None) if go_allowed else None
+    source_keys = {}
+    if auth is not None:
+        for provider in go_allowed:
+            source = auth.get(provider)
+            key = source.get('key') if isinstance(source, dict) and source.get('type') == 'api_key' else None
+            if not isinstance(key, str) or not key.strip():
+                if provider == required:
+                    raise Failure('selected OpenCode Go account key is unavailable')
+                continue
+            source_keys[provider] = key
+    selected = {}
+    if source_keys:
+        snapshot = broker_request(broker, token, 'GET', '/v1/snapshot')
+        for provider, key in source_keys.items():
+            active = api_key_entries(snapshot, provider)
+            previous = ownership.get(provider)
+            tracked = next((entry for entry in active if entry['id'] == previous['id']), None) if previous else None
+            if tracked and tracked['credential']['key'] == key:
+                selected[provider] = tracked['id']
+                continue
+            matches = [entry for entry in active if entry['credential']['key'] == key]
+            if matches:
+                chosen = min(matches, key=lambda entry: entry['id'])
+                if tracked and previous['owned'] and tracked['id'] != chosen['id']:
+                    broker_request(broker, token, 'POST', f"/v1/credential/{tracked['id']}/disable",
+                                   {'cause': 'replaced by current OpenCode auth.json key'})
+                selected[provider] = chosen['id']
+                ownership[provider] = {'id': chosen['id'], 'owned': bool(previous and previous['id'] == chosen['id'] and previous['owned'])}
+                continue
+            uploaded = broker_request(broker, token, 'POST', '/v1/credential',
+                                      {'provider': provider, 'credential': {'type': 'api_key', 'key': key}})
+            entries = api_key_entries({'credentials': uploaded.get('entries')}, provider)
+            matches = [entry for entry in entries if entry['credential']['key'] == key]
+            if not matches:
+                raise Failure('canonical broker did not retain the OpenCode Go account key')
+            chosen = min(matches, key=lambda entry: entry['id'])
+            if tracked and previous['owned']:
+                broker_request(broker, token, 'POST', f"/v1/credential/{tracked['id']}/disable",
+                               {'cause': 'replaced by current OpenCode auth.json key'})
+            selected[provider] = chosen['id']
+            ownership[provider] = {'id': chosen['id'], 'owned': True}
+        publish(ownership_path, json.dumps(ownership, sort_keys=True))
+    if required and required not in selected:
+        raise Failure('selected OpenCode Go account key is unavailable')
+    snapshot = broker_request(broker, token, 'GET', '/v1/snapshot')
+    ids = []
+    for entry in api_key_entries(snapshot):
+        provider = entry.get('provider')
+        if provider not in allowed:
+            continue
+        if provider in OPEN_CODE_GO_PROVIDERS and selected.get(provider) != entry['id']:
+            continue
+        ids.append(entry['id'])
+    return sorted(set(ids))
+
 
 def worker(base, generation):
     base = Path(base)
@@ -230,12 +373,16 @@ def worker(base, generation):
             if time.monotonic() >= deadline:
                 raise Failure('canonical broker unavailable')
             time.sleep(0.05)
+        api_key_credential_ids = sync_opencode_go_credentials(
+            base, settings['broker'], upstream, settings['providers'], settings['model_provider'],
+            Path(settings['opencode_auth_file']))
         environment = os.environ.copy()
         environment.update(FM_OMP_AUTH_BROKER_TOKEN_FILE=str(base / 'facade.token'),
                            FM_OMP_AUTH_BROKER_UPSTREAM_TOKEN_FILE=str(base / 'upstream.token'),
                            FM_OMP_AUTH_BROKER_UPSTREAM_URL=settings['broker'],
                            FM_OMP_AUTH_BROKER_PROXY_BIND=settings['proxy'],
-                           FM_BOAT_PROVIDERS=json.dumps(settings['providers']))
+                           FM_BOAT_PROVIDERS=json.dumps(settings['providers']),
+                           FM_BOAT_API_KEY_CREDENTIAL_IDS=json.dumps(api_key_credential_ids))
         facade = subprocess.Popen([settings['node'], ROOT / 'fm-omp-auth-broker-readonly-proxy.mjs'], env=environment,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         while True:
@@ -250,6 +397,8 @@ def worker(base, generation):
             time.sleep(0.05)
         helper = (ROOT / 'fm-omp-auth-token-lib.sh').read_text() + '\n' + (ROOT / 'fm-boat-remote-auth.sh').read_text()
         ssh(descriptor, 'umask 077; mkdir -p /home/user/.fm && cat > /home/user/.fm/boat-auth-control && chmod 700 /home/user/.fm/boat-auth-control', input=helper, timeout=timeout)
+        remote_helper = (ROOT / 'fm-boat-remote-omp.py').read_text()
+        ssh(descriptor, 'umask 077; mkdir -p /home/user/.fm && cat > /home/user/.fm/boat-omp-remote.py && chmod 700 /home/user/.fm/boat-omp-remote.py', input=remote_helper, timeout=timeout)
         record['install_attempted'] = '1'
         save(path, record)
         ssh(descriptor, '/home/user/.fm/boat-auth-control', '--install', input=regular(base / 'facade.token', 0o600).read_text(), timeout=timeout)

@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+import hmac
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -60,6 +61,7 @@ class Lab:
         self.update()
         self.payload = dict(ENV_ENTRY, credentials=[ENTRY]); self.refresh = dict(ENV_ENTRY, entry=ENTRY)
         self.status = 200; self.health_status = 200; self.refresh_calls = 0; self.streams = []
+        self.upload_calls = []; self.disable_calls = []; self.next_credential_id = 100
         lab = self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args): pass
@@ -76,8 +78,26 @@ class Lab:
                 self.send_response(lab.health_status if self.path.endswith('healthz') else 200)
                 self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(json.dumps(body).encode())
             def do_POST(self):
-                lab.refresh_calls += 1
-                self.send_response(lab.status); self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(json.dumps(lab.refresh).encode())
+                path = self.path.split('?', 1)[0]
+                if path == '/v1/credential':
+                    request = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
+                    provider = request['provider']; credential = request['credential']
+                    lab.upload_calls.append({'provider': provider, 'type': credential['type']})
+                    entry = next((item for item in lab.payload['credentials']
+                                  if item['provider'] == provider and item['credential'] == credential), None)
+                    if entry is None:
+                        entry = {'provider': provider, 'id': lab.next_credential_id, 'identityKey': None,
+                                 'rotatesInMs': None, 'credential': credential}
+                        lab.next_credential_id += 1; lab.payload['credentials'].append(entry)
+                    body = {'entries': [item for item in lab.payload['credentials'] if item['provider'] == provider]}
+                    status = 200
+                elif (parts := path.strip('/').split('/')) and len(parts) == 4 and parts[:2] == ['v1', 'credential'] and parts[2].isdigit() and parts[3] == 'disable':
+                    credential_id = int(parts[2]); lab.disable_calls.append(credential_id)
+                    lab.payload['credentials'] = [item for item in lab.payload['credentials'] if item['id'] != credential_id]
+                    body = {'ok': True}; status = 200
+                else:
+                    lab.refresh_calls += 1; body = lab.refresh; status = lab.status
+                self.send_response(status); self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(json.dumps(body).encode())
         self.end = threading.Event()
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever); self.thread.start()
@@ -85,7 +105,7 @@ class Lab:
         import socket
         with socket.socket() as socket:
             socket.bind(('127.0.0.1', 0)); self.proxy_port = socket.getsockname()[1]
-        self.env = dict(os.environ, FM_HOME=str(self.home), FM_BOAT_SSH_BIN=str(self.fake / 'ssh'),
+        self.env = dict(os.environ, HOME=str(self.home), FM_HOME=str(self.home), FM_BOAT_SSH_BIN=str(self.fake / 'ssh'),
                         FM_DATA_OVERRIDE=str(self.home / 'data'), FM_STATE_OVERRIDE=str(self.home / 'state'),
                         FM_CONFIG_OVERRIDE=str(self.home / 'config'),
                         FM_BOAT_OMP_BIN=str(self.fake / 'omp'), FM_BOAT_BROKER_URL=f'http://127.0.0.1:{self.server.server_port}',
@@ -101,8 +121,8 @@ class Lab:
         if ok and result.returncode: raise AssertionError(result.stderr)
         if not ok and not result.returncode: raise AssertionError('operation unexpectedly succeeded')
         return result
-    def start(self, ok=True):
-        return self.call('start', 'fixture', str(self.config), 'openai-codex/fixture', ok=ok)
+    def start(self, ok=True, model='openai-codex/fixture'):
+        return self.call('start', 'fixture', str(self.config), model, ok=ok)
     def request(self, path='/v1/snapshot', method='GET', bearer=None):
         if bearer is None: bearer = (self.path / 'remote/omp-auth-broker.token').read_text()
         request = urllib.request.Request(f'http://127.0.0.1:{self.proxy_port}' + path, method=method,
@@ -213,18 +233,29 @@ class CredentialTests(unittest.TestCase):
         self.lab.lease.write_text(''.join(k + '=' + v + '\n' for k, v in record.items()))
     def test_exact_scoped_egress_and_refresh_admission(self):
         self.lab.payload['extra'] = 'upstream-top-level-secret'
-        self.lab.payload['credentials'] += [{'provider': 'anthropic', 'id': 9, 'credential': ENTRY['credential']},
-                                             {'provider': 'openai-codex', 'id': 3, 'credential': {'type': 'api_key', 'key': 'reserved'}},
-                                             {'provider': 'openai-codex', 'id': 4, 'credential': {'type': 'oauth', 'access': 'a'}}]
+        self.lab.payload['credentials'] += [
+            {'provider': 'anthropic', 'id': 9, 'credential': ENTRY['credential']},
+            {'provider': 'openai-codex', 'id': 3, 'identityKey': 'api-key-identity-must-not-egress',
+             'rotatesInMs': 31, 'credential': {'type': 'api_key', 'key': 'fixture_api_key', 'extra': 'must-not-egress'}},
+            {'provider': 'openai-codex', 'id': 4, 'credential': {'type': 'oauth', 'access': 'a'}},
+            {'provider': 'anthropic', 'id': 10, 'credential': {'type': 'api_key', 'key': 'non_allowlisted_fixture_key'}},
+        ]
         self.lab.start()
         out = self.lab.request()
-        expected = {'provider': 'openai-codex', 'id': 2, 'identityKey': None, 'rotatesInMs': None,
-                    'credential': {'type': 'oauth', 'access': 'fixture_access', 'expires': 4102444800000, 'refresh': '__remote__'}}
-        self.assertEqual(out, dict(ENV_ENTRY, credentials=[expected]))
-        self.assertEqual(self.lab.request('/v1/credential/2/refresh', 'POST')['entry'], expected)
+        expected = [
+            {'provider': 'openai-codex', 'id': 2, 'identityKey': None, 'rotatesInMs': None,
+             'credential': {'type': 'oauth', 'access': 'fixture_access', 'expires': 4102444800000, 'refresh': '__remote__'}},
+            {'provider': 'openai-codex', 'id': 3, 'identityKey': None, 'rotatesInMs': None,
+             'credential': {'type': 'api_key', 'key': 'fixture_api_key'}},
+        ]
+        self.assertEqual(out, dict(ENV_ENTRY, credentials=expected))
+        self.assertEqual(self.lab.request('/v1/credential/2/refresh', 'POST')['entry'], expected[0])
         from urllib.error import HTTPError
-        with self.assertRaises(HTTPError) as failure: self.lab.request('/v1/credential/9/refresh', 'POST')
-        self.assertEqual(failure.exception.code, 403); self.assertEqual(self.lab.refresh_calls, 1)
+        for credential_id in (3, 9, 10):
+            with self.assertRaises(HTTPError) as failure:
+                self.lab.request(f'/v1/credential/{credential_id}/refresh', 'POST')
+            self.assertEqual(failure.exception.code, 403)
+        self.assertEqual(self.lab.refresh_calls, 1)
         for expiry in (None, '4102444800000'):
             self.lab.payload = dict(ENV_ENTRY, credentials=[dict(ENTRY, credential=dict(ENTRY['credential'], expires=expiry))])
             self.assertEqual(self.lab.request()['credentials'], [])
@@ -356,6 +387,102 @@ class CredentialTests(unittest.TestCase):
         bashenv = self.lab.path / 'bashenv'; bashenv.write_text('sleep .2\n')
         self.lab.env['BASH_ENV'] = str(bashenv)
         self.lab.start(); self.assertEqual(rows(self.lab.lease)['state'], 'ready')
+    def test_opencode_go_key_is_brokered_without_remote_file(self):
+        provider = 'opencode-go-dnth'
+        old_key = 'fixture_opencode_go_key'
+        new_key = 'fixture_rotated_opencode_go_key'
+        providers = ['openai-codex', 'anthropic', 'opencode-go-dnth', 'opencode-go-dnth-1',
+                     'opencode-go-neuralengine', 'opencode-go-neuralengine-1']
+        other_keys = {account: f'fixture_{account.replace("-", "_")}_key' for account in providers[3:]}
+        auth_values = {provider: {'type': 'api_key', 'key': old_key},
+                       **{account: {'type': 'api_key', 'key': key} for account, key in other_keys.items()}}
+        allowlist = self.lab.home / 'config/boat/providers.json'
+        allowlist.parent.mkdir(parents=True)
+        allowlist.write_text(json.dumps(providers)); allowlist.chmod(0o600)
+        auth = self.lab.home / '.local/share/opencode/auth.json'
+        auth.parent.mkdir(parents=True)
+        auth.write_text(json.dumps(auth_values)); auth.chmod(0o600)
+        self.lab.payload['credentials'].append({
+            'provider': provider, 'id': 90, 'identityKey': 'unrelated-account',
+            'credential': {'type': 'api_key', 'key': 'unrelated_fixture_api_key'},
+        })
+
+        remote = self.lab.path / 'remote'
+        models = remote / '.omp/agent/models.yml'
+        models.parent.mkdir(parents=True)
+        original_models = ('providers:\n  private-provider:\n    api: openai-completions\n'
+                           '  opencode-go-dnth:\n'
+                           '    apiKey: \"!jq -er openai_go_key ~/.local/share/opencode/auth.json\"\n')
+        models.write_text(original_models)
+        self.lab.start(model=f'{provider}/deepseek-v4.1-flash')
+        self.assertEqual(self.lab.upload_calls, [{'provider': account, 'type': 'api_key'} for account in providers[2:]])
+        first = [item for item in self.lab.request()['credentials'] if item['provider'] == provider]
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]['credential'], {'type': 'api_key', 'key': old_key})
+        go_credentials = [item for item in self.lab.request()['credentials'] if item['provider'] in providers[2:]]
+        self.assertEqual([item['provider'] for item in go_credentials], providers[2:])
+        credential_id = first[0]['id']
+
+        remote = self.lab.path / 'remote'
+        helper = remote / 'boat-omp-remote.py'
+        models = remote / '.omp/agent/models.yml'
+        self.assertTrue(helper.is_file())
+        self.assertIn(f'api-key {provider}', models.read_text())
+        self.assertNotIn(old_key, models.read_text())
+        model_text = models.read_text()
+        self.assertIn('private-provider:', model_text)
+        self.assertNotIn('auth.json', model_text)
+        self.assertEqual(model_text.count(f'  {provider}:'), 1)
+        for account in providers[2:]:
+            self.assertIn(f'  {account}:', model_text)
+        self.assertFalse((remote / '.local/share/opencode/auth.json').exists())
+        token = (remote / 'omp-auth-broker.token').read_text()
+        resolver_env = dict(self.lab.env, HOME=str(remote), FM_BOAT_REMOTE_AUTH_DIR=str(remote),
+                            OMP_AUTH_BROKER_URL=f'http://127.0.0.1:{self.lab.proxy_port}',
+                            OMP_AUTH_BROKER_TOKEN=token)
+        for account, key in {provider: old_key, **other_keys}.items():
+            resolved = subprocess.run([sys.executable, helper, 'api-key', account], env=resolver_env,
+                                      capture_output=True, text=True, timeout=5)
+            self.assertEqual(resolved.returncode, 0)
+            self.assertTrue(hmac.compare_digest(resolved.stdout.rstrip('\n'), key))
+            self.assertEqual(resolved.stderr, '')
+        unscoped_env = dict(resolver_env, OMP_AUTH_BROKER_URL=f'http://127.0.0.1:{self.lab.server.server_port}')
+        unscoped = subprocess.run([sys.executable, helper, 'api-key', provider], env=unscoped_env,
+                                  capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(unscoped.returncode, 0)
+        self.assertEqual(unscoped.stdout, '')
+        for key in [old_key, *other_keys.values()]:
+            self.assertNotIn(key, '\0'.join(resolver_env.values()))
+        for file in remote.rglob('*'):
+            if file.is_file():
+                contents = file.read_bytes()
+                for key in [old_key, *other_keys.values()]:
+                    self.assertNotIn(key.encode(), contents)
+
+        self.lab.call('stop')
+        rotated_auth = dict(auth_values)
+        rotated_auth[provider] = {'type': 'api_key', 'key': new_key}
+        auth.write_text(json.dumps(rotated_auth))
+        self.lab.start(model=f'{provider}/deepseek-v4.1-flash')
+        self.assertEqual(self.lab.disable_calls, [credential_id])
+        self.assertEqual(self.lab.upload_calls,
+                         [{'provider': account, 'type': 'api_key'} for account in providers[2:]] +
+                         [{'provider': provider, 'type': 'api_key'}])
+        current = [item for item in self.lab.request()['credentials'] if item['provider'] == provider]
+        self.assertEqual(len(current), 1)
+        self.assertEqual(current[0]['credential'], {'type': 'api_key', 'key': new_key})
+        current_go = {item['provider']: item['credential']['key'] for item in self.lab.request()['credentials']
+                      if item['provider'] in providers[2:]}
+        expected_go = {provider: new_key, **other_keys}
+        self.assertEqual(set(current_go), set(expected_go))
+        for account, key in expected_go.items():
+            self.assertTrue(hmac.compare_digest(current_go[account], key))
+        for file in remote.rglob('*'):
+            if file.is_file():
+                contents = file.read_bytes()
+                for key in [old_key, new_key, *other_keys.values()]:
+                    self.assertNotIn(key.encode(), contents)
+
 
 if __name__ == '__main__':
     try:

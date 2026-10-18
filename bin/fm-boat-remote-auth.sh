@@ -24,6 +24,7 @@ case "${1:-}" in
     mv -f -- "$tmp" "$TOKEN"
     printf 'boat-auth-v1\n' > "$BASE/boat-auth.marker"
     chmod 600 "$BASE/boat-auth.marker"
+    python3 "$BASE/boat-omp-remote.py" install-models
     ;;
   --shred)
     [ ! -L "$BASE" ] && [ ! -L "$TOKEN" ] || exit 1
@@ -37,6 +38,7 @@ case "${1:-}" in
     [ -f "$TOKEN" ] && [ ! -L "$TOKEN" ] && [ "$(stat -c %a "$TOKEN")" = 600 ] || exit 1
     token=$(cat "$TOKEN")
     fm_omp_auth_token_valid "$token" || exit 1
+    python3 "$BASE/boat-omp-remote.py" check-models
     headers=$(mktemp "$BASE/.headers.XXXXXX")
     trap 'rm -f -- "$headers"' EXIT
     {

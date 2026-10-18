@@ -96,15 +96,20 @@ The shared OMP bearer grammar lives in `bin/fm-omp-auth-token-lib.sh`.
 The provider policy lives in `bin/fm-boat-policy.mjs` and is used both before allocation and by facade egress.
 It defaults to `openai-codex`; a mode-600 `config/boat/providers.json` may explicitly select other provider names.
 A model must name a listed provider and a nonempty model before any sandbox creation.
-The scoped facade accepts OAuth entries only, requires an opaque nonnegative integer refresh locator and finite upstream expiry, and reconstructs each entry from explicit fields:
+OAuth entries are reconstructed from the explicit fields below; upstream refresh data is never exposed:
 
 ```json
 {"provider":"openai-codex","id":2,"identityKey":null,"rotatesInMs":null,"credential":{"type":"oauth","access":"<access>","refresh":"__remote__","expires":4102444800000}}
 ```
 
-The null fields and `__remote__` refresh marker are protocol constants, never upstream identity or refresh data.
-Upstream refresh tokens, API keys, unknown fields or shapes, absent credential arrays, and failed refresh response bodies never leave the facade.
-Refresh refuses an ID that the current scoped snapshot cannot vend.
+For `api_key`, the facade reconstructs only `{provider,id,identityKey:null,rotatesInMs:null,credential:{type:'api_key',key}}` and serves it only when its provider is allowlisted and its ID is in that lease's credential-ID scope. Refresh accepts OAuth entries only.
+The four OpenCode Go provider names (`opencode-go-dnth`, `opencode-go-dnth-1`, `opencode-go-neuralengine`, `opencode-go-neuralengine-1`) must be present in the captain-private `config/boat/providers.json` allowlist. Keep that file mode 600; it contains provider names, never keys.
+
+At lease start, the host reads the allowlisted OpenCode Go keys from its local `auth.json` and imports them into the host OMP broker. The lease facade scopes API-key egress to those imported credential IDs, excluding unrelated credentials even for the same provider. The Boat's keyless `models.yml` entries call a remote helper that reads the scoped broker snapshot. During a live lease, OMP can hold a routed key in process memory for requests; no key is written to Boat disk, environment, command line, or logs. The broker snapshot disk cache is disabled for Boat OMP launches. The workstation must stay online for the lease so the helper can reach the broker.
+
+When an OpenCode key changes, the next lease imports the new value and disables the previously imported broker credential. Revoke access by rotating or revoking the key at OpenCode; the provider then rejects the old value, including one still held in an active process's memory.
+
+Boat cannot inspect these accounts' quota: quota-axi reads the workstation's `auth.json`, which is not copied to Boat. The main home selects the provider with current quota evidence and passes that provider/model in the launch profile; Boat must not choose among Go accounts or claim quota-informed selection.
 
 ## Verification and opt-in live smoke
 

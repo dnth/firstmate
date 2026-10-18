@@ -557,6 +557,8 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
   launch=$(resolve_staged_omp_launch "$(cat "$LAUNCH_LOG")")
   assert_contains "$launch" "OMP_AUTH_BROKER_URL=" \
     "OMP secondmate agent launch did not receive the pod-loopback broker URL"
+  assert_contains "$launch" "OMP_AUTH_BROKER_SNAPSHOT_TTL_MS=0" \
+    "OMP secondmate agent launch did not disable disk-backed broker snapshot caching"
   assert_contains "$launch" "http://127.0.0.1:8765" \
     "OMP secondmate agent launch did not retain the broker URL"
   assert_contains "$launch" "\$(cat" \

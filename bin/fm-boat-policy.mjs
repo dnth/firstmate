@@ -8,9 +8,15 @@ export function providers(value = process.env.FM_BOAT_PROVIDERS) {
   }
   return new Set(parsed);
 }
-export function vend(entry, policy) {
-  if (!entry || !policy.has(entry.provider) || !Number.isSafeInteger(entry.id) || entry.id < 0 ||
-      entry.credential?.type !== 'oauth' || typeof entry.credential.access !== 'string' || !entry.credential.access ||
+export function vend(entry, policy, apiKeyCredentialIds) {
+  if (!entry || !policy.has(entry.provider) || !Number.isSafeInteger(entry.id) || entry.id < 0) return null;
+  if (entry.credential?.type === 'api_key') {
+    if (typeof entry.credential.key !== 'string' || !entry.credential.key ||
+        (apiKeyCredentialIds !== undefined && !apiKeyCredentialIds.has(entry.id))) return null;
+    return { provider: entry.provider, id: entry.id, identityKey: null, rotatesInMs: null,
+      credential: { type: 'api_key', key: entry.credential.key } };
+  }
+  if (entry.credential?.type !== 'oauth' || typeof entry.credential.access !== 'string' || !entry.credential.access ||
       !Number.isFinite(entry.credential.expires)) return null;
   return { provider: entry.provider, id: entry.id, identityKey: null, rotatesInMs: null,
     credential: { type: 'oauth', access: entry.credential.access, refresh: '__remote__', expires: entry.credential.expires } };
