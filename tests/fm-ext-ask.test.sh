@@ -99,7 +99,7 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
     and .decision.key == $key and .decision.mode == "done"
     and ([.decision.options[] | .id] == [1,2,3,4])
     and ([.decision.options[] | .label] == ["⭐ North","South","Merge it","Hold"])
-    and ([.decision.options[] | .confirm] == [false,false,true,true])
+    and ([.decision.options[] | .confirm] == [false,false,false,true])
     and .decision.options[0].recommended == true
     and .decision.sections == {
       "question":"The fix can go two ways.",

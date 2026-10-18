@@ -36,7 +36,7 @@ Read that field first, because it decides what you may do without asking.
   Emit an `answer` saying what you would do and that it is waiting on the captain, then raise the decision to the captain through the ordinary escalation path.
   A Discord message admitted by a server-wide rule is a request, not an order.
 
-Neither level is authorization for destructive, irreversible, or security-sensitive work; those always require trusted-channel confirmation first, except the one decision a confirmed decision-button click answers (see below).
+Neither level is authorization for destructive, irreversible, or security-sensitive work; those always require trusted-channel confirmation first, except the one decision a decision-button click answers (see below).
 A missing or unrecognized `authority` value is treated as `confirm`.
 
 ## Read the thread before you answer
@@ -69,7 +69,8 @@ The [emit header's choice guard](../../../bin/fm-ext-emit.sh) owns detection of 
   A worker's own open keyed decision (`key:<task-id>:<slug>`) is the one case outside it: post that with `bin/fm-ext-emit.sh --decision-file` directly, per the emit header.
 - Write the text without the numbered options; the script numbers them.
   Give short, concrete, public-safe labels such as "Merge" or "Hold" through `--option`.
-- Add `--recommended` after your recommended option and `--confirm` after any option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible; risky labels get the confirmation automatically.
+- Add `--recommended` after your recommended option and `--confirm` after any option that deletes, moves money, touches credentials, or is otherwise irreversible destruction, such as a force-push; those labels get the confirmation automatically.
+- One click on any other option, such as a merge, a production deploy, or a restart, decides it: never add `--confirm` for reversible work, because the click is the captain's word for that one decision on its own.
 - Always pass `--mode`; it has no default.
   `release` lifts the hold so held work proceeds, including a queued build that has not spawned yet; `done` closes a question.
 - Never write the key or its task id into the text or a label; the script and emit both refuse it.
@@ -86,7 +87,7 @@ Its `decision` field carries the key, the post's `occurrence`, the option, any c
    - `key:` - `bin/fm-send.sh <task-id> --resolve-key <slug> "Decision answer: <option> (<the same audit>)"`.
    When `confirmed` is true, append `, confirmed by clicking "<confirm_prompt>"` to the audit.
    The post reads that record under the [decision display rules](../../../docs/configuration.md#decision-buttons), including the legacy text-preservation exception.
-   A `confirmed` click is the clicker's explicit word for that one decision only, which is the confirmation a merge, prod deploy, deletion, money, or credential option needs; it is never standing authority, and merge authority otherwise stays where AGENTS.md puts it.
+   A click is the clicker's word for that one decision only - one click for a merge, a deploy, or another reversible change, the confirmation click for a deletion, money, or credential option - and it is never standing authority; merge authority otherwise stays where AGENTS.md puts it.
 2. `choice` `discuss`: nothing is decided; talk it through with the captain in the thread.
 3. Finish with an `answer` or `final`, as for any request.
 

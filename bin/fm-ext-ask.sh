@@ -24,8 +24,12 @@
 # The numbered option lines follow button order, and a recommended option shows
 # "⭐ " in both. --recommended marks the option just before it (at most one);
 # --confirm asks for a second click on the option just before it. Options whose
-# label matches FM_EXT_DECISION_CONFIRM_PATTERN in bin/fm-ext-lib.sh (merge,
-# deploy, delete, and other risky words) get the confirmation click automatically.
+# label matches FM_EXT_DECISION_CONFIRM_PATTERN in bin/fm-ext-lib.sh (delete,
+# money, credentials, and other irreversible destruction) get the confirmation
+# click automatically. A merge, a deploy, or another reversible production
+# change takes one click instead: that click, like the same author's clear typed
+# reply, is the captain's word for that one decision, so never pass --confirm
+# for reversible work.
 # --mode is required and has no default: it chooses how a chosen option closes
 # the call, as in bin/fm-captain-hold.sh answers. done closes a question;
 # release lifts the hold so held work proceeds. A held build task that has not

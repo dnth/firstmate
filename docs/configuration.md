@@ -1056,12 +1056,13 @@ If intake published the request but context, offer, or wake notification failed,
 Discuss retries also reuse the original request id after publication.
 A Discuss click on an open decision decides nothing and leaves the buttons on: it files one request so Firstmate picks the decision up in the thread, and a typed reply to the post, including a bare option number, keeps working exactly as before.
 
-An option that merges, deploys to production, deletes, moves money, touches credentials, or is otherwise destructive or irreversible needs a second click.
+An option that deletes, moves money, touches credentials, or is otherwise irreversible destruction needs a second click.
 The first click answers with an ephemeral `Confirm: <label>?` and a Confirm button, and nothing is sent until that button is clicked; the request then carries the prompt, and Firstmate's record quotes it.
 The [emit header](../bin/fm-ext-emit.sh) owns the explicit and label-based rules that require confirmation.
+One click on any other option - a merge, a production deploy, a restart, or another reversible production change - is that author's word for that one decision, exactly as the same author's typed reply naming the option is, so it is sent and recorded with no confirmation step.
 An optional recommended choice renders green with a star-prefixed label; the [emit header](../bin/fm-ext-emit.sh) owns the recommendation field, limit, and stored label format so the recorded answer quotes what the button showed.
 A recommended option that also needs confirmation still needs its second click.
-A confirmed click from a standing-rule author is that author's explicit word for that one decision only, never standing authority, and merge authority stays where `AGENTS.md` puts it.
+A click from a standing-rule author is that author's explicit word for that one decision only, never standing authority, and merge authority stays where `AGENTS.md` puts it.
 
 Each post is bound to the lifecycle of its decision that was open when it was posted, so a captain call re-held or a worker key reopened for a new question is a different decision to it.
 When Firstmate records an answer on any channel, only the last chunk of a new post is edited with a bold outcome header above its exact original text whenever both fit Discord's 2,000-character limit; earlier chunks stay unchanged.
