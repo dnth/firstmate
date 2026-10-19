@@ -53,7 +53,9 @@
 # call, or a worker's open keyed status decision) and must fit Discord's
 # 100-character custom_id as fmd:<key>:<n>. An option needs a confirmation
 # click when it declares confirm, and always when its label matches
-# FM_EXT_DECISION_CONFIRM_PATTERN in bin/fm-ext-lib.sh. The post text and labels
+# FM_EXT_DECISION_CONFIRM_PATTERN in bin/fm-ext-lib.sh - the deletion, money,
+# credential, and irreversible-destruction labels. A merge, a deploy, or another
+# reversible production label takes one click. The post text and labels
 # are refused when they name the key or its task id, because only the button
 # custom_ids may carry the key. The payload's decision field also carries
 # the mode, numbered options, post text cut to its first 1000 characters,

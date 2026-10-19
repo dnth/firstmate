@@ -293,7 +293,7 @@ test_1_buttons_carry_key_and_option_ids_in_the_thread() {
   payload=$(emit_decision "$home" 1 \
     '{"key":"'"$KEY"'","options":[{"label":"North"},{"label":"Merge it"}]}' "$THREAD")
   jq -e --arg key "$KEY" '.decision.key == $key and .decision.mode == "done"
-    and .decision.options == [{"id":1,"label":"North","confirm":false},{"id":2,"label":"Merge it","confirm":true}]' \
+    and .decision.options == [{"id":1,"label":"North","confirm":false},{"id":2,"label":"Merge it","confirm":false}]' \
     "$payload" >/dev/null || fail "the decision payload lost its key or numbered options: $(cat "$payload")"
 
   # A long post: buttons ride on its last chunk only.
@@ -322,7 +322,7 @@ PY
     and (map(select(.body.content | startswith("Which way")))[0].body.components == [
           {"type":1,"components":[
             {"type":2,"style":2,"label":"North","custom_id":("fmd:" + $key + ":1"),"disabled":false},
-            {"type":2,"style":4,"label":"Merge it","custom_id":("fmd:" + $key + ":2"),"disabled":false}]},
+            {"type":2,"style":2,"label":"Merge it","custom_id":("fmd:" + $key + ":2"),"disabled":false}]},
           {"type":1,"components":[
             {"type":2,"style":1,"label":"Discuss","custom_id":("fmd:" + $key + ":d"),"disabled":false}]}])
     and (all(.[1:-1][]; .body | has("components") | not))
@@ -604,47 +604,72 @@ test_4_others_are_not_authorised() {
   pass "4 confirm-rule and unlisted authors get not authorised and file nothing; a click is never stronger than typing"
 }
 
-# --- 5. high-risk options need a confirmation step --------------------------
+# --- 5. one click decides reversible work; only destruction confirms --------
 
-test_5_high_risk_options_need_a_confirmation_step() {
+test_5_one_click_decides_reversible_work_and_only_destruction_confirms() {
   local home payload out record
   home="$TMP_ROOT/c5"
   setup_home "$home"
   open_request "$home"
   open_key "$home" pick
   payload=$(emit_decision "$home" 1 '{"key":"'"$KEY"'","options":[
-    {"label":"Approve","confirm":true},{"label":"Deploy to prod"},{"label":"Delete the branch"},
-    {"label":"Pay the invoice"},{"label":"Hold"}]}')
-  jq -e '[.decision.options[].confirm] == [true,true,true,true,false]' "$payload" >/dev/null \
-    || fail "declared and high-risk options must need confirmation: $(cat "$payload")"
+    {"label":"Merge PR 958"},{"label":"Deploy v0.5.17"},{"label":"Run write tests on production"},
+    {"label":"Restart API"},{"label":"Hold"}]}')
+  jq -e '[.decision.options[].confirm] == [false,false,false,false,false]' "$payload" >/dev/null \
+    || fail "a merge, a deploy, a production run, a restart, and Hold must take one click: $(cat "$payload")"
+  deliver "$home" "$POST"
+
+  # A merge click is sent at once as that one decision's word, exactly like the
+  # same author typing the option: no second click, no confirmation recorded.
+  out=$(click "$home" "fmd:$KEY:1" "$CAPTAIN" 880000000000000020)
+  assert_contains "$out" "Sent: Merge PR 958." "a merge click must be sent without a confirmation step"
+  assert_not_contains "$out" "Confirm:" "a merge click asked for a second click"
+  [ "$(button_requests "$home")" = 1 ] || fail "the merge click did not file exactly one request"
+  record=$(button_request "$home" option)
+  printf '%s' "$record" | jq -e '.decision.confirmed == false and .decision.option == "Merge PR 958"' >/dev/null \
+    || fail "the merge click must carry no confirmation: $record"
+  [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "Firstmate found the clicked decision no longer open"
+  pass "5a a merge, a deploy, a production run, and a restart take one click, which is that decision's word"
+
+  # Deletion, money, credentials, and irreversible destruction still need the
+  # second click, on a captain call and on a worker's own reopened key alike.
+  home="$TMP_ROOT/c5-destruction"
+  setup_home "$home"
+  open_request "$home"
+  open_key "$home" pick
+  payload=$(emit_decision "$home" 1 '{"key":"'"$KEY"'","options":[
+    {"label":"Delete old dumps"},{"label":"Purge cache"},{"label":"Rotate API key"},
+    {"label":"Pay invoice"},{"label":"Force push main"}]}')
+  jq -e '[.decision.options[].confirm] == [true,true,true,true,true]' "$payload" >/dev/null \
+    || fail "deletion, money, credentials, and force-push must need confirmation: $(cat "$payload")"
   deliver "$home" "$POST"
   printf 'needs-decision [key=creds]: rotate?\n' >> "$home/state/$TASK.status"
   printf '{"key":"key:%s:creds","options":[{"label":"Rotate credentials"},{"label":"Merge"}]}' "$TASK" \
     > "$home/decision.json"
   home_env "$home" "$EMIT" --request-id "discord:$GUILD:$CHANNEL:$CHANNEL:$REQUEST_MESSAGE" \
     --kind followup --generation 2 --text-file "$home/post.txt" --decision-file "$home/decision.json" >/dev/null
-  jq -e '[.decision.options[].confirm] == [true,true]' "$home"/state/ext-outbox/*.followup.2.json >/dev/null \
-    || fail "credential and merge options must need confirmation"
-  deliver "$home" 700000000000000005
+  jq -e '[.decision.options[].confirm] == [true,false]' "$home"/state/ext-outbox/*.followup.2.json >/dev/null \
+    || fail "a credential option must confirm and a merge option must not"
+  deliver "$home" 700000000000000006
 
-  out=$(click "$home" "fmd:$KEY:2" "$CAPTAIN" 880000000000000021)
-  assert_contains "$out" "{\"text\": \"Confirm: Deploy to prod?\", \"confirm\": \"fmc:$POST:2\"}" \
-    "a prod deploy must ask for a confirmation click"
-  [ "$(resolved_lines "$home" pick)" = 0 ] || fail "an unconfirmed high-risk click answered the decision"
-  [ "$(button_requests "$home")" = 0 ] || fail "an unconfirmed high-risk click woke Firstmate"
+  out=$(click "$home" "fmd:$KEY:1" "$CAPTAIN" 880000000000000021)
+  assert_contains "$out" "{\"text\": \"Confirm: Delete old dumps?\", \"confirm\": \"fmc:$POST:1\"}" \
+    "a deletion must ask for a confirmation click"
+  [ "$(resolved_lines "$home" pick)" = 0 ] || fail "an unconfirmed destructive click answered the decision"
+  [ "$(button_requests "$home")" = 0 ] || fail "an unconfirmed destructive click woke Firstmate"
 
-  out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmc:$POST:2" "$CAPTAIN" 880000000000000022 880000000000000099)
-  assert_contains "$out" "Sent: Deploy to prod." "the confirmation click was not sent"
+  out=$(FM_EXT_NOW_OVERRIDE=1791720000 click "$home" "fmc:$POST:1" "$CAPTAIN" 880000000000000022 880000000000000099)
+  assert_contains "$out" "Sent: Delete old dumps." "the confirmation click was not sent"
   [ "$(resolved_lines "$home" pick)" = 0 ] || fail "the plugin recorded the confirmed answer itself"
   record=$(button_request "$home" option)
-  printf '%s' "$record" | jq -e '.decision.confirmed == true and .decision.confirm_prompt == "Confirm: Deploy to prod?"
-    and .decision.option == "Deploy to prod"
-    and .text == "Decision answer by button: Deploy to prod (confirmed)"' >/dev/null \
+  printf '%s' "$record" | jq -e '.decision.confirmed == true and .decision.confirm_prompt == "Confirm: Delete old dumps?"
+    and .decision.option == "Delete old dumps"
+    and .text == "Decision answer by button: Delete old dumps (confirmed)"' >/dev/null \
     || fail "the request must carry the confirmation verbatim: $record"
   [ "$(record_as_firstmate "$home" "$record")" = open ] || fail "Firstmate found the clicked decision no longer open"
-  grep -qF 'confirmed by clicking "Confirm: Deploy to prod?"' "$home/state/$TASK.inbox/001.msg" \
+  grep -qF 'confirmed by clicking "Confirm: Delete old dumps?"' "$home/state/$TASK.inbox/001.msg" \
     || fail "the recorded answer must show its confirmation"
-  pass "5 merge, prod deploy, deletion, money, and credential options need a confirmation click before anything is sent, and the record shows it"
+  pass "5b deletion, money, credential, and force-push options still need a confirmation click before anything is sent"
 }
 
 # --- 6. answered anywhere: no-ops with a notice, and the post shows it -----
@@ -924,7 +949,7 @@ test_10_real_discord_client_routes_clicks() {
   setup_home "$home"
   open_request "$home"
   open_key "$home" pick
-  emit_decision "$home" 1 '{"key":"'"$KEY"'","options":[{"label":"North"},{"label":"Merge it"}]}' >/dev/null
+  emit_decision "$home" 1 '{"key":"'"$KEY"'","options":[{"label":"North"},{"label":"Delete the branch"}]}' >/dev/null
   deliver "$home" "$POST"
   mkdir -p "$home/hermes"
   out=$(home_env "$home" env PYTHONPATH="$PLUGIN" GUILD="$GUILD" CHANNEL="$CHANNEL" AUTHOR="$CAPTAIN" \
@@ -1016,7 +1041,7 @@ async def main():
     print("ready-after=%s" % decisions.buttons_ready())
 
     bot._connection.parse_interaction_create(component_click(
-        970000000000000001, os.environ["POST"], decisions.custom_id(os.environ["KEY"], 2), "Merge it", False))
+        970000000000000001, os.environ["POST"], decisions.custom_id(os.environ["KEY"], 2), "Delete the branch", False))
     await settle(2)
     confirm = calls[1]["body"]["components"][0]["components"][0]["custom_id"]
     bot._connection.parse_interaction_create(component_click(
@@ -1035,9 +1060,9 @@ PY
   assert_contains "$out" "ready-after=True" "buttons were not offered once the click route existed"
   [ "$(grep -c '"path": "/interactions/{webhook_id}/{webhook_token}/callback", "body": {"type": 5, "data": {"flags": 64}}' <<<"$out")" = 2 ] \
     || fail "each click must be deferred ephemerally at once: $out"
-  assert_contains "$out" "\"content\": \"Confirm: Merge it?\", \"components\": [{\"type\": 1, \"components\": [{\"type\": 2, \"style\": 4, \"disabled\": false, \"label\": \"Confirm\", \"custom_id\": \"fmc:$POST:2\"}]}], \"tts\": false, \"flags\": 64}" \
-    "a merge click must answer with an ephemeral confirmation button"
-  assert_contains "$out" '"content": "Sent: Merge it. Firstmate will record it, and the post updates when it does.", "tts": false, "flags": 64' \
+  assert_contains "$out" "\"content\": \"Confirm: Delete the branch?\", \"components\": [{\"type\": 1, \"components\": [{\"type\": 2, \"style\": 4, \"disabled\": false, \"label\": \"Confirm\", \"custom_id\": \"fmc:$POST:2\"}]}], \"tts\": false, \"flags\": 64}" \
+    "a deletion click must answer with an ephemeral confirmation button"
+  assert_contains "$out" '"content": "Sent: Delete the branch. Firstmate will record it, and the post updates when it does.", "tts": false, "flags": 64' \
     "the confirmation click must be sent and answered ephemerally"
   [ "$(resolved_lines "$home" pick)" = 0 ] || fail "the routed click recorded the answer itself"
   [ "$(button_requests "$home")" = 1 ] || fail "the routed click did not file exactly one request"
@@ -1258,9 +1283,9 @@ test_16_recommended_option_renders_green_with_a_single_star() {
   open_request "$home"
   open_key "$home" pick
   payload=$(emit_decision "$home" 1 '{"key":"'"$KEY"'","options":[
-    {"label":"North","recommended":true},{"label":"Merge it"}]}')
+    {"label":"North","recommended":true},{"label":"Delete the branch"}]}')
   jq -e --arg key "$KEY" '.decision.key == $key
-    and .decision.options == [{"id":1,"label":"⭐ North","confirm":false,"recommended":true},{"id":2,"label":"Merge it","confirm":true}]' \
+    and .decision.options == [{"id":1,"label":"⭐ North","confirm":false,"recommended":true},{"id":2,"label":"Delete the branch","confirm":true}]' \
     "$payload" >/dev/null || fail "the recommended payload lost its star or flags: $(cat "$payload")"
   out=$(plugin_py "$home" "$payload" <<'PY'
 import json, sys
@@ -1271,7 +1296,7 @@ PY
 ) || fail "the renderer refused the recommended decision"
   printf '%s' "$out" | jq -e --arg key "$KEY" '
     .[0].components[0] == {"type":2,"style":3,"label":"⭐ North","custom_id":("fmd:" + $key + ":1"),"disabled":false}
-    and .[0].components[1] == {"type":2,"style":4,"label":"Merge it","custom_id":("fmd:" + $key + ":2"),"disabled":false}' \
+    and .[0].components[1] == {"type":2,"style":4,"label":"Delete the branch","custom_id":("fmd:" + $key + ":2"),"disabled":false}' \
     >/dev/null || fail "the recommended button must be green and the other keeps its style: $out"
   out=$(plugin_py "$home" <<'PY'
 import json, decisions
@@ -1820,7 +1845,7 @@ test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records
 test_4_others_are_not_authorised
-test_5_high_risk_options_need_a_confirmation_step
+test_5_one_click_decides_reversible_work_and_only_destruction_confirms
 test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops
 test_7_stale_posts_are_no_ops
 test_8_discuss_and_typed_replies_stay_as_fallbacks

@@ -543,12 +543,15 @@ fm_ext_text_choice_shaped() {
   printf '%s\n' "$text" | grep -qiE -e "$FM_EXT_CHOICE_CUE_RE"
 }
 
-# Option labels naming a merge, a deploy, a deletion, money, credentials, or
-# another destructive or irreversible action always need a second confirmation
-# click, whatever the emitter declared. Matched case-insensitively anywhere in
-# the label; an extra confirmation is harmless, a missing one is not.
+# Option labels naming a deletion, money, credentials, or another irreversible
+# destruction always need a second confirmation click, whatever the emitter
+# declared. Merges, deploys, releases, and other reversible production changes
+# are deliberately absent: one click, or the same author's clear typed reply, is
+# the captain's word for that one decision, and docs/configuration.md's
+# decision-buttons contract owns that policy. Matched case-insensitively
+# anywhere in the label; only destruction still earns the extra click.
 # shellcheck disable=SC2034 # Read by the sourcing emit script.
-FM_EXT_DECISION_CONFIRM_PATTERN='merge|deploy|prod|ship|release|publish|push|delete|deletion|remove|destroy|discard|drop|wipe|purge|erase|reset|revert|roll ?back|force|overwrite|tear ?down|revoke|rotate|kill|money|pay|charge|refund|purchase|buy|invoice|billing|budget|credential|secret|token|password|api ?key'
+FM_EXT_DECISION_CONFIRM_PATTERN='delete|deletion|remove|destroy|discard|drop|wipe|purge|erase|reset|force ?-? ?push|push([[:space:]]+[^[:space:]]+)*[[:space:]]+(-[vqund46]*[fd][^[:space:]]*|--?force(-with-lease)?|--(mirror|prune)|[+:][^[:space:]]+)([[:space:]=]|$)|overwrite|tear ?down|revoke|rotate|kill|money|pay|charge|refund|purchase|buy|invoice|billing|budget|credential|secret|token|password|api ?key'
 
 _fm_ext_decision_part_valid() {
   case "$1" in
