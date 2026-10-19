@@ -33,6 +33,7 @@ With a non-empty inventory it appends a `captain-held [key=<key>]` transfer even
 Scout teardown calls the read-only `verify` subcommand after checking for the report and before removing any source state.
 The [script header](../bin/fm-captain-hold.sh) owns the read-only `due` report's eligibility, legacy-date fallback, configuration, and backend limits.
 `verify` requires the recorded attestation, requires every recorded inventory entry to still be durable (actively captain-held, or carrying a recorded answer), and fails on any keyed status decision that opened after the last `complete`, which makes re-running `complete` the repair.
+An answered call that tasks-axi's Done retention trimmed into the configured Done archive stays verifiable from the record the archive keeps, while an archived call with no recorded answer still refuses; the [script header](../bin/fm-captain-hold.sh) "Done retention" paragraph owns the exact rule.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 ## Cleanup and captain calls
