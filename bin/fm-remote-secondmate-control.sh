@@ -55,7 +55,7 @@
 # the default-off path. print_route echoes the carrier the endpoint actually
 # holds, including for an already-alive endpoint that was not relaunched, so the
 # parent records the identity the agent really received rather than an intent.
-# On a RunPod host, launch also supplies the workstation auth-broker URL and a
+# On a RunPod or Boat host, launch and relaunch supply the workstation auth-broker URL and a
 # mode-600 bearer-file path to fm-spawn.
 # fm-spawn expands that file only inside an OMP pane's launch command, so bearer
 # bytes never enter this control command's argv, output, metadata, or logs.
