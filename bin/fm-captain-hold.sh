@@ -192,18 +192,20 @@
 # a single row still held for the captain; two such rows refuse rather than
 # attest, and `complete` names each prefix-resolved row beside its attested
 # legacy id so the guess stays auditable.
-# Done retention: on the markdown backend tasks-axi's `done_keep` trim moves
-# closed rows, answered captain calls included, out of the configured backlog
-# into the Done archive tasks-axi resolves for it (`[markdown] archive`, else
-# done-archive.md beside the backlog). An inventory entry that no live row
-# carries, or whose live row never carried a captain hold (no captain hold
-# kind, hold-set stamp, or resolution record - a later row reusing the id), is
-# therefore judged by the newest archived row of that id that did carry one:
-# it is durable only when that row records a resolution. An archived captain
-# row with no recorded answer refuses, an archived row never counts as still
-# held, and a live row carrying captain-hold provenance is always judged on its
-# own, so an older archived answer cannot settle a newer lifecycle. `complete`
-# names each entry the archive evidenced.
+# Done retention: on the markdown backend tasks-axi's `done_keep` trim (and any
+# `prune` of another section) moves rows, answered captain calls included, out
+# of the configured backlog into the Done archive tasks-axi resolves for it
+# (`[markdown] archive`, else done-archive.md beside the backlog). An inventory
+# entry that no live row carries, or whose live row never carried a captain
+# hold (no captain hold kind, hold-set stamp, or resolution record - a later
+# row reusing the id), is therefore judged by the newest archived row of that
+# id that did carry one, whichever section it was pruned from: it is durable
+# only when that row's resolution record settles the row's latest lifecycle,
+# so a re-held row archived with only an earlier lifecycle's record refuses.
+# An archived captain row with no recorded answer refuses, an archived row
+# never counts as still held, and a live row carrying captain-hold provenance
+# is always judged on its own, so an older archived answer cannot settle a
+# newer lifecycle. `complete` names each entry the archive evidenced.
 #
 # `open` is the read-only predicate a mechanical closer asks before it may
 # retire a task's row: is this task still an open captain call? Exit 0 means it
@@ -552,9 +554,15 @@ body_has_resolution_record() {  # <task-body>
   return 1
 }
 
-body_has_current_resolution_record() {
-  local body stamp
+body_has_current_resolution_record() {  # <shown-task-body>
+  local body
   body=$(decode_shown_value "$1") || return 1
+  decoded_body_has_current_resolution_record "$body"
+}
+
+# Whether the newest record is linked to the hold-set stamp the body opens with.
+decoded_body_has_current_resolution_record() {  # <decoded-task-body>
+  local body=$1 stamp
   stamp=$(body_hold_set_timestamp "$body")
   [ -n "$stamp" ] || return 1
   body_has_resolution_record "$body" || return 1
@@ -640,11 +648,14 @@ row_has_captain_provenance() {  # <hold-kind> <decoded-task-body>
 
 # Print every row this home's configured Done archive holds for <id>, oldest
 # first, as `<hold-kind>\t<base64 body>`; print nothing when the backend keeps
-# no markdown archive or the archive does not exist yet. Done retention appends
-# pruned rows verbatim under `## Archived <date>` headings, so each block is
-# read through the installed tasks-axi parser and row projection as the Done
-# section it left, and the archive path is the one tasks-axi's own backlog
-# context resolves for this backlog file.
+# no markdown archive or the archive does not exist yet. Retention appends
+# pruned rows verbatim under `## Archived <date>` headings, from whichever
+# section was pruned, so the reader normalizes every heading to Done and every
+# open bullet (`- [ ] <id> -`, legacy `- **<id>** -`) to a checked one before
+# the installed tasks-axi parser and row projection read it: an unanswered row
+# archived from Queued or In flight is never skipped, and file order stays the
+# archive order. The archive path is the one tasks-axi's own backlog context
+# resolves for this backlog file.
 archived_rows_for_id() {  # <task-id>
   local id=$1 data root backend file pkg
   data=$(fm_backlog_data_absolute "$DATA") || {
@@ -682,7 +693,11 @@ try {
   if (error.code === "ENOENT") process.exit(0);
   throw error;
 }
-const doc = parseBacklog(src.replace(/^##[ \t]+Archived\b.*$/gm, "## Done"));
+const normalized = src
+  .replace(/^##[ \t]+Archived\b.*$/gm, "## Done")
+  .replace(/^- \[ \] /gm, "- [x] ")
+  .replace(/^- \*\*([^*\s]+)\*\* - /gm, "- [x] $1 - ");
+const doc = parseBacklog(normalized);
 const tasks = [];
 for (const section of doc.sections) {
   for (const entry of section.entries) {
@@ -702,9 +717,12 @@ NODE
 }
 
 # Judge <id> by the newest archived row that carried a captain hold. Returns 0
-# when that row records a resolution, 3 when it records none, and 1 when no
-# archived row of <id> ever carried a captain hold. An unreadable archive stops
-# the command instead of reading as absence.
+# when that row settles its latest lifecycle, 3 when it does not, and 1 when no
+# archived row of <id> ever carried a captain hold. `answer` leaves its record
+# first in the body, while a re-hold puts a fresh hold-set stamp back on top of
+# any earlier record, so a body that opens with a stamp is settled only by a
+# record linked to that stamp. An unreadable archive stops the command instead
+# of reading as absence.
 archived_call_answered() {  # <task-id>
   local id=$1 rows hold_kind encoded body verdict=1
   rows=$(archived_rows_for_id "$id") \
@@ -714,10 +732,11 @@ archived_call_answered() {  # <task-id>
     [ "$hold_kind" != '-' ] || hold_kind=''
     body=$(printf '%s' "$encoded" | base64 -d) || fail "could not decode the archived body of $id"
     row_has_captain_provenance "$hold_kind" "$body" || continue
-    if body_has_resolution_record "$body"; then
+    verdict=3
+    body_has_resolution_record "$body" || continue
+    if [ -z "$(body_hold_set_timestamp "$body")" ] \
+      || decoded_body_has_current_resolution_record "$body"; then
       verdict=0
-    else
-      verdict=3
     fi
   done <<EOF
 $rows

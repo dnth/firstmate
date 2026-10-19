@@ -1386,9 +1386,10 @@ test_self_held_call_answered_then_archived_still_verifies() {
 
 # The archive is evidence only for an answer it actually records. A call that
 # was answered and then trimmed out of the backlog passes; a captain-held call
-# closed with no recorded answer and then archived, or a live re-held lifecycle
-# whose ownership was lost, still refuses even when an older answered lifecycle
-# of the same id sits in the archive.
+# closed with no recorded answer and then archived, a live re-held lifecycle
+# whose ownership was lost, a newer lifecycle archived unanswered from the
+# queue, and a re-held row archived carrying only an earlier lifecycle's answer
+# all still refuse.
 test_archive_never_settles_an_unanswered_call() {
   local home origin call out
   home=$(make_home archived-answered-call)
@@ -1464,6 +1465,49 @@ test_archive_never_settles_an_unanswered_call() {
   fi
   assert_contains "$out" "neither held for the captain nor closed with a recorded captain answer" \
     "the lost-lifecycle refusal changed its reason"
+
+  # Queued-section retention archives the newer, still-unanswered lifecycle
+  # after the older answered one; the newest captain row in the archive decides.
+  run_captain "$home" hold "$call" --reason "captain next window pending" >/dev/null \
+    || fail "could not re-hold the new lifecycle"
+  tasks_in "$home" prune --state queued --keep 0 >/dev/null \
+    || fail "queued retention could not archive the new lifecycle"
+  assert_grep "[ ] $call -" "$home/data/done-archive.md" "queued retention did not archive the unanswered lifecycle"
+  if out=$(run_captain "$home" complete "$origin" --none 2>&1); then
+    fail "an older archived answer settled a newer lifecycle archived unanswered from the queue"
+  fi
+  assert_contains "$out" "$call was archived out of this home's configured backlog with no recorded captain answer" \
+    "the archived-newer-lifecycle refusal did not name the unanswered call"
+  if run_captain "$home" verify "$origin" > "$home/queued-archive-verify.out" 2>&1; then
+    fail "verify let an older archived answer settle a newer lifecycle archived from the queue"
+  fi
+
+  # One row can carry both lifecycles: a released answer stays in the body when
+  # the row is re-held, and closing that re-held row by hand answers nothing.
+  home=$(make_home archived-reheld-row)
+  call=sample-reheld-call
+  tasks_in "$home" add "$origin" "Run the sample ingest" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the fourth ingest origin"
+  write_origin_meta "$home" "$origin"
+  printf 'working: ingest running\n' > "$home/state/$origin.status"
+  run_captain "$home" hold "$call" --title "Choose the sample batch" \
+    --reason "captain batch choice pending" --origin "$origin" >/dev/null \
+    || fail "could not hold the released lifecycle"
+  run_captain "$home" complete "$origin" "$call" >/dev/null \
+    || fail "the ingest origin could not inventory the released lifecycle"
+  printf 'Run the first batch.\n' > "$home/batch-decision.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/batch-decision.txt" --release >/dev/null \
+    || fail "the captain's answer could not release the first lifecycle"
+  run_captain "$home" hold "$call" --reason "captain second batch pending" >/dev/null \
+    || fail "could not re-hold the released row"
+  tasks_in "$home" "done" "$call" --keep 0 >/dev/null \
+    || fail "could not close and archive the re-held row out of band"
+  assert_grep "[x] $call -" "$home/data/done-archive.md" "the re-held row was not archived"
+  if out=$(run_captain "$home" complete "$origin" --none 2>&1); then
+    fail "a released answer from an earlier lifecycle settled the re-held row archived unanswered"
+  fi
+  assert_contains "$out" "$call was archived out of this home's configured backlog with no recorded captain answer" \
+    "the re-held-row refusal did not name the unanswered call"
   pass "the archive settles an answered call and never an unanswered or lost one"
 }
 
