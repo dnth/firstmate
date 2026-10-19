@@ -10,9 +10,9 @@ The workstation needs the Boat CLI, an authenticated Boat account, `uv`, Python 
 Boat CLI authentication is read from its mode-600 `${XDG_CONFIG_HOME:-~/.config}/ascii/boat/config.json`, with the CLI's legacy `ascii/box/config.json` fallback when the Boat file is absent.
 `FM_BOAT_CONFIG_FILE` selects an explicit file instead of those defaults; a missing or unsafe override is refused rather than falling back.
 Never put the API credential in command arguments or tracked files.
-Subscription authentication additionally requires Linux cgroup v2, a reachable systemd user manager, and a workstation OMP broker login.
+Brokered OMP authentication additionally requires Linux cgroup v2, a reachable systemd user manager, and a workstation OMP installation with the selected account credentials.
 There is no PID-tree fallback on systems without that custody substrate.
-Keep the workstation online while subscription-authenticated work is running.
+The [credential boundary](#subscription-credential-boundary) owns credential sources and the workstation-online requirement.
 The remote host must meet the installation and readiness requirements in [remote-secondmates.md](remote-secondmates.md#prerequisites); provisioning compute does not install a Firstmate home or a worker runtime.
 The [remote-home prerequisites](remote-secondmates.md#prerequisites) own the neutral forge-credential policy, toolchain, entrypoint `PATH`, and `gh auth` dispatch gate.
 
@@ -96,15 +96,36 @@ The shared OMP bearer grammar lives in `bin/fm-omp-auth-token-lib.sh`.
 The provider policy lives in `bin/fm-boat-policy.mjs` and is used both before allocation and by facade egress.
 It defaults to `openai-codex`; a mode-600 `config/boat/providers.json` may explicitly select other provider names.
 A model must name a listed provider and a nonempty model before any sandbox creation.
-The scoped facade accepts OAuth entries only, requires an opaque nonnegative integer refresh locator and finite upstream expiry, and reconstructs each entry from explicit fields:
+OAuth entries require an opaque nonnegative integer refresh locator and finite upstream expiry and are reconstructed from the explicit fields below; upstream refresh data is never exposed:
 
 ```json
 {"provider":"openai-codex","id":2,"identityKey":null,"rotatesInMs":null,"credential":{"type":"oauth","access":"<access>","refresh":"__remote__","expires":4102444800000}}
 ```
 
 The null fields and `__remote__` refresh marker are protocol constants, never upstream identity or refresh data.
-Upstream refresh tokens, API keys, unknown fields or shapes, absent credential arrays, and failed refresh response bodies never leave the facade.
-Refresh refuses an ID that the current scoped snapshot cannot vend.
+For `api_key`, the facade reconstructs only `{provider,id,identityKey:null,rotatesInMs:null,credential:{type:'api_key',key}}` and serves it only when its provider is allowlisted and its ID is in that lease's credential-ID scope.
+Refresh accepts only OAuth entries vendable in the current scoped snapshot.
+Upstream refresh tokens, unknown fields or shapes, absent credential arrays, and failed refresh response bodies never leave the facade.
+To use any of `opencode-go-dnth`, `opencode-go-dnth-1`, `opencode-go-neuralengine`, or `opencode-go-neuralengine-1`, include that provider in the captain-private allowlist above; it contains provider names, never keys.
+
+Boat's Python 3 must have PyYAML available for model-configuration installation and checks; API-key resolution uses only the Python standard library.
+
+At lease start, the workstation reads the allowlisted OpenCode Go keys from its mode-600 `~/.local/share/opencode/auth.json` and imports them into the workstation OMP broker.
+The lease facade scopes OpenCode Go API-key egress to the selected credential ID for each imported account, excluding unrelated credentials even for the same provider.
+The Boat's keyless OMP `models.yml` entries call a remote helper that reads the scoped broker snapshot; this is the only OpenCode Go key path for the Boat secondmate and its workers.
+Installation replaces the four Go provider entries while preserving unrelated configuration.
+An existing providers mapping must use an unquoted `providers:` block header and two-space provider indentation; unsupported representations, including inline mappings and four-space provider indentation, are refused before writing, leaving the original file unchanged.
+Installation and readiness checks parse YAML and reject duplicate keys and malformed configuration.
+During a live lease, OMP can hold a routed key in process memory for requests; no key or workstation `auth.json` is written to Boat disk, environment, command line, or logs.
+The broker snapshot disk cache is disabled for Boat OMP launches, including relaunches, while generic broker launches retain their existing cache behavior.
+Boat launch and relaunch require the installed credential-lease marker and refuse a missing or unsafe marker; restore the lease before retrying.
+The workstation must stay online for the lease so the helper can reach the broker.
+
+When an OpenCode key changes, the next lease imports the new value and disables the previously imported broker credential owned by that placement.
+Revoke access by rotating or revoking the key at OpenCode; the provider then rejects the old value, including one still held in an active process's memory.
+
+Boat cannot inspect these accounts' quota: quota-axi reads the workstation's `auth.json`, which is not copied to Boat.
+The main home selects the account at routing time using current workstation quota evidence and passes its provider/model in the launch profile; Boat must not choose among Go accounts or claim quota-informed selection.
 
 ## Verification and opt-in live smoke
 

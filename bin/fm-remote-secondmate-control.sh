@@ -55,7 +55,7 @@
 # the default-off path. print_route echoes the carrier the endpoint actually
 # holds, including for an already-alive endpoint that was not relaunched, so the
 # parent records the identity the agent really received rather than an intent.
-# On a RunPod host, launch also supplies the workstation auth-broker URL and a
+# On a RunPod or Boat host, launch and relaunch supply the workstation auth-broker URL and a
 # mode-600 bearer-file path to fm-spawn.
 # fm-spawn expands that file only inside an OMP pane's launch command, so bearer
 # bytes never enter this control command's argv, output, metadata, or logs.
@@ -99,9 +99,14 @@ mode_600() {
 }
 
 configure_compute_omp_auth_launch() {
-  local token port
-  if [ -f /home/user/.fm/boat-auth.marker ] && [ ! -L /home/user/.fm/boat-auth.marker ]; then
-    FM_RUNPOD_OMP_AUTH_BROKER_TOKEN_FILE=/home/user/.fm/omp-auth-broker.token
+  local token port boat_auth_dir
+  boat_auth_dir=${FM_BOAT_REMOTE_AUTH_DIR:-/home/user/.fm}
+  if [ -e "$boat_auth_dir/boat-omp-remote.py" ] \
+     || [ -e "$boat_auth_dir/omp-auth-broker.token" ] \
+     || [ -e "$boat_auth_dir/boat-auth.marker" ] || [ -L "$boat_auth_dir/boat-auth.marker" ]; then
+    [ -f "$boat_auth_dir/boat-auth.marker" ] && [ ! -L "$boat_auth_dir/boat-auth.marker" ] \
+      || die "Boat OMP auth marker is missing or unsafe; restore the Boat credential lease before launching"
+    FM_RUNPOD_OMP_AUTH_BROKER_TOKEN_FILE="$boat_auth_dir/omp-auth-broker.token"
     FM_RUNPOD_OMP_AUTH_BROKER_URL=http://127.0.0.1:8765
   else
     [ -f "$FM_RUNPOD_SANDBOX_MARKER" ] && [ ! -L "$FM_RUNPOD_SANDBOX_MARKER" ] || return 0
@@ -439,6 +444,7 @@ cmd_relaunch() {
   remote_endpoint_require "$id"
   [ "$model" != - ] || model=default
   [ "$effort" != - ] || effort=default
+  configure_compute_omp_auth_launch
   HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" \
     FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
     FM_DATA_OVERRIDE="$CONTROL_DATA" FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \

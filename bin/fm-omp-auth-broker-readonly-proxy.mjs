@@ -13,6 +13,14 @@ const tokenFile = process.env.FM_OMP_AUTH_BROKER_TOKEN_FILE;
 const upstreamTokenFile = process.env.FM_OMP_AUTH_BROKER_UPSTREAM_TOKEN_FILE ?? tokenFile;
 const scoped = process.env.FM_BOAT_PROVIDERS !== undefined;
 const policy = providers();
+const apiKeyCredentialIds = (() => {
+  // Scoped Boat egress denies API keys unless the lease names exact IDs.
+  if (!scoped) return undefined;
+  if (process.env.FM_BOAT_API_KEY_CREDENTIAL_IDS === undefined) return new Set();
+  const ids = JSON.parse(process.env.FM_BOAT_API_KEY_CREDENTIAL_IDS);
+  if (!Array.isArray(ids) || ids.some(id => !Number.isSafeInteger(id) || id < 0)) throw new Error('invalid API-key credential ID scope');
+  return new Set(ids);
+})();
 const upstream = new URL(process.env.FM_OMP_AUTH_BROKER_UPSTREAM_URL ?? 'http://127.0.0.1:8765');
 const bind = /^(127\.0\.0\.1|localhost):(\d+)$/u.exec(process.env.FM_OMP_AUTH_BROKER_PROXY_BIND ?? '127.0.0.1:18766');
 if (upstream.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(upstream.hostname)) throw new Error('upstream must be loopback HTTP');
@@ -60,7 +68,7 @@ function envelope(input, stream = false) {
 function snapshot(input) {
   const out = envelope(input);
   if (!out || !Array.isArray(input.credentials)) return null;
-  out.credentials = input.credentials.map(e => vend(e, policy)).filter(Boolean);
+  out.credentials = input.credentials.map(e => vend(e, policy, apiKeyCredentialIds)).filter(Boolean);
   return out;
 }
 async function fetchBroker(path, options = {}) {
@@ -91,7 +99,7 @@ async function stream(request, response, remote, controller) {
           out.credentials = body.credentials; members.clear();
           for (const e of out.credentials) members.add(e.id);
         } else if (input.kind === 'entry') {
-          out.entry = vend(input.entry, policy); if (!out.entry) continue;
+          out.entry = vend(input.entry, policy, apiKeyCredentialIds); if (!out.entry) continue;
           members.add(out.entry.id);
         } else {
           if (!Number.isSafeInteger(input.id) || !members.delete(input.id)) continue;
@@ -117,7 +125,8 @@ const server = createServer(async (request, response) => {
       const upstreamSnapshot = await fetchBroker('/v1/snapshot');
       const body = upstreamSnapshot.ok ? snapshot(await upstreamSnapshot.json()) : null;
       const id = Number(url.pathname.split('/')[3]);
-      if (!body?.credentials.some(e => e.id === id)) return json(response, 403, { error: 'credential is not vendable' });
+      const credential = body?.credentials.find(e => e.id === id);
+      if (!credential || credential.credential.type !== 'oauth') return json(response, 403, { error: 'credential is not refreshable' });
     }
     const remote = await fetchBroker(`${url.pathname}${url.search}`, {
       method: request.method, signal: url.pathname.endsWith('/stream') ? controller.signal : AbortSignal.timeout(10000),
@@ -129,7 +138,7 @@ const server = createServer(async (request, response) => {
       const input = await remote.json();
       let body;
       if (refresh) {
-        const out = envelope(input, true); const entry = vend(input.entry, policy);
+        const out = envelope(input, true); const entry = vend(input.entry, policy, apiKeyCredentialIds);
         body = out && entry && String(entry.id) === url.pathname.split('/')[3] ? { ...out, entry } : null;
       } else if (url.pathname === '/v1/snapshot') body = snapshot(input);
       // Scoped usage has no credential-bearing passthrough; unsupported shapes refuse.

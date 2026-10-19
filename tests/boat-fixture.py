@@ -114,20 +114,30 @@ elif name == 'ssh':
     if 'cat > /home/user/.fm/boat-auth-control' in command:
         refusal('stage')
         (remote / 'boat-auth-control').write_text(sys.stdin.read())
+    elif 'cat > /home/user/.fm/boat-omp-remote.py' in command:
+        refusal('stage')
+        helper_path = remote / 'boat-omp-remote.py'
+        helper_path.write_text(sys.stdin.read()); helper_path.chmod(0o700)
     elif '--install' in command:
         refusal('install')
         if state.get('install_barrier'):
             (world / 'installer-waiting').touch()
             while not (world / 'installer-go').exists(): time.sleep(.05)
-        env = dict(os.environ, FM_BOAT_REMOTE_AUTH_DIR=str(remote))
+        env = dict(os.environ, HOME=str(remote), FM_BOAT_REMOTE_AUTH_DIR=str(remote),
+                   PI_CODING_AGENT_DIR=str(remote / '.omp/agent'))
         sys.exit(subprocess.run(['bash', remote / 'boat-auth-control', '--install'], input=sys.stdin.read(), text=True, env=env).returncode)
     elif '--shred' in command:
         refusal('shred')
-        env = dict(os.environ, FM_BOAT_REMOTE_AUTH_DIR=str(remote))
+        env = dict(os.environ, HOME=str(remote), FM_BOAT_REMOTE_AUTH_DIR=str(remote))
         sys.exit(subprocess.run(['bash', remote / 'boat-auth-control', '--shred'], env=env).returncode)
     elif '--check' in command:
         refusal('check')
         refusal('tunnel')
+        env = dict(os.environ, HOME=str(remote), FM_BOAT_REMOTE_AUTH_DIR=str(remote),
+                   PI_CODING_AGENT_DIR=str(remote / '.omp/agent'))
+        checked = subprocess.run([sys.executable, remote / 'boat-omp-remote.py', 'check-models'],
+                                 env=env, capture_output=True, text=True)
+        if checked.returncode: sys.exit(checked.returncode)
         settings = json.loads(next((world / 'home/state/boat-omp-auth').glob('*/settings.json')).read_text())
         token = (remote / 'omp-auth-broker.token').read_text()
         request = urllib.request.Request('http://' + settings['proxy'] + '/v1/snapshot', headers={'Authorization': 'Bearer ' + token})
