@@ -5284,9 +5284,14 @@ if [ -n "${FM_OMP_AUTH_BROKER_URL:-}" ] || [ -n "${FM_OMP_AUTH_BROKER_TOKEN_FILE
   if [ "$HARNESS" = omp ]; then
     LAUNCH="OMP_AUTH_BROKER_URL=$sq_omp_auth_url OMP_AUTH_BROKER_TOKEN=\"\$(cat $sq_omp_auth_token_file)\" FM_OMP_AUTH_BROKER_URL=$sq_omp_auth_url FM_OMP_AUTH_BROKER_TOKEN_FILE=$sq_omp_auth_token_file $LAUNCH"
   fi
-  if [ "$HARNESS" = omp ] \
-     && [ -f "$(dirname "$FM_OMP_AUTH_BROKER_TOKEN_FILE")/boat-auth.marker" ] \
-     && [ ! -L "$(dirname "$FM_OMP_AUTH_BROKER_TOKEN_FILE")/boat-auth.marker" ]; then
+  if [ "$HARNESS" = omp ] && {
+    [ "$FM_OMP_AUTH_BROKER_TOKEN_FILE" = "${FM_BOAT_REMOTE_AUTH_DIR:-/home/user/.fm}/omp-auth-broker.token" ] \
+      || [ -e "$(dirname "$FM_OMP_AUTH_BROKER_TOKEN_FILE")/boat-auth.marker" ] \
+      || [ -L "$(dirname "$FM_OMP_AUTH_BROKER_TOKEN_FILE")/boat-auth.marker" ];
+  }; then
+    [ -f "$(dirname "$FM_OMP_AUTH_BROKER_TOKEN_FILE")/boat-auth.marker" ] \
+      && [ ! -L "$(dirname "$FM_OMP_AUTH_BROKER_TOKEN_FILE")/boat-auth.marker" ] \
+      || { echo "error: Boat OMP auth marker is missing or unsafe; restore the Boat credential lease before launching" >&2; exit 1; }
     LAUNCH="OMP_AUTH_BROKER_SNAPSHOT_TTL_MS=0 $LAUNCH"
   fi
 fi

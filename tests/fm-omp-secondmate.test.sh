@@ -574,8 +574,17 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
   token_file="$CASE/omp-auth-broker.token"
   printf '%s' 'dummy_remote_agent_broker_token_789' > "$token_file"
   chmod 600 "$token_file"
+  out=$(run_spawn_herdr \
+    FM_BOAT_REMOTE_AUTH_DIR="$CASE" \
+    FM_OMP_AUTH_BROKER_URL=http://127.0.0.1:8765 \
+    FM_OMP_AUTH_BROKER_TOKEN_FILE="$token_file" 2>&1) \
+    && fail "OMP Boat launch accepted a missing auth marker"
+  assert_contains "$out" 'Boat' "missing Boat marker refusal did not identify Boat"
+  assert_contains "$out" 'marker' "missing Boat marker refusal did not identify the marker"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing Boat marker started an agent"
   printf 'boat-auth-v1\n' > "$CASE/boat-auth.marker"
   out=$(run_spawn_herdr \
+    FM_BOAT_REMOTE_AUTH_DIR="$CASE" \
     FM_OMP_AUTH_BROKER_URL=http://127.0.0.1:8765 \
     FM_OMP_AUTH_BROKER_TOKEN_FILE="$token_file" 2>&1) \
     || fail "OMP Boat secondmate broker launch failed: $out"

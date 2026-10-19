@@ -169,6 +169,62 @@ class Lab:
                     raise AssertionError('helper survived release: ' + identity)
         self.end.set(); self.server.shutdown(); self.server.server_close(); self.thread.join()
 
+class LaunchAuthTests(unittest.TestCase):
+    def test_relaunch_exports_installed_boat_broker_and_refuses_missing_marker(self):
+        import shutil
+        with tempfile.TemporaryDirectory(dir=BASE) as directory:
+            home = Path(directory)
+            code = home / 'code'; code.mkdir()
+            scripts = code / 'bin'; scripts.mkdir()
+            for source in (ROOT / 'bin').iterdir():
+                (scripts / source.name).symlink_to(source)
+            control = scripts / 'fm-remote-secondmate-control.sh'
+            control.unlink(); shutil.copyfile(ROOT / 'bin' / control.name, control)
+            child = scripts / 'fm-control.sh'; child.unlink()
+            child.write_text('#!/usr/bin/env python3\nimport json,os\nprint(json.dumps({k:os.environ.get(k) for k in ("FM_OMP_AUTH_BROKER_URL", "FM_OMP_AUTH_BROKER_TOKEN_FILE")}))\n')
+            child.chmod(0o700)
+            target = home / 'mate'; target.mkdir()
+            (target / 'bin').mkdir(); (target / 'AGENTS.md').touch()
+            (target / '.fm-secondmate-home').write_text('mate\n')
+            data = target / 'data'; data.mkdir(); (data / 'charter.md').write_text('Fixture charter\n')
+            state = target / 'state/parent-route'; state.mkdir(parents=True)
+            (state / 'mate.meta').write_text(f'window=fm-remote:w1:p2\nendpoint_task_id=mate\nworktree={target}\nproject={target}\nbackend=herdr\nherdr_session=fm-remote\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\nharness=omp\n')
+            auth = home / 'auth'; auth.mkdir()
+            shutil.copyfile(ROOT / 'bin/fm-boat-remote-omp.py', auth / 'boat-omp-remote.py')
+            env = dict(os.environ, FM_HOME=str(target), FM_ROOT_OVERRIDE=str(code),
+                       FM_BOAT_REMOTE_AUTH_DIR=str(auth), PI_CODING_AGENT_DIR=str(home / 'agent'))
+            installed = subprocess.run(['bash', ROOT / 'bin/fm-boat-remote-auth.sh', '--install'],
+                                       input='fixture_broker_token', text=True, capture_output=True, env=env)
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            marker = auth / 'boat-auth.marker'
+            self.assertEqual(marker.read_text(), 'boat-auth-v1\n')
+            command = ['bash', control, 'relaunch', 'mate', 'omp', '-', '-']
+            result = subprocess.run(command, text=True, capture_output=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {
+                'FM_OMP_AUTH_BROKER_URL': 'http://127.0.0.1:8765',
+                'FM_OMP_AUTH_BROKER_TOKEN_FILE': str(auth / 'omp-auth-broker.token')})
+            marker.unlink()
+            result = subprocess.run(command, text=True, capture_output=True, env=env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Boat', result.stderr)
+            self.assertIn('marker', result.stderr)
+            self.assertEqual(result.stdout, '')
+            runpod = home / 'runpod'; runpod.mkdir()
+            (runpod / 'sandbox').touch()
+            (runpod / 'token').write_text('fixture_runpod_token')
+            (runpod / 'token').chmod(0o600)
+            env.update(FM_BOAT_REMOTE_AUTH_DIR=str(home / 'not-boat'),
+                       FM_RUNPOD_SANDBOX_MARKER=str(runpod / 'sandbox'),
+                       FM_RUNPOD_OMP_AUTH_BROKER_TOKEN_FILE=str(runpod / 'token'),
+                       FM_RUNPOD_OMP_AUTH_BROKER_URL='http://127.0.0.1:9876')
+            result = subprocess.run(command, text=True, capture_output=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {
+                'FM_OMP_AUTH_BROKER_URL': 'http://127.0.0.1:9876',
+                'FM_OMP_AUTH_BROKER_TOKEN_FILE': str(runpod / 'token')})
+
+
 class ModelConfigTests(unittest.TestCase):
     def test_replacement_preserves_siblings(self):
         for provider in GO_PROVIDERS:
