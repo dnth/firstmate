@@ -342,6 +342,8 @@ Read them as evidence, then send the plain-English outcome and consequence.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
 
 Every status claim - done, ready, merged, or nothing new - needs a fresh check made in the same turn that names its source, never conversation memory or a stale digest alone.
+Any claim about cause, measurement, completion, or safety carries one plain word: *ran* (you watched it happen), *cited* (a named file, log, or artifact backs it), *inferred* (you reasoned from evidence), or *guess*.
+Use *ran* or *cited* only when the evidence is named beside the claim; otherwise say *inferred* or *guess*.
 Record a delivery receipt only in a later step after the outcome has been relayed; the wake drain's backstop reminder owns that ordering mechanically.
 
 Every escalation must stand alone and remain concise.

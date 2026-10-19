@@ -127,6 +127,16 @@ resolve_directory_input() {
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# The claim-confidence vocabulary, stated once here and carried by the ship
+# evidence block and the scout report guidance. It names how a claim was
+# established without adding a gate: the receipt checker still reads only
+# outcome.
+IFS= read -r -d '' CONFIDENCE_SECTION <<'EOF' || true
+Every claim about a cause, a measurement, completion, or safety carries one confidence word: `ran` (observed directly: command output, a test run, a live check), `cited` (a named file:line, log, or artifact backs it), `inferred` (reasoned from evidence, not observed), or `guess`.
+Call a claim `ran` or `cited` only when the evidence is named next to it; otherwise it is `inferred` or `guess`.
+EOF
+CONFIDENCE_SECTION=${CONFIDENCE_SECTION%$'\n'}
+
 render_ship_delivery() {
   local task_id=$1 delivery_mode operational_home data_dir artifact_dir
   delivery_mode=$2
@@ -146,6 +156,7 @@ render_ship_delivery() {
 Before reporting implementation complete, record at least one compact receipt for every acceptance criterion with \`$FM_ROOT/bin/fm-receipt.sh $task_id <criterion> <type> <summary> <result> --outcome <success|failure|negative|zero|skipped|empty|placeholder|weak|accepted-blocked> [options]\`.
 Only \`--outcome success\` evidences a criterion; \`accepted-blocked\` requires a non-empty \`--captain-exception "<text>"\` (the date plus the captain's own words or the board key that holds them) and accounts for the criterion without evidencing it; every other structured outcome records an unevidenced negative or inconclusive result.
 A task with any accepted-blocked criterion is never auto-merged; state those criteria and their exception references plainly in the PR description.
+$CONFIDENCE_SECTION
 Run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id\` and do not append \`done:\` unless its JSON status is \`complete\`.
 The latest receipt per criterion decides it: when a finding or a later test shows a criterion unsatisfied, record a \`--outcome failure\` receipt for it, fix, and record a fresh \`--outcome success\`.
 Receipts establish that you accounted for every declared criterion; they certify nothing about review, CI, No-Mistakes completion, or merge readiness, so keep summaries and results compact and point to commands or artifacts when useful.
@@ -564,6 +575,7 @@ $SUBAGENT_SECTION
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+$CONFIDENCE_SECTION
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion} - report at data/$ID/report.md\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
