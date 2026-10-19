@@ -84,22 +84,15 @@ slug_of() {
 }
 
 emit_as() {
-  local home=$1 rid=$2 kind=$3 generation=$4 text=$5 title=$6 state=$7 textfile
+  local home=$1 rid=$2 kind=$3 generation=$4 text=$5 title=${6:-} state=${7:-} retitle=${8:-} textfile
+  local args=()
   textfile="$home/emit-$generation-$kind.txt"
   write_text "$textfile" "$text"
-  if [ -n "$title" ] && [ -n "$state" ]; then
-    home_env "$home" "$EMIT" --request-id "$rid" --kind "$kind" --generation "$generation" \
-      --text-file "$textfile" --thread-title "$title" --thread-state "$state"
-  elif [ -n "$title" ]; then
-    home_env "$home" "$EMIT" --request-id "$rid" --kind "$kind" --generation "$generation" \
-      --text-file "$textfile" --thread-title "$title"
-  elif [ -n "$state" ]; then
-    home_env "$home" "$EMIT" --request-id "$rid" --kind "$kind" --generation "$generation" \
-      --text-file "$textfile" --thread-state "$state"
-  else
-    home_env "$home" "$EMIT" --request-id "$rid" --kind "$kind" --generation "$generation" \
-      --text-file "$textfile"
-  fi
+  args=(--request-id "$rid" --kind "$kind" --generation "$generation" --text-file "$textfile")
+  [ -z "$title" ] || args+=(--thread-title "$title")
+  [ -z "$state" ] || args+=(--thread-state "$state")
+  [ -z "$retitle" ] || args+=(--thread-retitle "$retitle")
+  home_env "$home" "$EMIT" "${args[@]}"
 }
 
 # The stand-in Discord edge for renames. An extra {"kind":"actual",
@@ -1852,6 +1845,257 @@ test_30_open_guilds_use_shared_allowlist_grammar() {
   pass "30 open guilds use the shared allowlist grammar"
 }
 
+# --- 31. a reply may retitle the thread so its name follows the conversation -
+#
+# The conversation moved on from the name the creating reply chose, so a later
+# reply carries a retitle. It replaces the stored base name, keeps whatever
+# marker the thread wears, and every later marker, auto-clear, and reconciliation
+# builds on the new name; a plain later title still replaces nothing.
+
+test_31_retitle_follows_the_conversation() {
+  local home slug out
+  home="$TMP_ROOT/c31"
+  setup_home "$home"
+  slug=$(intake_as "$home" "where are we on ic release?" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Aceh ships this week." "Aceh · ingestion status" "needs-you" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/Aceh · ingestion status" \
+    "the creating reply must open the thread"
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · ingestion status" \
+    "the creating reply must mark the thread"
+
+  emit_as "$home" "$RID" followup 2 "The IC migration is the blocker now." "" "" \
+    "InfoConnect · v0.5.11 migration" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "posted-to=777777777777777777 The IC migration is the blocker now." \
+    "a retitle reply must post in its own thread"
+  assert_contains "$out" "thread-rename=777777777777777777/❓ InfoConnect · v0.5.11 migration" \
+    "a retitle must rename the thread to the new base and keep its marker"
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
+    || fail "a retitle must not create a second thread: $out"
+  jq -e '.retitle == "InfoConnect · v0.5.11 migration"
+    and .topic_name == "❓ InfoConnect · v0.5.11 migration"' \
+    "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "the record must store the new base name: $(cat "$home/state/ext-outbox/$slug.thread.json")"
+
+  emit_as "$home" "$RID" final 3 "Migrated." "" "done" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-rename=777777777777777777/✅ InfoConnect · v0.5.11 migration" \
+    "a later marker must use the retitled base name, not the original"
+
+  emit_as "$home" "$RID" followup 4 "Same topic, more detail." "" "none" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-rename=777777777777777777/InfoConnect · v0.5.11 migration" \
+    "clearing a marker must keep the retitled base name"
+
+  emit_as "$home" "$RID" followup 5 "Nothing to rename here." >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  [ "$(renames_in "$out")" = 0 ] || fail "a reply without a retitle or state must not rename: $out"
+
+  emit_as "$home" "$RID" followup 6 "Late title." "Aceh · other" "" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  [ "$(printf '%s\n' "$out" | grep -cE '^thread-(create|rename)=')" = 0 ] \
+    || fail "a plain later title must still replace nothing: $out"
+
+  emit_as "$home" "$RID" followup 7 "Now it is accounting." "" "needs-you" \
+    "InfoConnect · accounting export" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-rename=777777777777777777/❓ InfoConnect · accounting export" \
+    "a second retitle must supersede the first"
+
+  # An in-thread request - the captain's typed reply - may retitle the same way.
+  rid2="discord:${GUILD}:${CHANNEL}:777777777777777777:999999999999999999"
+  intake_as "$home" "what about the ledger import?" 999999999999999999 "777777777777777777" message >/dev/null
+  emit_as "$home" "$rid2" answer 1 "Looking at it." "" "" "InfoConnect · ledger import" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ InfoConnect · ledger import" \
+    "an in-thread reply must be able to retitle the thread it arrived in"
+  emit_as "$home" "$rid2" followup 2 "Still on it." "" "done" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/✅ InfoConnect · ledger import" \
+    "a marker after an in-thread retitle must use the new base name"
+  emit_as "$home" "$rid2" followup 3 "Need a detail." "" "needs-you" >/dev/null
+  deliver "$home" >/dev/null
+  emit_as "$home" "$rid2" followup 4 "The topic moved." "" "" "InfoConnect · ledger export" >/dev/null
+  out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"InfoConnect · ledger import"}')
+  assert_contains "$out" "thread-rename=777777777777777777/InfoConnect · ledger export" \
+    "a retitle must preserve the captain's cleared marker"
+  assert_not_contains "$out" "❓" "a retitle must not restore a manually cleared marker"
+  pass "31 a retitle renames the thread and every later marker builds on it"
+}
+
+# --- 32. retitles pass the shared screen and stay inside Firstmate threads ---
+#
+# A retitle carries exactly the bounds and safety screen a creating title
+# passes, so an unsafe, multi-line, or over-long one is ignored rather than renamed onto a
+# thread. A thread this home did not create is never retitled either, and the
+# reply text always posts.
+
+test_32_retitles_are_screened_and_never_leave_home() {
+  local home slug out rc
+  home="$TMP_ROOT/c32"
+  setup_home "$home"
+  slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "On it." "Aceh · login fix" "" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
+  assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/Aceh · login fix" "the thread must exist"
+
+  local generation bad reason
+  generation=2
+  for reason in safety 'at most 60 characters' 'one line'; do
+    case "$generation" in
+      2) bad='fix fm-ship-login now' ;;
+      3) bad=$(printf 'A%.0s' $(seq 61)) ;;
+      4) bad=$'two\nlines' ;;
+    esac
+    emit_as "$home" "$RID" followup "$generation" "Reply remains intact." "" "" "$bad" \
+      >/dev/null 2>"$home/retitle-warning"; rc=$?
+    expect_code 0 "$rc" "a rejected retitle must still queue its reply"
+    assert_contains "$(cat "$home/retitle-warning")" 'warning: thread retitle ignored' "missing retitle warning"
+    assert_contains "$(cat "$home/retitle-warning")" "$reason" "missing rejection reason"
+    jq -e '.text == "Reply remains intact." and (has("thread_retitle") | not)' \
+      "$home/state/ext-outbox/$slug.followup.$generation.json" >/dev/null \
+      || fail "a rejected retitle must leave only the unchanged reply"
+    generation=$((generation + 1))
+  done
+  emit_as "$home" "$RID" followup 5 "Both flags." "Aceh · login fix" "" "InfoConnect · migration" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/InfoConnect · migration" \
+    "an explicit retitle must win over a later creation title"
+  emit_as "$home" "$RID" followup 6 "x" "" "done" "InfoConnect · migration" >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "a retitle with a state"
+  deliver "$home" >/dev/null
+
+  # An in-thread request whose thread this home did not create: the reply posts
+  # and the thread keeps its name.
+  rid2="discord:${GUILD}:${CHANNEL}:555555555555555555:888888888888888888"
+  intake_as "$home" "hello from your thread" 888888888888888888 "555555555555555555" message >/dev/null
+  emit_as "$home" "$rid2" answer 1 "Answering here." "" "" "Firstmate · not my thread" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "posted-to=555555555555555555 Answering here." \
+    "a retitle must never block the reply text"
+  assert_not_contains "$out" "thread-rename=555555555555555555" \
+    "a thread this home did not create must never be retitled"
+
+  # And the poster refuses an unusable retitle field, wherever it came from.
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster as poster
+home, slug = Path(sys.argv[1]), sys.argv[2]
+os.environ["FM_HOME"] = str(home)
+context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
+base = {"request_id": context["request_id"], "slug": slug, "origin": "message",
+        "channel_id": context["channel_id"], "thread_id": context["thread_id"],
+        "message_id": context["message_id"]}
+calls = []
+def rename(thread_id, name):
+    calls.append(name)
+assert json.loads((home / "state/ext-outbox" / (slug + ".thread.json")).read_text())["creator"] == "firstmate"
+for bad in ("fm-ship-login now", "A" * 61, "two\nlines", "", 7, None):
+    calls.clear()
+    poster.maybe_rename_topic_thread(dict(base, thread_retitle=bad), "777777777777777777", home,
+                                     rename_thread=rename)
+    assert calls == [], bad
+# A good retitle reaches the thread - keeping the marker the record has - and a
+# thread with no record of ours never does.
+calls.clear()
+poster.maybe_rename_topic_thread(dict(base, thread_retitle="InfoConnect · ledger import"),
+                                 "777777777777777777", home, rename_thread=rename, read_thread=lambda _: "")
+assert calls == ["✅ InfoConnect · ledger import"], calls
+for shown, requested, expected in (
+    ("❓ old topic", None, "❓ "),
+    ("✅ old topic", None, "✅ "),
+    ("old topic", None, ""),
+    ("❓ old topic", "done", "✅ "),
+    ("✅ old topic", "none", ""),
+    ("old topic", "needs-you", "❓ "),
+    ("", None, "❓ "),
+    (None, None, "❓ "),
+):
+    def read(thread_id):
+        if shown is None:
+            raise RuntimeError("unreadable")
+        return shown
+    calls.clear()
+    payload = dict(base, thread_retitle="InfoConnect · ledger import")
+    if requested is not None:
+        payload["thread_state"] = requested
+    poster.maybe_rename_topic_thread(payload, "777777777777777777", home,
+                                     rename_thread=rename, read_thread=read)
+    assert calls == [expected + "InfoConnect · ledger import"], (shown, requested, calls)
+for guarded in (dict(base, thread_retitle="InfoConnect · ledger import", thread_id="444444444444444444"),
+                dict(base, thread_retitle="InfoConnect · ledger import", channel_id="555555555555555555",
+                     thread_id="555555555555555555"),
+                dict(base, thread_retitle="InfoConnect · ledger import", origin="slash")):
+    calls.clear()
+    poster.maybe_rename_topic_thread(guarded, "", home, rename_thread=rename)
+    assert calls == [], guarded
+PY
+  then fail "an unusable retitle or a foreign thread must never be retitled"
+  fi
+  pass "32 retitles are screened and never leave their own thread"
+}
+
+# --- 33. retitles are best effort: failures retry, the reply always posts ----
+#
+# A refused retitle rename leaves the reply and its receipt durable, records
+# the wanted name, and is retried by the next reply and by the periodic pass.
+# An opened thread's title is its base name only until a retitle replaces it.
+
+test_33_retitle_retries_and_opened_threads_follow() {
+  local home slug out record title opened rid
+  home="$TMP_ROOT/c33"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  record="$home/state/ext-outbox/$slug.thread.json"
+  emit_as "$home" "$RID" answer 1 "Looking." "Aceh · long chats" "" >/dev/null
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  emit_as "$home" "$RID" followup 2 "Now about the IC migration." "" "" \
+    "InfoConnect · v0.5.11 migration" >/dev/null
+  out=$(deliver "$home" '{"kind":"rename-fail","outcome":"transient"}')
+  assert_contains "$out" "results=sent" "a failed retitle must not fail the reply"
+  assert_contains "$out" "posted-to=777777777777777777 Now about the IC migration." \
+    "a failed retitle must still post the reply"
+  [ -f "$home/state/ext-outbox/$slug.followup.2.receipt.json" ] \
+    || fail "a failed retitle must still record the reply receipt"
+  jq -e '.retitle == "InfoConnect · v0.5.11 migration" and .rename.outcome == "failed"
+    and .rename.name == "InfoConnect · v0.5.11 migration" and .rename.retryable == true' "$record" >/dev/null \
+    || fail "a failed retitle must be recorded with the name it wanted: $(cat "$record")"
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/InfoConnect · v0.5.11 migration" \
+    "the periodic pass must retry a failed retitle toward the new base name"
+  jq -e '.topic_name == "InfoConnect · v0.5.11 migration" and .rename.outcome == "applied"' "$record" >/dev/null \
+    || fail "a retried retitle must be recorded as applied: $(cat "$record")"
+
+  emit_as "$home" "$RID" followup 3 "Still on the migration." "" "needs-you" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ InfoConnect · v0.5.11 migration" \
+    "a marker after a retitle must use the new base name"
+  [ "$(renames_in "$out")" = 1 ] || fail "a marker alone must rename once: $out"
+
+  # An opened thread follows the same rule: its title is its base name until a
+  # retitle replaces it, and later markers build on the replacement.
+  title="InfoConnect · #532 handbok ranking"
+  opened=888888888888888888
+  rid=$(open_as "$home" infoconnect-532 "$title" "Tracking the ranking fix here.") \
+    || fail "open must succeed in the dedicated channel"
+  deliver "$home" '{"kind":"thread","request":"'"$rid"'","thread_id":"'"$opened"'"}' >/dev/null
+  emit_as "$home" "$rid" followup 1 "Ranking shipped; the migration is next." "" "" \
+    "InfoConnect · v0.5.11 migration" >/dev/null
+  out=$(deliver "$home" '{"kind":"thread","request":"'"$rid"'","thread_id":"'"$opened"'"}')
+  assert_contains "$out" "thread-rename=$opened/InfoConnect · v0.5.11 migration" \
+    "a retitle must rename an opened thread"
+  emit_as "$home" "$rid" final 2 "Done." "" "done" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=$opened/✅ InfoConnect · v0.5.11 migration" \
+    "a marker after retitling an opened thread must use the new base name"
+  [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
+    || fail "an opened thread must never be opened twice: $out"
+  pass "33 retitles retry and opened threads follow the conversation"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -1884,5 +2128,8 @@ test_27_opens_refuse_unsafe_titles_and_other_channels
 test_28_open_delivery_is_idempotent_and_reports_permissions
 test_29_open_creation_proof_survives_generations_and_failures
 test_30_open_guilds_use_shared_allowlist_grammar
+test_31_retitle_follows_the_conversation
+test_32_retitles_are_screened_and_never_leave_home
+test_33_retitle_retries_and_opened_threads_follow
 
 echo "all fm-ext-topic-threads tests passed"
