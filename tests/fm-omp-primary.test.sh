@@ -2924,6 +2924,155 @@ test_fm_guard_warns_on_stale_omp_inflight_wake() {
   pass "fm-guard warns only when an OMP in-flight wake outlives a turn boundary"
 }
 
+# Silent wake turns: which episodes may lose their final text, driven through
+# the extension's own handlers in OMP event order.
+test_silent_wake_turn_episode_rules() {
+  local out status
+  out=$(EXTENSION="$ROOT/.omp/extensions/fm-primary-omp.ts" node --input-type=module 2>&1 <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+const { installSilentWakeTurns, SILENT_WAKE_MARKER } = await import(pathToFileURL(process.env.EXTENSION).href);
+
+function session() {
+  const handlers = new Map();
+  installSilentWakeTurns({ on(name, handler) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); } });
+  const emit = (name, message) => (handlers.get(name) ?? []).map((handler) => handler({ type: name, message }));
+  return {
+    start: (message) => emit("message_start", message),
+    switch: (reason) => {
+      for (const handler of handlers.get("session_switch") ?? []) handler({ type: "session_switch", reason });
+    },
+    // An assistant message as OMP finalizes it: rewrite hook, then message_end.
+    answer(content, stopReason = "stop") {
+      let message = { role: "assistant", stopReason, content };
+      for (const result of emit("assistant_message", structuredClone(message))) {
+        if (result?.content) message = { ...message, content: result.content };
+      }
+      emit("message_end", message);
+      return message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
+    },
+  };
+}
+const thinking = { type: "thinking", thinking: "Nothing new.", thinkingSignature: "sig" };
+const say = (text) => [thinking, { type: "text", text }];
+const wake = { role: "custom", customType: "firstmate-watcher-wake", content: "WAKE: heartbeat", display: false, attribution: "agent" };
+const captain = (text) => ({ role: "user", content: [{ type: "text", text }], attribution: "user" });
+const merge = (content) => ({ role: "custom", customType: "fm-branch-merge", content, display: false, attribution: "agent" });
+
+function finalText(label, inputs, text) {
+  const s = session();
+  for (const input of inputs) {
+    if (input === "thinking-only") s.answer([thinking]);
+    else if (input === "tool-step") s.answer([thinking, { type: "toolCall", id: "t1", name: "bash", arguments: {} }], "toolUse");
+    else s.start(input);
+  }
+  return s.answer(say(text));
+}
+
+const hidden = [
+  ["marker after a wake", [wake, "tool-step"], SILENT_WAKE_MARKER],
+  ["no-change line after a wake", [wake], "Captain, standing by."],
+  ["two no-change sentences", [wake], "Captain, aye. Nothing new since my last update."],
+  ["routine branch note beside a wake", [wake, merge("\u26f5 aceh: still loading")], "Nothing new needs you."],
+  ["retry after a thinking-only stop", [wake, "thinking-only"], "Captain, nothing has changed."],
+];
+for (const [label, inputs, text] of hidden) {
+  assert.equal(finalText(label, inputs, text), SILENT_WAKE_MARKER, `${label} was not hidden`);
+}
+
+// A dot-only answer in an episode the captain joined is emptied, so OMP treats
+// it as a silent stop and asks for a visible answer.
+const reasked = [
+  ["marker on a captain turn", [captain("status?")], SILENT_WAKE_MARKER],
+  ["ascii dots on a captain turn", [captain("status?")], "..."],
+  ["captain skill during a wake", [wake, { role: "custom", customType: "skill-prompt", content: "skill", attribution: "user" }], SILENT_WAKE_MARKER],
+  ["captain turn retried after a thinking-only stop", [captain("status?"), "thinking-only"], SILENT_WAKE_MARKER],
+];
+for (const [label, inputs, text] of reasked) {
+  assert.equal(finalText(label, inputs, text), "", `${label} kept a silent answer`);
+}
+
+const outcome = "Captain, the fix is ready for review: https://github.com/example/repo/pull/7";
+const kept = [
+  ["real outcome after a wake", [wake], outcome],
+  ["no-change opener with a fact", [wake], "Captain, no change. The Mac is waiting on your #532 call."],
+  ["captain turn", [captain("status?")], "Captain, standing by."],
+  ["dot-only answer without captain or wake", [{ role: "custom", customType: "async-result", content: "job done", attribution: "agent" }], SILENT_WAKE_MARKER],
+  ["captain steer during a wake", [wake, "tool-step", captain("also check CI")], "Nothing new needs you."],
+  ["captain-facing branch merge", [wake, merge("kcc-audit: The audit is complete.")], "Captain, standing by."],
+  ["agent input without a wake", [{ role: "custom", customType: "async-result", content: "job done", attribution: "agent" }], "Captain, standing by."],
+];
+for (const [label, inputs, text] of kept) {
+  assert.equal(finalText(label, inputs, text), text, `${label} lost its text`);
+}
+
+// A text answer closes the episode, so captain input does not leak into the
+// next wake-only episode and a wake does not leak into the next captain turn.
+const s = session();
+s.start(captain("hello"));
+assert.equal(s.answer(say("Captain, here it is.")), "Captain, here it is.");
+s.start(wake);
+assert.equal(s.answer(say("Captain, standing by.")), SILENT_WAKE_MARKER, "captain input leaked past its answered episode");
+s.start(captain("anything?"));
+assert.equal(s.answer(say("Captain, standing by.")), "Captain, standing by.", "a wake leaked into the next captain turn");
+for (const stopReason of ["aborted", "error"]) {
+  const captainEpisode = session();
+  captainEpisode.start(captain("status?"));
+  captainEpisode.answer([thinking], stopReason);
+  captainEpisode.start(wake);
+  assert.equal(captainEpisode.answer(say(SILENT_WAKE_MARKER)), stopReason === "aborted" ? SILENT_WAKE_MARKER : "",
+    `${stopReason} mishandled the captain episode boundary`);
+
+  const wakeEpisode = session();
+  wakeEpisode.start(wake);
+  wakeEpisode.answer([thinking], stopReason);
+  assert.equal(wakeEpisode.answer(say("Captain, standing by.")), stopReason === "aborted" ? "Captain, standing by." : SILENT_WAKE_MARKER,
+    `${stopReason} mishandled the wake episode boundary`);
+}
+
+for (const reason of ["new", "resume", "fork"]) {
+  const captainEpisode = session();
+  captainEpisode.start(captain("status?"));
+  captainEpisode.switch(reason);
+  captainEpisode.start(wake);
+  assert.equal(captainEpisode.answer(say(SILENT_WAKE_MARKER)), SILENT_WAKE_MARKER,
+    `${reason} retained the previous session's captain input`);
+
+  const wakeEpisode = session();
+  wakeEpisode.start(wake);
+  wakeEpisode.switch(reason);
+  assert.equal(wakeEpisode.answer(say("Captain, standing by.")), "Captain, standing by.",
+    `${reason} retained the previous session's wake`);
+}
+console.log("silent-wake-rules-ok");
+JS
+  )
+  status=$?
+  assert_contains "$out" silent-wake-rules-ok "silent wake-turn episode rules failed: $out"
+  expect_code 0 "$status" "silent wake-turn episode rules"
+  pass "OMP primary silences only marker or no-change finals of wake-only episodes and re-asks silent captain turns"
+}
+
+# Opt-in real-SDK check of OMP's own recovery and chat rendering; the provider
+# is local and uses no credentials.
+test_silent_wake_turn_with_real_sdk() {
+  local package_dir fixture
+  package_dir=${FM_OMP_PACKAGE_DIR:-}
+  if [ -z "$package_dir" ]; then
+    echo "skip: set FM_OMP_PACKAGE_DIR for the real-SDK silent wake-turn regression"
+    return 0
+  fi
+  command -v bun >/dev/null 2>&1 || fail "bun is required for the real-SDK silent wake-turn regression"
+  [ -f "$package_dir/package.json" ] || fail "OMP SDK package is missing: $package_dir"
+  fixture="$TMP_ROOT/silent-wake-sdk"
+  mkdir -p "$fixture"
+  cp "$ROOT/tests/fm-omp-silent-wake-sdk.mjs" "$fixture/driver.mjs"
+  ln -s "$(cd "$package_dir/../.." && pwd)" "$fixture/node_modules"
+  env -u FM_TASK_ID FM_HOME="$fixture" PI_CODING_AGENT_DIR="$fixture/agent" FM_OMP_PACKAGE_DIR="$package_dir" \
+    EXTENSION_PATH="$ROOT/.omp/extensions/fm-primary-omp.ts" \
+    bun "$fixture/driver.mjs" || fail "real-SDK silent wake-turn regression failed"
+}
+
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
@@ -2952,3 +3101,5 @@ test_native_omp_unconsumed_inflight_wake_forces_turn_after_bound
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification
 test_native_omp_mid_turn_wake_reaches_idle_main
 test_fm_guard_warns_on_stale_omp_inflight_wake
+test_silent_wake_turn_episode_rules
+test_silent_wake_turn_with_real_sdk

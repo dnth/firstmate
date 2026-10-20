@@ -16,6 +16,7 @@ import { createPrimaryWatchCore, ompNativeProcessIdentity, type WakeDeliveryEvid
 import {
   createBranchDispatchOffer,
   FM_BRANCH_DISPATCH_EVENT,
+  MERGE_NOTE_BOAT,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
 import { installTaskInboxDoorbell } from "./lib/fm-task-inbox-doorbell.ts";
@@ -214,10 +215,106 @@ function runGuard(event: SessionStopEvent): Promise<ProcessResult> {
   });
 }
 
+// The text OMP carries in a user message_start: sendMessage wraps a string
+// as one text part, so the joined text parts equal the sent content.
+function userMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const part of content) {
+    if (
+      typeof part === "object" && part !== null &&
+      (part as { type?: unknown }).type === "text" &&
+      typeof (part as { text?: unknown }).text === "string"
+    ) {
+      parts.push((part as { text: string }).text);
+    }
+  }
+  return parts.join("\n");
+}
+
+// Silent wake turns (docs/supervision-protocols/omp.md). OMP re-prompts a final
+// message whose only content is signed thinking ("You said you would continue
+// ..."; features.unexpectedStopDetection, default "mechanical"), so a wake turn
+// cannot end without text. In mechanical mode it never re-prompts a final
+// message with text. Its chat view renders text made only of dots, ellipses,
+// and blank space as nothing in every frame, so SILENT_WAKE_MARKER ends a wake turn
+// silently. An episode ends on session replacement, an assistant abort, or a
+// final assistant stop that carried text; errors keep the episode for retries.
+// In an episode a watcher wake opened and no captain input or
+// captain-facing branch merge joined, a whole-message no-change line is
+// rewritten to the marker as a backstop; it streamed before the rewrite, so the
+// marker stays the primary path. In an episode the captain joined, a dot-only
+// final text is emptied so OMP asks for a visible answer as for any silent stop.
+export const SILENT_WAKE_MARKER = "\u2026";
+const DOT_ONLY = /^[.\u2026 \t\r\n]+$/;
+const NO_CHANGE_SENTENCE = "(?:captain,\\s+)?(?:aye|shipshape|standing by" +
+  "|no (?:change|changes|news)(?: since my last (?:message|update))?" +
+  "|no new (?:results|updates)(?: to report)?" +
+  "|no (?:action|reply) (?:needed|required)" +
+  "|nothing (?:new|changed|has changed)(?: (?:for you|needs you|to report|since my last (?:message|update)))?" +
+  "|nothing needs you" +
+  "|nothing was queued, so there(?:'|\u2019)s nothing new for you)" +
+  "(?: right now)?(?:,\\s+captain)?[.!]?";
+const NO_CHANGE_LINE = new RegExp(`^${NO_CHANGE_SENTENCE}(?:\\s+${NO_CHANGE_SENTENCE})?$`, "i");
+
+export function installSilentWakeTurns(omp: Pick<ExtensionAPI, "on">): void {
+  let wakeOpened = false;
+  let captainJoined = false;
+  omp.on("session_switch", () => {
+    wakeOpened = false;
+    captainJoined = false;
+  });
+  omp.on("message_start", (event) => {
+    const message = event.message;
+    const attribution = "attribution" in message ? message.attribution : undefined;
+    const customType = "customType" in message ? message.customType : undefined;
+    if (message.role === "user" || attribution === "user") {
+      captainJoined = true;
+    } else if (customType === "firstmate-watcher-wake") {
+      wakeOpened = true;
+    } else if (customType === "fm-branch-merge" && "content" in message &&
+      !userMessageText(message.content).startsWith(MERGE_NOTE_BOAT)) {
+      captainJoined = true;
+    }
+  });
+  omp.on("assistant_message", (event) => {
+    const { content, stopReason } = event.message;
+    if (stopReason !== "stop" || content.some((block) => block.type === "toolCall")) return undefined;
+    const spoken = content.flatMap((block, index) => block.type === "text" && block.text.trim() ? [index] : []);
+    if (spoken.length !== 1) return undefined;
+    const target = content[spoken[0]];
+    const text = target.type === "text" ? target.text.trim() : "";
+    let replacement: string;
+    if (captainJoined && DOT_ONLY.test(text)) {
+      replacement = "";
+    } else if (wakeOpened && !captainJoined && NO_CHANGE_LINE.test(text)) {
+      replacement = SILENT_WAKE_MARKER;
+    } else {
+      return undefined;
+    }
+    return {
+      content: content.map((block, index) =>
+        index === spoken[0] && block.type === "text" ? { ...block, text: replacement } : block
+      ),
+    };
+  });
+  omp.on("message_end", (event) => {
+    const message = event.message;
+    if (message.role !== "assistant") return;
+    if (message.stopReason !== "aborted" &&
+      !(message.stopReason === "stop" &&
+        message.content.some((block) => block.type === "text" && block.text.trim()))) return;
+    wakeOpened = false;
+    captainJoined = false;
+  });
+}
+
 export default function (omp: ExtensionAPI) {
   if (!primaryIntegrationApplies()) return;
   publishNativeProcessIdentity();
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, { observeTurns: false, deferUntilTurnStart: true });
+  installSilentWakeTurns(omp);
   let pendingStartupNudge = "";
 
   // Hidden next-turn delivery with triggerTurn. OMP schedules an internal
@@ -245,24 +342,6 @@ export default function (omp: ExtensionAPI) {
       forceTurn ? { deliverAs: "followUp", triggerTurn: true } : { deliverAs: "nextTurn", triggerTurn: true },
     );
   };
-
-  // The text OMP carries in a user message_start: sendMessage wraps a string
-  // as one text part, so the joined text parts equal the sent content.
-  function userMessageText(content: unknown): string {
-    if (typeof content === "string") return content;
-    if (!Array.isArray(content)) return "";
-    const parts: string[] = [];
-    for (const part of content) {
-      if (
-        typeof part === "object" && part !== null &&
-        (part as { type?: unknown }).type === "text" &&
-        typeof (part as { text?: unknown }).text === "string"
-      ) {
-        parts.push((part as { text: string }).text);
-      }
-    }
-    return parts.join("\n");
-  }
 
   // Durable rows are the whole persistence: only fm-wake-drain acknowledgement
   // removes them, so an interruption leaves the next session event able to

@@ -93,6 +93,7 @@ import {
   captureTaskStatusSnapshot,
   BRANCH_ELIGIBLE_STATUS_FILE,
   FM_BRANCH_DISPATCH_EVENT,
+  MERGE_NOTE_BOAT,
   releaseEligibleRowsSnapshot,
   rollbackEligibleRowsOwnerActivation,
   scopeForUnreadWake,
@@ -147,7 +148,6 @@ const BRANCH_TOOL_NAMES = ["read", "bash", "fm_branch_report"] as const;
 const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("hex").slice(0, 24)}`;
 
 const MIRROR_MESSAGE_CAP = 4000;
-const MERGE_NOTE_BOAT = "⛵";
 // One provider failure falls back immediately but leaves room for a transient
 // outage to recover on the next wake. A second consecutive provider failure
 // latches the branch off. While latched, main keeps every wake except one
