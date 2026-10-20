@@ -815,6 +815,44 @@ test_scout_and_secondmate_load_captain_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Every scaffold that tells a worker to commit must pin the repository's own git
+# identity and forbid overriding author or committer, so a worker cannot leak an
+# agent name into a delivered commit. Ship briefs deliver commits and scout
+# briefs make scratch commits; a secondmate charter is not a task brief.
+test_commit_identity_rule_in_briefs() {
+  local home id mode brief count
+  home="$TMP_ROOT/commit-identity-home"
+  mkdir -p "$home/data"
+  for id_mode in "brief-ident-nm-c1:no-mistakes" "brief-ident-dpr-c2:direct-PR" "brief-ident-lo-c3:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode: ship scaffold exited non-zero"
+    brief="$home/data/$id/brief.md"
+    count=$(grep -cF "Commit only with the repository's configured git identity" "$brief" || true)
+    [ "$count" -eq 1 ] || fail "$mode: commit-identity rule appeared $count times, expected exactly once"
+    assert_grep "never override the author or committer" "$brief" \
+      "$mode: commit-identity rule omitted the author/committer prohibition"
+    assert_grep "\`GIT_AUTHOR_*\`/\`GIT_COMMITTER_*\`" "$brief" \
+      "$mode: commit-identity rule omitted the environment-variable overrides"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ident-scout-c4 alpha --scout >/dev/null 2>&1 \
+    || fail "scout scaffold exited non-zero"
+  brief="$home/data/brief-ident-scout-c4/brief.md"
+  assert_grep "make scratch commits freely" "$brief" "scout brief no longer permits scratch commits"
+  count=$(grep -cF "Commit only with the repository's configured git identity" "$brief" || true)
+  [ "$count" -eq 1 ] || fail "scout: commit-identity rule appeared $count times, expected exactly once"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ident-sm-c5 --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate scaffold exited non-zero"
+  assert_no_grep "Commit only with the repository's configured git identity" \
+    "$home/data/brief-ident-sm-c5/brief.md" \
+    "secondmate charter must not carry the crewmate commit rule"
+  pass "fm-brief: commit-identity rule is present once in every commit-capable scaffold"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -1127,6 +1165,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_scouting_delegation_section_in_ship_and_scout
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_captain_hold_policy
+test_commit_identity_rule_in_briefs
 test_scout_and_secondmate_scaffold
 test_firstmate_repo_ship_brief_prefills_verification_criterion
 test_concurrent_ship_scaffold_has_one_owner
