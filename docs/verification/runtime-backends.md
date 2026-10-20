@@ -742,8 +742,8 @@ With only the two composer-draft assertions removed, the same run also passed `o
 #### OMP silent wake turns
 
 OMP 18.10.1 re-prompts a final assistant message whose only content is signed thinking with no text: `features.unexpectedStopDetection` defaults to `mechanical`, and `src/session/turn-recovery.ts` retries such a stop up to 3 times with "You said you would continue ... Give the final answer now.".
-It never retries a final message that has visible text in that mode, and its chat view renders text made only of dots or ellipses as nothing (`pi-tui` `canonicalizeMessage`).
-The primary extension's silent wake-turn rewrite (owner: `installSilentWakeTurns` in `.omp/extensions/fm-primary-omp.ts`; agent rule: [OMP supervision protocol](../supervision-protocols/omp.md)) relies on both behaviors.
+It never retries a final message that has visible text in that mode, and its chat view renders text made only of dots, ellipses, or blank space as nothing in every streamed frame (`pi-tui` `canonicalizeMessage`).
+The silent wake-turn marker `…` and the primary extension's backstop and captain guard (owner: `installSilentWakeTurns` in `.omp/extensions/fm-primary-omp.ts`; agent rule: [OMP supervision protocol](../supervision-protocols/omp.md)) rely on both behaviors.
 On 2026-10-20 the opt-in real-SDK regression ran under Bun 1.4.3 against `@oh-my-pi/pi-coding-agent` 18.10.1, the same version as the installed `omp` binary, installed into a scratch directory with `bun add @oh-my-pi/pi-coding-agent@18.10.1`:
 
 ```sh
@@ -751,11 +751,12 @@ FM_OMP_PACKAGE_DIR=<scratch>/node_modules/@oh-my-pi/pi-coding-agent bash tests/f
 ```
 
 ```text
-ok - OMP primary hides only marker or no-change finals of wake-only episodes
-ok - real OMP: silent wake turns draw no retry and render nothing, captain turns and real outcomes stay visible
+ok - OMP primary silences only marker or no-change finals of wake-only episodes and re-asks silent captain turns
+ok - real OMP: silent wake turns draw no retry and render nothing in any streamed frame, captain turns and real outcomes stay visible
 ```
 
-The real-SDK phase first asserts that a thinking-only wake turn is re-prompted, so it fails rather than passing vacuously once OMP stops retrying such stops.
+The real-SDK phase streams each reply in delayed chunks and renders every streamed frame through OMP's assistant message component.
+It first asserts that a thinking-only wake turn is re-prompted, so it fails rather than passing vacuously once OMP stops retrying such stops.
 Without `FM_OMP_PACKAGE_DIR` it prints a skip line and only the portable episode-rule phase runs.
 
 ## Herdr

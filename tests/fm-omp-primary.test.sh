@@ -2932,7 +2932,6 @@ test_silent_wake_turn_episode_rules() {
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 const { installSilentWakeTurns, SILENT_WAKE_MARKER } = await import(pathToFileURL(process.env.EXTENSION).href);
-const HIDDEN = "\u2026";
 
 function session() {
   const handlers = new Map();
@@ -2975,7 +2974,19 @@ const hidden = [
   ["retry after a thinking-only stop", [wake, "thinking-only"], "Captain, nothing has changed."],
 ];
 for (const [label, inputs, text] of hidden) {
-  assert.equal(finalText(label, inputs, text), HIDDEN, `${label} was not hidden`);
+  assert.equal(finalText(label, inputs, text), SILENT_WAKE_MARKER, `${label} was not hidden`);
+}
+
+// A dot-only answer in an episode the captain joined is emptied, so OMP treats
+// it as a silent stop and asks for a visible answer.
+const reasked = [
+  ["marker on a captain turn", [captain("status?")], SILENT_WAKE_MARKER],
+  ["ascii dots on a captain turn", [captain("status?")], "..."],
+  ["captain skill during a wake", [wake, { role: "custom", customType: "skill-prompt", content: "skill", attribution: "user" }], SILENT_WAKE_MARKER],
+  ["captain turn retried after a thinking-only stop", [captain("status?"), "thinking-only"], SILENT_WAKE_MARKER],
+];
+for (const [label, inputs, text] of reasked) {
+  assert.equal(finalText(label, inputs, text), "", `${label} kept a silent answer`);
 }
 
 const outcome = "Captain, the fix is ready for review: https://github.com/example/repo/pull/7";
@@ -2983,12 +2994,10 @@ const kept = [
   ["real outcome after a wake", [wake], outcome],
   ["no-change opener with a fact", [wake], "Captain, no change. The Mac is waiting on your #532 call."],
   ["captain turn", [captain("status?")], "Captain, standing by."],
-  ["marker on a captain turn", [captain("status?")], SILENT_WAKE_MARKER],
+  ["dot-only answer without captain or wake", [{ role: "custom", customType: "async-result", content: "job done", attribution: "agent" }], SILENT_WAKE_MARKER],
   ["captain steer during a wake", [wake, "tool-step", captain("also check CI")], "Nothing new needs you."],
-  ["captain skill during a wake", [wake, { role: "custom", customType: "skill-prompt", content: "skill", attribution: "user" }], SILENT_WAKE_MARKER],
   ["captain-facing branch merge", [wake, merge("kcc-audit: The audit is complete.")], "Captain, standing by."],
   ["agent input without a wake", [{ role: "custom", customType: "async-result", content: "job done", attribution: "agent" }], "Captain, standing by."],
-  ["captain turn retried after a thinking-only stop", [captain("status?"), "thinking-only"], SILENT_WAKE_MARKER],
 ];
 for (const [label, inputs, text] of kept) {
   assert.equal(finalText(label, inputs, text), text, `${label} lost its text`);
@@ -3000,7 +3009,7 @@ const s = session();
 s.start(captain("hello"));
 assert.equal(s.answer(say("Captain, here it is.")), "Captain, here it is.");
 s.start(wake);
-assert.equal(s.answer(say(SILENT_WAKE_MARKER)), HIDDEN, "captain input leaked past its answered episode");
+assert.equal(s.answer(say("Captain, standing by.")), SILENT_WAKE_MARKER, "captain input leaked past its answered episode");
 s.start(captain("anything?"));
 assert.equal(s.answer(say("Captain, standing by.")), "Captain, standing by.", "a wake leaked into the next captain turn");
 console.log("silent-wake-rules-ok");
@@ -3009,7 +3018,7 @@ JS
   status=$?
   assert_contains "$out" silent-wake-rules-ok "silent wake-turn episode rules failed: $out"
   expect_code 0 "$status" "silent wake-turn episode rules"
-  pass "OMP primary hides only marker or no-change finals of wake-only episodes"
+  pass "OMP primary silences only marker or no-change finals of wake-only episodes and re-asks silent captain turns"
 }
 
 # Opt-in real-SDK check of OMP's own recovery and chat rendering; the provider

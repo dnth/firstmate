@@ -236,14 +236,17 @@ function userMessageText(content: unknown): string {
 // Silent wake turns (docs/supervision-protocols/omp.md). OMP re-prompts a final
 // message whose only content is signed thinking ("You said you would continue
 // ..."; features.unexpectedStopDetection, default "mechanical"), so a wake turn
-// cannot end without text. An episode is every message since the last final
-// assistant message that carried text. In an episode a watcher wake opened and
-// no captain input or captain-facing branch merge joined, a final message that is
-// exactly SILENT_WAKE_MARKER or a whole-message no-change line is rewritten to
-// "…": still text, so OMP does not retry it, while OMP's chat view renders
-// dot-only text as nothing. Every other episode keeps its text untouched.
-export const SILENT_WAKE_MARKER = "[fm:silent]";
-const SILENT_WAKE_TEXT = "\u2026";
+// cannot end without text. It never re-prompts a final message with text, and
+// its chat view renders text made only of dots, ellipses, and blank space as
+// nothing in every streamed frame, so SILENT_WAKE_MARKER ends a wake turn
+// silently. An episode is every message since the last final assistant message
+// that carried text. In an episode a watcher wake opened and no captain input or
+// captain-facing branch merge joined, a whole-message no-change line is
+// rewritten to the marker as a backstop; it streamed before the rewrite, so the
+// marker stays the primary path. In an episode the captain joined, a dot-only
+// final text is emptied so OMP asks for a visible answer as for any silent stop.
+export const SILENT_WAKE_MARKER = "\u2026";
+const DOT_ONLY = /^[.\u2026 \t\r\n]+$/;
 const NO_CHANGE_SENTENCE = "(?:captain,\\s+)?(?:aye|shipshape|standing by" +
   "|no (?:change|changes|news)(?: since my last (?:message|update))?" +
   "|no new (?:results|updates)(?: to report)?" +
@@ -272,16 +275,22 @@ export function installSilentWakeTurns(omp: Pick<ExtensionAPI, "on">): void {
   });
   omp.on("assistant_message", (event) => {
     const { content, stopReason } = event.message;
-    if (!wakeOpened || captainJoined || stopReason !== "stop") return undefined;
-    if (content.some((block) => block.type === "toolCall")) return undefined;
+    if (stopReason !== "stop" || content.some((block) => block.type === "toolCall")) return undefined;
     const spoken = content.flatMap((block, index) => block.type === "text" && block.text.trim() ? [index] : []);
     if (spoken.length !== 1) return undefined;
     const target = content[spoken[0]];
     const text = target.type === "text" ? target.text.trim() : "";
-    if (text !== SILENT_WAKE_MARKER && !NO_CHANGE_LINE.test(text)) return undefined;
+    let replacement: string;
+    if (captainJoined && DOT_ONLY.test(text)) {
+      replacement = "";
+    } else if (wakeOpened && !captainJoined && NO_CHANGE_LINE.test(text)) {
+      replacement = SILENT_WAKE_MARKER;
+    } else {
+      return undefined;
+    }
     return {
       content: content.map((block, index) =>
-        index === spoken[0] && block.type === "text" ? { ...block, text: SILENT_WAKE_TEXT } : block
+        index === spoken[0] && block.type === "text" ? { ...block, text: replacement } : block
       ),
     };
   });
