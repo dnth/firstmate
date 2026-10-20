@@ -246,6 +246,9 @@ function userMessageText(content: unknown): string {
 // rewritten to the marker as a backstop; it streamed before the rewrite, so the
 // marker stays the primary path. In an episode the captain joined, a dot-only
 // final text is emptied so OMP asks for a visible answer as for any silent stop.
+// An OMP advisor note that opens an episode continues the one that just ended
+// (from OMP 18.12.1 a concern after a final answer starts that turn by default),
+// so the episode takes that origin until its own wake or captain input replaces it.
 export const SILENT_WAKE_MARKER = "\u2026";
 const DOT_ONLY = /^[.\u2026 \t\r\n]+$/;
 const NO_CHANGE_SENTENCE = "(?:captain,\\s+)?(?:aye|shipshape|standing by" +
@@ -258,25 +261,46 @@ const NO_CHANGE_SENTENCE = "(?:captain,\\s+)?(?:aye|shipshape|standing by" +
   "(?: right now)?(?:,\\s+captain)?[.!]?";
 const NO_CHANGE_LINE = new RegExp(`^${NO_CHANGE_SENTENCE}(?:\\s+${NO_CHANGE_SENTENCE})?$`, "i");
 
+type EpisodeOrigin = { wake: boolean; captain: boolean };
+const NO_ORIGIN: EpisodeOrigin = { wake: false, captain: false };
+
 export function installSilentWakeTurns(omp: Pick<ExtensionAPI, "on">): void {
   let wakeOpened = false;
   let captainJoined = false;
-  omp.on("session_switch", () => {
+  let episodeStarted = false;
+  let advisorResumed = false;
+  let endedOrigin = NO_ORIGIN;
+  const endEpisode = (ended: EpisodeOrigin) => {
     wakeOpened = false;
     captainJoined = false;
-  });
+    episodeStarted = false;
+    advisorResumed = false;
+    endedOrigin = ended;
+  };
+  omp.on("session_switch", () => endEpisode(NO_ORIGIN));
   omp.on("message_start", (event) => {
     const message = event.message;
     const attribution = "attribution" in message ? message.attribution : undefined;
     const customType = "customType" in message ? message.customType : undefined;
-    if (message.role === "user" || attribution === "user") {
-      captainJoined = true;
-    } else if (customType === "firstmate-watcher-wake") {
-      wakeOpened = true;
-    } else if (customType === "fm-branch-merge" && "content" in message &&
-      !userMessageText(message.content).startsWith(MERGE_NOTE_BOAT)) {
-      captainJoined = true;
+    const opensEpisode = !episodeStarted;
+    episodeStarted = true;
+    if (customType === "advisor" && opensEpisode) {
+      ({ wake: wakeOpened, captain: captainJoined } = endedOrigin);
+      advisorResumed = true;
+      return;
     }
+    const wakeInput = customType === "firstmate-watcher-wake";
+    const captainInput = message.role === "user" || attribution === "user" ||
+      (customType === "fm-branch-merge" && "content" in message &&
+        !userMessageText(message.content).startsWith(MERGE_NOTE_BOAT));
+    if (!wakeInput && !captainInput) return;
+    if (advisorResumed) {
+      wakeOpened = false;
+      captainJoined = false;
+      advisorResumed = false;
+    }
+    wakeOpened ||= wakeInput;
+    captainJoined ||= captainInput;
   });
   omp.on("assistant_message", (event) => {
     const { content, stopReason } = event.message;
@@ -305,8 +329,7 @@ export function installSilentWakeTurns(omp: Pick<ExtensionAPI, "on">): void {
     if (message.stopReason !== "aborted" &&
       !(message.stopReason === "stop" &&
         message.content.some((block) => block.type === "text" && block.text.trim()))) return;
-    wakeOpened = false;
-    captainJoined = false;
+    endEpisode({ wake: wakeOpened, captain: captainJoined });
   });
 }
 
