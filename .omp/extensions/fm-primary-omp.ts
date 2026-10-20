@@ -236,9 +236,9 @@ function userMessageText(content: unknown): string {
 // Silent wake turns (docs/supervision-protocols/omp.md). OMP re-prompts a final
 // message whose only content is signed thinking ("You said you would continue
 // ..."; features.unexpectedStopDetection, default "mechanical"), so a wake turn
-// cannot end without text. It never re-prompts a final message with text, and
-// its chat view renders text made only of dots, ellipses, and blank space as
-// nothing in every streamed frame, so SILENT_WAKE_MARKER ends a wake turn
+// cannot end without text. In mechanical mode it never re-prompts a final
+// message with text. Its chat view renders text made only of dots, ellipses,
+// and blank space as nothing in every frame, so SILENT_WAKE_MARKER ends a wake turn
 // silently. An episode ends on session replacement, an assistant abort, or a
 // final assistant stop that carried text; errors keep the episode for retries.
 // In an episode a watcher wake opened and no captain input or
