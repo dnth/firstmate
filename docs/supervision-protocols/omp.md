@@ -22,6 +22,8 @@ When this session owns supervision and away mode is not active:
 12. Missing, failed, or unhealthy cycle only: drain queued notifications, inspect the failure, call `fm_watch_arm_omp`, and restart with the explicit `-e` fallback if the integration is missing or stale.
 13. Never use shell `&` for watcher supervision.
 14. While the supervision branch is active, MAIN must claim the reserved backlog lease before every `tasks-axi` or direct `data/backlog.md` mutation, then release it after the mutation: `bin/fm-lease.sh claim backlog`, mutate, `bin/fm-lease.sh release backlog`.
+15. A turn opened only by a watcher wake that has nothing captain-facing ends with exactly `[fm:silent]` as its whole final message, never a no-change line; the primary extension hides it, and OMP does not re-prompt a final message that has text.
+   Never use it in place of a real outcome, decision, PR-ready report, or failure; on a turn where the captain wrote, the marker stays visible.
 
 For a persistent secondmate, the watcher in that secondmate home touches `state/.last-watcher-beat` at the start of every cycle.
 The parent watcher treats a fresh, non-future secondmate-home beacon as positive liveness evidence when the secondmate is neither paused nor captain-held and its pane is idle between child polls, reading remote beacon age through a short bounded call with a forced-kill grace on the configured host route.

@@ -20,6 +20,11 @@ import { runCommandAsync } from "./fm-async-exec.ts";
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
 
+// Prefix of every routine fm-branch-merge note. A merge without it is a
+// captain-facing delivery whose follow-up main turn is itself the
+// captain-visible outcome (docs/omp-supervision-branch.md).
+export const MERGE_NOTE_BOAT = "⛵";
+
 export type UnreadWakeScopeStatus = "safe" | "empty" | "unsafe";
 
 export interface UnreadWakeScope {
