@@ -192,6 +192,20 @@
 # a single row still held for the captain; two such rows refuse rather than
 # attest, and `complete` names each prefix-resolved row beside its attested
 # legacy id so the guess stays auditable.
+# Done retention: on the markdown backend tasks-axi's `done_keep` trim (and any
+# `prune` of another section) moves rows, answered captain calls included, out
+# of the configured backlog into the Done archive tasks-axi resolves for it
+# (`[markdown] archive`, else done-archive.md beside the backlog). An inventory
+# entry that no live row carries, or whose live row never carried a captain
+# hold (no captain hold kind, hold-set stamp, or resolution record - a later
+# row reusing the id), is therefore judged by the newest archived row of that
+# id that did carry one, whichever section it was pruned from: it is durable
+# only when that row's resolution record settles the row's latest lifecycle,
+# so a re-held row archived with only an earlier lifecycle's record refuses.
+# An archived captain row with no recorded answer refuses, an archived row
+# never counts as still held, and a live row carrying captain-hold provenance
+# is always judged on its own, so an older archived answer cannot settle a
+# newer lifecycle. `complete` names each entry the archive evidenced.
 #
 # `open` is the read-only predicate a mechanical closer asks before it may
 # retire a task's row: is this task still an open captain call? Exit 0 means it
@@ -540,9 +554,15 @@ body_has_resolution_record() {  # <task-body>
   return 1
 }
 
-body_has_current_resolution_record() {
-  local body stamp
+body_has_current_resolution_record() {  # <shown-task-body>
+  local body
   body=$(decode_shown_value "$1") || return 1
+  decoded_body_has_current_resolution_record "$body"
+}
+
+# Whether the newest record is linked to the hold-set stamp the body opens with.
+decoded_body_has_current_resolution_record() {  # <decoded-task-body>
+  local body=$1 stamp
   stamp=$(body_hold_set_timestamp "$body")
   [ -n "$stamp" ] || return 1
   body_has_resolution_record "$body" || return 1
@@ -614,10 +634,128 @@ resolution_block() {  # <mode> [hold-set-stamp]
   fi
 }
 
+# Whether a row ever carried a captain hold: tasks-axi keeps the captain hold
+# kind through a close, `hold` writes a hold-set stamp that survives an
+# out-of-band unhold, and a resolution record names the call it settled.
+row_has_captain_provenance() {  # <hold-kind> <decoded-task-body>
+  [ "$1" = captain ] && return 0
+  body_has_resolution_record "$2" && return 0
+  case "$2" in
+    'Captain hold set: '*|*$'\n''Captain hold set: '*) return 0 ;;
+  esac
+  return 1
+}
+
+# Print every row this home's configured Done archive holds for <id>, oldest
+# first, as `<hold-kind>\t<base64 body>`; print nothing when the backend keeps
+# no markdown archive or the archive does not exist yet. Retention appends
+# pruned rows verbatim under `## Archived <date>` headings, from whichever
+# section was pruned, so the reader normalizes every heading to Done and every
+# open bullet (`- [ ] <id> -`, legacy `- **<id>** -`) to a checked one before
+# the installed tasks-axi parser and row projection read it: an unanswered row
+# archived from Queued or In flight is never skipped, and file order stays the
+# archive order. The archive path is the one tasks-axi's own backlog context
+# resolves for this backlog file.
+archived_rows_for_id() {  # <task-id>
+  local id=$1 data root backend file pkg
+  data=$(fm_backlog_data_absolute "$DATA") || {
+    printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2
+    return 1
+  }
+  root=$(fm_backlog_root "$data") || {
+    printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
+    return 1
+  }
+  backend=$(fm_tasks_axi_backend_resolve "$root") || return 1
+  [ "$backend" = markdown ] || return 0
+  file=$(fm_backlog_file "$data") || {
+    printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
+    return 1
+  }
+  pkg=$(tasks_axi_package_root) || pkg=
+  if [ -z "$pkg" ] || [ ! -f "$pkg/dist/src/context.js" ]; then
+    printf 'fm-captain-hold: the installed tasks-axi package layout is not readable; cannot read the Done archive\n' >&2
+    return 1
+  fi
+  (cd "$root" && FM_ARCHIVE_GRAMMAR="$pkg/dist/src/backends/markdown-grammar.js" \
+    FM_ARCHIVE_VIEW="$pkg/dist/src/view.js" FM_ARCHIVE_CONTEXT="$pkg/dist/src/context.js" \
+    node --input-type=module - "$file" "$id" <<'NODE'
+import { readFileSync } from "node:fs";
+const { parseBacklog } = await import(process.env.FM_ARCHIVE_GRAMMAR);
+const { toRow } = await import(process.env.FM_ARCHIVE_VIEW);
+const { resolveTasksContext } = await import(process.env.FM_ARCHIVE_CONTEXT);
+const [file, id] = process.argv.slice(2);
+const { store } = resolveTasksContext({ cwd: process.cwd(), file });
+let src;
+try {
+  src = readFileSync(store.archivePath, "utf8");
+} catch (error) {
+  if (error.code === "ENOENT") process.exit(0);
+  throw error;
+}
+const normalized = src
+  .replace(/^##[ \t]+Archived\b.*$/gm, "## Done")
+  .replace(/^- \[ \] /gm, "- [x] ")
+  .replace(/^- \*\*([^*\s]+)\*\* - /gm, "- [x] $1 - ");
+const doc = parseBacklog(normalized);
+const tasks = [];
+for (const section of doc.sections) {
+  for (const entry of section.entries) {
+    if (entry.kind === "task") tasks.push(entry.task);
+  }
+}
+const rows = [];
+for (const task of tasks) {
+  if (task.id !== id) continue;
+  const row = toRow(task, { all: tasks, full: true });
+  rows.push(String(row.hold_kind ?? "-").replace(/[\t\r\n]/g, " ") + "\t"
+    + Buffer.from(row.body ?? "", "utf8").toString("base64"));
+}
+process.stdout.write(rows.length ? rows.join("\n") + "\n" : "");
+NODE
+  )
+}
+
+# Judge <id> by the newest archived row that carried a captain hold. Returns 0
+# when that row settles its latest lifecycle, 3 when it does not, and 1 when no
+# archived row of <id> ever carried a captain hold. `answer` leaves its record
+# first in the body, while a re-hold puts a fresh hold-set stamp back on top of
+# any earlier record, so a body that opens with a stamp is settled only by a
+# record linked to that stamp. An unreadable archive stops the command instead
+# of reading as absence.
+archived_call_answered() {  # <task-id>
+  local id=$1 rows hold_kind encoded body verdict=1
+  rows=$(archived_rows_for_id "$id") \
+    || fail "could not read this home's configured Done archive while verifying $id"
+  while IFS=$'\t' read -r hold_kind encoded; do
+    [ -n "$hold_kind" ] || continue
+    [ "$hold_kind" != '-' ] || hold_kind=''
+    body=$(printf '%s' "$encoded" | base64 -d) || fail "could not decode the archived body of $id"
+    row_has_captain_provenance "$hold_kind" "$body" || continue
+    verdict=3
+    body_has_resolution_record "$body" || continue
+    if [ -z "$(body_hold_set_timestamp "$body")" ] \
+      || decoded_body_has_current_resolution_record "$body"; then
+      verdict=0
+    fi
+  done <<EOF
+$rows
+EOF
+  return "$verdict"
+}
+
+# How the last verify_hold_durable call evidenced its call: `live` for the
+# backlog row itself, `archived` for the Done archive's record of it.
+CAPTAIN_CALL_EVIDENCE=
+
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
-verify_hold_durable() {  # <task-id>
-  local id=$1 show state hold_kind body
+# A live row that never carried a captain hold is a later row reusing the id,
+# so the call it names is judged by the Done archive instead (header: "Done
+# retention").
+verify_hold_durable() {  # <task-id>; sets CAPTAIN_CALL_EVIDENCE
+  local id=$1 show state hold_kind body archived_rc=0
+  CAPTAIN_CALL_EVIDENCE=live
   task_show "$id" || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
   show=$TASK_SHOW_OUTPUT
   state=$(show_field "$show" state)
@@ -628,6 +766,13 @@ verify_hold_durable() {  # <task-id>
   fi
   if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
     return 0
+  fi
+  if ! row_has_captain_provenance "$hold_kind" "$(show_field_value "$show" body)"; then
+    archived_call_answered "$id" || archived_rc=$?
+    case "$archived_rc" in
+      0) CAPTAIN_CALL_EVIDENCE=archived; return 0 ;;
+      3) fail "captain-held task $id was archived out of this home's configured backlog with no recorded captain answer, and its live row was never held for the captain" ;;
+    esac
   fi
   fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
 }
@@ -681,7 +826,7 @@ captain_beads_setting() {  # <entries-output> <setting>
 
 # Read the configured beads graph's row listing for a migration-note scan.
 # The listing is deliberately re-read per unresolvable key: the cache below
-# lives and dies with the command-substitution subshell every resolve_entry
+# lives and dies with the command-substitution subshell every live-resolution
 # call site runs in, so it cannot persist across keys - bounded by a scout
 # report's handful of attested ids. Returns 0 when the listing loads, and 2
 # with the reason on stderr when the graph cannot be read.
@@ -824,12 +969,14 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
   return 2
 }
 
-# Resolve one inventory entry or channel key to the task that carries it: the
-# exact task id when it exists, else the legacy derived identity, else - on the
-# beads backend - the migrated row the markdown-to-beads hold migration wrote.
-# Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
-# migrated-prefix, so a caller can record which evidence carried the attestation.
-resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
+# Resolve one inventory entry or channel key to the live task that carries it:
+# the exact task id when it exists, else the legacy derived identity, else - on
+# the beads backend - the migrated row the markdown-to-beads hold migration
+# wrote. Prints "<resolved id> <how>", where <how> is exact, legacy,
+# migrated-note or migrated-prefix, so a caller can record which evidence
+# carried the attestation. Returns 1 without a message when no live row carries
+# the entry, so the completion gate can consult the Done archive first.
+resolve_live_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>"
   local origin=$1 entry=$2 legacy migrated rc
   if task_show "$entry"; then
     printf '%s exact' "$entry"
@@ -849,11 +996,25 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
     2) return 2 ;;
     124) return 124 ;;
   esac
+  return 1
+}
+
+fail_unresolved_entry() {  # <origin-or-empty> <entry>
+  local origin=$1 entry=$2
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
-    legacy=$(legacy_hold_id "$origin" "$entry")
-    fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA); the nearest legacy identity $legacy also resolves to nothing"
+    fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA); the nearest legacy identity $(legacy_hold_id "$origin" "$entry") also resolves to nothing"
   fi
   fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA)"
+}
+
+resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
+  local rc=0
+  resolve_live_entry "$1" "$2" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) fail_unresolved_entry "$1" "$2" ;;
+  esac
+  return "$rc"
 }
 
 # The hold-set stamp and review-by line sit on the body's first two lines, so
@@ -966,21 +1127,40 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
 }
 
 # Resolve one entry and verify the row it names is durably captain-held. A
-# resolution failure that is not the read bound keeps resolve_entry's own
+# resolution failure that is not the read bound keeps resolve_live_entry's own
 # status - its stderr already named the entry; 124 means the backend never
 # answered, which is not the same as an unknown entry and must not be spent
-# as absence. On success prints "<id> <how>" so the caller can keep the
-# attestation evidence.
+# as absence. An entry no live row carries is judged by the Done archive
+# (header: "Done retention"), exact id first, then the legacy identity. On
+# success prints "<id> <how>", with <how> `archived` when the archive carried
+# the answer, so the caller can keep the attestation evidence.
 verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how>"
-  local origin=$1 entry=$2 resolved resolve_status=0
-  resolved=$(resolve_entry "$origin" "$entry") || resolve_status=$?
-  if [ "$resolve_status" -ne 0 ]; then
-    [ "$resolve_status" -ne 124 ] \
-      || fail "the backlog backend exceeded its read bound resolving $entry"
-    exit "$resolve_status"
+  local origin=$1 entry=$2 resolved resolve_status=0 candidate candidates archived_rc
+  resolved=$(resolve_live_entry "$origin" "$entry") || resolve_status=$?
+  case "$resolve_status" in
+    0)
+      verify_hold_durable "${resolved%% *}"
+      [ "$CAPTAIN_CALL_EVIDENCE" != archived ] || resolved="${resolved%% *} archived"
+      printf '%s\n' "$resolved"
+      return 0
+      ;;
+    1) : ;;
+    124) fail "the backlog backend exceeded its read bound resolving $entry" ;;
+    *) exit "$resolve_status" ;;
+  esac
+  candidates=$entry
+  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
+    candidates="$candidates $(legacy_hold_id "$origin" "$entry")"
   fi
-  printf '%s\n' "$resolved"
-  verify_hold_durable "${resolved%% *}"
+  for candidate in $candidates; do
+    archived_rc=0
+    archived_call_answered "$candidate" || archived_rc=$?
+    case "$archived_rc" in
+      0) printf '%s archived\n' "$candidate"; return 0 ;;
+      3) fail "captain-held task $candidate was archived out of this home's configured backlog with no recorded captain answer" ;;
+    esac
+  done
+  fail_unresolved_entry "$origin" "$entry"
 }
 
 command_hold() {
@@ -1921,7 +2101,7 @@ reconcile_note() {
 
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfers=() resolved
-  local resolved_how attested_by_prefix=''
+  local resolved_how attested_by_prefix='' attested_by_archive=''
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -1955,9 +2135,10 @@ command_complete() {
       resolved=$(verify_entry_durable "$origin" "$entry") || exit $?
       resolved_how=${resolved##* }
       resolved=${resolved%% *}
-      if [ "$resolved_how" = migrated-prefix ]; then
-        attested_by_prefix="${attested_by_prefix}${attested_by_prefix:+ }$entry=$resolved"
-      fi
+      case "$resolved_how" in
+        migrated-prefix) attested_by_prefix="${attested_by_prefix}${attested_by_prefix:+ }$entry=$resolved" ;;
+        archived) attested_by_archive="${attested_by_archive}${attested_by_archive:+ }$resolved" ;;
+      esac
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -2013,8 +2194,9 @@ EOF
       fi
     fi
   fi
-  printf 'complete: %s captain-call inventory reviewed%s%s\n' "$origin" "${keys:+ ($keys)}" \
-    "${attested_by_prefix:+ [attested through the configured prefix: $attested_by_prefix]}"
+  printf 'complete: %s captain-call inventory reviewed%s%s%s\n' "$origin" "${keys:+ ($keys)}" \
+    "${attested_by_prefix:+ [attested through the configured prefix: $attested_by_prefix]}" \
+    "${attested_by_archive:+ [answered calls read from the configured Done archive: $attested_by_archive]}"
 }
 
 command_verify() {

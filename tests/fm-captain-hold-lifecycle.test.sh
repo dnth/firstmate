@@ -1321,6 +1321,196 @@ test_out_of_band_close_is_recordable() {
   pass "an out-of-band close stays recordable through answer"
 }
 
+# Done retention (tasks-axi `done_keep`) moves an answered captain call's row out
+# of the configured backlog into tasks-axi's configured Done archive, and a later
+# row may reuse the id. This is the self-held origin shape: the origin held
+# itself (the policy prefers holding the gated work item), an earlier pass
+# attested `--none`, a later pass inventoried the origin's own id and transferred
+# its keyed status decision, the captain answered, retention archived the row,
+# and a fresh never-held row was re-added for cleanup. The answer the archive
+# still carries must satisfy `complete --none` and `verify`.
+test_self_held_call_answered_then_archived_still_verifies() {
+  local home id meta_before open out
+  home=$(make_home archived-self-call)
+  id=sample-deploy-run
+  tasks_in "$home" add "$id" "Run the sample deploy" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the self-held origin"
+  write_origin_meta "$home" "$id"
+  mkdir -p "$home/data/$id"
+  printf '# Sample deploy\n\nThe deploy was applied on the captain go.\n' > "$home/data/$id/report.md"
+  printf 'working: preparing the sample deploy\n' > "$home/state/$id.status"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "the first review pass could not attest an empty inventory"
+  printf 'needs-decision [key=%s]: deploy now or wait?\n' "$id" >> "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain deploy go pending" >/dev/null \
+    || fail "the origin could not hold its own captain call"
+  if run_captain "$home" complete "$id" --none > "$home/open-none.out" 2> "$home/open-none.err"; then
+    fail "--none was accepted while the self-held call's keyed status decision was open"
+  fi
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "the self-held origin could not inventory its own open call"
+  [ "$(grep -c '^decisions_reviewed=1$' "$home/state/$id.meta")" = 2 ] \
+    || fail "the fixture did not reproduce the two-pass attestation shape"
+  assert_equals "decision_keys=,decision_keys=$id" \
+    "$(grep '^decision_keys=' "$home/state/$id.meta" | paste -sd, -)" \
+    "the fixture did not record the empty pass followed by the self-key"
+  assert_grep "captain-held [key=$id]: tracked by $id" "$home/state/$id.status" \
+    "the self-held status decision was not transferred to its captain-held task"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  [ -z "$open" ] || fail "the transferred status decision stayed open: $open"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "an open self-held call stopped counting as durably held"
+
+  printf 'Captain: deploy now.\n' > "$home/deploy-decision.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/deploy-decision.txt" --close-live >/dev/null \
+    || fail "the captain's answer could not close the self-held call"
+  printf 'done: sample deploy applied - report at data/%s/report.md\n' "$id" >> "$home/state/$id.status"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "Done retention could not archive the answered call"
+  assert_no_grep "] $id -" "$home/data/backlog.md" "Done retention left the answered row in the live backlog"
+  assert_grep "[x] $id -" "$home/data/done-archive.md" "Done retention did not archive the answered row"
+
+  tasks_in "$home" add "$id" "Clean up the finished sample deploy" --kind scout --repo sample >/dev/null \
+    || fail "could not re-add a cleanup row under the archived id"
+  meta_before=$(cat "$home/state/$id.meta")
+  out=$(run_captain "$home" complete "$id" --none 2>&1) \
+    || fail "complete --none refused an answered self-held call shadowed by a fresh cleanup row: $out"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "verify refused an answered self-held call shadowed by a fresh cleanup row"
+  assert_equals "$meta_before" "$(cat "$home/state/$id.meta")" \
+    "a repeat --none pass appended another attestation"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
+    || fail "teardown refused the verified self-held origin: $(cat "$home/teardown.err")"
+  pass "an answered self-held call verifies after Done retention archives it, even under a fresh reused row"
+}
+
+# The archive is evidence only for an answer it actually records. A call that
+# was answered and then trimmed out of the backlog passes; a captain-held call
+# closed with no recorded answer and then archived, a live re-held lifecycle
+# whose ownership was lost, a newer lifecycle archived unanswered from the
+# queue, and a re-held row archived carrying only an earlier lifecycle's answer
+# all still refuse.
+test_archive_never_settles_an_unanswered_call() {
+  local home origin call out
+  home=$(make_home archived-answered-call)
+  origin=sample-ingest-run
+  call=sample-redo-call
+  tasks_in "$home" add "$origin" "Run the sample ingest" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the ingest origin"
+  write_origin_meta "$home" "$origin"
+  printf 'working: ingest running\n' > "$home/state/$origin.status"
+  run_captain "$home" complete "$origin" --none >/dev/null \
+    || fail "the ingest origin could not attest an empty inventory"
+  run_captain "$home" hold "$call" --title "Redo the owed sample rows" \
+    --reason "captain redo choice pending" --origin "$origin" >/dev/null \
+    || fail "could not hold the redo call"
+  run_captain "$home" complete "$origin" "$call" >/dev/null \
+    || fail "the ingest origin could not inventory the redo call"
+  printf 'A: redo the owed rows now.\n' > "$home/redo-decision.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/redo-decision.txt" >/dev/null \
+    || fail "the captain's answer could not close the redo call"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "Done retention could not archive the answered call"
+  assert_no_grep "] $call -" "$home/data/backlog.md" "Done retention left the answered call in the live backlog"
+  out=$(run_captain "$home" complete "$origin" --none 2>&1) \
+    || fail "complete --none refused a call that was answered and then archived: $out"
+  run_captain "$home" verify "$origin" >/dev/null \
+    || fail "verify refused a call that was answered and then archived"
+
+  home=$(make_home archived-unanswered-call)
+  call=sample-unanswered-call
+  tasks_in "$home" add "$origin" "Run the sample ingest" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the second ingest origin"
+  write_origin_meta "$home" "$origin"
+  printf 'working: ingest running\n' > "$home/state/$origin.status"
+  run_captain "$home" hold "$call" --title "Choose the sample retry" \
+    --reason "captain retry choice pending" --origin "$origin" >/dev/null \
+    || fail "could not hold the unanswered call"
+  run_captain "$home" complete "$origin" "$call" >/dev/null \
+    || fail "the ingest origin could not inventory the unanswered call"
+  tasks_in "$home" "done" "$call" --keep 0 >/dev/null \
+    || fail "could not close and archive the call out of band"
+  assert_grep "[x] $call -" "$home/data/done-archive.md" "the out-of-band close was not archived"
+  if out=$(run_captain "$home" complete "$origin" --none 2>&1); then
+    fail "complete --none accepted an archived captain call that records no answer"
+  fi
+  assert_contains "$out" "$call" "the archived-unanswered refusal did not name the call"
+  if run_captain "$home" verify "$origin" > "$home/unanswered-verify.out" 2>&1; then
+    fail "verify accepted an archived captain call that records no answer"
+  fi
+
+  home=$(make_home archived-lost-relifecycle)
+  call=sample-rehold-call
+  tasks_in "$home" add "$origin" "Run the sample ingest" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the third ingest origin"
+  write_origin_meta "$home" "$origin"
+  printf 'working: ingest running\n' > "$home/state/$origin.status"
+  run_captain "$home" hold "$call" --title "Choose the sample window" \
+    --reason "captain window choice pending" --origin "$origin" >/dev/null \
+    || fail "could not hold the first lifecycle"
+  run_captain "$home" complete "$origin" "$call" >/dev/null \
+    || fail "the ingest origin could not inventory the first lifecycle"
+  printf 'Tonight.\n' > "$home/window-decision.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/window-decision.txt" >/dev/null \
+    || fail "the captain's answer could not close the first lifecycle"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "Done retention could not archive the first lifecycle"
+  tasks_in "$home" add "$call" "Choose the next sample window" --kind captain --repo sample >/dev/null \
+    || fail "could not re-add the call id for a new lifecycle"
+  run_captain "$home" hold "$call" --reason "captain next window pending" >/dev/null \
+    || fail "could not hold the new lifecycle"
+  run_captain "$home" verify "$origin" >/dev/null \
+    || fail "an actively held new lifecycle stopped counting as durably held"
+  tasks_in "$home" unhold "$call" >/dev/null || fail "could not lift the new hold out of band"
+  if out=$(run_captain "$home" complete "$origin" --none 2>&1); then
+    fail "an older archived answer settled a live lifecycle whose hold was lost unanswered"
+  fi
+  assert_contains "$out" "neither held for the captain nor closed with a recorded captain answer" \
+    "the lost-lifecycle refusal changed its reason"
+
+  # Queued-section retention archives the newer, still-unanswered lifecycle
+  # after the older answered one; the newest captain row in the archive decides.
+  run_captain "$home" hold "$call" --reason "captain next window pending" >/dev/null \
+    || fail "could not re-hold the new lifecycle"
+  tasks_in "$home" prune --state queued --keep 0 >/dev/null \
+    || fail "queued retention could not archive the new lifecycle"
+  assert_grep "[ ] $call -" "$home/data/done-archive.md" "queued retention did not archive the unanswered lifecycle"
+  if out=$(run_captain "$home" complete "$origin" --none 2>&1); then
+    fail "an older archived answer settled a newer lifecycle archived unanswered from the queue"
+  fi
+  assert_contains "$out" "$call was archived out of this home's configured backlog with no recorded captain answer" \
+    "the archived-newer-lifecycle refusal did not name the unanswered call"
+  if run_captain "$home" verify "$origin" > "$home/queued-archive-verify.out" 2>&1; then
+    fail "verify let an older archived answer settle a newer lifecycle archived from the queue"
+  fi
+
+  # One row can carry both lifecycles: a released answer stays in the body when
+  # the row is re-held, and closing that re-held row by hand answers nothing.
+  home=$(make_home archived-reheld-row)
+  call=sample-reheld-call
+  tasks_in "$home" add "$origin" "Run the sample ingest" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the fourth ingest origin"
+  write_origin_meta "$home" "$origin"
+  printf 'working: ingest running\n' > "$home/state/$origin.status"
+  run_captain "$home" hold "$call" --title "Choose the sample batch" \
+    --reason "captain batch choice pending" --origin "$origin" >/dev/null \
+    || fail "could not hold the released lifecycle"
+  run_captain "$home" complete "$origin" "$call" >/dev/null \
+    || fail "the ingest origin could not inventory the released lifecycle"
+  printf 'Run the first batch.\n' > "$home/batch-decision.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/batch-decision.txt" --release >/dev/null \
+    || fail "the captain's answer could not release the first lifecycle"
+  run_captain "$home" hold "$call" --reason "captain second batch pending" >/dev/null \
+    || fail "could not re-hold the released row"
+  tasks_in "$home" "done" "$call" --keep 0 >/dev/null \
+    || fail "could not close and archive the re-held row out of band"
+  assert_grep "[x] $call -" "$home/data/done-archive.md" "the re-held row was not archived"
+  if out=$(run_captain "$home" complete "$origin" --none 2>&1); then
+    fail "a released answer from an earlier lifecycle settled the re-held row archived unanswered"
+  fi
+  assert_contains "$out" "$call was archived out of this home's configured backlog with no recorded captain answer" \
+    "the re-held-row refusal did not name the unanswered call"
+  pass "the archive settles an answered call and never an unanswered or lost one"
+}
+
 # A live call past its review-by date is marked due in OPEN DECISIONS while
 # staying captain-held: the hold bit, the spawn refusal, and the answer path
 # all survive, and answered, deferred, or not-yet-due calls are not marked.
@@ -1658,3 +1848,5 @@ test_deferred_hold_leaves_captains_call_until_due
 test_board_build_writes_decision_cards
 test_out_of_band_close_is_recordable
 test_answer_refuses_close_while_worker_is_live
+test_self_held_call_answered_then_archived_still_verifies
+test_archive_never_settles_an_unanswered_call
