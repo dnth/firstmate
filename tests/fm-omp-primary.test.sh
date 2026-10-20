@@ -2958,12 +2958,16 @@ const say = (text) => [thinking, { type: "text", text }];
 const wake = { role: "custom", customType: "firstmate-watcher-wake", content: "WAKE: heartbeat", display: false, attribution: "agent" };
 const captain = (text) => ({ role: "user", content: [{ type: "text", text }], attribution: "user" });
 const merge = (content) => ({ role: "custom", customType: "fm-branch-merge", content, display: false, attribution: "agent" });
+const advisor = { role: "custom", customType: "advisor", content: "<advisory severity=\"concern\">Recheck CI.</advisory>", display: true, attribution: "agent" };
+const asyncResult = { role: "custom", customType: "async-result", content: "job done", attribution: "agent" };
+const answered = (text) => ({ answered: text });
 
 function finalText(label, inputs, text) {
   const s = session();
   for (const input of inputs) {
     if (input === "thinking-only") s.answer([thinking]);
     else if (input === "tool-step") s.answer([thinking, { type: "toolCall", id: "t1", name: "bash", arguments: {} }], "toolUse");
+    else if (input.answered !== undefined) s.answer(say(input.answered));
     else s.start(input);
   }
   return s.answer(say(text));
@@ -2975,6 +2979,9 @@ const hidden = [
   ["two no-change sentences", [wake], "Captain, aye. Nothing new since my last update."],
   ["routine branch note beside a wake", [wake, merge("\u26f5 aceh: still loading")], "Nothing new needs you."],
   ["retry after a thinking-only stop", [wake, "thinking-only"], "Captain, nothing has changed."],
+  ["advisor continuation of a wake-only turn", [wake, answered(SILENT_WAKE_MARKER), advisor], "Captain, standing by."],
+  ["second advisor continuation of a wake-only turn", [wake, answered(SILENT_WAKE_MARKER), advisor, answered("Nothing new needs you."), advisor], "Captain, aye."],
+  ["wake after an advisor note on a captain turn", [captain("status?"), answered("Captain, CI is green."), advisor, wake], SILENT_WAKE_MARKER],
 ];
 for (const [label, inputs, text] of hidden) {
   assert.equal(finalText(label, inputs, text), SILENT_WAKE_MARKER, `${label} was not hidden`);
@@ -2987,6 +2994,7 @@ const reasked = [
   ["ascii dots on a captain turn", [captain("status?")], "..."],
   ["captain skill during a wake", [wake, { role: "custom", customType: "skill-prompt", content: "skill", attribution: "user" }], SILENT_WAKE_MARKER],
   ["captain turn retried after a thinking-only stop", [captain("status?"), "thinking-only"], SILENT_WAKE_MARKER],
+  ["marker on an advisor continuation of a captain turn", [captain("status?"), answered("Captain, CI is green."), advisor], SILENT_WAKE_MARKER],
 ];
 for (const [label, inputs, text] of reasked) {
   assert.equal(finalText(label, inputs, text), "", `${label} kept a silent answer`);
@@ -2997,10 +3005,14 @@ const kept = [
   ["real outcome after a wake", [wake], outcome],
   ["no-change opener with a fact", [wake], "Captain, no change. The Mac is waiting on your #532 call."],
   ["captain turn", [captain("status?")], "Captain, standing by."],
-  ["dot-only answer without captain or wake", [{ role: "custom", customType: "async-result", content: "job done", attribution: "agent" }], SILENT_WAKE_MARKER],
+  ["dot-only answer without captain or wake", [asyncResult], SILENT_WAKE_MARKER],
   ["captain steer during a wake", [wake, "tool-step", captain("also check CI")], "Nothing new needs you."],
   ["captain-facing branch merge", [wake, merge("kcc-audit: The audit is complete.")], "Captain, standing by."],
-  ["agent input without a wake", [{ role: "custom", customType: "async-result", content: "job done", attribution: "agent" }], "Captain, standing by."],
+  ["agent input without a wake", [asyncResult], "Captain, standing by."],
+  ["no-change line on an advisor continuation of a captain turn", [captain("status?"), answered("Captain, CI is green."), advisor], "Captain, standing by."],
+  ["captain input after an advisor note on a wake-only turn", [wake, answered(SILENT_WAKE_MARKER), advisor, captain("anything?")], "Captain, standing by."],
+  ["advisor note inside a turn without a wake", [wake, answered(SILENT_WAKE_MARKER), asyncResult, advisor], "Captain, standing by."],
+  ["advisor note opening a fresh session", [advisor], "Captain, standing by."],
 ];
 for (const [label, inputs, text] of kept) {
   assert.equal(finalText(label, inputs, text), text, `${label} lost its text`);
@@ -3043,6 +3055,14 @@ for (const reason of ["new", "resume", "fork"]) {
   wakeEpisode.switch(reason);
   assert.equal(wakeEpisode.answer(say("Captain, standing by.")), "Captain, standing by.",
     `${reason} retained the previous session's wake`);
+
+  const advisedAfterSwitch = session();
+  advisedAfterSwitch.start(wake);
+  advisedAfterSwitch.answer(say(SILENT_WAKE_MARKER));
+  advisedAfterSwitch.switch(reason);
+  advisedAfterSwitch.start(advisor);
+  assert.equal(advisedAfterSwitch.answer(say("Captain, standing by.")), "Captain, standing by.",
+    `${reason} let an advisor note continue the previous session's wake`);
 }
 console.log("silent-wake-rules-ok");
 JS

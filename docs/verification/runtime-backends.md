@@ -741,15 +741,18 @@ With only the two composer-draft assertions removed, the same run also passed `o
 
 #### OMP silent wake turns
 
-In `@oh-my-pi/pi-coding-agent` 18.10.1, `features.unexpectedStopDetection` is `none|mechanical|smart`, defaulting to `mechanical` (`src/session/settings.ts:1052-1056`).
-The recovery handler (`src/session/turn-recovery.ts:1108-1195`, invoked at `src/session/agent-session.ts:4381-4385`) retries a final `stop` with no tool call, no visible text, and a thinking block with non-empty thinking and signature (`src/session/unexpected-stop-classifier.ts:42-61`) in both mechanical and smart modes (`src/session/turn-recovery.ts:1127-1135`), up to 3 times (`:93`).
-Signed thinking counts as actionable content (`src/session/messages.ts:544,568`), bypassing the empty-stop path.
-It never retries a final message that has visible text in mechanical mode (`src/session/turn-recovery.ts:1136-1138`), and its chat view renders text made only of dots, ellipses, or blank space as nothing in every streamed frame (`pi-tui` `canonicalizeMessage`).
+Line references below are to `@oh-my-pi/pi-coding-agent` 18.12.3; 18.10.1 behaves the same except where noted.
+`features.unexpectedStopDetection` is `none|mechanical|smart`, defaulting to `mechanical` (`src/session/settings.ts:1053-1056`).
+The recovery handler (`src/session/turn-recovery.ts:1119-1207`, invoked at `src/session/agent-session.ts:4707-4711`) retries a final `stop` with no tool call, no visible text, and a signed thinking block (`src/session/unexpected-stop-classifier.ts:59-80`) in both mechanical and smart modes (`src/session/turn-recovery.ts:1134-1139,1185-1206`), up to 3 times (`:93`).
+Since 18.11.1 a signature alone qualifies; 18.10.1 also required non-empty thinking text.
+Signed thinking counts as actionable content (`src/session/messages.ts:545-559`), bypassing the empty-stop path.
+It never retries a final message that has visible text in mechanical mode (`src/session/turn-recovery.ts:1139-1143`), and its chat view renders text made only of dots, ellipses, or blank space as nothing in every streamed frame (`pi-tui` `canonicalizeMessage`).
 Smart mode's judge on `…` is unproven.
-There is no supported per-turn silent stop in this version: the recovery setting is session-wide and not extension-settable, `acceptTerminalEmptyStop` is internal and handles empty stops rather than signed thinking-only stops, and `yield` is the subagent terminal protocol.
+There is no supported per-turn silent stop in either version: the recovery setting is session-wide and not extension-settable, `acceptTerminalEmptyStop` is internal (absent from the extension `sendMessage` options, `src/extensibility/extensions/types.ts:1861-1864`) and handles empty stops rather than signed thinking-only stops, and `yield` is the subagent terminal protocol.
 Rewriting text to empty through `assistant_message` restores the retried thinking-only shape.
-The silent wake-turn marker `…` and the primary extension's backstop and captain guard (owner: `installSilentWakeTurns` in `.omp/extensions/fm-primary-omp.ts`; agent rule: [OMP supervision protocol](../supervision-protocols/omp.md)) rely on both behaviors.
-On 2026-10-20 the opt-in real-SDK regression ran under Bun 1.4.3 against `@oh-my-pi/pi-coding-agent` 18.10.1, the same version as the installed `omp` binary, installed into a scratch directory with `bun add @oh-my-pi/pi-coding-agent@18.10.1`:
+From 18.12.1, `advisor.continueSeverity` defaults to `concern` (`src/advisor/settings.ts:65-71`), so an advisor concern after a final answer, `…` included, starts a continuation turn (`src/advisor/advise-tool.ts:118-137`) opened by a visible `advisor` custom message attributed to the agent (`src/session/session-advisors.ts:1853-1856`); Firstmate's `.omp/config.yml` enables the advisor.
+The silent wake-turn marker `…` and the primary extension's backstop, captain guard, and advisor-continuation rule (owner: `installSilentWakeTurns` in `.omp/extensions/fm-primary-omp.ts`; agent rule: [OMP supervision protocol](../supervision-protocols/omp.md)) rely on these behaviors.
+On 2026-10-20 the opt-in real-SDK regression ran under Bun 1.4.3 against `@oh-my-pi/pi-coding-agent` 18.12.3, the same version as the installed `omp` binary, installed into a scratch directory with `bun add @oh-my-pi/pi-coding-agent@18.12.3`:
 
 ```sh
 FM_OMP_PACKAGE_DIR=<scratch>/node_modules/@oh-my-pi/pi-coding-agent bash tests/fm-omp-primary.test.sh
@@ -757,13 +760,16 @@ FM_OMP_PACKAGE_DIR=<scratch>/node_modules/@oh-my-pi/pi-coding-agent bash tests/f
 
 ```text
 ok - OMP primary silences only marker or no-change finals of wake-only episodes and re-asks silent captain turns
-ok - real OMP: silent wake turns draw no retry and render nothing in any streamed frame, captain turns and real outcomes stay visible
+ok - real OMP: silent wake turns and their advisor continuations draw no retry and show nothing, captain turns and real outcomes stay visible
 ```
 
 The real-SDK phase streams each reply in delayed chunks and renders every streamed frame through OMP's assistant message component.
 It first asserts that a thinking-only wake turn is re-prompted, so it fails rather than passing vacuously once OMP stops retrying such stops.
+Its advisor scenarios run OMP's own advisor runtime against a scripted `advise` concern: the continuation of a wake-only turn settles with its no-change line hidden, and the continuation of a captain turn that ends in `…` is re-asked and answered visibly.
+The fixture writes a leaf `WATCHDOG.yml` because OMP reads advisor rosters from every ancestor directory and the nearest entry of a name wins, so an ancestor `default` entry could otherwise set the advisor model.
 Without `FM_OMP_PACKAGE_DIR` it prints a skip line and only the portable episode-rule phase runs.
-The portable phase also covers episode reset on assistant abort and session replacement, and episode retention on errors for retries.
+The portable phase also covers episode reset on assistant abort and session replacement, episode retention on errors for retries, and advisor continuations that keep the origin of the turn they review until the episode's own wake or captain input arrives.
+The same day, the installed `omp` 18.12.3 binary, run as `omp -p --no-session --no-extensions -e <local-provider-extension> --model silent-probe/probe` with a throwaway agent directory, made 4 provider requests (3 carrying the unexpected-stop retry) for thinking-only replies and 1 request for a `…` reply.
 OMP versions before 18.4.4 lack the `assistant_message` hook, so the marker remains usable but the backstop and captain guard are unavailable.
 The backstop can briefly stream a no-change line before rewriting the settled message; only the marker path is proven invisible in every streamed frame.
 

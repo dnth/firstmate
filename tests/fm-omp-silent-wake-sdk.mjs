@@ -2,6 +2,7 @@
 // disposable local model endpoint that streams each reply in delayed chunks.
 // Launched by test_silent_wake_turn_with_real_sdk.
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 const packageDir = process.env.FM_OMP_PACKAGE_DIR;
 const { initializeExtensions } = await import(`${packageDir}/src/modes/runtime-init.ts`);
@@ -11,25 +12,36 @@ const { installSilentWakeTurns, SILENT_WAKE_MARKER } = await import(process.env.
 const RETRY_PROMPTS = ["You said you would continue", "Stopped without actionable output"];
 const requests = [];
 const replies = [];
+const advisorNotes = [];
 const frames = [];
 const encoder = new TextEncoder();
 const pieces = (text, size) => text ? Array.from({ length: Math.ceil(text.length / size) }, (_, i) => text.slice(i * size, (i + 1) * size)) : [];
+let adviceCalls = 0;
 const server = Bun.serve({
   hostname: "127.0.0.1", port: 0,
   async fetch(req) {
     const body = await req.json();
-    // A recovery retry appends its prompt as the newest message of the request.
-    requests.push(JSON.stringify(body.messages.at(-1)));
-    const reply = replies.shift() ?? { text: "unscripted provider call" };
     const chunk = (delta, finish_reason = null) => `data: ${JSON.stringify({ id: "silent", object: "chat.completion.chunk", created: 1, model: "probe", choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
-    // reasoning_content parses to a thinking block whose signature is the field
-    // name: the signed thinking-only shape OMP's unexpected-stop path retries.
-    const events = [
-      ...pieces(reply.reasoning, 8).map((part) => chunk({ role: "assistant", reasoning_content: part })),
-      ...pieces(reply.text, 3).map((part) => chunk({ role: "assistant", content: part })),
-      chunk({}, "stop"),
-      "data: [DONE]\n\n",
-    ];
+    let events;
+    if ((body.tools ?? []).some((tool) => tool.function?.name === "advise")) {
+      // OMP's advisor reviewing a finished primary turn: one scripted note, then done.
+      const note = advisorNotes.shift();
+      events = note
+        ? [chunk({ role: "assistant", tool_calls: [{ index: 0, id: `advise-${++adviceCalls}`, type: "function", function: { name: "advise", arguments: JSON.stringify(note) } }] }), chunk({}, "tool_calls")]
+        : [chunk({ role: "assistant", content: "Reviewed." }), chunk({}, "stop")];
+    } else {
+      // A recovery retry or advisor continuation appends its prompt as the newest message.
+      requests.push(JSON.stringify(body.messages.at(-1)));
+      const reply = replies.shift() ?? { text: "unscripted provider call" };
+      // reasoning_content parses to a thinking block whose signature is the field
+      // name: the signed thinking-only shape OMP's unexpected-stop path retries.
+      events = [
+        ...pieces(reply.reasoning, 8).map((part) => chunk({ role: "assistant", reasoning_content: part })),
+        ...pieces(reply.text, 3).map((part) => chunk({ role: "assistant", content: part })),
+        chunk({}, "stop"),
+      ];
+    }
+    events.push("data: [DONE]\n\n");
     return new Response(new ReadableStream({
       async start(controller) {
         for (const event of events) {
@@ -54,6 +66,11 @@ const frameRecorder = (pi) => pi.on("message_update", (event) => {
   if (event.message.role === "assistant") frames.push(visibleLines(event.message));
 });
 const home = process.env.FM_HOME;
+// The advisor stays off until the advisor scenarios. A leaf WATCHDOG.yml pins its
+// model over any ancestor roster, and no cooldown lets consecutive concerns continue.
+writeFileSync(`${home}/WATCHDOG.yml`, "advisors:\n  - name: default\n    model: silent-probe/probe\n");
+mkdirSync(`${home}/agent`, { recursive: true });
+writeFileSync(`${home}/agent/config.yml`, "advisor:\n  immuneTurns: 0\n");
 const { session } = await createAgentSession({
   cwd: home, agentDir: `${home}/agent`, sessionManager: SessionManager.inMemory(home),
   disableExtensionDiscovery: true, extensions: [provider, frameRecorder, (pi) => installSilentWakeTurns(pi)],
@@ -61,12 +78,14 @@ const { session } = await createAgentSession({
   promptTemplates: [], toolNames: [], autoApprove: true, systemPrompt: "Main test session",
 });
 
-// Runs one turn and returns what the captain would see from it.
+// Runs one turn, plus any advisor continuation, and returns what the captain would see from it.
 async function turn(label, start, scripted) {
   const before = requests.length;
   frames.length = 0;
   replies.push(...scripted);
   await start();
+  // An advisor continuation starts only after the reviewed turn went idle.
+  for (let waited = 0; replies.length > 0 && waited < 10_000; waited += 20) await Bun.sleep(20);
   await session.waitForIdle();
   assert.equal(replies.length, 0, `${label}: not every scripted reply was requested`);
   const sent = requests.slice(before);
@@ -75,6 +94,7 @@ async function turn(label, start, scripted) {
   assert(frames.length > 1, `${label}: no streamed frames were observed`);
   return {
     calls: sent.length,
+    advised: sent.some((request) => request.includes("<advisory")),
     nudged: sent.some((request) => RETRY_PROMPTS.some((prompt) => request.includes(prompt))),
     text: final.content.filter((block) => block.type === "text").map((block) => block.text).join(""),
     lines: visibleLines(final),
@@ -126,7 +146,32 @@ try {
   assert.deepEqual({ calls: misuse.calls, nudged: misuse.nudged, lines: misuse.lines }, { calls: 2, nudged: true, lines: [answer] },
     `the marker silenced a captain-initiated turn: ${JSON.stringify(misuse)}`);
 
-  console.log("ok - real OMP: silent wake turns draw no retry and render nothing in any streamed frame, captain turns and real outcomes stay visible");
+  // From OMP 18.12.1 an advisor concern after a final answer starts a continuation
+  // turn by default; it keeps the origin of the turn it reviewed.
+  assert.equal(session.setAdvisorEnabled(true), true, "the scripted advisor did not start");
+  advisorNotes.push({ note: "The heartbeat review was not reported.", severity: "concern" });
+  const reviewedWake = await turn("advisor continuation of a wake", wake, [
+    { reasoning: "Nothing new.", text: SILENT_WAKE_MARKER },
+    { reasoning: "The concern changes nothing for the captain.", text: "Captain, standing by." },
+  ]);
+  assert.deepEqual(
+    { calls: reviewedWake.calls, advised: reviewedWake.advised, nudged: reviewedWake.nudged, lines: reviewedWake.lines },
+    { calls: 2, advised: true, nudged: false, lines: [] },
+    `an advisor continuation of a wake-only turn stayed visible: ${JSON.stringify(reviewedWake)}`);
+
+  advisorNotes.push({ note: "CI was not rechecked.", severity: "concern" });
+  const recheck = "Captain, I rechecked: CI on main is still green.";
+  const reviewedCaptain = await turn("advisor continuation of a captain turn", captain("is CI green?"), [
+    { text: answer },
+    { reasoning: "Nothing to add.", text: SILENT_WAKE_MARKER },
+    { reasoning: "Answer the captain.", text: recheck },
+  ]);
+  assert.deepEqual(
+    { calls: reviewedCaptain.calls, advised: reviewedCaptain.advised, nudged: reviewedCaptain.nudged, lines: reviewedCaptain.lines },
+    { calls: 3, advised: true, nudged: true, lines: [recheck] },
+    `the marker silenced an advisor continuation of a captain turn: ${JSON.stringify(reviewedCaptain)}`);
+
+  console.log("ok - real OMP: silent wake turns and their advisor continuations draw no retry and show nothing, captain turns and real outcomes stay visible");
 } finally {
   await session.dispose();
   server.stop();
