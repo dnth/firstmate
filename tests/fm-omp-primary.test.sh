@@ -2939,6 +2939,9 @@ function session() {
   const emit = (name, message) => (handlers.get(name) ?? []).map((handler) => handler({ type: name, message }));
   return {
     start: (message) => emit("message_start", message),
+    switch: (reason) => {
+      for (const handler of handlers.get("session_switch") ?? []) handler({ type: "session_switch", reason });
+    },
     // An assistant message as OMP finalizes it: rewrite hook, then message_end.
     answer(content, stopReason = "stop") {
       let message = { role: "assistant", stopReason, content };
@@ -3012,6 +3015,35 @@ s.start(wake);
 assert.equal(s.answer(say("Captain, standing by.")), SILENT_WAKE_MARKER, "captain input leaked past its answered episode");
 s.start(captain("anything?"));
 assert.equal(s.answer(say("Captain, standing by.")), "Captain, standing by.", "a wake leaked into the next captain turn");
+for (const stopReason of ["aborted", "error"]) {
+  const captainEpisode = session();
+  captainEpisode.start(captain("status?"));
+  captainEpisode.answer([thinking], stopReason);
+  captainEpisode.start(wake);
+  assert.equal(captainEpisode.answer(say(SILENT_WAKE_MARKER)), stopReason === "aborted" ? SILENT_WAKE_MARKER : "",
+    `${stopReason} mishandled the captain episode boundary`);
+
+  const wakeEpisode = session();
+  wakeEpisode.start(wake);
+  wakeEpisode.answer([thinking], stopReason);
+  assert.equal(wakeEpisode.answer(say("Captain, standing by.")), stopReason === "aborted" ? "Captain, standing by." : SILENT_WAKE_MARKER,
+    `${stopReason} mishandled the wake episode boundary`);
+}
+
+for (const reason of ["new", "resume", "fork"]) {
+  const captainEpisode = session();
+  captainEpisode.start(captain("status?"));
+  captainEpisode.switch(reason);
+  captainEpisode.start(wake);
+  assert.equal(captainEpisode.answer(say(SILENT_WAKE_MARKER)), SILENT_WAKE_MARKER,
+    `${reason} retained the previous session's captain input`);
+
+  const wakeEpisode = session();
+  wakeEpisode.start(wake);
+  wakeEpisode.switch(reason);
+  assert.equal(wakeEpisode.answer(say("Captain, standing by.")), "Captain, standing by.",
+    `${reason} retained the previous session's wake`);
+}
 console.log("silent-wake-rules-ok");
 JS
   )

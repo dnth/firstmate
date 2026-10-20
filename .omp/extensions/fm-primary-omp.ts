@@ -239,8 +239,9 @@ function userMessageText(content: unknown): string {
 // cannot end without text. It never re-prompts a final message with text, and
 // its chat view renders text made only of dots, ellipses, and blank space as
 // nothing in every streamed frame, so SILENT_WAKE_MARKER ends a wake turn
-// silently. An episode is every message since the last final assistant message
-// that carried text. In an episode a watcher wake opened and no captain input or
+// silently. An episode ends on session replacement, an assistant abort, or a
+// final assistant stop that carried text; errors keep the episode for retries.
+// In an episode a watcher wake opened and no captain input or
 // captain-facing branch merge joined, a whole-message no-change line is
 // rewritten to the marker as a backstop; it streamed before the rewrite, so the
 // marker stays the primary path. In an episode the captain joined, a dot-only
@@ -260,6 +261,10 @@ const NO_CHANGE_LINE = new RegExp(`^${NO_CHANGE_SENTENCE}(?:\\s+${NO_CHANGE_SENT
 export function installSilentWakeTurns(omp: Pick<ExtensionAPI, "on">): void {
   let wakeOpened = false;
   let captainJoined = false;
+  omp.on("session_switch", () => {
+    wakeOpened = false;
+    captainJoined = false;
+  });
   omp.on("message_start", (event) => {
     const message = event.message;
     const attribution = "attribution" in message ? message.attribution : undefined;
@@ -296,8 +301,10 @@ export function installSilentWakeTurns(omp: Pick<ExtensionAPI, "on">): void {
   });
   omp.on("message_end", (event) => {
     const message = event.message;
-    if (message.role !== "assistant" || message.stopReason !== "stop") return;
-    if (!message.content.some((block) => block.type === "text" && block.text.trim())) return;
+    if (message.role !== "assistant") return;
+    if (message.stopReason !== "aborted" &&
+      !(message.stopReason === "stop" &&
+        message.content.some((block) => block.type === "text" && block.text.trim()))) return;
     wakeOpened = false;
     captainJoined = false;
   });
