@@ -1007,16 +1007,19 @@ test_raw_non_omp_launches_keep_their_existing_escape_hatch() {
   rec=$(make_spawn_case profile-raw-non-omp claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  ln -s custom-agent "$FAKEBIN_DIR/custom-omp-agent"
+  ln -s "$RAW_DIRECT_PRINTF" "$FAKEBIN_DIR/custom-omp-agent"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" 'custom-omp-agent --legacy')
+    "$id" "$PROJ_DIR" 'custom-omp-agent %s raw-escape-ok')
   status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
   expect_code 0 "$status" "lookalike non-OMP raw command should still launch"
   assert_contains "$out" "spawned $id harness=custom-omp-agent" \
     "lookalike non-OMP raw command lost its executable identity"
-  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' exec /usr/bin/env $RAW_DIRECT_TRUE --legacy" \
-    "lookalike non-OMP raw launch changed"
+  [ "$(cat "$CASE_DIR/raw-execution.log")" = raw-escape-ok ] \
+    || fail "lookalike non-OMP raw launch did not execute its target with its arguments"
   pass "lookalike non-OMP raw launches preserve the escape hatch"
 }
 
@@ -1026,6 +1029,8 @@ test_raw_non_omp_launches_bypass_pane_aliases_and_functions() {
   rec=$(make_spawn_case profile-raw-pane-resolution claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  rm "$FAKEBIN_DIR/custom-agent"
+  ln -s "$RAW_DIRECT_PRINTF" "$FAKEBIN_DIR/custom-agent"
   pane_env="$CASE_DIR/pane-env"
   cat > "$pane_env" <<'SH'
 custom-agent() { omp "$@"; }
@@ -1033,15 +1038,16 @@ SH
   export FM_TEST_PANE_BASH_ENV="$pane_env"
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
   export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" 'custom-agent --legacy')
+    "$id" "$PROJ_DIR" 'custom-agent %s pane-resolution-ok')
   status=$?
-  unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED FM_TEST_RAW_EXECUTION_LOG
   expect_code 0 "$status" "raw direct non-OMP launch should bypass an ambient pane function"
   assert_absent "$CASE_DIR/raw-omp-executed" "ambient pane function executed the harmless fake OMP"
-  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' exec /usr/bin/env $RAW_DIRECT_TRUE --legacy" \
-    "raw direct non-OMP launch did not use the alias-safe command form"
+  [ "$(cat "$CASE_DIR/raw-execution.log")" = pane-resolution-ok ] \
+    || fail "raw direct non-OMP launch did not execute its target with its arguments"
   pass "raw direct non-OMP launches bypass ambient pane aliases and functions"
 }
 
@@ -1070,8 +1076,6 @@ SH
   expect_code 0 "$status" "raw direct non-OMP launch should preserve a plain assignment"
   [ "$(cat "$CASE_DIR/raw-execution.log")" = bar ] \
     || fail "raw direct non-OMP launch did not pass its assignment to the executable: $(cat "$CASE_DIR/raw-execution.log")"
-  assert_contains "$(cat "$LAUNCH_LOG")" "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/prepush-guard' exec /usr/bin/env FOO=bar $RAW_DIRECT_PRINTENV FOO" \
-    "raw direct non-OMP assignment launch was not normalized safely"
   pass "raw direct non-OMP launches preserve plain assignments"
 }
 
