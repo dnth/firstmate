@@ -75,9 +75,9 @@
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
 #   check: no-mistakes task <id> has open PR <url> but no No-Mistakes run on <branch>
-#                          a no-mistakes ship task's worker created the PR
-#                          itself, so the pipeline that must own the PR never
-#                          ran; bin/fm-nm-pr-guard.sh is the prevention gate
+#                          an open PR exists without a branch run, indicating
+#                          a possible worker bypass of pipeline PR creation;
+#                          bin/fm-nm-pr-guard.sh is the prevention gate
 #                          and this is the detection backstop. One wake per
 #                          task and PR while the branch has no run.
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> idle=<seconds>s
@@ -767,8 +767,10 @@ EOF
 # Cost is bounded: one `gh pr list` per eligible task, plus one local
 # `axi status` read only when a PR exists, both no more often than
 # CHECK_INTERVAL.
-# A recorded pr= or nm_run_id= already proves a run, so those tasks are skipped
-# entirely.
+# Tasks with a recorded pr= or nm_run_id= are outside this missing-run scan.
+# An explicit `repo not initialized` response counts as no run; other failed
+# or malformed status reads are inconclusive and preserve the current marker.
+# Failed PR lookups likewise preserve it, so recovery cannot repeat an alert.
 # One durable check wake per task and PR; the per-task marker clears when a run
 # appears or the PR closes, so a later episode alerts again.
 nm_pr_unguarded_tick() {
