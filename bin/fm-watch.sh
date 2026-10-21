@@ -58,9 +58,10 @@
 #                          live worker is never interrupted and escalates here.
 #                          An idle secondmate that is neither paused nor captain-held
 #                          is also absorbed while its home watcher beacon is fresh
-#                          within the wedge threshold; missing, stale, future-dated,
-#                          or timed-out evidence follows the ordinary stale and
-#                          possible-wedge path. A RunPod route in a recognized
+#                          within the wedge threshold; conclusive stale evidence
+#                          follows the ordinary stale and possible-wedge path.
+#                          Inconclusive remote evidence uses the consecutive-probe
+#                          bound documented below. A RunPod route in a recognized
 #                          no-host lifecycle is dormant instead and uses the long
 #                          pause cadence without probing its absent endpoint.
 #   check: <script>: <out> authenticated check output, always actionable
@@ -101,8 +102,9 @@
 # Inconclusive evidence is never a stale verdict by itself: a slow SSH round trip
 # on a healthy host is normal. Consecutive inconclusive probes are counted per
 # route in state/.remote-inconclusive-<key>, and only
-# FM_REMOTE_INCONCLUSIVE_MAX of them (positive integer, default 3) enter the
-# ordinary stale path. A conclusive stale age, or a live fresh age, resets the
+# FM_REMOTE_INCONCLUSIVE_MAX of them (positive integer, default 3, also used
+# for invalid values) enter the ordinary stale path.
+# A conclusive stale age, or a live fresh age, resets the
 # count and takes its own path immediately.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still

@@ -53,9 +53,10 @@
 #     captain-held recovery whose endpoint is proven dead or missing instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge
 #     escalation. Live or ambiguous recovery stays visible, and remote stale
-#     endpoints are checked through their owner; inconclusive owner results are
-#     escalated rather than silently deferred. Crewmates are autonomous, so a
-#     delayed stale response does not stall a healthy crewmate's own progress.
+#     endpoints are checked through their owner; inconclusive owner results use
+#     the bounded retry policy described under FM_REMOTE_INCONCLUSIVE_MAX below.
+#     Crewmates are autonomous, so a delayed stale response does not stall a
+#     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
@@ -125,6 +126,14 @@
 #                                   as a possible wedge (default 240)
 #          FM_REMOTE_STALE_RECHECK_SECS seconds between inconclusive remote
 #                                   stale-owner probes (default 60)
+#          FM_REMOTE_INCONCLUSIVE_MAX consecutive inconclusive owner probes
+#                                   before escalation (positive integer,
+#                                   default 3; invalid values use 3). Counts
+#                                   persist per route in
+#                                   state/.subsuper-remote-inconclusive-<key>;
+#                                   conclusive owner answers or stale-marker
+#                                   cleanup reset them. Throttled rechecks do
+#                                   not count as probes.
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 2700)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
@@ -241,9 +250,7 @@ FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 REMOTE_STALE_RECHECK_SECS_DEFAULT=60
-# Consecutive inconclusive remote owner probes (deadline, no answer, unusable
-# output) before the away-mode daemon escalates a stale remote route. A
-# conclusive owner answer still escalates immediately.
+# The header owns the remote owner-probe retry policy.
 REMOTE_INCONCLUSIVE_MAX_DEFAULT=3
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
