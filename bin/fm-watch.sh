@@ -280,10 +280,6 @@ case "$IDLE_OPEN_WORK_SECS" in ''|0|*[!0-9]*) IDLE_OPEN_WORK_SECS=$FM_IDLE_OPEN_
 # secondmate_wake_stall_tick, never a substitute for it.
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-}
 case "$SECONDMATE_WAKE_STALL_SECS" in ''|*[!0-9]*|0) SECONDMATE_WAKE_STALL_SECS=180 ;; esac
-# The no-mistakes PR-guard backstop scans no more often than this, so one
-# per-task `gh pr list` query cannot pace the watcher or its GitHub rate limit.
-NM_PR_SCAN_SECS=${FM_NM_PR_SCAN_SECS:-600}
-case "$NM_PR_SCAN_SECS" in ''|*[!0-9]*|0) NM_PR_SCAN_SECS=600 ;; esac
 # Oldest age (seconds) an undelivered main-owned durable wake row may reach
 # before the watcher raises one wedge alarm per oldest-row episode
 # (docs/wedge-alarm.md). Empty, zero, or non-numeric falls back to 300.
@@ -770,7 +766,7 @@ EOF
 # rather than alerting on an unreadable PR state.
 # Cost is bounded: one `gh pr list` per eligible task, plus one local
 # `axi status` read only when a PR exists, both no more often than
-# NM_PR_SCAN_SECS.
+# CHECK_INTERVAL.
 # A recorded pr= or nm_run_id= already proves a run, so those tasks are skipped
 # entirely.
 # One durable check wake per task and PR; the per-task marker clears when a run
@@ -778,7 +774,7 @@ EOF
 nm_pr_unguarded_tick() {
   local meta task kind mode worktree recorded_pr recorded_run branch marker pr_line number url
   local status_out runs reason notify_key queued
-  [ "$(age_of "$STATE/.last-nm-pr-scan")" -ge "$NM_PR_SCAN_SECS" ] || return 0
+  [ "$(age_of "$STATE/.last-nm-pr-scan")" -ge "$CHECK_INTERVAL" ] || return 0
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind)
@@ -806,8 +802,14 @@ nm_pr_unguarded_tick() {
       rm -f "$marker"
       continue
     fi
-    status_out=$(fm_nm_run "$worktree" 15 axi status)
-    runs=$(fm_nm_field "$status_out" runs_on_current_branch)
+    if status_out=$(fm_nm_run_bounded "$worktree" 15 axi status 2>&1); then
+      runs=$(fm_nm_field "$status_out" runs_on_current_branch)
+    else
+      case "$status_out" in
+        *"repo not initialized"*) runs=0 ;;
+        *) continue ;;
+      esac
+    fi
     case "$runs" in
       ''|*[!0-9]*) continue ;;
     esac

@@ -211,14 +211,10 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *.fm-launch-*)
-          marker=${a#/bin/bash }
-          marker=${marker#\'}
-          script=${marker%\'}
-          [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_SEND_LOG"
+          (cd "$FM_FAKE_PANE_PATH" && /bin/bash -c "$a") || exit 1
           ;;
       esac
     done
-    [ -z "${FM_FAKE_SEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
     exit 0
     ;;
   list-windows|has-session|new-session|new-window|kill-window|kill-pane|list-panes) exit 0 ;;
@@ -226,6 +222,19 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux" || return 1
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  echo 'codex-cli 0.100.0'
+  exit 0
+fi
+for tool in gh gh-axi; do
+  output=$("$tool" pr create --title 'worker PR' 2>&1)
+  result=$?
+  printf '%s:%s:%s\n' "$tool" "$result" "$output" >> "$FM_FAKE_WORKER_LOG"
+done
+SH
+  chmod +x "$fakebin/codex" || return 1
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -235,6 +244,7 @@ SH
 case "${1:-} ${2:-}" in
   "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
   "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
+  "pr create") printf '%s\n' 'created PR' >> "$FM_FAKE_REAL_LOG"; echo 'created PR' ;;
 esac
 exit 0
 SH
@@ -242,6 +252,7 @@ SH
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
   "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
+  "pr create") printf '%s\n' 'created PR' >> "$FM_FAKE_REAL_LOG"; echo 'created PR' ;;
 esac
 exit 0
 SH
@@ -298,65 +309,49 @@ run_spawn() {  # <id> [extra fm-spawn args...]
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
-    FM_FAKE_SEND_LOG="$CASE_DIR/send.log" PATH="$FAKEBIN_DIR:$PATH" \
+    FM_FAKE_WORKER_LOG="$CASE_DIR/worker.log" \
+    FM_FAKE_REAL_LOG="$CASE_DIR/real.log" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
 
 test_no_mistakes_spawn_arms_guard() {
-  local rec id out status sendlog guarddir realbin
+  local rec id out status tool
   id='nm-guard-ship-r1'
   rec=$(make_spawn_case ship "$id") || fail "fixture setup failed"
   read_spawn_case "$rec"
-  sendlog="$CASE_DIR/send.log"
-
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "spawn failed: $out"
   assert_contains "$out" "spawned $id" "spawn did not report success"
-  grep -q 'FM_NM_PR_GUARD=1' "$sendlog" \
-    || fail "no-mistakes launch did not arm FM_NM_PR_GUARD=1"
-  grep -q 'nm-pr-guard' "$sendlog" \
-    || fail "no-mistakes launch did not put the guard dir on PATH"
-
-  guarddir="/tmp/fm-$id/nm-pr-guard"
-  [ -x "$guarddir/gh" ] && [ -x "$guarddir/gh-axi" ] \
-    || fail "spawn did not install the guard wrappers at $guarddir"
-  grep -Fq "PATH='$guarddir':\"\$PATH\" FM_NM_PR_GUARD=1 " "$sendlog" \
-    || fail "no-mistakes launch did not lead PATH with the guard dir and arm it at runtime"
-
-  # The refusal itself, run with the launch environment's shape.
-  realbin="$CASE_DIR/realbin"
-  mkdir -p "$realbin" || fail "could not create a real-tool stand-in dir"
-  printf '#!/usr/bin/env bash\nprintf "real gh:%%s\\n" "$*"\n' > "$realbin/gh" || fail "could not write stand-in gh"
-  chmod +x "$realbin/gh" || fail "could not make stand-in gh executable"
-  out=$(PATH="$guarddir:$realbin:/usr/bin:/bin" FM_NM_PR_GUARD=1 "$guarddir/gh" pr create --title x 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "worker-shaped environment allowed gh pr create"
-  assert_contains "$out" "No-Mistakes pipeline" "refusal did not name the pipeline"
-  assert_not_contains "$out" "real gh:pr create" "refused invocation reached the real gh"
-
+  for tool in gh gh-axi; do
+    assert_contains "$(cat "$CASE_DIR/worker.log")" "$tool:2:blocked:" \
+      "launched worker allowed $tool pr create"
+  done
+  assert_contains "$(cat "$CASE_DIR/worker.log")" "No-Mistakes pipeline" \
+    "worker refusal did not name the pipeline"
+  [ ! -s "$CASE_DIR/real.log" ] || fail "blocked worker reached real tool"
   rm -rf "/tmp/fm-$id"
-  pass "no-mistakes spawn installs and arms the guard; worker PR creation is refused"
+  pass "executed no-mistakes launch refuses worker PR creation through both tools"
 }
 
 test_direct_pr_spawn_installs_nothing() {
-  local rec id out status sendlog
+  local rec id out status tool
   id='nm-guard-direct-r1'
   rec=$(make_spawn_case direct "$id") || fail "fixture setup failed"
   read_spawn_case "$rec"
-  sendlog="$CASE_DIR/send.log"
-
   out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "spawn failed: $out"
-  if grep -q 'FM_NM_PR_GUARD=1' "$sendlog" 2>/dev/null; then
-    fail "a direct-PR launch was armed with the no-mistakes PR guard"
-  fi
+  for tool in gh gh-axi; do
+    assert_contains "$(cat "$CASE_DIR/worker.log")" "$tool:0:created PR" \
+      "direct-PR worker could not create PR through $tool"
+  done
+  assert_equals 2 "$(wc -l < "$CASE_DIR/real.log" | tr -d ' ')" \
+    "direct-PR worker did not reach both real tools"
   assert_absent "/tmp/fm-$id/nm-pr-guard" \
     "a direct-PR spawn installed the no-mistakes PR guard"
-
   rm -rf "/tmp/fm-$id"
-  pass "direct-PR spawn installs no guard and arms nothing"
+  pass "executed direct-PR launch allows worker PR creation through both tools"
 }
 
 test_install_writes_wrappers

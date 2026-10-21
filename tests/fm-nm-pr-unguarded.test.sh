@@ -68,6 +68,11 @@ SH
 #!/usr/bin/env bash
 # `no-mistakes axi status`: report the run count for the current branch.
 if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
+  case "${FM_FAKE_NM_RUNS:-0}" in
+    uninitialized) echo 'error: repo not initialized' >&2; exit 1 ;;
+    unavailable) echo 'error: daemon unavailable' >&2; exit 1 ;;
+    malformed) echo 'unexpected response'; exit 0 ;;
+  esac
   printf 'current_branch: fm/nm-detector\n'
   printf 'runs_on_current_branch: %s\n' "${FM_FAKE_NM_RUNS:-0}"
   exit 0
@@ -88,7 +93,7 @@ EOF
 # case's state, override wake(), and run one scan. Prints the tick's wake
 # reasons, one per line.
 run_tick() {
-  local pr=$1 runs=$2
+  local pr=$1 runs=$2 force_scan=${3:-1}
   (
     export FM_HOME="$CASE_HOME" \
       FM_ROOT_OVERRIDE="$ROOT" \
@@ -103,7 +108,7 @@ run_tick() {
     . "$ROOT/bin/fm-watch.sh"
     # shellcheck disable=SC2329 # Replaces the watcher's exit-on-wake callback.
     wake() { printf 'WAKE:%s\n' "$1"; }
-    rm -f "$CASE_STATE/.last-nm-pr-scan"
+    [ "$force_scan" != 1 ] || rm -f "$CASE_STATE/.last-nm-pr-scan"
     nm_pr_unguarded_tick
   )
 }
@@ -160,6 +165,39 @@ test_failed_lookup_preserves_episode() {
   pass "failed lookup preserves deduplication; confirmed closure or run resets it"
 }
 
+test_existing_check_interval_controls_scan() {
+  local rec out
+  rec=$(make_case cadence) || fail "fixture setup failed"
+  read_case "$rec"
+  out=$(run_tick '' 0 2>&1) || fail "initial tick failed: $out"
+  out=$(run_tick 7 0 0 2>&1) || fail "early tick failed: $out"
+  assert_not_contains "$out" "WAKE:" "scan ignored the existing check interval"
+  out=$(FM_CHECK_INTERVAL=0 run_tick 7 0 0 2>&1) || fail "due tick failed: $out"
+  assert_contains "$out" "WAKE:" "scan did not use the existing check interval"
+  pass "detector shares the existing check interval"
+}
+
+test_uninitialized_and_inconclusive_status() {
+  local rec out response
+  rec=$(make_case uninitialized) || fail "fixture setup failed"
+  read_case "$rec"
+  for response in unavailable malformed; do
+    out=$(run_tick 7 "$response" 2>&1) || fail "tick failed: $out"
+    assert_not_contains "$out" "WAKE:" "inconclusive status raised a wake"
+  done
+  out=$(run_tick 7 uninitialized 2>&1) || fail "tick failed: $out"
+  assert_contains "$out" "WAKE:" "uninitialized repo with an open PR did not wake"
+  : > "$CASE_STATE/.wake-queue"
+  for response in unavailable malformed uninitialized; do
+    out=$(run_tick 7 "$response" 2>&1) || fail "repeat tick failed: $out"
+    assert_not_contains "$out" "WAKE:" "status transition repeated an acknowledged episode"
+  done
+  out=$(run_tick 7 1 2>&1) || fail "run-present tick failed: $out"
+  assert_not_contains "$out" "WAKE:" "initialized branch with a run raised a wake"
+  assert_absent "$CASE_STATE/.nm-pr-unguarded-nm-ship-r1" "observed run did not clear marker"
+  pass "uninitialized repo alerts once; inconclusive status stays quiet"
+}
+
 test_run_on_branch_stays_quiet() {
   local rec out rows
   rec=$(make_case with-run) || fail "fixture setup failed"
@@ -212,6 +250,8 @@ test_recorded_run_id_is_skipped() {
 
 test_open_pr_without_run_raises_one_wake
 test_failed_lookup_preserves_episode
+test_existing_check_interval_controls_scan
+test_uninitialized_and_inconclusive_status
 test_run_on_branch_stays_quiet
 test_no_open_pr_stays_quiet
 test_recorded_pr_is_skipped
