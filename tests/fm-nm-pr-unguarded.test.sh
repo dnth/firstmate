@@ -56,6 +56,7 @@ make_case() {
 # `gh pr list --state open --head <branch> --json number,url --jq ...`
 case "${1:-} ${2:-}" in
   "pr list")
+    [ "${FM_FAKE_PR_FAIL:-0}" = 0 ] || exit 1
     [ -n "${FM_FAKE_PR_NUMBER:-}" ] || exit 0
     printf '%s\thttps://github.com/o/r/pull/%s\n' "$FM_FAKE_PR_NUMBER" "$FM_FAKE_PR_NUMBER"
     exit 0
@@ -134,6 +135,31 @@ test_open_pr_without_run_raises_one_wake() {
   pass "one wake for an open PR with no run, silent on repeat"
 }
 
+test_failed_lookup_preserves_episode() {
+  local rec out rows
+  rec=$(make_case lookup-failure) || fail "fixture setup failed"
+  read_case "$rec"
+  out=$(run_tick 7 0 2>&1) || fail "initial tick failed: $out"
+  assert_contains "$out" "WAKE:" "initial episode did not wake"
+  : > "$CASE_STATE/.wake-queue"
+
+  out=$(FM_FAKE_PR_FAIL=1 run_tick 7 0 2>&1) || fail "failed-lookup tick failed: $out"
+  assert_not_contains "$out" "WAKE:" "failed lookup raised a wake"
+  out=$(run_tick 7 0 2>&1) || fail "recovery tick failed: $out"
+  assert_not_contains "$out" "WAKE:" "lookup recovery repeated an acknowledged episode"
+  rows=$(queue_rows "$CASE_STATE")
+  assert_equals "" "$rows" "lookup recovery requeued the acknowledged episode"
+
+  out=$(run_tick '' 0 2>&1) || fail "closed PR tick failed: $out"
+  assert_not_contains "$out" "WAKE:" "closed PR raised a wake"
+  out=$(run_tick 7 0 2>&1) || fail "reopened PR tick failed: $out"
+  assert_contains "$out" "WAKE:" "confirmed closure did not reset the episode"
+  out=$(run_tick 7 1 2>&1) || fail "run-present tick failed: $out"
+  assert_not_contains "$out" "WAKE:" "run-present tick raised a wake"
+  assert_absent "$CASE_STATE/.nm-pr-unguarded-nm-ship-r1" "observed run did not clear marker"
+  pass "failed lookup preserves deduplication; confirmed closure or run resets it"
+}
+
 test_run_on_branch_stays_quiet() {
   local rec out rows
   rec=$(make_case with-run) || fail "fixture setup failed"
@@ -185,6 +211,7 @@ test_recorded_run_id_is_skipped() {
 }
 
 test_open_pr_without_run_raises_one_wake
+test_failed_lookup_preserves_episode
 test_run_on_branch_stays_quiet
 test_no_open_pr_stays_quiet
 test_recorded_pr_is_skipped

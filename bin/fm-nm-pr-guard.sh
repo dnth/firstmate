@@ -69,6 +69,7 @@ is_pr_create() {  # <args...>
       while [ "$i" -lt "${#args[@]}" ]; do
         arg=${args[$i]}
         case "$arg" in
+          -R|--repo) i=$((i + 2)); continue ;;
           -*) i=$((i + 1)); continue ;;
           create) return 0 ;;
           *) return 1 ;;
@@ -93,9 +94,11 @@ api_posts_to_pulls() {  # <api args...>
     case "$arg" in
       -X|--method) i=$((i + 1)); method=${args[$i]:-} ;;
       --method=*) method=${arg#--method=} ;;
-      -X?*) method=${arg#-X} ;;
+      -X?*) method=${arg#-X}; method=${method#=} ;;
       -f|--raw-field|-F|--field) fields=1; i=$((i + 1)) ;;
-      --field=*|--raw-field=*|--input|--input=*) fields=1 ;;
+      -f?*|-F?*|--field=*|--raw-field=*|--input=*) fields=1 ;;
+      --input) fields=1; i=$((i + 1)) ;;
+      -H|--header|--hostname|--cache|-p|--preview|-q|--jq|-t|--template) i=$((i + 1)) ;;
       -*) ;;
       *) [ -n "$path" ] || path=$arg ;;
     esac

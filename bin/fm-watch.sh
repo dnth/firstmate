@@ -799,7 +799,7 @@ nm_pr_unguarded_tick() {
     marker="$STATE/.nm-pr-unguarded-$task"
     pr_line=$(fm_nm_cmd_bounded "$worktree" 15 gh pr list --state open \
       --head "$branch" --limit 1 --json number,url \
-      --jq '.[] | "\(.number)\t\(.url)"' 2>/dev/null) || pr_line=
+      --jq '.[] | "\(.number)\t\(.url)"' 2>/dev/null) || continue
     number=$(printf '%s\n' "$pr_line" | head -1 | cut -f1)
     url=$(printf '%s\n' "$pr_line" | head -1 | cut -f2)
     if [ -z "$number" ] || [ -z "$url" ]; then

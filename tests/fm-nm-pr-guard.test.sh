@@ -108,6 +108,45 @@ test_armed_guard_refuses_worker_pr_create() {
   pass "armed guard refuses gh/gh-axi pr create and the api pulls POST"
 }
 
+test_option_placement_preserves_guard() {
+  local rec tool option method
+  rec=$(make_guard_case options) || fail "guard install failed"
+  read_guard_case "$rec"
+  for tool in gh gh-axi; do
+    for option in -R --repo; do
+      run_guarded "$tool" 1 pr "$option" o/r create --fill
+      expect_code 2 "$GUARD_RC" "guard allowed $tool pr $option o/r create"
+    done
+    for option in --repo=o/r -Ro/r; do
+      run_guarded "$tool" 1 "$option" pr create --fill
+      expect_code 2 "$GUARD_RC" "guard allowed $tool $option pr create"
+      run_guarded "$tool" 1 pr "$option" create --fill
+      expect_code 2 "$GUARD_RC" "guard allowed $tool pr $option create"
+    done
+    for option in -H --header --hostname --cache -p --preview -q --jq -t --template; do
+      run_guarded "$tool" 1 api "$option" value -X POST repos/o/r/pulls
+      expect_code 2 "$GUARD_RC" "guard allowed API creation with $option before endpoint"
+      run_guarded "$tool" 1 api "$option" repos/o/r/pulls repos/o/r/issues -X POST
+      expect_code 0 "$GUARD_RC" "guard mistook $option value for endpoint"
+    done
+    for option in -f -F --field --raw-field --input; do
+      run_guarded "$tool" 1 api "$option" body repos/o/r/pulls
+      expect_code 2 "$GUARD_RC" "guard allowed inferred POST with $option"
+    done
+    for option in -ftitle=worker -Ftitle=worker --field=title=worker --raw-field=title=worker --input=body; do
+      run_guarded "$tool" 1 api "$option" repos/o/r/pulls
+      expect_code 2 "$GUARD_RC" "guard allowed inferred POST with $option"
+      run_guarded "$tool" 1 api "$option" repos/o/r/pulls --method GET
+      expect_code 0 "$GUARD_RC" "guard refused explicit GET with $option"
+    done
+    for method in -XPOST -X=POST --method=POST; do
+      run_guarded "$tool" 1 api "$method" repos/o/r/pulls
+      expect_code 2 "$GUARD_RC" "guard allowed API creation with $method"
+    done
+  done
+  pass "option values and attached fields preserve command, endpoint, and method classification"
+}
+
 test_armed_guard_allows_reads_and_other_verbs() {
   local rec
   rec=$(make_guard_case reads) || fail "guard install failed"
@@ -322,6 +361,7 @@ test_direct_pr_spawn_installs_nothing() {
 
 test_install_writes_wrappers
 test_armed_guard_refuses_worker_pr_create
+test_option_placement_preserves_guard
 test_armed_guard_allows_reads_and_other_verbs
 test_unarmed_guard_is_inert
 test_no_mistakes_spawn_arms_guard
