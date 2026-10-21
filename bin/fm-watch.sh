@@ -74,6 +74,12 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+#   check: no-mistakes task <id> has open PR <url> but no No-Mistakes run on <branch>
+#                          a no-mistakes ship task's worker created the PR
+#                          itself, so the pipeline that must own the PR never
+#                          ran; bin/fm-nm-pr-guard.sh is the prevention gate
+#                          and this is the detection backstop. One wake per
+#                          task and PR while the branch has no run.
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> idle=<seconds>s
 #                          an actionable row in an endpoint-recorded local
 #                          secondmate home's durable wake queue did not advance
@@ -135,6 +141,11 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-ext-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# No-Mistakes run attribution primitives (bounded axi calls, TOON field reads),
+# shared with fm-crew-state.sh, fm-teardown.sh, and fm-pr-check.sh. The
+# nm_pr_unguarded_tick backstop reads a task's run existence through this owner.
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is
 # cheap when no records exist and never scrapes secondmate conversation.
@@ -269,6 +280,10 @@ case "$IDLE_OPEN_WORK_SECS" in ''|0|*[!0-9]*) IDLE_OPEN_WORK_SECS=$FM_IDLE_OPEN_
 # secondmate_wake_stall_tick, never a substitute for it.
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-}
 case "$SECONDMATE_WAKE_STALL_SECS" in ''|*[!0-9]*|0) SECONDMATE_WAKE_STALL_SECS=180 ;; esac
+# The no-mistakes PR-guard backstop scans no more often than this, so one
+# per-task `gh pr list` query cannot pace the watcher or its GitHub rate limit.
+NM_PR_SCAN_SECS=${FM_NM_PR_SCAN_SECS:-600}
+case "$NM_PR_SCAN_SECS" in ''|*[!0-9]*|0) NM_PR_SCAN_SECS=600 ;; esac
 # Oldest age (seconds) an undelivered main-owned durable wake row may reach
 # before the watcher raises one wedge alarm per oldest-row episode
 # (docs/wedge-alarm.md). Empty, zero, or non-numeric falls back to 300.
@@ -741,6 +756,77 @@ EOF
   triage_log "main-owned wake row seq $seq undelivered for ${age}s; wedge alarm fired once - see $MAIN_WAKE_UNDELIVERED_MARKER"
   WEDGE_ALARM_TITLE="firstmate: main wakes UNDELIVERED" \
     wedge_alarm_notify "main-owned wake row seq $seq undelivered for ${age}s - see $MAIN_WAKE_UNDELIVERED_MARKER" "$MAIN_WAKE_UNDELIVERED_MARKER" || true
+  return 0
+}
+
+# No-Mistakes PR-guard backstop. A no-mistakes ship task's branch must get its
+# PR from the No-Mistakes pipeline; a worker-created PR predates every run, so
+# fm-pr-check.sh and fm-pr-merge.sh have no run to prove. bin/fm-nm-pr-guard.sh
+# refuses that creation in the worker's environment, and this tick detects a
+# bypass (absolute path, another API client, a cleared marker) by asking
+# whether the branch already has an open PR while it has no run.
+# The open-PR lookup is GitHub's `gh pr list`, run in the task worktree; a
+# project on another forge fails that lookup inconclusively and stays silent
+# rather than alerting on an unreadable PR state.
+# Cost is bounded: one `gh pr list` per eligible task, plus one local
+# `axi status` read only when a PR exists, both no more often than
+# NM_PR_SCAN_SECS.
+# A recorded pr= or nm_run_id= already proves a run, so those tasks are skipped
+# entirely.
+# One durable check wake per task and PR; the per-task marker clears when a run
+# appears or the PR closes, so a later episode alerts again.
+nm_pr_unguarded_tick() {
+  local meta task kind mode worktree recorded_pr recorded_run branch marker pr_line number url
+  local status_out runs reason notify_key queued
+  [ "$(age_of "$STATE/.last-nm-pr-scan")" -ge "$NM_PR_SCAN_SECS" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" = ship ] || continue
+    mode=$(fm_meta_get "$meta" mode)
+    [ "$mode" = no-mistakes ] || continue
+    recorded_pr=$(fm_meta_get "$meta" pr)
+    [ -z "$recorded_pr" ] || continue
+    recorded_run=$(fm_meta_get "$meta" nm_run_id)
+    [ -z "$recorded_run" ] || continue
+    task=${meta##*/}
+    task=${task%.meta}
+    case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    worktree=$(fm_meta_get "$meta" worktree)
+    [ -n "$worktree" ] && [ -d "$worktree" ] || continue
+    branch=$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=
+    [ -n "$branch" ] && [ "$branch" != HEAD ] || continue
+    marker="$STATE/.nm-pr-unguarded-$task"
+    pr_line=$(fm_nm_cmd_bounded "$worktree" 15 gh pr list --state open \
+      --head "$branch" --limit 1 --json number,url \
+      --jq '.[] | "\(.number)\t\(.url)"' 2>/dev/null) || pr_line=
+    number=$(printf '%s\n' "$pr_line" | head -1 | cut -f1)
+    url=$(printf '%s\n' "$pr_line" | head -1 | cut -f2)
+    if [ -z "$number" ] || [ -z "$url" ]; then
+      rm -f "$marker"
+      continue
+    fi
+    status_out=$(fm_nm_run "$worktree" 15 axi status)
+    runs=$(fm_nm_field "$status_out" runs_on_current_branch)
+    case "$runs" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$runs" -ne 0 ]; then
+      rm -f "$marker"
+      continue
+    fi
+    [ "$(cat "$marker" 2>/dev/null || true)" = "$number $url" ] && continue
+    notify_key="nm-pr-unguarded-$task-$number"
+    reason="check: no-mistakes task $task has open PR $url but no No-Mistakes run on $branch (worker opened it; the pipeline must own the PR)"
+    queued=$(fm_wake_queued_keys check) || queued=
+    if ! printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1; then
+      fm_wake_append check "$notify_key" "$reason" || return 1
+    fi
+    printf '%s\n' "$number $url" > "$marker" || return 1
+    touch "$STATE/.last-nm-pr-scan"
+    wake "$reason"
+  done
+  touch "$STATE/.last-nm-pr-scan"
   return 0
 }
 
@@ -1802,6 +1888,13 @@ while :; do
   # Undelivered main-wake alarm: strictly read-only and best-effort, so a
   # marker or channel failure can never interrupt the watch loop.
   main_wake_undelivered_tick || true
+
+  # No-Mistakes PR-guard backstop: a no-mistakes ship whose worker opened its
+  # own PR has no run to prove, so surface it once while the branch has none.
+  nm_pr_unguarded_tick || {
+    echo "watcher: no-mistakes PR guard scan failed" >&2
+    exit 1
+  }
 
   # Local Communication Officer: converge the inbox poll shim with the opt-in,
   # then ring once for any bridge row the gateway recorded since the last ring.

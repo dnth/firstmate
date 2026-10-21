@@ -192,6 +192,10 @@
 #   (bin/fm-prepush-guard.sh) refusing pushes to main, master, and the repo's
 #   default branch; it rides the launch environment's GIT_CONFIG_* injection,
 #   so no repository config or sibling worktree is touched.
+#   A no-mistakes ship additionally gets the per-worker PR guard
+#   (bin/fm-nm-pr-guard.sh): `gh` and `gh-axi` wrappers in the task temp root
+#   lead the worker's PATH with FM_NM_PR_GUARD=1, so a worker-initiated PR
+#   creation is refused and the No-Mistakes pipeline stays the only creator.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -4590,6 +4594,25 @@ if [ "$KIND" != secondmate ]; then
   }
 fi
 
+# Per-worker No-Mistakes PR guard (bin/fm-nm-pr-guard.sh owns the contract): a
+# no-mistakes ship gets task-private `gh` and `gh-axi` wrappers under its task
+# temp root, first on the worker's PATH and armed by FM_NM_PR_GUARD=1 on the
+# launch command below, so a worker-initiated PR creation is refused instead of
+# racing the pipeline that must own it. Every other mode installs nothing, and
+# the wrappers stay in /tmp so fm-teardown's tasktmp removal retires them.
+NM_PR_GUARD_DIR=
+if [ "$KIND" = ship ] && [ "${MODE:-}" = no-mistakes ]; then
+  NM_PR_GUARD_DIR="$TASK_TMP/nm-pr-guard"
+  if [ -L "$NM_PR_GUARD_DIR" ] || { [ -e "$NM_PR_GUARD_DIR" ] && [ ! -d "$NM_PR_GUARD_DIR" ]; }; then
+    echo "error: no-mistakes PR guard path must be a non-symlink directory: $NM_PR_GUARD_DIR" >&2
+    exit 1
+  fi
+  "$SCRIPT_DIR/fm-nm-pr-guard.sh" install "$NM_PR_GUARD_DIR" || {
+    echo "error: could not install the no-mistakes PR guard for task $ID" >&2
+    exit 1
+  }
+fi
+
 # Per-harness turn-end hook where enabled: every surface calls fm-turnend-signal.sh
 # with this task's SPAWN_GEN, which writes the per-generation marker
 # state/<id>.turn-ended.<SPAWN_GEN> when the agent finishes a turn. Worktree-resident
@@ -5333,6 +5356,13 @@ else
   # carry no trace of the guard.
   if [ -n "$PUSH_GUARD_HOOKS_DIR" ]; then
     LAUNCH="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(shell_quote "$PUSH_GUARD_HOOKS_DIR") $LAUNCH"
+  fi
+  # The No-Mistakes PR guard rides the launch command the same way: its dir
+  # leads PATH and FM_NM_PR_GUARD=1 arms it. "$PATH" resolves inside the staged
+  # launch script's shell, so the pane's own PATH stays behind the guard dir
+  # instead of freezing the primary's PATH at spawn time.
+  if [ -n "$NM_PR_GUARD_DIR" ]; then
+    LAUNCH="PATH=$(shell_quote "$NM_PR_GUARD_DIR"):\"\$PATH\" FM_NM_PR_GUARD=1 $LAUNCH"
   fi
   LAUNCH="FM_TASK_ID=$sq_task_id FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= $LAUNCH"
 fi
