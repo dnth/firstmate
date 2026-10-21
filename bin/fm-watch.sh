@@ -96,6 +96,14 @@
 # force-kill after one additional second when TERM is ignored. Perl starts the
 # probe in its own process group, sends TERM at the bound, and sends KILL after
 # a 0.2-second grace. With none of those tools, the probe returns missing evidence.
+# A remote probe is either conclusive (a numeric beacon age, fresh or stale) or
+# inconclusive (deadline hit, no answer, non-numeric output, or no deadline tool).
+# Inconclusive evidence is never a stale verdict by itself: a slow SSH round trip
+# on a healthy host is normal. Consecutive inconclusive probes are counted per
+# route in state/.remote-inconclusive-<key>, and only
+# FM_REMOTE_INCONCLUSIVE_MAX of them (positive integer, default 3) enter the
+# ordinary stale path. A conclusive stale age, or a live fresh age, resets the
+# count and takes its own path immediately.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -160,6 +168,10 @@ REMOTE_TIMEOUT=${FM_WATCH_REMOTE_TIMEOUT:-5}
 case "$REMOTE_TIMEOUT" in
   ''|*[!0-9]*|0) REMOTE_TIMEOUT=5 ;;
   *) [ "$REMOTE_TIMEOUT" -le 15 ] || REMOTE_TIMEOUT=5 ;;
+esac
+REMOTE_INCONCLUSIVE_MAX=${FM_REMOTE_INCONCLUSIVE_MAX:-3}
+case "$REMOTE_INCONCLUSIVE_MAX" in
+  ''|*[!0-9]*|0) REMOTE_INCONCLUSIVE_MAX=3 ;;
 esac
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 PR_PUBLICATION_LOCK_STALE_SECS=30
@@ -1121,7 +1133,8 @@ clear_pause_state() {  # <window-key>
 clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.remote-inconclusive-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
@@ -1261,16 +1274,21 @@ run_with_deadline() {
   fi
 }
 
+# 0 = alive (a fresh beacon), 1 = conclusive stale (an answer that is missing,
+# stale, or shaped wrong for a local home), and 2 = inconclusive remote evidence:
+# the probe hit its deadline, returned no answer, or emitted non-numeric output.
+# Only the caller may turn 2 into a stale verdict, and only after the route's
+# consecutive-inconclusive bound.
 secondmate_supervision_is_alive() {  # <window> <meta> <remote-host>
   local win=$1 meta=$2 remote_host=$3 home beat task age
   [ -n "$meta" ] || return 1
   if [ -n "$remote_host" ]; then
     task=$(window_to_task "$win" "$STATE")
     age=$(run_with_deadline "$REMOTE_TIMEOUT" "$ON_BIN" "$task" \
-      fm-remote-secondmate-control.sh beacon-age "$task" </dev/null 2>/dev/null) || return 1
-    case "$age" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$age" -ge 0 ] && [ "$age" -lt "$STALE_ESCALATE_SECS" ]
-    return
+      fm-remote-secondmate-control.sh beacon-age "$task" </dev/null 2>/dev/null) || return 2
+    case "$age" in ''|*[!0-9]*) return 2 ;; esac
+    [ "$age" -ge 0 ] && [ "$age" -lt "$STALE_ESCALATE_SECS" ] && return 0
+    return 1
   fi
   home=$(grep '^home=' "$meta" | cut -d= -f2- || true)
   [ -n "$home" ] || return 1
@@ -2084,10 +2102,31 @@ EOF
     fi
     secondmate_stale=0
     if [ "$kind" = secondmate ]; then
-      if ! status_is_paused_or_captain_held "$last" \
-        && secondmate_supervision_is_alive "$w" "$meta" "$remote_host"; then
-        clear_pause_tracking "$key"
-        continue
+      if ! status_is_paused_or_captain_held "$last"; then
+        secondmate_supervision_is_alive "$w" "$meta" "$remote_host"
+        probe_rc=$?
+        if [ "$probe_rc" -eq 0 ]; then
+          clear_pause_tracking "$key"
+          continue
+        fi
+        icf="$STATE/.remote-inconclusive-$key"
+        if [ "$probe_rc" -eq 2 ]; then
+          # Inconclusive evidence (deadline, no answer, unusable output) is not a
+          # stale verdict: count it per route and absorb until the documented
+          # consecutive-probe bound, so one slow SSH round trip on a live host
+          # never wakes firstmate.
+          icn=$(( $(cat "$icf" 2>/dev/null || echo 0) + 1 ))
+          [ "$icn" -le "$REMOTE_INCONCLUSIVE_MAX" ] || icn=$REMOTE_INCONCLUSIVE_MAX
+          printf '%s\n' "$icn" > "$icf"
+          if [ "$icn" -lt "$REMOTE_INCONCLUSIVE_MAX" ]; then
+            triage_log "absorbed inconclusive remote beacon probe ($icn/$REMOTE_INCONCLUSIVE_MAX): $w"
+            continue
+          fi
+          triage_log "inconclusive remote beacon probes reached the bound ($icn/$REMOTE_INCONCLUSIVE_MAX): $w"
+        else
+          # A conclusive answer (fresh or stale) resets the inconclusive count.
+          rm -f "$icf"
+        fi
       fi
       secondmate_stale=1
     fi

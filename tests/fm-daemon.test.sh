@@ -528,11 +528,25 @@ SH
         FM_STALE_ESCALATE_SECS=240 \
         FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
       if [ "$mode" = unknown ]; then
+        # One inconclusive owner probe is not stale evidence: the next pass
+        # must stay deferred while the bound is unmet.
         FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
           FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
           FM_REMOTE_STATUS_FILE="$remote_status_file" \
           FM_STALE_ESCALATE_SECS=240 \
-          FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
+          FM_REMOTE_STALE_RECHECK_SECS=0 housekeeping "$state"
+        [ ! -s "$state/.subsuper-escalations" ] \
+          || fail "unknown remote owner escalated before the inconclusive bound"
+        [ -e "$state/.subsuper-stale-$key" ] \
+          || fail "unknown remote owner dropped the stale marker below the bound"
+        [ -e "$state/.subsuper-remote-inconclusive-$key" ] \
+          || fail "unknown remote owner did not count its inconclusive probes"
+        # The third consecutive probe meets the bound and escalates.
+        FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
+          FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
+          FM_REMOTE_STATUS_FILE="$remote_status_file" \
+          FM_STALE_ESCALATE_SECS=240 \
+          FM_REMOTE_STALE_RECHECK_SECS=0 housekeeping "$state"
       fi
     ) || fail "remote captain-held stale housekeeping failed for $mode result"
     [ ! -e "$capture_attempted" ] || fail "remote captain-held stale attempted a local capture for $mode result"
@@ -556,7 +570,10 @@ SH
         [ ! -e "$state/.subsuper-remote-recheck-$key" ] || fail "unknown remote owner result retained recheck throttle marker"
         grep -q 'remote stale owner probe inconclusive' "$state/.subsuper-escalations" \
           || fail "unknown remote owner result did not escalate bounded visibility"
-        [ "$(wc -l < "$probe_calls")" -eq 1 ] || fail "unknown remote owner result was probed repeatedly"
+        [ ! -e "$state/.subsuper-remote-inconclusive-$key" ] \
+          || fail "unknown remote owner retained its inconclusive count after escalation"
+        [ "$(wc -l < "$probe_calls")" -eq 3 ] \
+          || fail "unknown remote owner did not probe exactly the documented bound: $(wc -l < "$probe_calls")"
         ;;
     esac
   done

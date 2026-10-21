@@ -241,6 +241,10 @@ FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 REMOTE_STALE_RECHECK_SECS_DEFAULT=60
+# Consecutive inconclusive remote owner probes (deadline, no answer, unusable
+# output) before the away-mode daemon escalates a stale remote route. A
+# conclusive owner answer still escalates immediately.
+REMOTE_INCONCLUSIVE_MAX_DEFAULT=3
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
@@ -594,7 +598,8 @@ stale_marker_record() {  # <window> <state>  — create if absent
 
 stale_markers_remove_by_key() {  # <state> <key>
   local state=$1 key=$2
-  rm -f "$state/.subsuper-stale-$key" "$state/.subsuper-remote-recheck-$key"
+  rm -f "$state/.subsuper-stale-$key" "$state/.subsuper-remote-recheck-$key" \
+    "$state/.subsuper-remote-inconclusive-$key"
 }
 
 stale_marker_remove() {  # <window> <state>
@@ -987,6 +992,31 @@ remote_stale_probe_with_deadline() {
   fi
 }
 
+# Record one inconclusive remote owner probe for <state> <key>. Returns 0 once
+# FM_REMOTE_INCONCLUSIVE_MAX consecutive probes have produced no usable answer,
+# 1 while still below the bound.
+remote_inconclusive_max() {
+  local max=${FM_REMOTE_INCONCLUSIVE_MAX:-$REMOTE_INCONCLUSIVE_MAX_DEFAULT}
+  case "$max" in
+    ''|*[!0-9]*|0) max=$REMOTE_INCONCLUSIVE_MAX_DEFAULT ;;
+  esac
+  printf '%s\n' "$max"
+}
+
+remote_inconclusive_tick() {  # <state> <key>
+  local state=$1 key=$2 file max count
+  max=$(remote_inconclusive_max)
+  file="$state/.subsuper-remote-inconclusive-$key"
+  count=$(( $(cat "$file" 2>/dev/null || echo 0) + 1 ))
+  [ "$count" -le "$max" ] || count=$max
+  printf '%s\n' "$count" > "$file"
+  [ "$count" -ge "$max" ]
+}
+
+# Probe a stale remote route's own owner. Returns 0 for a conclusive dead or
+# missing endpoint, 1 for a conclusive live/ambiguous answer, 2 once the
+# consecutive-inconclusive bound is reached, and 3 while deferred (a throttled
+# recheck or an inconclusive probe still below its bound).
 remote_stale_recheck() {  # <window> <state>
   local win=$1 state=$2 task meta remote_host on_bin timeout retry_secs key marker now last endpoint_state
   task=$(window_to_task "$win" "$state")
@@ -1004,7 +1034,7 @@ remote_stale_recheck() {  # <window> <state>
   last=$(cat "$marker" 2>/dev/null || true)
   case "$last" in
     ''|*[!0-9]*) ;;
-    *) [ "$((now - last))" -lt "$retry_secs" ] && return 2 ;;
+    *) [ "$((now - last))" -lt "$retry_secs" ] && return 3 ;;
   esac
   printf '%s\n' "$now" > "$marker"
   on_bin=${FM_ON_BIN:-$FM_DAEMON_DIR/fm-on.sh}
@@ -1014,18 +1044,23 @@ remote_stale_recheck() {  # <window> <state>
     *) [ "$timeout" -le 15 ] || timeout=5 ;;
   esac
   endpoint_state=$(remote_stale_probe_with_deadline "$timeout" "$on_bin" "$task" \
-    fm-remote-secondmate-control.sh state "$task" </dev/null 2>/dev/null) || return 2
+    fm-remote-secondmate-control.sh state "$task" </dev/null 2>/dev/null) || {
+    remote_inconclusive_tick "$state" "$key" && return 2
+    return 3
+  }
   case "$endpoint_state" in
     dead|missing)
-      rm -f "$marker"
+      rm -f "$marker" "$state/.subsuper-remote-inconclusive-$key"
       return 0
       ;;
     alive|ambiguous|unreadable|unverified)
-      rm -f "$marker"
+      rm -f "$marker" "$state/.subsuper-remote-inconclusive-$key"
       return 1
       ;;
-    *) return 2 ;;
   esac
+  # Any other answer is unusable evidence, so it counts toward the bound.
+  remote_inconclusive_tick "$state" "$key" && return 2
+  return 3
 }
 
 recovery_projection_path() {  # <state>
@@ -1661,10 +1696,15 @@ EOF
           if [ -n "$latest" ] && daemon_pause_status_is_valid "$win" "$state" "$latest"; then
             reconcile_pause_tracking "$win" "$state" "$latest"
           else
-            escalate_add "$state" "remote stale owner probe inconclusive: $win" \
+            escalate_add "$state" "remote stale owner probe inconclusive after $(remote_inconclusive_max) consecutive probes: $win" \
               "$task" worker - "$adv_endpoint" "$adv_ident"
             stale_marker_remove "$win" "$state"
           fi
+          ;;
+        3)
+          # Deferred: a throttled recheck or an inconclusive probe still below
+          # its consecutive bound. Keep the stale marker for the next pass.
+          :
           ;;
       esac
       continue
