@@ -1311,7 +1311,6 @@ ok - live steering-inbox doorbell guard: 2 harnesses verified
 The OMP wake transport was changed on 2026-08-30 from terminal submission to an acknowledged programmatic extension request on tmux and Herdr, and on 2026-09-04 that native request became OMP's only transport: the composer fallback was removed and every OMP steer now reports one bounded outcome.
 The deterministic fixtures reran on 2026-09-04 and cover canonical counted requests, `triggerTurn=true`, post-retirement signal safety, exact-identity revalidation for pending retries, ambiguous-claim inbox anchoring without resend, ordinary non-OMP composer routing, ordinary worker wiring, and secondmate wiring through the primary extension.
 They also drive the public `fm-send.sh` over tmux and Herdr against a real task-bound extension process and prove that a received steer reports `omp-native-received` with the exact task, endpoint, session process, native queue entry and durable record while nothing reaches the terminal; that a mate with no live adapter, an unproven session binding, and an unacknowledged request each exit nonzero with a named non-resend-inviting outcome; and that no `/exit` is appended to resolve one.
-The required live OMP-under-Herdr smoke is intentionally deferred until after Firstmate updates; no live Herdr or OMP lifecycle was driven from this worktree.
 
 ```sh
 set -o pipefail
@@ -1330,6 +1329,36 @@ ok - fm-send: an OMP steer is received natively over tmux and Herdr with no comp
 ok - fm-send: refused and unacknowledged OMP steers stay bounded, durable and non-resend-inviting
 ok - fm-send: an unproven OMP session binding is refused, never redirected to the terminal
 ok - OMP primary extension binds secondmate doorbells after session readiness
+```
+
+The deferred live OMP-under-Herdr smoke ran on 2026-10-17 against OMP 18.10.1 and Herdr 0.9.3 on Linux x86_64, inside one guarded non-default lab session created by `bin/fm-herdr-lab.sh`, with `opencode-go-neuralengine-1/deepseek-v4.1-flash` at low effort.
+It spawned a real worker through `bin/fm-spawn.sh`, let that worker invoke one native `task` subagent and dispose of it normally, and then steered the parent through `bin/fm-send.sh`.
+The steer reported `omp-native-received` bound to the session process the ready marker names, and the marker was still present afterwards, so the worker stayed reachable across a native subagent's full lifecycle.
+The ownership invariant lives in [`architecture.md`](../architecture.md#event-driven-supervision), and `tests/fm-omp-task-inbox-doorbell.test.sh` covers duplicate-child retirement, delivery through the owner alone, owner retirement, and successor takeover.
+
+The command shapes and result summary below retain placeholders rather than the exact invocation and raw output.
+
+```sh
+# Guarded non-default lab session: every lifecycle call goes through the helper,
+# and the pane's own herdr is a wrapper that refuses any call not bound to it.
+omp --version
+HERDR_LAB_HELPER=/home/dnth/Desktop/firstmate/bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-omp-doorbell)
+"$HERDR_LAB_HELPER" provision "fm-lab-fm-omp-doorbell-956971-29708"
+bin/fm-spawn.sh omp-doorbell-ac3 <project> --harness omp --model opencode-go-neuralengine-1/deepseek-v4.1-flash --effort low --mode direct-PR --yolo off
+# the worker runs one native `task` subagent, which then disposes normally
+bin/fm-send.sh omp-doorbell-ac3 'Live AC3 check: reply exactly ac3-steer-received and stop.'
+"$HERDR_LAB_HELPER" teardown "fm-lab-fm-omp-doorbell-956971-29708"
+```
+
+Observed result:
+
+```text
+omp/18.10.1
+child exit record: session_exit","data":{"reason":"dispose","kind":"normal
+fm-send: omp-native-received: the bound OMP session acknowledged the request (task=omp-doorbell-ac3 endpoint=herdr:fm-lab-fm-omp-doorbell-956971-29708:w2:p2 session-pid=960819 request=<lab-home>/state/omp-doorbell-ac3.omp-doorbell-ready.requests/request.001.msg record=<lab-home>/state/omp-doorbell-ac3.inbox/001.msg message-bytes=58)
+marker intact after the steer: 960819
+lab teardown ok: fm-lab-fm-omp-doorbell-956971-29708 deleted, default-session tripwire unchanged
 ```
 
 ## Codex App host tools
