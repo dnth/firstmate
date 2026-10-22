@@ -77,6 +77,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RM_TOOL_PATTERN='^\\s*<!-- (no-mistakes-pipeline-attestation:v1 [^\\r\\n]*|no-mistakes-pr-appendix[^\\r\\n]*|fm-worker-note) -->\\s*$'
 # shellcheck disable=SC2016
 RM_QUERY='query($owner:String!,$repo:String!,$number:Int!,$reviewsCursor:String,$threadsCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){headRefOid body reviews(first:100,after:$reviewsCursor){pageInfo{hasNextPage endCursor} nodes{databaseId state body}} reviewThreads(first:100,after:$threadsCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:100){pageInfo{hasNextPage endCursor} nodes{databaseId body}}}}}}}'
+# shellcheck disable=SC2016
+RM_THREAD_QUERY='query($id:ID!,$cursor:String!){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{databaseId body}}}}}'
 
 RM_JSON_FILE=
 RM_PAGE_FILE=
@@ -88,6 +90,7 @@ RM_CONTAINER_COUNT=0
 RM_DEADLINE=0
 RM_READ_FAILED=0
 
+# shellcheck disable=SC2329 # Registered by the EXIT trap below.
 rm_cleanup() {
   [ -z "$RM_JSON_FILE" ] || rm -f -- "$RM_JSON_FILE"
   [ -z "$RM_PAGE_FILE" ] || rm -f -- "$RM_PAGE_FILE"
@@ -134,7 +137,7 @@ rm_read() {
     RM_JSON_FILE=
     return 1
   }
-  local page reviews_cursor= threads_cursor= next_reviews next_threads merged thread cursor next reviews_done=0 threads_done=0
+  local page reviews_cursor='' threads_cursor='' next_reviews next_threads merged thread cursor next reviews_done=0 threads_done=0
   local read_limit=$RM_TIMEOUT watch_limit=${FM_CHECK_TIMEOUT:-30}
   case "$watch_limit" in ''|*[!0-9]*) watch_limit=30 ;; esac
   watch_limit=$((10#$watch_limit / 2))
@@ -184,7 +187,7 @@ rm_read() {
     [ -n "$cursor" ] && [ "$cursor" != null ] || { rm -f "$page"; return 1; }
     while :; do
       if ! rm_forge_read api graphql \
-          -f 'query=query($id:ID!,$cursor:String!){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{databaseId body}}}}}' \
+          -f "query=$RM_THREAD_QUERY" \
           -f "id=$thread" -f "cursor=$cursor" > "$page" 2>/dev/null; then
         rm -f "$page"
         return 1
@@ -265,7 +268,7 @@ rm_parse_table() {
     row=${row#|}
     row=${row%|}
     cells=()
-    cell= escaped=0
+    cell='' escaped=0
     for ((i=0; i<${#row}; i++)); do
       char=${row:i:1}
       if [ "$char" = '|' ] && [ "$escaped" -eq 0 ]; then
@@ -274,7 +277,7 @@ rm_parse_table() {
       else
         cell="$cell$char"
       fi
-      if [ "$char" = '\' ] && [ "$escaped" -eq 0 ]; then escaped=1; else escaped=0; fi
+      if [ "$char" = "\\" ] && [ "$escaped" -eq 0 ]; then escaped=1; else escaped=0; fi
     done
     cells+=("$cell")
     cell_count=${#cells[@]}

@@ -769,7 +769,7 @@ test_paginated_reviews() {
 }
 
 test_gitlab_without_github_tools() {
-  local dir out command
+  local dir out command rc
   dir="$TMP_ROOT/gitlab-only"
   mkdir -p "$dir/bin"
   ln -s "$BASH" "$dir/bin/bash"
@@ -779,12 +779,13 @@ test_gitlab_without_github_tools() {
   PATH="$dir/bin" "$BASH" -c 'command -v glab >/dev/null && ! command -v gh >/dev/null && ! command -v jq >/dev/null' \
     || fail "GitLab-only fixture has the wrong available tools"
   for command in verify poll; do
+    rc=0
     if [ "$command" = verify ]; then
-      out=$(PATH="$dir/bin" "$BASH" "$MANIFEST" verify https://gitlab.example/group/repo/-/merge_requests/7 --mode direct-PR 2>&1)
+      out=$(PATH="$dir/bin" "$BASH" "$MANIFEST" verify https://gitlab.example/group/repo/-/merge_requests/7 --mode direct-PR 2>&1) || rc=$?
     else
-      out=$(PATH="$dir/bin" "$BASH" "$MANIFEST" poll https://gitlab.example/group/repo/-/merge_requests/7 2>&1)
+      out=$(PATH="$dir/bin" "$BASH" "$MANIFEST" poll https://gitlab.example/group/repo/-/merge_requests/7 2>&1) || rc=$?
     fi
-    [ "$?" -eq 0 ] || fail "$command blocked GitLab on missing GitHub tools: $out"
+    [ "$rc" -eq 0 ] || fail "$command blocked GitLab on missing GitHub tools: $out"
     assert_contains "$out" 'notice: review manifest verification covers GitHub pull requests only' "$command did not identify GitLab as out of scope"
   done
   out=$(PATH="$dir/bin" "$BASH" "$MANIFEST" verify "$URL" --mode direct-PR 2>&1) \
