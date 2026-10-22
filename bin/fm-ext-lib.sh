@@ -1859,7 +1859,7 @@ fm_ext_attachment_cache_match() {
 }
 
 # --- retention prune cadence -----------------------------------------------
-# fm_ext_poll.sh runs the three prunes after it has claimed the inbox offers,
+# fm-ext-poll.sh runs the three prunes after it has claimed the inbox offers,
 # and at most once per interval: the watcher kills a poll that outruns its
 # check timeout, so a prune must never sit in front of a request's claim, and
 # repeating it every poll buys nothing. FM_EXT_PRUNE_INTERVAL_SECS=0 prunes
@@ -1913,8 +1913,9 @@ fm_ext_prune_mark() {
 }
 
 # fm_ext_prune_run <state>: run the retention prunes when their cadence allows.
-# Logs one journal line when the pass overruns, so a prune that again approaches
-# the watcher's timeout is visible instead of silently failing to finish.
+# Writes the completed pass duration to stderr and the cadence stamp; the
+# stamp retains it when the watcher discards stderr. An interrupted pass has
+# no new stamp and is retried when the next poll finds the cadence due.
 fm_ext_prune_run() {
   local state=$1 started elapsed
   fm_ext_prune_due "$state" || return 0

@@ -860,6 +860,7 @@ A leftover claim is stolen only when it is older than `FM_EXT_INFLIGHT_TTL_SECS`
 Steal serialization keeps a 1-second floor even when that TTL is 0, so two stealers cannot both win.
 A live owner stays protected from TTL-based claim stealing, including an ambiguous crash-after-post while the poster process is still alive.
 `receipt` writes the receipt once.
+The gateway poster includes `queued_at` (the payload's emit time, or 0 when unavailable) and `picked_at` (the delivery attempt's start time) as epoch seconds in ordinary reply receipts.
 `abort` deletes the posting marker after a transient definite send failure (HTTP 429 or 5xx) so that generation can retry.
 `fail` records a terminal failed marker after a permanent 4xx so pending stops retrying that generation.
 The gateway poster splits oversized Discord replies using the budget resolved by `bin/fm-ext-lib.sh`: `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900, min 50, values above 2000 reset to 1900) and `FM_EXT_DISCORD_THREAD_MAX` (default 25).
@@ -888,7 +889,7 @@ It drops the leftover markers of already retired outbox generations.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
 The poll claims its inbox offers before it prunes, and prunes at most once per `FM_EXT_PRUNE_INTERVAL_SECS` (default 3600), so the claim runs first; a prune interrupted by the watcher's check timeout is retried on the next poll whose cadence is due.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
-Request-wide thread records remain while any payload, progress, receipt, or failed JSON record for the request remains, then become eligible for pruning based on their own age.
+Request-wide thread records remain while any other JSON record for the request remains, then become eligible for pruning based on their own age.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id`; its header owns the recorded metadata fields.

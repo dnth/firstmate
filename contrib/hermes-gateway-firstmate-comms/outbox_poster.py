@@ -43,9 +43,8 @@ for a later outcome header.
 rules in docs/configuration.md, "Decision buttons". ``reconcile_thread_states`` then
 clears answered needs-you threads and retries failed renames.
 
-The watcher runs delivery and reconciliation on two daemon threads so a sweep
-that takes minutes can never delay a queued reply, and the two paths serialize
-their writes to a request's thread record under one lock.
+The watcher loop and delivery diagnostics are described in README.md under
+"How it works".
 """
 
 from __future__ import annotations
@@ -85,9 +84,8 @@ _WATCHER_LOCK = threading.Lock()
 # sweep that has been reconciling for minutes can overwrite a rename a
 # delivery recorded meanwhile.
 _THREAD_RECORD_LOCK = threading.RLock()
-# A watcher step slower than this is worth a journal line: the loop's whole
-# point is that no step can hold up delivery, and a slow step is how the
-# sweeps drifted into minutes-long cycles before.
+# Time each watcher step separately so a slow drain or reconciliation step
+# can be identified in the journal.
 SLOW_STEP_SECS = 5.0
 _TRANSIENT_HTTP = {429, 500, 502, 503, 504}
 # Discord REST base. Hermetic tests point the real sender at a local stub by
@@ -1092,6 +1090,10 @@ def apply_thread_state(
     record is re-read under ``_THREAD_RECORD_LOCK`` before the state is
     applied: the name, retitle, and provenance this rename builds on are the
     ones a delivery recorded meanwhile, not the ones the sweep read.
+    Sweep calls use ``require_current`` to reject stale state decisions;
+    auto-clear also checks the progress snapshot for concurrent publication.
+    Discord work runs outside the record lock. If eligibility changes during
+    that work, retry the current desired name without saving the stale outcome.
     """
     repairing = False
     while True:
@@ -2156,9 +2158,8 @@ def _run_step(label: str, step) -> None:
 def outbox_delivery_loop(interval: float) -> None:
     """Post queued payloads every ``interval`` seconds.
 
-    This runs on its own daemon thread so a reconciliation sweep that takes
-    minutes can never delay a reply. Delivery and reconciliation share only
-    the thread-record lock.
+    This runs separately from reconciliation so delivery does not wait for a
+    sweep to finish; local record updates still share the thread-record lock.
     """
     while True:
         _run_step("ensure-click-route", decisions.ensure_click_route)

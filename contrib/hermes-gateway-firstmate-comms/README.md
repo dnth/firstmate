@@ -100,7 +100,8 @@ The [local bridge configuration reference](../../docs/configuration.md#local-com
 Destination isolation, originating-thread and parent-channel routing, version diagnostics, and required hook registration are covered by [the destination regression test](../../tests/fm-ext-plugin-dest.test.sh).
 
 An outbox watcher drains `state/ext-outbox/` through `bin/fm-ext-outbox.sh`.
-Delivery and decision reconciliation run on two daemon threads, so a sweep that takes minutes can never delay a queued reply; both serialize their writes to a request's thread record under one lock.
+Delivery and reconciliation run on separate daemon threads, so delivery does not wait for a sweep to finish.
+Both serialize local thread-record updates under one lock, with Discord reads and renames outside that lock.
 A delivery logs one journal line with its queued, picked, and posted times, and a watcher step slower than five seconds logs its own line.
 For the optional pinned waiting message and its separate delivery contract, see the [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge).
 The following posting-marker, chunk-progress, and receipt rules apply to ordinary request replies.

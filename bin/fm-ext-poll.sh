@@ -14,8 +14,8 @@
 # watcher does not append a second record for this check.
 # An already claimed offer stays silent, including after Firstmate restart, so
 # each offer wakes once.
-# Each poll expires local bridge records past the retention window, the same
-# way fm-x-poll.sh expires X-mode context.
+# Due retention passes expire local bridge records past the retention window,
+# the same way fm-x-poll.sh expires X-mode context.
 # The claim loop runs first and the prunes follow it at their own cadence
 # (fm_ext_prune_run in fm-ext-lib.sh owns the interval), so a prune that
 # outruns the watcher's check timeout can never sit in front of a request.
