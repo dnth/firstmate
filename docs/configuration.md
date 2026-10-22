@@ -947,8 +947,8 @@ The file names exactly one policy, `strict` or `private-server`; an empty, symli
 A clear verdict made under `private-server` stops posting once the home returns to `strict`, so that file needs a fresh look; a clear verdict made under `strict` posts under either rule.
 The opt-in widens only what may appear inside an image or video: post text and thread titles still never name files, paths, hostnames, or other internal identifiers.
 
-The gateway poster attaches the staged files to the post's last message as one Discord multipart request (`payload_json` plus `files[n]`), after re-checking each file's digest and attestation and confirming that the bytes it sends hash to the verified digest.
-When Discord answers an upload with a definite HTTP refusal (excluding ambiguous HTTP 408), the poster retries the upload exactly once; if the retry also fails definitely, or a file no longer verifies, the text posts without it and ends with `_(screenshot couldn't be posted)_`.
+The gateway poster attaches the staged files to the post's last message as one Discord multipart request (`payload_json` plus `files[n]`), re-checking each file's digest, attestation, and current screening policy before every upload attempt, including the retry, and confirming that the bytes it sends hash to the verified digest.
+When Discord answers an upload with a definite HTTP refusal (excluding ambiguous HTTP 408), the poster retries the still-verified files at most once; if the retry also fails definitely, or a file no longer verifies, the text posts without it and ends with `_(screenshot couldn't be posted)_`.
 Each chunk carries a stable Discord nonce with enforced deduplication.
 After an ambiguous send, recovery checks recent bot messages for that nonce, or for matching content and attachment names after the attempt when Discord omits the nonce, and records a matched message as delivered.
 An inconclusive lookup leaves delivery pending under the bounded mid-delivery recovery rule above; it never triggers a resend or text fallback, and a resumed generation never makes a third upload attempt.
