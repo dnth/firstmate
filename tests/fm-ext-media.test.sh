@@ -182,9 +182,11 @@ class Edge(BaseHTTPRequestHandler):
         # fail-always-text-503: every upload is refused and the text-only
         # fallback then hits a transient 503, leaving nothing posted.
         refuse = record["files"] and (mode in ("fail-always", "fail-always-text-503")
-                                      or (mode == "fail-once" and multipart_seen[0] == 1))
+                                      or (mode in ("fail-once", "fail-once-revoke-policy") and multipart_seen[0] == 1))
         if refuse:
-            code, reply = (500, {"message": "upstream"}) if mode == "fail-once" else (413, {"code": 40005, "message": "Request entity too large"})
+            if mode == "fail-once-revoke-policy":
+                Path(home, "config/ext-media-screening").unlink()
+            code, reply = (500, {"message": "upstream"}) if mode.startswith("fail-once") else (413, {"code": 40005, "message": "Request entity too large"})
         elif mode == "fail-always-text-503":
             code, reply = 503, {"message": "upstream"}
         else:
@@ -877,6 +879,53 @@ test_12_screening_policy() {
   pass "12 the screening policy is recorded with each verdict, strict by default, and an invalid policy refuses"
 }
 
+test_13_retry_rechecks_policy() {
+  local home slug out receipt mixed expected_attempts expected_posted
+  local -a files
+  for mixed in no yes; do
+    home="$TMP_ROOT/c13-$mixed"
+    setup_home "$home"
+    slug=$(intake "$home" 530000000000000001)
+    mkdir -p "$home/data/shots"
+    write_png "$home/data/shots/private.png"
+    write_png "$home/data/shots/strict.png" 300
+    screen "$home" "$home/data/shots/strict.png"
+    printf 'private-server\n' > "$home/config/ext-media-screening"
+    screen "$home" "$home/data/shots/private.png"
+    files=("$home/data/shots/private.png")
+    expected_attempts=1
+    expected_posted='[]'
+    if [ "$mixed" = yes ]; then
+      files+=("$home/data/shots/strict.png")
+      expected_attempts=2
+      expected_posted='["image-2.png"]'
+    fi
+    emit_media "$home" 530000000000000001 1 "Policy changed." "${files[@]}" >/dev/null \
+      || fail "emit under the opt-in must succeed"
+    out=$(drive "$home" fail-once-revoke-policy)
+    [ ! -e "$home/config/ext-media-screening" ] || fail "the first refused upload must revoke the opt-in"
+    printf '%s' "$out" | jq -e --argjson count "${#files[@]}" --argjson posted "$expected_posted" '
+      .result == ["sent"] and (.requests | length) == 2 and (.messages | length) == 1
+      and (.requests[0].files | length) == $count
+      and .requests[0].files[0].filename == "image-1.png"
+      and ([.requests[1].files[].filename] == $posted)
+      and .requests[1].json.content == "Policy changed.\n\n_(screenshot couldn'"'"'t be posted)_"
+      and .requests[0].json.nonce == .requests[1].json.nonce
+      and .requests[1].json.enforce_nonce == true' >/dev/null \
+      || fail "the retry must drop revoked media and post only still-verified files with the note (got: $out)"
+    receipt="$home/state/ext-outbox/$slug.answer.1.receipt.json"
+    jq -e --argjson attempts "$expected_attempts" --argjson posted "$expected_posted" '
+      (.attachments | map(.name)) == $posted and .attachments_dropped == ["image-1.png"]
+      and .media_note == true and .media_upload_attempts == $attempts
+      and (.discord_message_ids | length) == 1' "$receipt" >/dev/null \
+      || fail "the receipt must retain the upload count and record only verified attachments (got: $(cat "$receipt"))"
+    out=$(drive "$home" ok)
+    printf '%s' "$out" | jq -e '(.requests | length) == 0' >/dev/null \
+      || fail "the delivered fallback must never post again (got: $out)"
+  done
+  pass "13 retries recheck policy, drop revoked media, and keep strict media with the fallback note"
+}
+
 test_1_worker_and_inactive_home_refused
 test_2_unscreened_refused_screened_staged
 test_3_refusals
@@ -889,3 +938,4 @@ test_9_video_frames_and_length
 test_10_remote_pull
 test_11_open_review_thread_with_media
 test_12_screening_policy
+test_13_retry_rechecks_policy
