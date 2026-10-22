@@ -118,6 +118,13 @@ case "\${1:-} \${2:-}" in
     esac
     ;;
   "api graphql")
+    # bin/fm-review-manifest.sh's review read answers before the outcome read;
+    # this fixture keeps no reviews, so the request only needs a valid body.
+    case " \$* " in
+      *reviewThreads*)
+        exec "\$FM_TEST_FAKE_GH_REVIEW" "" direct-PR
+        ;;
+    esac
     cat "\$FM_TEST_GH_OUTCOME"
     exit 0
     ;;
@@ -150,6 +157,9 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
+    case " $* " in
+      *reviewThreads*) exec "$FM_TEST_FAKE_GH_REVIEW" "" direct-PR ;;
+    esac
     cat "$FM_TEST_GH_OUTCOME"
     exit 0
     ;;
@@ -180,6 +190,11 @@ case "\${1:-} \${2:-}" in
     esac
     ;;
   "api graphql")
+    # The review read is a different query from the outcome read this fixture
+    # breaks, so bin/fm-pr-check.sh's review gate still gets its answer.
+    case " \$* " in
+      *reviewThreads*) exec "\$FM_TEST_FAKE_GH_REVIEW" "" direct-PR ;;
+    esac
     echo 'error: could not reach the GitHub API' >&2
     exit 1
     ;;
@@ -714,6 +729,9 @@ case "${1:-} ${2:-}" in
     esac
     ;;
   "api graphql")
+    case " $* " in
+      *reviewThreads*) exec "$FM_TEST_FAKE_GH_REVIEW" "" direct-PR ;;
+    esac
     cat "$FM_TEST_GH_OUTCOME"
     exit 0
     ;;
@@ -783,9 +801,11 @@ SH
   mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
   : > "$case_dir/gh-axi.log"
 
+  # A host without gh cannot read the review manifest, so the guard refuses
+  # until the captain's instruction covers that merge.
   set +e
   PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
-    https://github.com/example/repo/pull/73 -- --auto --merge \
+    https://github.com/example/repo/pull/73 --captain-instruction "merge it without gh on this host" -- --auto --merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -915,11 +935,24 @@ test_github_without_gh_still_uses_gh_axi_merge() {
   set +e
   PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
     https://github.com/example/repo/pull/60 \
+    > "$case_dir/refuse-stdout" 2> "$case_dir/refuse-stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-without-gh: a host that cannot read the review manifest merged without the captain's word"
+  assert_grep 'could not be read, so the review manifest cannot be verified' "$case_dir/refuse-stderr" \
+    "github-without-gh: the refusal did not name the unreadable review manifest"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "github-without-gh: the forge merge ran without the captain's word"
+
+  set +e
+  PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/60 --captain-instruction "merge it without gh on this host" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "github-without-gh: gh-axi can prove a landed merge without gh"
+  expect_code 0 "$rc" "github-without-gh: gh-axi can prove a landed merge without gh under the captain's instruction"
   assert_grep 'pr merge 60 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     "github-without-gh: the configured merge abstraction was not invoked"
   assert_grep 'pr view 60 --repo example/repo' "$case_dir/gh-axi.log" \
@@ -949,7 +982,7 @@ SH
 
   set +e
   PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
-    https://github.com/example/repo/pull/61 \
+    https://github.com/example/repo/pull/61 --captain-instruction "merge it without gh on this host" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1953,6 +1986,7 @@ test_gh_axi_checks_fallback_accepts_skipped_checks() {
 
     set +e
     PATH="$merge_path" run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/90 \
+      --captain-instruction "merge it with the forge reader this host has" \
       > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
     set -e
@@ -1964,8 +1998,21 @@ test_gh_axi_checks_fallback_accepts_skipped_checks() {
       || fail "skipped-checks-gh-$reader: the merge did not run"
     assert_grep 'verified: https://github.com/example/repo/pull/90 is merged' "$case_dir/stdout" \
       "skipped-checks-gh-$reader: the landed merge was not verified"
-    assert_absent "$case_dir/$OVERRIDE_LOG" \
-      "skipped-checks-gh-$reader: a green merge wrote an override record"
+    # A host without gh cannot read the review manifest, so the captain's
+    # instruction covers exactly that. With gh present, nothing needed an
+    # override at all.
+    case "$reader" in
+      absent)
+        assert_grep 'review manifest' "$case_dir/$OVERRIDE_LOG" \
+          "skipped-checks-gh-absent: the override record did not name the unreadable review manifest"
+        assert_no_grep 'checks are' "$case_dir/$OVERRIDE_LOG" \
+          "skipped-checks-gh-absent: skipped checks were recorded as a refusal reason"
+        ;;
+      *)
+        assert_absent "$case_dir/$OVERRIDE_LOG" \
+          "skipped-checks-gh-$reader: a green merge wrote an override record"
+        ;;
+    esac
   done
   pass "fm-pr-merge accepts skipped checks through both gh-axi fallback paths"
 }

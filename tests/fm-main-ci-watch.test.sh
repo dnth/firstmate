@@ -94,6 +94,11 @@ case "\${1:-} \${2:-}" in
     esac
     ;;
   "api graphql")
+    # bin/fm-review-manifest.sh's review read shares this handler and answers
+    # before the merge-outcome read this fixture pins.
+    case " \$* " in
+      *reviewThreads*) exec "\$FM_TEST_FAKE_GH_REVIEW" '$head' direct-PR ;;
+    esac
     cat "\$FM_TEST_GH_OUTCOME"
     exit 0
     ;;

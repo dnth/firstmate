@@ -123,6 +123,17 @@ case " $* " in
     fi
     printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     ;;
+  # The review-manifest read (bin/fm-review-manifest.sh) comes first: its query
+  # carries the words `state` and `headRefOid`, so a later pattern would answer
+  # it with a poll state or a bare head. A case that pins reviews answers from
+  # its own file instead.
+  *" api graphql "*)
+    if [ -n "${FM_TEST_GH_REVIEW_STATE:-}" ]; then
+      cat "$FM_TEST_GH_REVIEW_STATE"
+      exit 0
+    fi
+    exec "$FM_TEST_FAKE_GH_REVIEW" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" direct-PR
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"

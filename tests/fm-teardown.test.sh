@@ -310,6 +310,14 @@ case "\${1:-} \${2:-}" in
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
+  "api graphql")
+    # bin/fm-pr-check.sh verifies the review manifest and body format; this
+    # fixture keeps no reviews and answers with a valid body for the head it
+    # also reports as the PR head.
+    case " \$* " in
+      *reviewThreads*) exec "\$FM_TEST_FAKE_GH_REVIEW" '$head' direct-PR ;;
+    esac
+    ;;
 esac
 echo "error: pull request not found" >&2
 exit 1

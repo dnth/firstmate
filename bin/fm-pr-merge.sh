@@ -65,8 +65,15 @@
 # skipped, and neutral are green; pending, queued, in_progress, waiting,
 # requested, and expected are pending; every other conclusion is failing.
 # A PR with no reported checks has nothing red. Checks that cannot be read
-# refuse. Each refusal names the failing or pending checks or
-# the accepted-blocked criteria, plus --captain-instruction, the only override;
+# refuse. The same guard set re-verifies the review manifest and body format
+# through bin/fm-review-manifest.sh immediately before merging, so a review or
+# unresolved thread that arrived after PR-ready, or a body that lost its
+# required sections, refuses here even though the PR was registered earlier;
+# bin/fm-pr-check.sh skips its own copy of that verification for this run
+# (FM_PR_CHECK_REVIEW_OVERRIDE) because this guard owns the decision, including
+# its override. Each refusal names the failing or pending checks, the unanswered
+# review or thread, the unreadable row, the missing section, or the
+# accepted-blocked criteria, plus --captain-instruction, the only override;
 # bin/fm-merge-guard-lib.sh owns the accepted-blocked guard and the override
 # flag's validation and durable record.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--captain-instruction <words>]
@@ -197,6 +204,8 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 
 # Read one live GitHub pull request view after gh-axi returns. The selected
 # fields distinguish a landed pull request from a merge-queue entry and retain
@@ -546,10 +555,33 @@ github_check_checks_green() {
   [ -z "$FM_PR_CHECKS_PENDING" ] || fm_merge_guard_add_reason "checks are still pending: $FM_PR_CHECKS_PENDING"
 }
 
+# The review manifest and the PR body format, re-verified from the forge and the
+# task worktree at merge time; bin/fm-review-manifest.sh owns both contracts.
+github_check_review_manifest() {
+  local out rc=0 line
+  local -a verify_args
+  verify_args=("$URL" --mode "${MODE:-unknown}")
+  [ -z "$WT" ] || [ ! -d "$WT" ] || verify_args+=(--worktree "$WT")
+  out=$("$SCRIPT_DIR/fm-review-manifest.sh" verify "${verify_args[@]}" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    fm_merge_guard_add_reason "${line#error: }"
+  done <<REVIEW
+$out
+REVIEW
+}
+
 FM_MERGE_GUARD_DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 fm_merge_guard_check_accepted_blocked "$ID" "$META"
 github_check_checks_green
+github_check_review_manifest
 fm_merge_guard_resolve "$ID" fm-pr-merge "$URL" "$CAPTAIN_INSTRUCTION" || exit 1
+
+# The guard above owns the review-manifest decision for this merge, including a
+# recorded captain override, so the re-registration it triggers must not repeat
+# that refusal.
+export FM_PR_CHECK_REVIEW_OVERRIDE=1
 
 # Record before the forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot

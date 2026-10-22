@@ -6,6 +6,14 @@
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# An open GitHub pull request is also watched for review items its body's
+# `## Review follow-up` table does not answer yet: the sibling
+# bin/fm-review-manifest.sh owns that contract and prints one `review ...` line
+# for the current uncovered set, and only that line breaks the otherwise silent
+# poll. The watcher reports a given line once, so an unanswered review wakes
+# firstmate without repeating every sweep. A missing or unusable sibling stays
+# silent, because this program may only report a merge it proved or a review
+# state it read.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -63,7 +71,17 @@ case "$provider" in
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
     state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    if [ "$state" = MERGED ]; then
+      printf '%s\n' merged
+      exit 0
+    fi
+    review_dir=${0%/*}
+    [ "$review_dir" != "$0" ] || review_dir=.
+    review_line=
+    if [ -x "$review_dir/fm-review-manifest.sh" ]; then
+      review_line=$("$review_dir/fm-review-manifest.sh" poll "$url" 2>/dev/null) || review_line=
+    fi
+    [ -z "$review_line" ] || printf '%s\n' "$review_line"
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0

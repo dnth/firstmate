@@ -8,6 +8,18 @@
 # Initial ship PR registration requires complete acceptance evidence
 # (bin/fm-receipt-check.sh <task-id> exits 0); missing or invalid receipts
 # refuse registration naming the criteria.
+# A ship PR-ready also proves its review manifest and body format through
+# bin/fm-review-manifest.sh, the single owner of that contract: every counted
+# review and unresolved review thread needs a row in the body's
+# `## Review follow-up` table whose disposition parses (`fixed <sha>` reachable
+# from the PR head, `declined: <reason>`, or `deferred: <issue url>` that
+# resolves), and the body must carry the pr skill's `## Summary`, `## Evidence`,
+# and `## Merge Danger` sections plus, for a no-mistakes delivery or any body
+# that has one, an intact `## Pipeline` section carrying No-Mistakes'
+# attestation for the current head. A refusal names the review or thread URL,
+# the unreadable row, or the missing section. On success with reviews present it
+# prints the coverage disclosure: the author declares what each row answers, and
+# nothing machine-verifies that declaration against the review text.
 # A no-mistakes task additionally proves its run from No-Mistakes' own status:
 # `axi status` in the task worktree must report a run whose branch is the task
 # branch, whose pr is this URL, and whose full head_sha equals the forge's PR
@@ -199,6 +211,28 @@ if [ "$ALREADY_REGISTERED" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" = no-mista
   fi
 fi
 
+# The review manifest and body format are verified from the forge, not from the
+# worker's report, so a body whose table came back only in prose cannot pass.
+# The disclosure is held until publication succeeds and printed with the arm
+# line, so a registration that refuses never claims coverage it did not record.
+REVIEW_DISCLOSURE=
+if [ "$KIND" = ship ]; then
+  if [ "${FM_PR_CHECK_REVIEW_OVERRIDE:-0}" = 1 ]; then
+    echo "notice: review manifest verification delegated to the caller for $ID" >&2
+  else
+    REVIEW_ARGS=("$URL" --mode "$MODE")
+    [ -z "$WT" ] || [ ! -d "$WT" ] || REVIEW_ARGS+=(--worktree "$WT")
+    REVIEW_RC=0
+    REVIEW_OUT=$("$SCRIPT_DIR/fm-review-manifest.sh" verify "${REVIEW_ARGS[@]}" 2>&1) || REVIEW_RC=$?
+    if [ "$REVIEW_RC" -ne 0 ]; then
+      printf '%s\n' "$REVIEW_OUT" >&2
+      echo "error: PR-ready refused for $ID: the review manifest or the PR body does not pass bin/fm-review-manifest.sh" >&2
+      exit 1
+    fi
+    REVIEW_DISCLOSURE=$REVIEW_OUT
+  fi
+fi
+
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
@@ -234,6 +268,7 @@ fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
 # worker can be released; the main home's landing record keeps it (bin/fm-landing.sh).
 "$SCRIPT_DIR/fm-landing.sh" report "$ID" >/dev/null \
   || echo "warning: could not report PR custody for $ID to the main home" >&2
+[ -z "$REVIEW_DISCLOSURE" ] || printf '%s\n' "$REVIEW_DISCLOSURE"
 printf 'armed: state/%s.check.sh\n' "$ID"
 # Keep the pinned waiting message current after a PR turns ready.
 # Best effort: a failed refresh never blocks the arm.

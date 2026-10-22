@@ -22,7 +22,16 @@ NM_CALL_LOG="$TMP_ROOT/no-mistakes-calls.log"
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
-  *" headRefOid "*) [ -z "${FM_FAKE_GH_HEAD:-}" ] || printf '%s\n' "$FM_FAKE_GH_HEAD" ;;
+  *" headRefOid "*) [ -z "${FM_FAKE_GH_HEAD:-}" ] || printf '%s\n' "$FM_FAKE_GH_HEAD"; exit 0 ;;
+esac
+# bin/fm-pr-check.sh verifies the review manifest and body format through
+# bin/fm-review-manifest.sh, whose one GraphQL read this answers with a valid
+# body for the head this fixture also reports.
+case " $* " in
+  *" api graphql "*)
+    [ -n "${FM_FAKE_GH_HEAD:-}" ] || exit 1
+    exec "$FM_TEST_FAKE_GH_REVIEW" "$FM_FAKE_GH_HEAD" no-mistakes
+    ;;
 esac
 SH
 cat > "$FAKEBIN/no-mistakes" <<EOF

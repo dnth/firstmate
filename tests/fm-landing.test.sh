@@ -69,6 +69,11 @@ case "${1:-} ${2:-}" in
   "pr view") number=${3##*/} ;;
   "pr checks") echo '[]'; exit 0 ;;
   "api graphql")
+    # bin/fm-review-manifest.sh's review read shares this handler; the review
+    # query carries reviewThreads and takes the shared fixture answer.
+    case " $* " in
+      *reviewThreads*) exec "$FM_TEST_FAKE_GH_REVIEW" "" direct-PR ;;
+    esac
     f="$FM_TEST_FORGE/merged-by-main"
     if [ -f "$f" ]; then
       printf 'state=MERGED\nmerged=true\nqueued=false\nbase=main\n'
