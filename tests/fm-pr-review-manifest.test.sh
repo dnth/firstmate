@@ -530,6 +530,39 @@ test_pr_poll_reports_an_unanswered_review_once() {
   pass "AC3: the PR poll reports a review posted after ready, and the watcher reports it once"
 }
 
+test_reopened_thread_wakes_again() {
+  local dir head threads expected
+  dir=$(make_case reopened-thread)
+  head=$(head_of "$dir")
+  FM_TEST_GH_HEAD=$head
+  body_state "$dir" "$head" "$(sections)"
+  run_pr_check "$dir"
+  [ "$CHECK_RC" -eq 0 ] || fail "reopened-thread seed was refused: $CHECK_OUT"
+  threads='[{"id":"PRRT_reopened","isResolved":false,"comments":{"nodes":[{"databaseId":901,"body":"unanswered item"}]}}]'
+  body_state "$dir" "$head" "$(sections)" '[]' "$threads"
+  run_poll "$dir"
+  expected="review $URL PRRT_reopened"
+  [ "$POLL_OUT" = "$expected" ] || fail "unanswered thread was not reported: $POLL_OUT"
+  run_watcher_cycle "$dir"
+  assert_contains "$(cat "$dir/watch.out")" "$expected" "unanswered thread did not wake supervision"
+  body_state "$dir" "$head" "$(sections)" '[]' "$(printf '%s' "$threads" | jq '.[0].isResolved=true')"
+  run_poll "$dir"
+  [ "$POLL_OUT" = "review $URL clear" ] || fail "resolved thread did not produce a clear result: $POLL_OUT"
+  run_watcher_cycle "$dir"
+  [ ! -e "$dir/home/state/$ID.pr-poll-review-notified" ] || fail "clear result retained the unanswered-thread notification"
+  case "$(cat "$dir/watch.out")" in
+    *"review $URL"*) fail "resolved thread woke supervision" ;;
+  esac
+  body_state "$dir" "$head" "$(sections)" '[]' "$threads"
+  run_poll "$dir"
+  [ "$POLL_OUT" = "$expected" ] || fail "reopened thread changed its poll identity: $POLL_OUT"
+  run_watcher_cycle "$dir"
+  assert_contains "$(cat "$dir/watch.out")" "$expected" "reopened thread did not wake supervision again"
+  [ "$(grep -c "$expected" "$dir/home/state/.wake-queue")" -eq 2 ] \
+    || fail "unanswered and reopened thread did not each produce one durable wake"
+  pass "a resolved and reopened unanswered thread wakes supervision again"
+}
+
 test_review_regressions() {
   local dir head out body key
   dir=$(make_case review-regressions)
@@ -751,6 +784,7 @@ test_remote_custody_mode() {
   pass "remote custody enforces Pipeline and accepts forge-proved fixed commits"
 }
 
+test_reopened_thread_wakes_again
 test_gitlab_without_github_tools
 test_slow_paginated_read
 test_private_review_temp_files

@@ -2018,9 +2018,7 @@ while :; do
         fi
       fi
       if [ "$is_pr_poll" -eq 1 ] && [ "$out" = "review $url clear" ]; then
-        if fm_pr_poll_review_notified "$STATE" "$id" "review $url unreadable"; then
-          fm_pr_poll_review_notified_remove "$STATE" "$id" || exit 1
-        fi
+        fm_pr_poll_review_notified_remove "$STATE" "$id" || exit 1
         out=
       fi
       if [ -n "$out" ]; then

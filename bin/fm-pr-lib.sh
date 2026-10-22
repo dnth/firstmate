@@ -1034,7 +1034,7 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
 # so an unanswered review item wakes firstmate once rather than once per check
 # sweep. It holds no PR identity of its own: the line already names the PR URL,
 # and a changed uncovered set is a different line, so a new review wakes again
-# without any reset step. Removed at teardown with the other per-task PR-poll
+# Removed at teardown with the other per-task PR-poll
 # artifacts.
 fm_pr_poll_review_marker_matches() {  # <marker> <device> <line>
   local marker=$1 device=$2 expected=$3 version line
