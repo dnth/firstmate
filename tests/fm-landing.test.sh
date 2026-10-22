@@ -72,7 +72,21 @@ case "${1:-} ${2:-}" in
     # bin/fm-review-manifest.sh's review read shares this handler; the review
     # query carries reviewThreads and takes the shared fixture answer.
     case " $* " in
-      *reviewThreads*) exec "$FM_TEST_FAKE_GH_REVIEW" "" direct-PR ;;
+      *reviewThreads*)
+        # The manifest check needs the delivery mode and head the landing record
+        # carries, because mode=no-mistakes requires an intact Pipeline section.
+        number= head= mode=direct-PR
+        for arg in "$@"; do
+          case "$arg" in number=*) number=${arg#number=} ;; esac
+        done
+        for meta in "${FM_HOME:-/nonexistent}"/state/*.meta; do
+          [ -e "$meta" ] || continue
+          grep -qx "pr=.*/pull/$number" "$meta" || continue
+          grep -qx 'custody_mode=no-mistakes' "$meta" && mode=no-mistakes
+          head=$(grep '^pr_head=' "$meta" | tail -1 | cut -d= -f2-)
+        done
+        exec "$FM_TEST_FAKE_GH_REVIEW" "$head" "$mode"
+        ;;
     esac
     f="$FM_TEST_FORGE/merged-by-main"
     if [ -f "$f" ]; then

@@ -631,8 +631,11 @@ run_watcher_bounded() {
   # announcement still resolves to resurface-and-exit. Pin the bound high so a
   # repeated unacked run cannot trip into stay-alive supervision; a test that
   # wants the bound can lower it through FM_TEST_WATCH_RESURFACE_*.
+  # FM_CHECK_TIMEOUT leaves the PR poll room for its bounded review-manifest
+  # read (bin/fm-review-manifest.sh budgets half the check timeout); a 1-second
+  # check budget would leave no read at all and report every poll unreadable.
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
-    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=4 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
       FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS="${FM_TEST_WATCH_RESURFACE_MAX_ANNOUNCEMENTS:-999999}" \
       FM_WATCH_RESURFACE_MAX_SECS="${FM_TEST_WATCH_RESURFACE_MAX_SECS:-999999}" \
