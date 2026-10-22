@@ -460,27 +460,28 @@ def load_progress(payload: dict, home: Path) -> dict | None:
 
 
 def write_progress(payload: dict, progress: dict, home: Path) -> None:
-    with _temp_json(progress) as progress_file:
-        result = subprocess.run(
-            [
-                str(outbox_cli()),
-                "progress",
-                "--slug",
-                payload["slug"],
-                "--kind",
-                payload["kind"],
-                "--generation",
-                str(payload["generation"]),
-                "--progress-file",
-                progress_file,
-            ],
-            check=False,
-            env=_env_for(home),
-            capture_output=True,
-            text=True,
-        )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "progress failed")
+    with _THREAD_RECORD_LOCK:
+        with _temp_json(progress) as progress_file:
+            result = subprocess.run(
+                [
+                    str(outbox_cli()),
+                    "progress",
+                    "--slug",
+                    payload["slug"],
+                    "--kind",
+                    payload["kind"],
+                    "--generation",
+                    str(payload["generation"]),
+                    "--progress-file",
+                    progress_file,
+                ],
+                check=False,
+                env=_env_for(home),
+                capture_output=True,
+                text=True,
+            )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "progress failed")
 
 
 def _chunk_payload(payload: dict, text: str, index: int, total: int) -> dict:
@@ -1053,6 +1054,17 @@ def discord_thread_name(thread_id: str) -> str:
     return name if isinstance(name, str) else ""
 
 
+def _decision_post_snapshot(home: Path) -> tuple | None:
+    try:
+        records = []
+        for path in (state_dir(home) / "ext-outbox").glob("*.progress.json"):
+            stat = path.stat()
+            records.append((str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size))
+        return tuple(sorted(records))
+    except OSError:
+        return None
+
+
 def apply_thread_state(
     recorded: dict,
     state: str,
@@ -1064,6 +1076,7 @@ def apply_thread_state(
     marked_open: bool | None = None,
     retitle: str = "",
     require_current: bool = False,
+    decision_posts: tuple | None = None,
 ) -> str:
     """Show ``state`` on one recorded topic thread and record the outcome.
 
@@ -1080,75 +1093,95 @@ def apply_thread_state(
     applied: the name, retitle, and provenance this rename builds on are the
     ones a delivery recorded meanwhile, not the ones the sweep read.
     """
-    thread_id = recorded.get("topic_thread_id") or ""
-    with _THREAD_RECORD_LOCK:
-        path = recorded.get("path")
-        fresh = _read_thread_record(path) if isinstance(path, Path) else {}
-        if require_current and fresh != recorded:
-            return "skipped"
-        if fresh:
-            if fresh.get("topic_thread_id") != thread_id:
-                return "skipped"
-            recorded = fresh
-    thread_id = recorded.get("topic_thread_id") or ""
-    provenance = recorded.get("creator") or ""
-    if provenance == "adopted":
-        return "skipped"
-    if provenance != "firstmate":
-        owner = thread_owner or discord_thread_owner
-        try:
-            owner_id = owner(thread_id)
-        except Exception as err:
-            print(f"fm-ext-poster: thread owner lookup skipped: {err}", file=sys.stderr)
-            return "skipped"
-        if not owner_id or owner_id != _bot_user_id():
-            print(f"fm-ext-poster: thread {thread_id} ownership unproved; leaving its name alone",
-                  file=sys.stderr)
-            return "skipped"
-        provenance = "firstmate"
-    try:
-        creator = _creating_request(recorded)
-        base = retitle or (thread_name_for(creator, home) if creator else "")
-    except Exception as err:
-        print(f"fm-ext-poster: thread name check skipped: {err}", file=sys.stderr)
-        return "skipped"
-    want = state_thread_name(base, state)
-    if want is None:
-        return "skipped"
-    stored = recorded.get("topic_name") or base
-    rename = {"name": want, "at": time.time()}
-    if want == stored:
-        try:
-            shown = (read_thread or discord_thread_name)(thread_id)
-        except Exception:
-            shown = ""
-        if shown == want:
-            rename["outcome"] = "unchanged"
-    if "outcome" not in rename:
-        try:
-            (rename_thread or discord_rename_thread)(thread_id, want)
-        except Exception as err:
-            prior = recorded.get("rename") or {}
-            attempts = prior.get("attempts") if prior.get("outcome") == "failed" else 0
-            rename.update(outcome="failed", error=str(err),
-                          retryable=classify_send_failure(err) != "permanent",
-                          attempts=(attempts if isinstance(attempts, int) else 0) + 1)
-            print(f"fm-ext-poster: thread {thread_id} rename failed: {err}", file=sys.stderr)
-        else:
-            rename["outcome"] = "applied"
-    try:
+    repairing = False
+    while True:
+        thread_id = recorded.get("topic_thread_id") or ""
         with _THREAD_RECORD_LOCK:
-            if require_current and _read_thread_record(recorded["path"]) != recorded:
+            path = recorded.get("path")
+            fresh = _read_thread_record(path) if isinstance(path, Path) else {}
+            if require_current and fresh != recorded:
+                if not repairing or not fresh:
+                    return "skipped"
+                state = fresh.get("thread_state")
+            if decision_posts is not None and _decision_post_snapshot(home) != decision_posts:
                 return "skipped"
-            save_thread_record(recorded["path"], recorded.get("request_id"), thread_id,
-                               topic_name="" if rename["outcome"] == "failed" else want,
-                               thread_state=state, creator=provenance,
-                               creating_title=recorded.get("creating_title") or "",
-                               retitle=retitle or None,
-                               state_at=state_at, rename=rename, marked_open=marked_open)
-    except Exception as err:
-        print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
-    return rename["outcome"]
+            if fresh:
+                if fresh.get("topic_thread_id") != thread_id:
+                    return "skipped"
+                recorded = fresh
+        thread_id = recorded.get("topic_thread_id") or ""
+        provenance = recorded.get("creator") or ""
+        if provenance == "adopted":
+            return "skipped"
+        if provenance != "firstmate":
+            owner = thread_owner or discord_thread_owner
+            try:
+                owner_id = owner(thread_id)
+            except Exception as err:
+                print(f"fm-ext-poster: thread owner lookup skipped: {err}", file=sys.stderr)
+                return "skipped"
+            if not owner_id or owner_id != _bot_user_id():
+                print(f"fm-ext-poster: thread {thread_id} ownership unproved; leaving its name alone",
+                      file=sys.stderr)
+                return "skipped"
+            provenance = "firstmate"
+        try:
+            creator = _creating_request(recorded)
+            base = retitle or (thread_name_for(creator, home) if creator else "")
+        except Exception as err:
+            print(f"fm-ext-poster: thread name check skipped: {err}", file=sys.stderr)
+            return "skipped"
+        want = state_thread_name(base, state)
+        if want is None:
+            return "skipped"
+        stored = recorded.get("topic_name") or base
+        rename = {"name": want, "at": time.time()}
+        if want == stored:
+            try:
+                shown = (read_thread or discord_thread_name)(thread_id)
+            except Exception:
+                shown = ""
+            if shown == want:
+                rename["outcome"] = "unchanged"
+        if "outcome" not in rename:
+            try:
+                (rename_thread or discord_rename_thread)(thread_id, want)
+            except Exception as err:
+                prior = recorded.get("rename") or {}
+                attempts = prior.get("attempts") if prior.get("outcome") == "failed" else 0
+                rename.update(outcome="failed", error=str(err),
+                              retryable=classify_send_failure(err) != "permanent",
+                              attempts=(attempts if isinstance(attempts, int) else 0) + 1)
+                print(f"fm-ext-poster: thread {thread_id} rename failed: {err}", file=sys.stderr)
+            else:
+                rename["outcome"] = "applied"
+        changed = False
+        try:
+            with _THREAD_RECORD_LOCK:
+                current = _read_thread_record(recorded["path"])
+                changed = (require_current and current != recorded
+                           or decision_posts is not None and _decision_post_snapshot(home) != decision_posts)
+                if not changed:
+                    save_thread_record(recorded["path"], recorded.get("request_id"), thread_id,
+                                       topic_name="" if rename["outcome"] == "failed" else want,
+                                       thread_state=state, creator=provenance,
+                                       creating_title=recorded.get("creating_title") or "",
+                                       retitle=retitle or None,
+                                       state_at=state_at, rename=rename, marked_open=marked_open)
+        except Exception as err:
+            print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
+        if changed:
+            if not current or current.get("topic_thread_id") != thread_id:
+                return "skipped"
+            recorded = current
+            state = current.get("thread_state")
+            state_at = marked_open = None
+            retitle = ""
+            require_current = True
+            decision_posts = None
+            repairing = True
+            continue
+        return rename["outcome"]
 
 
 def maybe_rename_topic_thread(
@@ -1273,6 +1306,7 @@ def reconcile_thread_states(
         return []
     channel = dedicated_channel(home)
     summaries = None
+    decision_posts = None
     touched = []
     for path in paths:
         record = _read_thread_record(path)
@@ -1283,14 +1317,17 @@ def reconcile_thread_states(
         state = record.get("thread_state")
         if state == "needs-you":
             if summaries is None:
+                with _THREAD_RECORD_LOCK:
+                    decision_posts = _decision_post_snapshot(home)
                 summaries = decision_threads(home)
             summary = summaries.get(record["topic_thread_id"])
-            if (summary and summary["open"] == 0 and summary["closed"] > 0
+            if (decision_posts is not None and summary and summary["open"] == 0 and summary["closed"] > 0
                     and (record.get("marked_open")
                          or record.get("state_at", 0) <= summary["last_posted_at"])):
                 apply_thread_state(record, "none", home, state_at=time.time(),
                                    rename_thread=rename_thread, read_thread=read_thread,
-                                   marked_open=False, require_current=True)
+                                   marked_open=False, require_current=True,
+                                   decision_posts=decision_posts)
                 touched.append(record["topic_thread_id"])
                 continue
         failed = record.get("rename") or {}

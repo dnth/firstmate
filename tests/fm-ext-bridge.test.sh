@@ -3369,22 +3369,25 @@ for thread in threads:
 record = json.loads(path.read_text())
 missing = [key for key in dict.fromkeys(k for update in updates for k in update)
            if key not in record]
-poster.thread_name_for = lambda payload, home: "Topic"
+poster.thread_name_for = lambda payload, home: poster._read_thread_record(path).get("retitle") or "Topic"
 poster.dedicated_channel = lambda home: os.environ["RID"].split(":")[2]
 renamed = []
+remote = {}
 def rename(thread, name):
     renamed.append(name)
+    remote[thread] = name
 
 def seed(state="needs-you", failed=None):
     poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
         topic_name="Topic", thread_state=state, creator="firstmate",
-        state_at=1, marked_open=True, rename=failed or {"outcome": "applied"})
+        state_at=1, marked_open=True, retitle="", rename=failed or {"outcome": "applied"})
 
 def summaries(home):
     poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
                               thread_state="done", state_at=3)
     return {os.environ["THREAD"]: {"open": 0, "closed": 1, "last_posted_at": 2}}
 
+real_summaries = poster.decision_threads
 seed()
 poster.decision_threads = summaries
 poster.reconcile_thread_states(home, rename_thread=rename)
@@ -3409,10 +3412,12 @@ for operation in ("read", "rename"):
     def block(*args):
         entered.set()
         assert release.wait(5)
+        if len(args) == 2:
+            rename(*args)
         return "Topic"
     def deliver():
-        poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
-                                  thread_state="done", retitle="Delivered title")
+        assert real_apply(poster._read_thread_record(path), "done", home,
+                          retitle="Delivered title", rename_thread=rename) == "applied"
         saved.set()
     sweep = threading.Thread(target=real_apply,
         args=(poster._read_thread_record(path), "none", home),
@@ -3431,12 +3436,15 @@ for operation in ("read", "rename"):
         delivery.join(5)
     assert poster._read_thread_record(path)["thread_state"] == "done"
     assert poster._read_thread_record(path)["retitle"] == "Delivered title"
+    assert remote[os.environ["THREAD"]] == "✅ Delivered title"
+    assert poster._read_thread_record(path)["topic_name"] == remote[os.environ["THREAD"]]
 
 seed()
 entered, release = threading.Event(), threading.Event()
 def delivery_rename(*args):
     entered.set()
     assert release.wait(5)
+    rename(*args)
 delivery = threading.Thread(target=real_apply,
     args=(poster._read_thread_record(path), "done", home),
     kwargs={"rename_thread": delivery_rename, "state_at": 10})
@@ -3451,10 +3459,67 @@ finally:
     delivery.join(5)
 assert poster._read_thread_record(path)["thread_state"] == "done"
 assert poster._read_thread_record(path)["state_at"] == 10
+assert remote[os.environ["THREAD"]] == "✅ Topic"
 
 assert real_apply(poster._read_thread_record(path), "needs-you", home,
                   rename_thread=rename) == "applied"
 assert poster._read_thread_record(path)["thread_state"] == "needs-you"
+
+(home / "state" / "route-fix.status").write_text("needs-decision [key=publication]: pick a route\n")
+publication = {"slug": os.environ["SLUG"], "kind": "followup", "generation": 2}
+progress = {"request_id": os.environ["RID"], "topic_thread_id": os.environ["THREAD"],
+            "decision": {"key": "key:route-fix:publication"},
+            "buttons": True, "discord_message_ids": ["900000000000000001"], "posted_at": 2}
+closed = dict(publication, generation=1)
+poster.write_progress(closed, dict(progress, posted_at=1), home)
+(outbox / f"{os.environ['SLUG']}.followup.1.settled.json").write_text('{"kind":"decided"}')
+published_path = outbox / f"{os.environ['SLUG']}.followup.2.progress.json"
+
+def publish():
+    poster.write_progress(publication, progress, home)
+
+for phase in ("summary", "apply", "rename"):
+    published_path.unlink(missing_ok=True)
+    seed()
+    renamed.clear()
+    remote[os.environ["THREAD"]] = "❓ Topic"
+    def snapshot(home):
+        summary = real_summaries(home)
+        assert summary[os.environ["THREAD"]]["open"] == 0
+        if phase == "summary":
+            publish()
+        return summary
+    poster.decision_threads = snapshot
+    def publish_before_apply(*args, **kwargs):
+        publish()
+        return real_apply(*args, **kwargs)
+    poster.apply_thread_state = publish_before_apply if phase == "apply" else real_apply
+    entered, release = threading.Event(), threading.Event()
+    def clearing_rename(*args):
+        entered.set()
+        assert release.wait(5)
+        rename(*args)
+    if phase == "rename":
+        sweep = threading.Thread(target=poster.reconcile_thread_states, args=(home,),
+            kwargs={"rename_thread": clearing_rename, "read_thread": lambda tid: "other"})
+        sweep.start()
+        assert entered.wait(3)
+        try:
+            publish()
+        finally:
+            release.set()
+            sweep.join(5)
+        assert not sweep.is_alive()
+    else:
+        poster.reconcile_thread_states(home, rename_thread=rename,
+                                       read_thread=lambda tid: "other")
+        assert not renamed
+    assert real_summaries(home)[os.environ["THREAD"]]["open"] == 1
+    assert poster._read_thread_record(path)["thread_state"] == "needs-you"
+    assert remote[os.environ["THREAD"]] == "❓ Topic"
+    assert poster._read_thread_record(path)["marked_open"]
+poster.apply_thread_state = real_apply
+poster.decision_threads = real_summaries
 
 print(json.dumps({"missing": missing, "record": record}))
 PY
