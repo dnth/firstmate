@@ -68,9 +68,21 @@ CHECK
     # bin/fm-review-manifest.sh's single read; a case pins its answer in
     # $dir/reviews.json.
     case " $* " in
-      *PullRequestReviewThread*) cat "$FM_TEST_REVIEW_STATE.comments"; exit 0 ;;
+      *PullRequestReviewThread*)
+        if [ -e "$FM_TEST_REVIEW_STATE.delay" ]; then
+          printf 'comments\n' >> "$FM_TEST_REVIEW_STATE.calls"
+          sleep 5
+        fi
+        cat "$FM_TEST_REVIEW_STATE.comments"; exit 0
+        ;;
       *reviewThreads*)
         [ -f "${FM_TEST_REVIEW_STATE:-/nonexistent}" ] || exit 1
+        if [ -e "$FM_TEST_REVIEW_STATE.delay" ]; then
+          case " $* " in
+            *reviewsCursor=page2*) printf 'page2\n' >> "$FM_TEST_REVIEW_STATE.calls"; sleep 5 ;;
+            *) printf 'page1\n' >> "$FM_TEST_REVIEW_STATE.calls"; sleep 1 ;;
+          esac
+        fi
         case " $* " in
           *reviewsCursor=page2*) [ ! -e "$FM_TEST_REVIEW_STATE.fail" ] || exit 1; cat "$FM_TEST_REVIEW_STATE.next" ;;
           *) cat "$FM_TEST_REVIEW_STATE" ;;
@@ -181,10 +193,10 @@ run_poll() {  # <dir>
 }
 
 run_watcher_cycle() {  # <dir>
-  local dir=$1
+  local dir=$1 check_timeout=${2:-10}
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 15; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
-    env -u FM_TASK_ID FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_CHECK_INTERVAL=0 FM_CHECK_TIMEOUT=10 \
-      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+    env -u FM_TASK_ID FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_CHECK_INTERVAL=0 FM_CHECK_TIMEOUT="$check_timeout" \
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 FM_WATCH_HANDLING_SUCCESSOR=1 \
       FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=999999 FM_WATCH_RESURFACE_MAX_SECS=999999 \
       FM_TEST_REVIEW_STATE="$dir/reviews.json" FM_TEST_GH_HEAD="$FM_TEST_GH_HEAD" \
       FM_TEST_ISSUE_MISSING="${FM_TEST_ISSUE_MISSING:-0}" \
@@ -608,7 +620,49 @@ test_paginated_reviews() {
   case "$(cat "$dir/watch.out")" in
     *"review $URL unreadable"*) fail "the same read failure repeatedly woke supervision" ;;
   esac
-  pass "paginated coverage, failed page reads, and deduplicated unreadable-state wakes"
+  rm -f "$dir/reviews.json.fail"
+  run_poll "$dir"
+  [ "$POLL_OUT" = "review $URL clear" ] || fail "successful empty review result did not prove recovery: $POLL_OUT"
+  run_watcher_cycle "$dir"
+  [ ! -e "$dir/home/state/$ID.pr-poll-review-notified" ] || fail "recovery retained the unreadable notification"
+  case "$(cat "$dir/watch.out")" in
+    *"review $URL clear"*) fail "successful empty review result woke supervision" ;;
+  esac
+  touch "$dir/reviews.json.fail"
+  run_watcher_cycle "$dir"
+  assert_contains "$(cat "$dir/watch.out")" "review $URL unreadable" "a separate outage was suppressed after recovery"
+  [ "$(grep -c "review $URL unreadable" "$dir/home/state/.wake-queue")" -eq 2 ] \
+    || fail "separate outages did not each produce one durable wake"
+  pass "paginated coverage, failed page reads, deduplication, and notification reset after recovery"
+}
+
+test_slow_paginated_read() {
+  local dir head axis started
+  for axis in reviews comments; do
+    dir=$(make_case "slow-$axis")
+    head=$(head_of "$dir")
+    FM_TEST_GH_HEAD=$head
+    body_state "$dir" "$head" "$(sections)"
+    run_pr_check "$dir"
+    [ "$CHECK_RC" -eq 0 ] || fail "slow-read seed refused: $CHECK_OUT"
+    if [ "$axis" = reviews ]; then
+      cp "$dir/reviews.json" "$dir/reviews.json.next"
+      jq '.data.repository.pullRequest.reviews.pageInfo={hasNextPage:true,endCursor:"page2"}' \
+        "$dir/reviews.json.next" > "$dir/reviews.json"
+    else
+      body_state "$dir" "$head" "$(sections)" '[]' \
+        '[{"id":"PRRT_slow","isResolved":false,"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"more"},"nodes":[{"databaseId":999,"body":"<!-- fm-worker-note -->"}]}}]'
+      printf '%s\n' '{"data":{"node":{"comments":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}' > "$dir/reviews.json.comments"
+    fi
+    touch "$dir/reviews.json.delay"
+    started=$SECONDS
+    run_watcher_cycle "$dir" 6
+    [ "$((SECONDS - started))" -lt 6 ] || fail "paginated $axis read outlived its outer check deadline"
+    assert_contains "$(cat "$dir/watch.out")" "review $URL unreadable" "slow $axis read timed out silently"
+    assert_contains "$(cat "$dir/home/state/.wake-queue")" "review $URL unreadable" "slow $axis read did not produce a durable wake"
+    [ "$(wc -l < "$dir/reviews.json.calls" | tr -d ' ')" -ge 2 ] || fail "slow $axis fixture never reached its second page"
+  done
+  pass "slow review and thread-comment pages share one deadline and wake before the outer timeout"
 }
 
 test_private_review_temp_files() {
@@ -669,6 +723,7 @@ test_remote_custody_mode() {
   pass "remote custody enforces Pipeline and accepts forge-proved fixed commits"
 }
 
+test_slow_paginated_read
 test_private_review_temp_files
 test_review_regressions
 test_paginated_reviews

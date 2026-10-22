@@ -75,7 +75,11 @@ case "$provider" in
     [ "$review_dir" != "$0" ] || review_dir=.
     review_line=
     if [ -x "$review_dir/fm-review-manifest.sh" ]; then
-      review_line=$("$review_dir/fm-review-manifest.sh" poll "$url" 2>/dev/null) || review_line="review $url unreadable"
+      if review_line=$("$review_dir/fm-review-manifest.sh" poll "$url" 2>/dev/null); then
+        [ -n "$review_line" ] || review_line="review $url clear"
+      else
+        review_line="review $url unreadable"
+      fi
     fi
     [ -z "$review_line" ] || printf '%s\n' "$review_line"
     ;;

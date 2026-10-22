@@ -114,10 +114,17 @@ rm_read() {
     return 1
   }
   local page reviews_cursor= threads_cursor= next_reviews next_threads merged thread cursor next reviews_done=0 threads_done=0
+  local read_limit=$RM_TIMEOUT watch_limit=${FM_CHECK_TIMEOUT:-30} deadline remaining
+  case "$watch_limit" in ''|*[!0-9]*) watch_limit=30 ;; esac
+  watch_limit=$((10#$watch_limit / 2))
+  [ "$watch_limit" -ge "$read_limit" ] || read_limit=$watch_limit
+  deadline=$((SECONDS + read_limit))
   RM_PAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/.fm-review-page.XXXXXX") || return 1
   page=$RM_PAGE_FILE
   while :; do
-    if ! fm_run_timed "$RM_TIMEOUT" gh api graphql -f "query=$RM_QUERY" \
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || return 1
+    if ! fm_run_timed "$remaining" gh api graphql -f "query=$RM_QUERY" \
         -F "owner=$FM_PR_OWNER" -F "repo=$FM_PR_REPO" -F "number=$FM_PR_NUMBER" \
         ${reviews_cursor:+-f "reviewsCursor=$reviews_cursor"} \
         ${threads_cursor:+-f "threadsCursor=$threads_cursor"} > "$page" 2>/dev/null; then
@@ -157,7 +164,9 @@ rm_read() {
     [ -n "$thread" ] || continue
     [ -n "$cursor" ] && [ "$cursor" != null ] || { rm -f "$page"; return 1; }
     while :; do
-      if ! fm_run_timed "$RM_TIMEOUT" gh api graphql \
+      remaining=$((deadline - SECONDS))
+      [ "$remaining" -gt 0 ] || return 1
+      if ! fm_run_timed "$remaining" gh api graphql \
           -f 'query=query($id:ID!,$cursor:String!){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{databaseId body}}}}}' \
           -f "id=$thread" -f "cursor=$cursor" > "$page" 2>/dev/null; then
         rm -f "$page"
@@ -176,7 +185,7 @@ rm_read() {
     done
   done < <(jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.pageInfo.hasNextPage == true) | [.id,.comments.pageInfo.endCursor] | @tsv' "$RM_JSON_FILE")
   rm -f "$page"
-  return 0
+  [ "$SECONDS" -lt "$deadline" ]
 }
 
 rm_field() {
