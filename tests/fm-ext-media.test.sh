@@ -145,9 +145,19 @@ import outbox_poster
 home, mode, raw_dir = sys.argv[1], sys.argv[2], Path(sys.argv[3])
 raw_dir.mkdir(parents=True, exist_ok=True)
 requests = []
+messages = []
+lookups = []
 multipart_seen = [0]
 
 class Edge(BaseHTTPRequestHandler):
+    def do_GET(self):
+        lookups.append(self.path)
+        reply = {"id": "777777777777777777"} if self.path.endswith("/users/@me") else ([] if mode.endswith("unmatched") else messages)
+        data = json.dumps(reply).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         ctype = self.headers.get("Content-Type", "")
@@ -179,8 +189,22 @@ class Edge(BaseHTTPRequestHandler):
             code, reply = 503, {"message": "upstream"}
         else:
             code = 200
+            existing = next((m for m in messages if m.get("nonce") == record["json"].get("nonce")), None)
             reply = {"id": "90000000000000000%d" % len(requests), "channel_id": self.path.split("/")[-2],
                      "attachments": [{"id": str(i), "filename": f["filename"]} for i, f in enumerate(record["files"])]}
+            if existing and record["json"].get("enforce_nonce"):
+                reply = existing
+            else:
+                reply.update(content=record["json"]["content"], nonce=record["json"].get("nonce"),
+                             author={"id": "777777777777777777"})
+                messages.append(reply)
+            if mode in ("accepted-timeout", "accepted-timeout-no-nonce", "accepted-timeout-unmatched"):
+                if mode.endswith("no-nonce"):
+                    reply.pop("nonce", None)
+                    import time
+                    reply["id"] = str((int(time.time() * 1000) - 1420070400000) << 22)
+                self.close_connection = True
+                return
         data = json.dumps(reply).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -195,8 +219,15 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 outbox_poster.DISCORD_API_BASE = "http://127.0.0.1:%d/api/v10" % server.server_address[1]
 outbox_poster.MEDIA_RETRY_DELAY_SECS = 0
 result = outbox_poster.drain_outbox(home=Path(home))
+if mode.startswith("accepted-timeout"):
+    payload = next(Path(home, "state/ext-outbox").glob("*.answer.1.json"))
+    identity = json.loads(payload.read_text())
+    import time
+    outbox_poster.release_inflight(identity, Path(home))
+    os.environ["FM_EXT_NOW_OVERRIDE"] = str(int(time.time()) + 600)
+    result += outbox_poster.drain_outbox(home=Path(home))
 server.shutdown()
-print(json.dumps({"result": result, "requests": requests}))
+print(json.dumps({"result": result, "requests": requests, "messages": messages, "lookups": lookups}))
 PY
 
 drive() {  # <home> <mode> -> JSON {result, requests}
@@ -331,6 +362,27 @@ test_3_refusals() {
     || fail "refused emits must publish nothing"
   [ -z "$(find "$home/state/ext-media/staged" -mindepth 1 2>/dev/null)" ] \
     || fail "refused emits must leave nothing staged"
+  mkdir -p "$home/data/real-shots"
+  write_png "$home/data/real-shots/a.png"
+  ln -s real-shots "$home/data/linked-shots"
+  if home_env "$home" "$MEDIA" screen "$home/data/linked-shots/a.png" --verdict clear --reason looked >/dev/null 2>&1; then
+    fail "a symlinked source parent must be refused"
+  fi
+  mv "$home/data" "$home/data-real"
+  ln -s data-real "$home/data"
+  if home_env "$home" "$MEDIA" screen "$home/data/real-shots/a.png" --verdict clear --reason looked >/dev/null 2>&1; then
+    fail "a symlinked data root must be refused"
+  fi
+  rm "$home/data"
+  mv "$home/data-real" "$home/data"
+  write_png "$home/state/a.png"
+  mv "$home/state" "$home/state-real"
+  ln -s state-real "$home/state"
+  if home_env "$home" "$MEDIA" screen "$home/state/a.png" --verdict clear --reason looked >/dev/null 2>&1; then
+    fail "a symlinked state root must be refused"
+  fi
+  rm "$home/state"
+  mv "$home/state-real" "$home/state"
   pass "3 out-of-tree, symlinked, unsupported, over-count, refused, and oversized-video media are refused"
 }
 
@@ -346,18 +398,18 @@ test_4_oversized_image_downscaled() {
   setup_home "$home"
   slug=$(intake "$home" 440000000000000001)
   mkdir -p "$home/data/shots"
-  write_png "$home/data/shots/large.png" 90000
-  [ "$(wc -c < "$home/data/shots/large.png" | tr -d ' ')" -gt 60000 ] || fail "the fixture must be large"
+  write_png "$home/data/shots/large.png" 40000000
+  [ "$(wc -c < "$home/data/shots/large.png" | tr -d ' ')" -gt 33554432 ] || fail "the fixture must be large"
   screen "$home" "$home/data/shots/large.png"
   printf 'Big screen.' > "$home/reply.txt"
   env -u FM_TASK_ID PATH="$BASE_PATH:$MAGICK_DIR" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_EXT_MEDIA_MAX_BYTES=40000 "$EMIT" --request-id "$(request_id 440000000000000001)" \
+    "$EMIT" --request-id "$(request_id 440000000000000001)" \
     --kind answer --generation 1 --text-file "$home/reply.txt" --media "$home/data/shots/large.png" >/dev/null \
     || fail "an oversized image must be downscaled, not refused"
   payload="$home/state/ext-outbox/$slug.answer.1.json"
   staged="$home/state/ext-media/staged/$(jq -r '.media.dir' "$payload")/image-1.png"
   bytes=$(wc -c < "$staged" | tr -d ' ')
-  [ "$bytes" -le 40000 ] || fail "the downscaled image must fit the limit (got $bytes)"
+  [ "$bytes" -le 10000000 ] || fail "the downscaled image must fit the limit (got $bytes)"
   head -c 8 "$staged" | od -An -c | grep -q 'P   N   G' || fail "the downscaled image must stay a PNG"
   jq -e '.media.files[0] | .sha256 != .screened_sha256' "$payload" >/dev/null \
     || fail "a downscaled copy must record both its own digest and the screened digest"
@@ -412,7 +464,7 @@ test_5_poster_multipart_upload() {
 # --- 6. one retry, never a duplicate; failure posts the text with a note ----
 
 test_6_retry_once_then_note() {
-  local home slug out receipt
+  local home slug out receipt mode
   home="$TMP_ROOT/c6"
   setup_home "$home"
   slug=$(intake "$home" 460000000000000001)
@@ -474,6 +526,34 @@ test_6_retry_once_then_note() {
   jq -e '.attachments == [] and .attachments_dropped == ["image-1.png"] and .media_note == true
     and .media_upload_attempts == 2 and (.discord_message_ids | length) == 1' "$receipt" >/dev/null \
     || fail "the receipt must count both uploads across drains (got: $(cat "$receipt"))"
+  for mode in accepted-timeout accepted-timeout-no-nonce accepted-timeout-unmatched; do
+    home="$TMP_ROOT/c6-$mode"
+    setup_home "$home"
+    slug=$(intake "$home" 460000000000000004)
+    mkdir -p "$home/data/shots"
+    write_png "$home/data/shots/a.png"
+    screen "$home" "$home/data/shots/a.png"
+    emit_media "$home" 460000000000000004 1 "Accepted then timeout." "$home/data/shots/a.png" >/dev/null
+    out=$(drive "$home" "$mode")
+    if [ "$mode" = accepted-timeout-unmatched ]; then
+      printf '%s' "$out" | jq -e '.result == ["mid-delivery", "mid-delivery"]
+        and (.requests | length) == 1 and (.messages | length) == 1' >/dev/null \
+        || fail "an inconclusive lookup must never resend or post fallback text (got: $out)"
+      [ ! -e "$home/state/ext-outbox/$slug.answer.1.receipt.json" ] \
+        || fail "unresolved delivery must not fabricate a receipt"
+      continue
+    fi
+    printf '%s' "$out" | jq -e '.result == ["mid-delivery", "sent"]
+      and (.requests | length) == 1 and (.messages | length) == 1
+      and (.lookups | length) == 2
+      and .requests[0].json.enforce_nonce == true
+      and (.requests[0].json.nonce | length) <= 25' >/dev/null \
+      || fail "an accepted upload with a lost response must recover without another send (got: $out)"
+    jq -e '.media_upload_attempts == 1 and (.attachments | length) == 1
+      and (.discord_message_ids | length) == 1 and .media_note == false' \
+      "$home/state/ext-outbox/$slug.answer.1.receipt.json" >/dev/null \
+      || fail "recovery must record the accepted media receipt"
+  done
   pass "6 a refused upload is retried once per post, even across drains, then the text posts alone with a note, never twice"
 }
 
@@ -576,7 +656,8 @@ EOF
 # --- 10. screenshots copy back from a remote second mate in bounded pieces --
 
 test_10_remote_pull() {
-  local home remote out rc pulled log
+  local home remote out rc pulled log operation
+  local -a args=()
   home="$TMP_ROOT/c10"
   remote="$TMP_ROOT/c10-remote"
   setup_home "$home"
@@ -626,6 +707,36 @@ PY
     rc=$?
     [ "$rc" -ne 0 ] || fail "pulling $bad must be refused"
   done
+  ln -s ios-task "$remote/data/linked"
+  for operation in sum get; do
+    args=(sum data/linked/artifacts/after.png 0)
+    [ "$operation" = sum ] || args=(get data/linked/artifacts/after.png 0 0 1024)
+    if FM_HOME="$remote" "$ROOT/bin/fm-remote-file.sh" "${args[@]}" >/dev/null 2>&1; then
+      fail "remote $operation must reject a symlinked parent"
+    fi
+  done
+  mv "$remote/data" "$remote/data-real"
+  ln -s data-real "$remote/data"
+  for operation in sum get; do
+    args=(sum data/ios-task/artifacts/after.png 0)
+    [ "$operation" = sum ] || args=(get data/ios-task/artifacts/after.png 0 0 1024)
+    if FM_HOME="$remote" "$ROOT/bin/fm-remote-file.sh" "${args[@]}" >/dev/null 2>&1; then
+      fail "remote $operation must reject a symlinked data root"
+    fi
+  done
+  rm "$remote/data"
+  mv "$remote/data-real" "$remote/data"
+  cp "$remote/data/ios-task/artifacts/after.png" "$remote/data/large.png"
+  "$PYTHON_BIN" - "$remote/data/large.png" <<'PY_SIZE'
+import sys
+with open(sys.argv[1], "r+b") as stream:
+    stream.truncate(40000000)
+PY_SIZE
+  out=$(FM_HOME="$remote" "$ROOT/bin/fm-remote-file.sh" sum data/large.png 0) \
+    || fail "remote image checksums must have no source byte cap"
+  [ "${out%% *}" = 40000000 ] || fail "the remote checksum must cover the entire large image"
+  FM_HOME="$remote" "$ROOT/bin/fm-remote-file.sh" get data/large.png 0 33554432 1024 > "$home/range"
+  [ "$(wc -c < "$home/range" | tr -d ' ')" = 1024 ] || fail "large images must support bounded reads beyond 32 MiB"
   intake "$home" 500000000000000001 >/dev/null
   screen "$home" "$pulled"
   emit_media "$home" 500000000000000001 1 "From the Mac." "$pulled" >/dev/null \

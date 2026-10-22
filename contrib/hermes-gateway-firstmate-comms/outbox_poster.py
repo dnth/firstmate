@@ -1692,6 +1692,8 @@ def discord_send(payload: dict) -> dict:
         raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
     channel = payload["thread_id"] or payload["channel_id"]
     message = {"content": payload["text"]}
+    if payload.get("nonce"):
+        message.update(nonce=payload["nonce"], enforce_nonce=True)
     decision = payload.get("decision")
     last_chunk = int(payload.get("chunk_index") or 0) + 1 >= int(payload.get("chunk_count") or 1)
     buttons = isinstance(decision, dict) and last_chunk and decisions.buttons_ready()
@@ -2060,6 +2062,35 @@ def _waiting_pin_deliver_claimed(payload: dict, home: Path) -> str:
     return "edited"
 
 
+def recover_pending_message(payload: dict, pending: dict) -> dict | None:
+    token = _bot_token()
+    if not token:
+        raise RuntimeError("missing bot token")
+    channel = payload.get("thread_id") or payload.get("channel_id")
+    headers = {"Authorization": f"Bot {token}", "User-Agent": USER_AGENT}
+    def get(path):
+        request = urllib.request.Request(f"{DISCORD_API_BASE}{path}", headers=headers)
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.load(response)
+    bot = get("/users/@me")
+    messages = get(f"/channels/{channel}/messages?limit=100")
+    if not isinstance(messages, list) or not bot.get("id"):
+        raise RuntimeError("invalid message lookup")
+    for message in messages:
+        if str((message.get("author") or {}).get("id")) != str(bot["id"]):
+            continue
+        matches = str(message.get("nonce") or "") == pending["nonce"]
+        if not message.get("nonce"):
+            created = (int(message["id"]) >> 22) / 1000 + 1420070400
+            matches = (created >= int(pending["attempted_at"] * 1000) / 1000
+                       and message.get("content") == pending["text"]
+                       and [item.get("filename") for item in message.get("attachments") or []] == pending["names"])
+        if matches and _SNOWFLAKE.fullmatch(str(message.get("id") or "")):
+            return {"discord_message_id": str(message["id"]),
+                    "buttons": bool(message.get("components"))}
+    return None
+
+
 def deliver_one(
     path: Path,
     send: SendFn | None = None,
@@ -2176,7 +2207,22 @@ def deliver_one(
         last = index + 1 == len(chunks)
         media_state = progress.get("media") if media and last else None
         uploads: list[dict] = []
-        if media_state is not None and media_state.get("state") == "pending":
+        recovered = None
+        pending = progress.get("pending_send")
+        if pending:
+            progress["inflight"] = index
+            write_progress(payload, progress, home)
+            try:
+                recovered = recover_pending_message(send_payload, pending)
+            except Exception:
+                return "mid-delivery"
+            if recovered is None:
+                return "mid-delivery"
+            text = pending["text"]
+            if media_state is not None and pending["names"]:
+                media_state["state"] = "posted"
+                media_state["posted"] = pending["names"]
+        if not recovered and media_state is not None and media_state.get("state") == "pending":
             if int(media_state.get("attempts") or 0) >= MEDIA_UPLOAD_ATTEMPTS:
                 # A resumed ambiguous upload already used its one retry.
                 media_state["state"] = "dropped"
@@ -2188,6 +2234,9 @@ def deliver_one(
                 if not uploads:
                     media_state["state"] = "dropped"
         while True:
+            if recovered:
+                receipt = recovered
+                break
             attaching = bool(uploads) and media_state is not None and media_state.get("state") == "pending"
             text = chunks[index]
             if media_state is not None and (media_state.get("state") == "dropped" or media_state.get("dropped")) \
@@ -2197,13 +2246,24 @@ def deliver_one(
             if attaching:
                 chunk["files"] = uploads
                 media_state["attempts"] = int(media_state.get("attempts") or 0) + 1
+            chunk["nonce"] = hashlib.sha256(
+                f"{payload['slug']}:{payload['kind']}:{payload['generation']}:{index}".encode()
+            ).hexdigest()[:25]
+            progress["pending_send"] = {
+                "nonce": chunk["nonce"], "text": text, "names": [item["name"] for item in uploads] if attaching else [],
+                "attempted_at": time.time(),
+            }
             progress["inflight"] = index
             write_progress(payload, progress, home)
             try:
                 receipt = sender(chunk)
+                if not isinstance(receipt, dict) or not _message_id(receipt):
+                    raise DiscordSendError("ambiguous", "discord post returned no message id")
             except Exception as err:
                 outcome = classify_send_failure(err)
                 refused = getattr(err, "http_code", None) is not None or isinstance(err, urllib.error.HTTPError)
+                if outcome != "ambiguous":
+                    progress.pop("pending_send", None)
                 if attaching and refused and outcome in ("transient", "permanent"):
                     # Discord answered with an HTTP error, so this try created no
                     # message: retry the upload once, then post the text alone.
@@ -2248,6 +2308,7 @@ def deliver_one(
         ids.append(_message_id(receipt))
         progress["discord_message_ids"] = ids
         progress["posted_count"] = index + 1
+        progress.pop("pending_send", None)
         progress["inflight"] = None
         if "decision" in progress and index + 1 == len(chunks):
             progress["buttons"] = bool(receipt.get("buttons"))

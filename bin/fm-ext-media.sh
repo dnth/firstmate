@@ -20,14 +20,14 @@
 # task worktree this home records (worktree= in state/<id>.meta). Paths with
 # "." or ".." components, a symlink at any component below that root, and
 # anything outside those roots are refused. A source is read once through a
-# no-follow copy capped at 32 MiB, and every check runs on that private copy.
+# no-follow copy, and every check runs on that private copy. Videos have a
+# 32 MiB source cap; images are bounded by ImageMagick resources when decoded.
 #
 # Types come from file contents, never the name: PNG, JPEG, GIF, and WebP
 # images, and MP4 (ISO base media) or WebM video. A video must be at most 30
 # seconds long by ffprobe.
 #
-# Size. FM_EXT_MEDIA_MAX_BYTES (default and maximum 10000000, Discord's
-# per-file limit on a server without boosts) caps every posted file. An
+# Size. A fixed 10000000-byte limit caps every posted file. An
 # oversized image is downscaled with ImageMagick, which also strips its
 # metadata, until it fits; one that cannot be brought under the cap is
 # refused. An oversized video is refused and never re-encoded.
@@ -95,9 +95,6 @@ help() {
 
 die() { printf 'fm-ext-media: %s\n' "$1" >&2; exit "${2:-2}"; }
 
-# Read cap for a source before any downscale, matching the inbound attachment
-# default so a full-resolution screenshot can still be brought under the post cap.
-MEDIA_SOURCE_MAX=33554432
 MEDIA_MAX_IMAGES=4
 MEDIA_MAX_VIDEOS=1
 MEDIA_VIDEO_MAX_SECS=30
@@ -105,17 +102,6 @@ MEDIA_REASON_MAX=200
 # One ranged read from a remote second mate, safely under its 1 MiB job
 # output bound.
 MEDIA_PULL_PIECE=786432
-
-media_max_bytes() {
-  local raw=${FM_EXT_MEDIA_MAX_BYTES-}
-  case "$raw" in
-    ''|*[!0-9]*) raw=10000000 ;;
-  esac
-  [ "${#raw}" -le 9 ] || raw=10000000
-  [ "$raw" -ge 1 ] 2>/dev/null || raw=10000000
-  [ "$raw" -le 10000000 ] || raw=10000000
-  printf '%s\n' "$raw"
-}
 
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
@@ -154,14 +140,14 @@ absolute_path() {
 }
 
 # Accepted source roots, one "<root>\t<required-prefix>" per line, each root
-# as given and physically resolved.
+# as given.
 media_roots() {
-  local data state meta kind worktree root physical
+  local data state meta kind worktree root
   data=$(absolute_path "${FM_DATA_OVERRIDE:-$FM_HOME/data}")
   state=$(absolute_path "$(fm_ext_state_dir)")
   for root in "$data" "$state"; do
-    physical=$(CDPATH='' cd -P -- "$root" 2>/dev/null && pwd -P) || continue
-    printf '%s\t%s\t\n' "$root" "$physical"
+    [ -d "$root" ] && [ ! -L "$root" ] || continue
+    printf '%s\t\n' "$root"
   done
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
@@ -175,15 +161,15 @@ media_roots() {
       /*) ;;
       *) continue ;;
     esac
-    physical=$(CDPATH='' cd -P -- "$worktree" 2>/dev/null && pwd -P) || continue
-    printf '%s\t%s\t.qa/evidence/\n' "$worktree" "$physical"
+    [ -d "$worktree" ] && [ ! -L "$worktree" ] || continue
+    printf '%s\t.qa/evidence/\n' "$worktree"
   done
 }
 
 # media_source_copy <path> <dest>: refuse anything outside the accepted roots
 # or symlinked below them, then copy it without following symlinks.
 media_source_copy() {
-  local path=$1 dest=$2 lexical physical prefix rel cur part rest found=0 rc
+  local path=$1 dest=$2 root prefix rel cur part rest found=0 rc
   path=$(absolute_path "$path")
   case "$path" in
     *$'\n'*|*$'\r'*|*$'\t'*) die "media path contains control characters" ;;
@@ -191,12 +177,11 @@ media_source_copy() {
   case "$path/" in
     */./*|*/../*|*//*) die "media path must not contain '.', '..', or empty components: $path" ;;
   esac
-  while IFS=$'\t' read -r lexical physical prefix; do
-    [ -n "$physical" ] || continue
+  while IFS=$'\t' read -r root prefix; do
+    [ -n "$root" ] || continue
     rel=
     case "$path" in
-      "$lexical"/*) rel=${path#"$lexical"/} ;;
-      "$physical"/*) rel=${path#"$physical"/} ;;
+      "$root"/*) rel=${path#"$root"/} ;;
       *) continue ;;
     esac
     if [ -n "$prefix" ]; then
@@ -210,7 +195,7 @@ media_source_copy() {
   done < <(media_roots)
   [ "$found" = 1 ] \
     || die "media must come from this home's data/ or state/ tree or a task worktree's .qa/evidence/ folder: $path"
-  cur=$physical
+  cur=$root
   rest=$rel
   while :; do
     part=${rest%%/*}
@@ -220,11 +205,11 @@ media_source_copy() {
     rest=${rest#*/}
   done
   [ -f "$cur" ] || die "media file not found or not a regular file: $path"
-  fm_ext_attachment_copy_nofollow "$physical" "$rel" "$dest" "$MEDIA_SOURCE_MAX" >/dev/null
+  fm_ext_attachment_copy_nofollow "$root" "$rel" "$dest" media >/dev/null
   rc=$?
   case "$rc" in
     0) ;;
-    11) die "media file is larger than the $MEDIA_SOURCE_MAX-byte read limit: $path" ;;
+    11) die "media file is larger than the 33554432-byte video read limit: $path" ;;
     *) die "could not read the media file without following a symlink: $path" ;;
   esac
 }
@@ -319,16 +304,16 @@ image_downscale() {
     rm -f -- "$dest"
     case "$ext" in
       gif)
-        "$im" "$src" -coalesce -strip -resize "${percent}%" -layers Optimize "GIF:$dest" >/dev/null 2>&1 || continue
+        "$im" -limit memory 256MiB -limit map 512MiB -limit disk 1GiB -limit width 32768 -limit height 32768 -limit area 64MP -limit time 30 "$src" -coalesce -strip -resize "${percent}%" -layers Optimize "GIF:$dest" >/dev/null 2>&1 || continue
         ;;
       png)
-        "$im" "$src" -auto-orient -strip -resize "${percent}%" "PNG:$dest" >/dev/null 2>&1 || continue
+        "$im" -limit memory 256MiB -limit map 512MiB -limit disk 1GiB -limit width 32768 -limit height 32768 -limit area 64MP -limit time 30 "$src" -auto-orient -strip -resize "${percent}%" "PNG:$dest" >/dev/null 2>&1 || continue
         ;;
       jpg)
-        "$im" "$src" -auto-orient -strip -resize "${percent}%" -quality 85 "JPEG:$dest" >/dev/null 2>&1 || continue
+        "$im" -limit memory 256MiB -limit map 512MiB -limit disk 1GiB -limit width 32768 -limit height 32768 -limit area 64MP -limit time 30 "$src" -auto-orient -strip -resize "${percent}%" -quality 85 "JPEG:$dest" >/dev/null 2>&1 || continue
         ;;
       webp)
-        "$im" "$src" -auto-orient -strip -resize "${percent}%" -quality 85 "WEBP:$dest" >/dev/null 2>&1 || continue
+        "$im" -limit memory 256MiB -limit map 512MiB -limit disk 1GiB -limit width 32768 -limit height 32768 -limit area 64MP -limit time 30 "$src" -auto-orient -strip -resize "${percent}%" -quality 85 "WEBP:$dest" >/dev/null 2>&1 || continue
         ;;
       *) return 1 ;;
     esac
@@ -337,7 +322,7 @@ image_downscale() {
     [ "$size" -le "$max" ] 2>/dev/null && return 0
   done
   rm -f -- "$dest"
-  return 1
+  die "image exceeds ImageMagick resource limits or cannot fit the upload limit"
 }
 
 cmd_frames() {
@@ -449,7 +434,7 @@ cmd_stage() {
   [ "$total" -ge 1 ] || die "stage needs at least one media file"
   [ "$total" -le $((MEDIA_MAX_IMAGES + MEDIA_MAX_VIDEOS)) ] \
     || die "a post carries at most $MEDIA_MAX_IMAGES images and $MEDIA_MAX_VIDEOS video; keep the rest in the work's report"
-  max=$(media_max_bytes)
+  max=10000000
   nonce=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
   [ "${#nonce}" -eq 16 ] || die "could not create a staging identity" 1
   fm_ext_private_artifact_dir_prepare "$MEDIA" >/dev/null || die "could not prepare $MEDIA" 1
@@ -513,8 +498,7 @@ cmd_stage() {
       video_length_ok "$duration" || die "video is ${duration}s long; at most ${MEDIA_VIDEO_MAX_SECS}s is allowed: $path"
     fi
     if [ "$bytes" -gt "$max" ]; then
-      image_downscale "$stage/.source-$index" "$stage/$name" "$ext" "$max" \
-        || die "could not bring the image under the $max-byte limit: $path"
+      image_downscale "$stage/.source-$index" "$stage/$name" "$ext" "$max"
       rm -f -- "$stage/.source-$index"
     else
       mv -- "$stage/.source-$index" "$stage/$name" || die "could not stage $name" 1
@@ -608,7 +592,7 @@ cmd_pull() {
   # The remote job output bound is 1 MiB, so the file is sized and hashed
   # first, read in bounded pieces, and accepted only when the pieces add up
   # to exactly that file.
-  summary=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh sum "$rel" "$MEDIA_SOURCE_MAX" < /dev/null)
+  summary=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh sum "$rel" 0 < /dev/null)
   rc=$?
   [ "$rc" -eq 0 ] \
     || die "could not read $rel on second mate $id (link exit $rc); its Firstmate checkout may need an update" 1
@@ -623,7 +607,7 @@ EOF
   : > "$WORK/pulled"
   offset=0
   while [ "$offset" -lt "$want_bytes" ]; do
-    "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MEDIA_SOURCE_MAX" "$offset" "$MEDIA_PULL_PIECE" \
+    "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" 0 "$offset" "$MEDIA_PULL_PIECE" \
       < /dev/null >> "$WORK/pulled"
     rc=$?
     [ "$rc" -eq 0 ] || die "could not copy $rel from second mate $id (link exit $rc)" 1

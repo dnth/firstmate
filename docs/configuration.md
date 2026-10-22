@@ -932,13 +932,15 @@ Firstmate can attach screenshots and short recordings to its own posts; workers 
 `bin/fm-ext-emit.sh --media <path>` (or `bin/fm-ext-open.sh --media <path>`) attaches up to 4 images (PNG, JPEG, GIF, or WebP) and 1 video (MP4 or WebM, at most 30 seconds) to an `answer`, `followup`, or `final`.
 Media is accepted only from this home's `data/` or `state/` tree or a recorded task worktree's `.qa/evidence/` folder; a symlink, a `.` or `..` component, an unsupported type, or a path outside those roots is refused, as is a request from a task worker's environment.
 Every file needs a screening attestation that Firstmate records after looking at it, bound to the file's content digest, so a file that was never screened, has changed since, or was screened and refused cannot post; a video also needs its frames sampled before it can be screened.
-`FM_EXT_MEDIA_MAX_BYTES` (default and maximum 10000000, Discord's per-file limit without server boosts) caps each posted file: an oversized image is downscaled with ImageMagick, and an oversized video is refused rather than re-encoded.
+A fixed 10000000-byte limit caps each posted file: an oversized image is downscaled with ImageMagick, and an oversized video is refused rather than re-encoded.
 Emit copies each file into a private folder under `state/ext-media/staged/` under a generic name such as `image-1.png`, so no path, branch name, task id, or original filename reaches Discord, and it refuses post text that names a media file.
 The [`bin/fm-ext-media.sh` header](../bin/fm-ext-media.sh) owns screening, frame sampling, staging, verification, remote pulls, and every refusal.
 
 The gateway poster attaches the staged files to the post's last message as one Discord multipart request, after re-checking each file's digest and attestation.
 When Discord answers an upload with an HTTP error, no message was created, so the poster retries the upload exactly once; if the retry also fails, or a file no longer verifies, the text posts without it and ends with `_(screenshot couldn't be posted)_`.
-An ambiguous transport failure follows the mid-delivery rule above instead of retrying blind, and a resumed generation never makes a third upload attempt.
+Each chunk carries a stable Discord nonce with enforced deduplication.
+After an ambiguous send, recovery checks recent bot messages for that nonce, or for matching content and attachment names after the attempt when Discord omits the nonce, and records a matched message as delivered.
+An inconclusive lookup leaves delivery pending under the bounded mid-delivery recovery rule above; it never triggers a resend or text fallback, and a resumed generation never makes a third upload attempt.
 The upload count lives in chunk progress, so once an upload has been tried, a transient failure with nothing posted keeps that progress and resumes it rather than deleting the posting marker, and a later delivery attempt cannot start the count over.
 The receipt adds `attachments` (name, kind, and bytes of each posted file), `attachments_dropped`, `media_upload_attempts`, and `media_note`.
 The bot needs Discord's Attach Files permission wherever it posts.
@@ -1269,7 +1271,6 @@ FM_EXT_INFLIGHT_TTL_SECS=30   # seconds a dead-owner exclusive send claim must a
 FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds without a claim or progress heartbeat before the next begin reopens the in-flight chunk for another attempt
 FM_EXT_MIDDELIVERY_RECOVERY_MAX=3   # reopen attempts before a stuck generation is failed terminally and surfaced as ext-delivery-failed
 FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records and retired ext-outbox markers (7 days); larger values clamp back to it
-FM_EXT_MEDIA_MAX_BYTES=10000000   # largest outbound media file Firstmate posts; oversized images are downscaled and oversized videos refused; larger values clamp back to it
 FM_EXT_HISTORY_MAX_CHARS=8000   # characters of message text kept in a request's thread-history sidecar; the replied-to message and Firstmate's latest recognised post are kept past it
 FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes; the delivery pass runs on its own thread, independent of the decision sweeps
 FM_EXT_PRUNE_INTERVAL_SECS=3600   # minimum seconds between retention prunes in the inbox poll; the poll claims offers before pruning, so this only bounds prune frequency

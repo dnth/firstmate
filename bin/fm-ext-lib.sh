@@ -1860,11 +1860,20 @@ fm_ext_attachment_copy_nofollow() {
     'import os,stat,sys,tempfile
 root=os.environ["FM_EXT_ATTACHMENT_ROOT"]; rel=os.environ["FM_EXT_ATTACHMENT_REL"]
 dest=os.environ["FM_EXT_ATTACHMENT_DEST"]
-limit=int(os.environ.get("FM_EXT_ATTACHMENT_MAX") or 0)
+bound=os.environ.get("FM_EXT_ATTACHMENT_MAX") or "0"
+limit=33554432 if bound == "media" else int(bound)
 parts=[p for p in rel.split("/") if p not in ("", ".", "..")]
 if not parts:
   sys.exit(1)
-rfd=os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+rfd=os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+try:
+  for part in os.path.abspath(root).split("/")[1:]:
+    nfd=os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rfd)
+    os.close(rfd)
+    rfd=nfd
+except OSError:
+  os.close(rfd)
+  sys.exit(10)
 try:
   dfd=rfd
   # Each intermediate folder FD is closed exactly once, as the walk moves past
@@ -1884,6 +1893,12 @@ try:
     st=os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
       sys.exit(10)
+    if bound == "media":
+      head=os.read(fd, 16)
+      os.lseek(fd, 0, os.SEEK_SET)
+      if (head.startswith(b"\x89PNG\r\n\x1a\n") or head.startswith(b"\xff\xd8\xff")
+          or head[:6] in (b"GIF87a", b"GIF89a") or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")):
+        limit=None
     out, temp=tempfile.mkstemp(prefix=".attachment-", dir=os.path.dirname(dest))
     try:
       got=0
@@ -1892,7 +1907,7 @@ try:
         if not chunk:
           break
         got+=len(chunk)
-        if got > limit:
+        if limit is not None and got > limit:
           sys.exit(11)
         view=memoryview(chunk)
         while view:
