@@ -553,7 +553,7 @@ test_15_wake_failure_does_not_leave_silent_offered() {
   pass "15 wake failure does not leave a permanently silent offered marker"
 }
 
-# --- 16. ambiguous timeout/URLError keeps posting until recovery -------------
+# --- 16. ambiguous timeout/URLError needs lookup before recovery ------------
 
 test_16_ambiguous_urlerror_keeps_mid_delivery() {
   local home slug posting receipt failed sent out future
@@ -592,6 +592,7 @@ sys.path.insert(0, os.environ["PYTHONPATH"])
 import outbox_poster
 home, sent = sys.argv[1], sys.argv[2]
 os.environ["FM_HOME"] = home
+outbox_poster._bot_token = lambda: ""
 def send(payload):
     with open(sent, "a", encoding="utf-8") as fh:
         fh.write("SHOULD_NOT_RETRY\n")
@@ -599,11 +600,12 @@ def send(payload):
 print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
 PY
   )
-  assert_contains "$out" "sent" "later drain past recovery window must retry"
-  [ -s "$sent" ] || fail "recovered mid-delivery must invoke send again"
-  assert_present "$receipt" "recovered delivery must write a receipt"
-  assert_present "$posting" "recovered delivery keeps the posting marker with its receipt"
-  pass "16 ambiguous timeout/URLError recovers after the window"
+  assert_contains "$out" "mid-delivery" "elapsed time alone must not permit an ambiguous resend"
+  [ ! -s "$sent" ] || fail "unresolved delivery must not invoke send again"
+  assert_absent "$receipt" "unresolved delivery must not invent a receipt"
+  assert_absent "$failed" "lookup failure must not mark delivery terminally failed"
+  assert_present "$posting" "unresolved delivery must keep the posting marker"
+  pass "16 ambiguous timeout/URLError stays pending without a confirming lookup"
 }
 
 # --- 17. permanent 4xx is terminal failed, not endless retry ----------------
@@ -1439,27 +1441,44 @@ PY
     >/dev/null 2>&1; rc=$?
   expect_code 3 "$rc" "inside the recovery window a wedged generation stays mid-delivery"
 
-  # Past the window the next drain reopens exactly that chunk and delivers it.
+  # Past the window, look up the accepted message and record its receipt.
+  # Exercise the real recovery lookup through an injected Discord REST edge.
   future=$(( $(date +%s) + 4000 ))
   out=$(home_env "$home" env FM_EXT_INFLIGHT_OWNER_PID="$$" FM_EXT_NOW_OVERRIDE="$future" \
     PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
-import os, sys
+import io, json, os, sys
 from pathlib import Path
 sys.path.insert(0, os.environ["PYTHONPATH"])
 import outbox_poster
 home, sent = sys.argv[1], sys.argv[2]
 os.environ["FM_HOME"] = home
+progress = json.loads(next((Path(home) / "state/ext-outbox").glob("*.progress.json")).read_text())
+pending = progress["pending_send"]
+lookups = []
+def urlopen(request, timeout):
+    lookups.append(request.full_url)
+    if request.full_url.endswith("/users/@me"):
+        return io.StringIO(json.dumps({"id": "888888888888888888"}))
+    assert request.full_url.endswith("/channels/333333333333333333/messages?limit=100")
+    return io.StringIO(json.dumps([{
+        "id": "700000000000000024", "author": {"id": "888888888888888888"},
+        "nonce": pending["nonce"], "content": pending["text"], "attachments": [],
+    }]))
+outbox_poster._bot_token = lambda: "fake-token"
+outbox_poster.urllib.request.urlopen = urlopen
 def send(payload):
     with open(sent, "a", encoding="utf-8") as fh:
         fh.write(payload["text"] + "\n")
     return {"ok": True, "discord_message_id": "24"}
 print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+assert len(lookups) == 2, lookups
 PY
-  )
-  assert_contains "$out" "sent" "a wedged generation must eventually be retried"
-  [ "$(wc -l < "$sent" | tr -d ' ')" = 1 ] \
-    || fail "recovery must re-send exactly the ambiguous chunk once"
+  ) || fail "recovery lookup failed"
+  assert_contains "$out" "sent" "a confirmed earlier post must complete delivery"
+  [ ! -s "$sent" ] || fail "recovery must not duplicate the confirmed post"
   assert_present "$receipt" "recovered delivery must record a receipt"
+  [ "$(jq -r '.discord_message_ids[0]' "$receipt")" = 700000000000000024 ] \
+    || fail "recovery must record the confirmed Discord message id"
   assert_absent "$failed" "a recovered delivery must not be marked terminally failed"
   pass "24 a wedged ambiguous mid-chunk send is recovered and delivered"
 }
