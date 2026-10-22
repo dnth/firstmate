@@ -56,7 +56,7 @@
 # arming failure warns without changing the merge outcome. Queued or refused
 # requests do not reach that hook.
 #
-# Before recording or merging, two guards refuse a merge that standing
+# Before recording or merging, pre-merge guards refuse a merge that standing
 # authority does not cover: a ship task with any accepted-blocked acceptance
 # criterion, and a PR whose reported checks are not all green. Checks are read
 # with gh pr checks --json (gh-axi pr checks when gh is absent or its read

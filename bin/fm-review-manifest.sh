@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verify a GitHub pull request's review manifest and body format, or report
-# which counted review items still lack a manifest row.
+# which counted review items lack a valid manifest disposition.
 #
 # The PR body is the only record of what a worker did with the reviews it
 # received, so this script reads the body, the reviews, and the review threads
@@ -11,15 +11,18 @@
 # captain's account), plus every unresolved review thread (`reviewThreads`
 # isResolved false). An inline-only review counts too: its body is empty, but
 # its items are the review's, and the row quotes whichever comment answers it.
-# Tool-generated items are skipped by their body markers:
+# Only complete generated-note envelopes are skipped, using these markers:
 # `no-mistakes-pipeline-attestation`, `no-mistakes-pr-appendix`, and
-# `fm-worker-note`. A generated envelope containing only those markers is not a
-# review item and needs no row.
+# `fm-worker-note`. Mentioning a marker in human text does not exempt an item.
+# A thread is skipped only when all its comments are generated envelopes;
+# a human follow-up still requires a row.
 #
 # Manifest. A `## Review follow-up` section holds one three-column table row per
-# item: key | item | disposition. The key cell names the item, either as
-# `pullrequestreview-<id>` or as the
-# thread's node id. The disposition cell is
+# item: key | item | disposition. The key cell contains exactly one canonical
+# `pullrequestreview-<id>` or `PRRT_...` thread node id, never a comment anchor.
+# The item cell must be nonempty; escaped pipes stay within the same cell.
+# With no counted reviews or threads, no table is required.
+# The disposition cell is
 # one of:
 #   fixed <sha>            <sha> must be a commit reachable from the PR head
 #   declined: <reason>     <reason> must be non-empty
@@ -31,14 +34,20 @@
 # `## Merge Danger` (the pr skill's template). A no-mistakes delivery must also
 # keep a `## Pipeline` section carrying No-Mistakes' own attestation comment
 # `<!-- no-mistakes-pipeline-attestation:v1 {...} -->`, whose head_sha must
-# equal the PR head; any body that has a `## Pipeline` section has to carry an
-# intact attestation whatever its delivery mode.
+# equal the PR head, with a nonempty steps array whose entries have nonempty
+# step and status strings, and a test table in that same section.
+# Any body that has a `## Pipeline` section must satisfy these checks whatever
+# its delivery mode; these structural checks do not compare the section's bytes
+# with the original pipeline output, which workers must preserve verbatim.
 #
 # A forge read that cannot be completed fails verification closed, including on
 # a host with no gh: an unread manifest is not evidence that the pull request
 # has no reviews. A merge on a host that cannot read the manifest is
 # therefore covered only by the captain's explicit instruction, which
 # bin/fm-merge-guard-lib.sh records.
+# Pagination includes reviews, threads, and thread comments; an incomplete page
+# refuses the read. All forge reads, including disposition evidence, share one
+# deadline of at most 15 seconds, reduced to half FM_CHECK_TIMEOUT when smaller.
 #
 # Usage:
 #   fm-review-manifest.sh verify <pr-url> --mode <mode> [--worktree <dir>]
@@ -46,13 +55,17 @@
 #
 # verify prints one disclosure line on success when counted items exist:
 #   review <url>: N items declared by author; coverage of review text NOT machine-verified
+# N counts declared table rows, not review or thread containers.
 # and prints `error:` lines naming the failed item URL, row, or section on
 # failure, exiting 1. A GitLab merge request is out of scope and prints a
 # notice on stderr.
 #
-# poll prints one line when counted items exist that no manifest row covers:
+# poll shares verify's table parser and disposition validator, without checking
+# body headings. It prints one line for uncovered items or invalid rows:
 #   review <url> <key> [<key>...]
-# and nothing otherwise; unreadable connections exit 1.
+# or `review <url> invalid` when invalid rows exist without counted items.
+# Any parser or disposition error leaves all counted items uncovered.
+# A valid covered manifest prints nothing; an unreadable evidence read exits 1.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

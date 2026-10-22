@@ -9,17 +9,8 @@
 # (bin/fm-receipt-check.sh <task-id> exits 0); missing or invalid receipts
 # refuse registration naming the criteria.
 # A ship PR-ready also proves its review manifest and body format through
-# bin/fm-review-manifest.sh, the single owner of that contract: every counted
-# review and unresolved review thread needs a row in the body's
-# `## Review follow-up` table whose disposition parses (`fixed <sha>` reachable
-# from the PR head, `declined: <reason>`, or `deferred: <issue url>` that
-# resolves), and the body must carry the pr skill's `## Summary`, `## Evidence`,
-# and `## Merge Danger` sections plus, for a no-mistakes delivery or any body
-# that has one, an intact `## Pipeline` section carrying No-Mistakes'
-# attestation for the current head. A refusal names the review or thread URL,
-# the unreadable row, or the missing section. On success with reviews present it
-# prints the coverage disclosure: the author declares what each row answers, and
-# nothing machine-verifies that declaration against the review text.
+# bin/fm-review-manifest.sh, whose header owns the GitHub-only contract and
+# coverage disclosure; GitLab registration skips this gate with a notice.
 # A no-mistakes task additionally proves its run from No-Mistakes' own status:
 # `axi status` in the task worktree must report a run whose branch is the task
 # branch, whose pr is this URL, and whose full head_sha equals the forge's PR
@@ -30,8 +21,10 @@
 # refuse registration. Nothing here reconstructs what the pipeline validated
 # from the worker's object store.
 # Re-registering the recorded pr= URL refreshes pr_head= and re-arms the poll
-# without re-running the handoff gates, provided a no-mistakes ship also has
-# nm_run_id= recorded. Older no-mistakes records without that run identity and
+# without re-running the evidence and run-identity handoff gates, provided a
+# no-mistakes ship also has nm_run_id= recorded. Ship re-registration still
+# re-verifies the review manifest unless the merge guard owns that decision.
+# Older no-mistakes records without that run identity and
 # registrations of a different URL are gated in full. fm-pr-merge.sh calls this
 # before every merge, and reconciliation re-arms a skipped poll.
 # Publication is serialized per task through state/.<task-id>.pr-publication.lock

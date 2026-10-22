@@ -25,7 +25,7 @@ case " $* " in
   *" headRefOid "*) [ -z "${FM_FAKE_GH_HEAD:-}" ] || printf '%s\n' "$FM_FAKE_GH_HEAD"; exit 0 ;;
 esac
 # bin/fm-pr-check.sh verifies the review manifest and body format through
-# bin/fm-review-manifest.sh, whose one GraphQL read this answers with a valid
+# bin/fm-review-manifest.sh, whose GraphQL query this answers with a valid
 # body for the head this fixture also reports.
 case " $* " in
   *" api graphql "*)

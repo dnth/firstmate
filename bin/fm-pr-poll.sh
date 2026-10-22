@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
-# It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise. The provider-tagged identity is data in the sidecar and is never
+# It emits exactly one merged line for a merged PR or MR.
+# The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
-# An open GitHub pull request is also watched for review items its body's
-# `## Review follow-up` table does not answer yet: the sibling
-# bin/fm-review-manifest.sh owns that contract and prints one `review ...` line
-# for the current uncovered set. The watcher reports a given line once, so an
-# unanswered review wakes firstmate without repeating every sweep.
+# Unmerged GitHub PRs also use bin/fm-review-manifest.sh's poll contract.
+# Its uncovered or invalid result is forwarded; a failed review read emits
+# `review <url> unreadable`, and a successful empty result emits
+# `review <url> clear` for the watcher to consume without waking.
+# Other lookup failures stay silent and can never be read as a merge.
+# bin/fm-pr-lib.sh owns review-notification deduplication and reset semantics.
 set -u
 LC_ALL=C
 export LC_ALL

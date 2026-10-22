@@ -272,7 +272,7 @@ fm_write_secondmate_meta() {
 #
 # bin/fm-review-manifest.sh owns the review manifest and PR body contract, and
 # both bin/fm-pr-check.sh and bin/fm-pr-merge.sh consult it, so every fake `gh`
-# that a suite drives through those scripts has to answer its one GraphQL read.
+# that a suite drives through those scripts has to answer its GraphQL queries.
 # A fake delegates to the shared responder below rather than re-rolling the
 # response shape.
 #

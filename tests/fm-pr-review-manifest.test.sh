@@ -815,9 +815,13 @@ test_slow_paginated_read() {
       printf '%s\n' '{"data":{"node":{"comments":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}' > "$dir/reviews.json.comments"
     fi
     touch "$dir/reviews.json.delay"
+    # Bound the public poll itself: watcher startup and durable wake delivery
+    # are outside its per-check deadline and vary with host load.
     started=$SECONDS
-    run_watcher_cycle "$dir" 6
+    FM_CHECK_TIMEOUT=6 run_poll "$dir"
     [ "$((SECONDS - started))" -lt 6 ] || fail "paginated $axis read outlived its outer check deadline"
+    assert_contains "$POLL_OUT" "review $URL unreadable" "slow $axis poll timed out silently"
+    run_watcher_cycle "$dir" 6
     assert_contains "$(cat "$dir/watch.out")" "review $URL unreadable" "slow $axis read timed out silently"
     assert_contains "$(cat "$dir/home/state/.wake-queue")" "review $URL unreadable" "slow $axis read did not produce a durable wake"
     [ "$(wc -l < "$dir/reviews.json.calls" | tr -d ' ')" -ge 2 ] || fail "slow $axis fixture never reached its second page"

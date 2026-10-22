@@ -2052,11 +2052,8 @@ while :; do
           wake "$reason"
         fi
         if [ "$is_pr_poll" -eq 1 ]; then
-          # A PR poll also reports the review items its manifest still leaves
-          # unanswered. That state persists until the worker answers it, so the
-          # same line must wake firstmate once: the marker remembers the last
-          # reported line, and only a changed uncovered set reports again
-          # (marker semantics owned by bin/fm-pr-lib.sh).
+          # Deduplicate review wakes under bin/fm-pr-lib.sh's marker contract;
+          # bin/fm-pr-poll.sh owns the review-result protocol.
           case "$out" in
             review\ *)
               if fm_pr_poll_review_notified "$STATE" "$id" "$out"; then

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared fixture responder for bin/fm-review-manifest.sh's single GraphQL read.
+# Shared terminal-page fixture responder for bin/fm-review-manifest.sh.
 #
 # Fake `gh` scripts that have to answer that read (bin/fm-pr-check.sh verifies
 # the review manifest and body format at PR-ready, and bin/fm-pr-merge.sh
