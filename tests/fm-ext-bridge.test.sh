@@ -3297,7 +3297,8 @@ poster.reconcile_decision_posts = blocking_sweep
 poster.reconcile_thread_states = lambda **kwargs: []
 poster.decisions.ensure_click_route = lambda: False
 
-poster.start_outbox_watcher(interval=0.05)
+os.environ["FM_EXT_OUTBOX_POLL_SECS"] = "0.05"
+poster.start_outbox_watcher()
 if not sweeping.wait(10):
     print("no-sweep")
     sys.stdout.flush()
@@ -3368,9 +3369,96 @@ for thread in threads:
 record = json.loads(path.read_text())
 missing = [key for key in dict.fromkeys(k for update in updates for k in update)
            if key not in record]
+poster.thread_name_for = lambda payload, home: "Topic"
+poster.dedicated_channel = lambda home: os.environ["RID"].split(":")[2]
+renamed = []
+def rename(thread, name):
+    renamed.append(name)
+
+def seed(state="needs-you", failed=None):
+    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
+        topic_name="Topic", thread_state=state, creator="firstmate",
+        state_at=1, marked_open=True, rename=failed or {"outcome": "applied"})
+
+def summaries(home):
+    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
+                              thread_state="done", state_at=3)
+    return {os.environ["THREAD"]: {"open": 0, "closed": 1, "last_posted_at": 2}}
+
+seed()
+poster.decision_threads = summaries
+poster.reconcile_thread_states(home, rename_thread=rename)
+assert poster._read_thread_record(path)["thread_state"] == "done"
+assert not renamed
+
+seed("done", {"outcome": "failed", "retryable": True})
+real_apply = poster.apply_thread_state
+def interleaved_apply(recorded, *args, **kwargs):
+    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
+                              thread_state="needs-you", state_at=4)
+    return real_apply(recorded, *args, **kwargs)
+poster.apply_thread_state = interleaved_apply
+poster.reconcile_thread_states(home, rename_thread=rename)
+assert poster._read_thread_record(path)["thread_state"] == "needs-you"
+assert not renamed
+poster.apply_thread_state = real_apply
+
+for operation in ("read", "rename"):
+    seed()
+    entered, release, saved = threading.Event(), threading.Event(), threading.Event()
+    def block(*args):
+        entered.set()
+        assert release.wait(5)
+        return "Topic"
+    def deliver():
+        poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
+                                  thread_state="done", retitle="Delivered title")
+        saved.set()
+    sweep = threading.Thread(target=real_apply,
+        args=(poster._read_thread_record(path), "none", home),
+        kwargs={"read_thread": block if operation == "read" else lambda tid: "",
+                "rename_thread": block if operation == "rename" else rename,
+                "require_current": True})
+    sweep.start()
+    assert entered.wait(3)
+    delivery = threading.Thread(target=deliver)
+    delivery.start()
+    try:
+        assert saved.wait(1), "Discord work blocked a delivery record save"
+    finally:
+        release.set()
+        sweep.join(5)
+        delivery.join(5)
+    assert poster._read_thread_record(path)["thread_state"] == "done"
+    assert poster._read_thread_record(path)["retitle"] == "Delivered title"
+
+seed()
+entered, release = threading.Event(), threading.Event()
+def delivery_rename(*args):
+    entered.set()
+    assert release.wait(5)
+delivery = threading.Thread(target=real_apply,
+    args=(poster._read_thread_record(path), "done", home),
+    kwargs={"rename_thread": delivery_rename, "state_at": 10})
+delivery.start()
+assert entered.wait(3)
+try:
+    assert real_apply(poster._read_thread_record(path), "none", home,
+        rename_thread=rename, read_thread=lambda tid: "other",
+        require_current=True) == "applied"
+finally:
+    release.set()
+    delivery.join(5)
+assert poster._read_thread_record(path)["thread_state"] == "done"
+assert poster._read_thread_record(path)["state_at"] == 10
+
+assert real_apply(poster._read_thread_record(path), "needs-you", home,
+                  rename_thread=rename) == "applied"
+assert poster._read_thread_record(path)["thread_state"] == "needs-you"
+
 print(json.dumps({"missing": missing, "record": record}))
 PY
-)
+) || fail "thread-record concurrency regression failed"
   printf '%s\n' "$out" | jq -e '.missing == []' >/dev/null \
     || fail "concurrent thread-record writers must lose no update: $out"
   printf '%s\n' "$out" | jq -e '

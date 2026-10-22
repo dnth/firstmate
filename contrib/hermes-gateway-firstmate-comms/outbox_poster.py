@@ -83,8 +83,7 @@ _WATCHER_LOCK = threading.Lock()
 # record. Delivery (save_request_thread, maybe_rename_topic_thread) and the
 # periodic thread-state sweep both read-merge-write that file, so without it a
 # sweep that has been reconciling for minutes can overwrite a rename a
-# delivery recorded meanwhile. Reentrant because apply_thread_state holds it
-# across its re-read and its own save.
+# delivery recorded meanwhile.
 _THREAD_RECORD_LOCK = threading.RLock()
 # A watcher step slower than this is worth a journal line: the loop's whole
 # point is that no step can hold up delivery, and a slow step is how the
@@ -1064,6 +1063,7 @@ def apply_thread_state(
     read_thread=None,
     marked_open: bool | None = None,
     retitle: str = "",
+    require_current: bool = False,
 ) -> str:
     """Show ``state`` on one recorded topic thread and record the outcome.
 
@@ -1084,25 +1084,12 @@ def apply_thread_state(
     with _THREAD_RECORD_LOCK:
         path = recorded.get("path")
         fresh = _read_thread_record(path) if isinstance(path, Path) else {}
-        if fresh and fresh.get("topic_thread_id") == thread_id:
+        if require_current and fresh != recorded:
+            return "skipped"
+        if fresh:
+            if fresh.get("topic_thread_id") != thread_id:
+                return "skipped"
             recorded = fresh
-        return _apply_thread_state(recorded, state, home, state_at=state_at,
-                                   rename_thread=rename_thread, thread_owner=thread_owner,
-                                   read_thread=read_thread, marked_open=marked_open,
-                                   retitle=retitle)
-
-
-def _apply_thread_state(
-    recorded: dict,
-    state: str,
-    home: Path,
-    state_at: float | None = None,
-    rename_thread=None,
-    thread_owner=None,
-    read_thread=None,
-    marked_open: bool | None = None,
-    retitle: str = "",
-) -> str:
     thread_id = recorded.get("topic_thread_id") or ""
     provenance = recorded.get("creator") or ""
     if provenance == "adopted":
@@ -1150,12 +1137,15 @@ def _apply_thread_state(
         else:
             rename["outcome"] = "applied"
     try:
-        save_thread_record(recorded["path"], recorded.get("request_id"), thread_id,
-                           topic_name="" if rename["outcome"] == "failed" else want,
-                           thread_state=state, creator=provenance,
-                           creating_title=recorded.get("creating_title") or "",
-                           retitle=retitle or None,
-                           state_at=state_at, rename=rename, marked_open=marked_open)
+        with _THREAD_RECORD_LOCK:
+            if require_current and _read_thread_record(recorded["path"]) != recorded:
+                return "skipped"
+            save_thread_record(recorded["path"], recorded.get("request_id"), thread_id,
+                               topic_name="" if rename["outcome"] == "failed" else want,
+                               thread_state=state, creator=provenance,
+                               creating_title=recorded.get("creating_title") or "",
+                               retitle=retitle or None,
+                               state_at=state_at, rename=rename, marked_open=marked_open)
     except Exception as err:
         print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
     return rename["outcome"]
@@ -1202,7 +1192,8 @@ def maybe_rename_topic_thread(
         if not recorded:
             return thread_id
     state_at = marked_open = None
-    if state is None and not retitle:
+    retry = state is None and not retitle
+    if retry:
         if (recorded.get("rename") or {}).get("outcome") != "failed":
             return thread_id
         state = recorded.get("thread_state")
@@ -1237,7 +1228,7 @@ def maybe_rename_topic_thread(
                     state = "none"
     apply_thread_state(recorded, state, home, state_at=state_at, rename_thread=rename_thread,
                        thread_owner=thread_owner, read_thread=read_thread, marked_open=marked_open,
-                       retitle=retitle)
+                       retitle=retitle, require_current=retry)
     return thread_id
 
 
@@ -1299,12 +1290,13 @@ def reconcile_thread_states(
                          or record.get("state_at", 0) <= summary["last_posted_at"])):
                 apply_thread_state(record, "none", home, state_at=time.time(),
                                    rename_thread=rename_thread, read_thread=read_thread,
-                                   marked_open=False)
+                                   marked_open=False, require_current=True)
                 touched.append(record["topic_thread_id"])
                 continue
         failed = record.get("rename") or {}
         if failed.get("outcome") == "failed" and failed.get("retryable") and state_prefix(state) is not None:
-            apply_thread_state(record, state, home, rename_thread=rename_thread, read_thread=read_thread)
+            apply_thread_state(record, state, home, rename_thread=rename_thread,
+                               read_thread=read_thread, require_current=True)
             touched.append(record["topic_thread_id"])
     return touched
 
@@ -2124,30 +2116,21 @@ def _run_step(label: str, step) -> None:
             print(f"fm-ext-poster: slow step {label}={elapsed:.1f}s", file=sys.stderr)
 
 
-def _wait_tick(interval: float, stop: threading.Event | None) -> bool:
-    """Sleep one poll tick; True when the caller should stop instead."""
-    if stop is None:
-        time.sleep(interval)
-        return False
-    return stop.wait(interval)
-
-
-def outbox_delivery_loop(interval: float, stop: threading.Event | None = None) -> None:
-    """Post queued payloads every ``interval`` seconds until ``stop`` is set.
+def outbox_delivery_loop(interval: float) -> None:
+    """Post queued payloads every ``interval`` seconds.
 
     This runs on its own daemon thread so a reconciliation sweep that takes
     minutes can never delay a reply. Delivery and reconciliation share only
     the thread-record lock.
     """
-    while not (stop is not None and stop.is_set()):
+    while True:
         _run_step("ensure-click-route", decisions.ensure_click_route)
         _run_step("drain", drain_outbox)
-        if _wait_tick(interval, stop):
-            return
+        time.sleep(interval)
 
 
-def outbox_reconcile_loop(interval: float, stop: threading.Event | None = None) -> None:
-    """Sweep decision posts and topic threads until ``stop`` is set.
+def outbox_reconcile_loop(interval: float) -> None:
+    """Sweep decision posts and topic threads every ``interval`` seconds.
 
     Clicks settle posts locally, so their edits follow within a cycle; posts
     closed on another channel need a ledger read and are swept on the slower
@@ -2155,15 +2138,14 @@ def outbox_reconcile_loop(interval: float, stop: threading.Event | None = None) 
     and retries failed renames.
     """
     last_full = 0.0
-    while not (stop is not None and stop.is_set()):
+    while True:
         full = time.monotonic() - last_full >= DECISION_SWEEP_SECS
         if full:
             last_full = time.monotonic()
         _run_step("posts", lambda: _reconcile_posts_step(full))
         if full:
             _run_step("threads", reconcile_thread_states)
-        if _wait_tick(interval, stop):
-            return
+        time.sleep(interval)
 
 
 def _reconcile_posts_step(full: bool) -> None:

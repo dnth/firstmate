@@ -1863,6 +1863,22 @@ test_22_replaced_posts_need_a_newer_button_post() {
       '.posted_at = $at | .buttons = $buttons' "$file" > "$tmp" \
       && mv "$tmp" "$file"
   }
+  local real_xargs real_jq
+  real_xargs=$(command -v xargs)
+  real_jq=$(command -v jq)
+  cat > "$home/fakebin/xargs" <<'SH'
+#!/usr/bin/env bash
+exec "$REAL_XARGS" -n 1 "$@"
+SH
+  cat > "$home/fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in *.progress.json) printf '%s\n' "$arg" >> "$PROGRESS_READS" ;; esac
+done
+exec "$REAL_JQ" "$@"
+SH
+  chmod +x "$home/fakebin/xargs" "$home/fakebin/jq"
+  export REAL_XARGS="$real_xargs" REAL_JQ="$real_jq" PROGRESS_READS="$home/reads"
   c22_posts() { home_env "$home" "$ROOT/bin/fm-ext-decision.sh" posts; }
   c22_settle_kind() { jq -r '.kind // empty' "$home/state/ext-outbox/$1.settled.json" 2>/dev/null; }
 
@@ -1870,6 +1886,14 @@ test_22_replaced_posts_need_a_newer_button_post() {
   c22_set_post "$first_stem" 1000 true
   c22_set_post "$second_stem" 2000 true
   out=$(c22_posts)
+  [ "$(sort "$home/reads" | uniq -c | awk '{print $1}' | sort -u)" = 1 ] \
+    || fail "posts must read each progress record once even across xargs batches"
+  : > "$home/reads"
+  home_env "$home" "$ROOT/bin/fm-ext-decision.sh" threads > "$home/threads.json"
+  jq -se 'length == 1 and .[0].open == 1 and .[0].closed == 1' "$home/threads.json" >/dev/null \
+    || fail "threads must classify replacements across xargs batches"
+  [ "$(sort "$home/reads" | uniq -c | awk '{print $1}' | sort -u)" = 1 ] \
+    || fail "threads must read each progress record once"
   assert_equals replaced "$(c22_settle_kind "$first_stem")" \
     "a post with a newer button post must settle as replaced"
   assert_absent "$home/state/ext-outbox/$second_stem.settled.json" \

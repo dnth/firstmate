@@ -883,10 +883,10 @@ A payload whose generation has reached a receipt or a terminal failed marker is 
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
 Local bridge records expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
-Each poll drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.
+A due retention pass drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.
 It drops the leftover markers of already retired outbox generations.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
-The poll claims its inbox offers before it prunes, and prunes at most once per `FM_EXT_PRUNE_INTERVAL_SECS` (default 3600), so a slow prune can neither be killed part-way by the watcher's check timeout nor delay a queued request.
+The poll claims its inbox offers before it prunes, and prunes at most once per `FM_EXT_PRUNE_INTERVAL_SECS` (default 3600), so the claim runs first; a prune interrupted by the watcher's check timeout is retried on the next poll whose cadence is due.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
 Request-wide thread records remain while any payload, progress, receipt, or failed JSON record for the request remains, then become eligible for pruning based on their own age.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.

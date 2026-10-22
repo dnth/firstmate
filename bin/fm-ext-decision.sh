@@ -202,7 +202,11 @@ post_for_message() {
 }
 
 post_field() {  # <stem> <jq filter>
-  jq -r "($2) // empty | tostring" "$OUTBOX/$1.progress.json" 2>/dev/null
+  if [ "$POST_TABLE_LOADED" = 1 ]; then
+    jq -r "($2) // empty | tostring" <<<"$(post_json "$1")" 2>/dev/null
+  else
+    jq -r "($2) // empty | tostring" "$OUTBOX/$1.progress.json" 2>/dev/null
+  fi
 }
 
 # --- one pass over the decision posts --------------------------------------
@@ -218,9 +222,11 @@ post_table_load() {
   [ "$POST_TABLE_LOADED" = 1 ] && return 0
   POST_TABLE_LOADED=1
   # shellcheck disable=SC2016  # jq program: $all, $x, $best, $stem, $newer, $p are jq variables.
-  POST_TABLE=$(progress_files | tr '\n' '\0' | xargs -0 jq -rn '
-    [inputs
-     | {f: input_filename,
+  POST_TABLE=$(progress_files | tr '\n' '\0' \
+    | xargs -0 jq -c '{file: input_filename, post: .}' 2>/dev/null \
+    | jq -rn '
+    [inputs | .file as $file | .post
+     | {f: $file, raw: .,
         k: ((.decision.key // "") | tostring),
         haskey: (if (.decision.key != null and .decision.key != false) then 1 else 0 end),
         occ: ((.decision.occurrence // "") | tostring),
@@ -242,7 +248,7 @@ post_table_load() {
     | [$stem, .haskey, .k, .occ, .p, .b, .hasmsg, .msg, .sec, .topic, .req,
        (if $newer != null and $newer.p > .p then 1 else 0 end),
        (if $newer != null and $newer.p > .p
-        then ($newer.f | split("/") | last | sub("\\.progress\\.json$"; "")) else "" end)]
+        then ($newer.f | split("/") | last | sub("\\.progress\\.json$"; "")) else "" end), (.raw | tojson)]
     | map(tostring) | join("\u001f")' 2>/dev/null)
   return 0
 }
@@ -257,6 +263,12 @@ post_row() {
     esac
   done <<<"$POST_TABLE"
   return 1
+}
+
+post_json() {
+  local row
+  row=$(post_row "$1") || return 1
+  row_field "$row" 14
 }
 
 # row_field <row> <n>: field <n>, 1-based, of one table row.
@@ -333,14 +345,16 @@ newer_post() {
 
 # post_link <stem>: the post's jump URL, when its request and message are known.
 post_link() {
-  local request guild thread message
-  request=$(post_field "$1" '.request_id')
+  local request guild thread message row
+  post_table_load
+  row=$(post_row "$1") || return 0
+  request=$(row_field "$row" 11)
   guild=${request#discord:}
   guild=${guild%%:*}
-  message=$(post_field "$1" '.discord_message_ids[-1]')
+  message=$(row_field "$row" 8)
   case "$guild" in ''|*[!0-9]*) return 0 ;; esac
   case "$message" in ''|*[!0-9]*) return 0 ;; esac
-  thread=$(post_thread "$1") || return 0
+  thread=$(post_thread_of "$(row_field "$row" 10)" "$request") || return 0
   printf 'https://discord.com/channels/%s/%s/%s\n' "$guild" "$thread" "$message"
 }
 
@@ -361,9 +375,9 @@ selected_option_id() {
     [ "$kind" = decided ] || return 0
     option=$(jq -r '.selected_option_id // empty' "$OUTBOX/$stem.settled.json" 2>/dev/null)
     if [ -z "$option" ]; then
-      option=$(jq -r --slurpfile progress "$OUTBOX/$stem.progress.json" '
+      option=$(jq -r --argjson progress "$(post_json "$stem")" '
         .text as $outcome
-        | [$progress[0].decision.options[]
+        | [$progress.decision.options[]
            | ("✅ " + .label + " chosen by ") as $prefix
            | select($outcome | startswith($prefix))]
         | if length == 0 then empty else
@@ -392,7 +406,7 @@ answer_option() {
   options=$(jq -c '[.decision.options[]
     | ., (select(.recommended == true) | .label |= sub("^⭐ *"; "")
           | select(.label | length > 0))]
-    | unique_by([.id, .label])' "$OUTBOX/$stem.progress.json" 2>/dev/null)
+    | unique_by([.id, .label])' <<<"$(post_json "$stem")" 2>/dev/null)
   prefix=$(jq -r --arg answer "$answer" '
     ($answer | ascii_downcase) as $text
     | [.[] | (.label | ascii_downcase) as $option_label
@@ -454,8 +468,9 @@ outcome_text() {
 # post_outcome <stem>: the ledger outcome for this post's own lifecycle of its
 # decision, as "<state>\t<answer>".
 post_outcome() {
-  fm_ext_decision_key_outcome "$(post_field "$1" '.decision.key')" \
-    "$(post_field "$1" '.decision.occurrence')"
+  local row
+  row=$(post_row "$1") || return 1
+  fm_ext_decision_key_outcome "$(row_field "$row" 3)" "$(row_field "$row" 4)"
 }
 
 # settle_if_closed <stem> [newer]: settle a post whose decision a newer post
@@ -681,10 +696,10 @@ command_click() {
   notice 0 "Sent: $label. Firstmate will record it, and the post updates when it does."
 }
 
-# fit_post_content <header> <original text> <progress file>: preserve the
+# fit_post_content <header> <original text> <progress JSON>: preserve the
 # original last chunk when it fits; structured posts trim only explanation.
 fit_post_content() {
-  jq -njr --arg header "$1" --arg original "$2" --slurpfile progress "$3" '
+  jq -njr --arg header "$1" --arg original "$2" --argjson progress "$3" '
     def compose($header; $question; $explanation; $options; $cue):
       ($header + "\n\n") as $base
       | (if $options == "" then "" else "\n\n" + $options end) as $option_suffix
@@ -708,7 +723,7 @@ fit_post_content() {
               error("decision header leaves no room for the explanation marker")
             end
         end;
-    $progress[0] as $post
+    $progress as $post
     | ($header + "\n\n" + $original) as $whole
     | if ($whole | length) <= 2000 then
         $whole
@@ -727,11 +742,11 @@ fit_post_content() {
 command_posts() {
   local settled_only=0 stem haskey key occ posted buttons hasmessages message sections
   local topic request newer newer_stem thread content original displayed shown final receipt
-  local legacy kind header replacement_url selected
+  local legacy kind header replacement_url selected progress
   [ "${1:-}" != --settled-only ] || settled_only=1
   post_table_load
   while IFS=$'\x1f' read -r stem haskey key occ posted buttons hasmessages message \
-    sections topic request newer newer_stem; do
+    sections topic request newer newer_stem progress; do
     [ -n "$stem" ] || continue
     [ "$haskey" = 1 ] && [ "$buttons" = 1 ] || continue
     if [ "$settled_only" = 0 ]; then
@@ -770,9 +785,9 @@ command_posts() {
       else
         header="**$content**"
       fi
-      original=$(jq -j '.texts[-1]' "$OUTBOX/$stem.progress.json"; printf '\001')
+      original=$(jq -j '.texts[-1]' <<<"$progress"; printf '\001')
       original=${original%$'\001'}
-      displayed=$(fit_post_content "$header" "$original" "$OUTBOX/$stem.progress.json") || continue
+      displayed=$(fit_post_content "$header" "$original" "$progress") || continue
       receipt=$displayed
     else
       receipt=$(jq -cn --arg selected "$selected" --argjson final "$final" '
@@ -787,18 +802,18 @@ command_posts() {
       --arg message "$message" \
       --arg content "$displayed" --arg receipt "$receipt" --argjson legacy "$legacy" \
       --arg selected "$selected" --argjson final "$final" \
-      --slurpfile progress "$OUTBOX/$stem.progress.json" \
+      --argjson progress "$(post_json "$stem")" \
       '{post:$post, channel_id:$channel, message_id:$message,
         content:(if $legacy then null else $content end), receipt:$receipt,
         final:$final,
         selected_option_id:(if $selected == "" then null else ($selected | tonumber) end),
-        key:$progress[0].decision.key, options:$progress[0].decision.options}'
+        key:$progress.decision.key, options:$progress.decision.options}'
   done <<<"$POST_TABLE"
 }
 
 command_threads() {
   local only='' stem haskey key occ posted buttons hasmessages message sections
-  local topic request newer newer_stem thread state
+  local topic request newer newer_stem thread state progress
   case "${1:-}" in
     '') ;;
     --thread)
@@ -811,7 +826,7 @@ command_threads() {
   esac
   post_table_load
   while IFS=$'\x1f' read -r stem haskey key occ posted buttons hasmessages message \
-    sections topic request newer newer_stem; do
+    sections topic request newer newer_stem progress; do
     [ -n "$stem" ] || continue
     [ "$haskey" = 1 ] && [ "$hasmessages" = 1 ] || continue
     thread=$(post_thread_of "$topic" "$request") || continue
