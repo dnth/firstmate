@@ -31,10 +31,11 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
-| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone - stopped, or the endpoint positively absent after the command was delivered to an endpoint this plane had already validated and owned. Already-stopped is idempotent success. |
+| `exit` | Stop the agent, preserving the worktree and every uncommitted change, without explicitly closing the endpoint. | The backend's recovery-grade classifier reports the agent gone - stopped, or the endpoint positively absent after the command was delivered to an endpoint this plane had already validated and owned. Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same worktree, reusing the endpoint when the backend supports it or allocating a fresh endpoint for OMP secondmates, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint published by the replacement launch, and the durable record names the harness and endpoint that are actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
+An endpoint already missing before exit delivery is refused; disappearance after interrupt alone is also insufficient to confirm exit.
 Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
@@ -44,8 +45,7 @@ muse is the one verified adapter that restores the cancelled prompt back into it
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 **Teardown and discard are not verbs and will not become verbs.**
-`exit` stops an agent and preserves everything else.
-Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
+Removing a worktree, explicitly closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
 It is not deterministic across the verified adapters: codex and grok resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract.
@@ -129,6 +129,7 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 ## Verification
 
+- `tests/fm-stall-recovery.test.sh` - exit confirmation when an owned endpoint disappears after exit delivery, with an unrelated endpoint left untouched.
 - `tests/fm-spawn-relaunch-dead-endpoint.test.sh` - proven-gone endpoint recreation in the recorded worktree across tmux, Herdr, zellij, and cmux for both `fm-spawn --relaunch` and `fm-control relaunch`, the lease-ownership gate, the Herdr drifted-shell `cd` recovery, and the live/ambiguous/unprovable refusal matrix.
 - `tests/fm-secondmate-restart.test.sh` - the persist gate, restart capability routing, local and remote control-plane relaunches, already-current versus unprovable runtime behavior, and a local OMP restart after an update changes its loaded extension closure.
 - `tests/fm-update.test.sh` - fast-forward classification, live secondmate restart/nudge sets, and stopped or malformed endpoint handling.

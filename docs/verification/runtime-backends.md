@@ -1311,7 +1311,6 @@ ok - live steering-inbox doorbell guard: 2 harnesses verified
 The OMP wake transport was changed on 2026-08-30 from terminal submission to an acknowledged programmatic extension request on tmux and Herdr, and on 2026-09-04 that native request became OMP's only transport: the composer fallback was removed and every OMP steer now reports one bounded outcome.
 The deterministic fixtures reran on 2026-09-04 and cover canonical counted requests, `triggerTurn=true`, post-retirement signal safety, exact-identity revalidation for pending retries, ambiguous-claim inbox anchoring without resend, ordinary non-OMP composer routing, ordinary worker wiring, and secondmate wiring through the primary extension.
 They also drive the public `fm-send.sh` over tmux and Herdr against a real task-bound extension process and prove that a received steer reports `omp-native-received` with the exact task, endpoint, session process, native queue entry and durable record while nothing reaches the terminal; that a mate with no live adapter, an unproven session binding, and an unacknowledged request each exit nonzero with a named non-resend-inviting outcome; and that no `/exit` is appended to resolve one.
-The required live OMP-under-Herdr smoke is intentionally deferred until after Firstmate updates; no live Herdr or OMP lifecycle was driven from this worktree.
 
 ```sh
 set -o pipefail
@@ -1333,8 +1332,11 @@ ok - OMP primary extension binds secondmate doorbells after session readiness
 ```
 
 The deferred live OMP-under-Herdr smoke ran on 2026-10-17 against OMP 18.10.1 and Herdr 0.9.3 on Linux x86_64, inside one guarded non-default lab session created by `bin/fm-herdr-lab.sh`, with `opencode-go-neuralengine-1/deepseek-v4.1-flash` at low effort.
-It spawned a real worker through `bin/fm-spawn.sh`, let that worker invoke one native `task` subagent and dispose of it normally - the child session OMP runs inside the worker's own OS process, and that shutdown is exactly what used to retire the live parent's ready marker - and then steered the parent through `bin/fm-send.sh`.
+It spawned a real worker through `bin/fm-spawn.sh`, let that worker invoke one native `task` subagent and dispose of it normally, and then steered the parent through `bin/fm-send.sh`.
 The steer reported `omp-native-received` bound to the session process the ready marker names, and the marker was still present afterwards, so the worker stayed reachable across a native subagent's full lifecycle.
+The ownership invariant lives in [`architecture.md`](../architecture.md#event-driven-supervision), and `tests/fm-omp-task-inbox-doorbell.test.sh` covers duplicate-child retirement, delivery through the owner alone, owner retirement, and successor takeover.
+
+The command shapes and result summary below retain placeholders rather than the exact invocation and raw output.
 
 ```sh
 # Guarded non-default lab session: every lifecycle call goes through the helper,
