@@ -108,15 +108,9 @@ The following posting-marker, chunk-progress, and receipt rules apply to ordinar
 Unsent payloads retry after a gateway restart.
 Oversized replies split with `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900) and post as ordered Discord messages in the same thread.
 That split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
-A transient definite send failure (HTTP 429 or 5xx) before a successful Discord response deletes the posting marker so that generation can retry, unless a media upload was already tried (see the outbound media reference below).
-A permanent 4xx records a terminal failed marker so pending stops retrying that generation.
-A posting marker without a receipt is refused so an ambiguous crash or transport error after Discord may have accepted the post cannot double-post.
-A post with screenshots or a recording uploads its staged files with its last message as one Discord multipart request (`payload_json` plus `files[n]`), after `bin/fm-ext-media.sh verify` re-checks each file and the poster confirms the bytes it sends hash to the verified digest.
-An upload Discord refuses with an HTTP error is retried once, then the text posts alone with a short note, and the receipt records what was attached; the [outbound media reference](../../docs/configuration.md#outbound-media) owns that contract, and [the media regression test](../../tests/fm-ext-media.test.sh) drives the real poster against a local multipart-parsing Discord stub.
-An exclusive inflight send claim means two gateway processes cannot both post the same remaining chunk after a later-chunk resume.
-A dead owner's claim older than `FM_EXT_INFLIGHT_TTL_SECS` (default 30) may be stolen; a live owner is never stolen from.
-A generation left in-flight by an ambiguous send is reopened for another attempt once it has had no claim or progress heartbeat for longer than `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), and after `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts it is failed terminally and surfaced to Firstmate, so an active poster is not interrupted and a network timeout cannot silently truncate a reply.
-Delivered payloads are retired as soon as they have a receipt, so poll cost does not grow with the number of replies already sent, and leftover records expire after `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 7 days).
+The [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge) owns posting markers, chunk progress, bounded recovery, receipt retirement, and retention.
+The [outbound media reference](../../docs/configuration.md#outbound-media) owns multipart uploads, verification, retry and text fallback, nonce reconciliation, and media receipts.
+The [media regression test](../../tests/fm-ext-media.test.sh) drives the real poster against a local multipart-parsing Discord stub.
 `FM_EXT_OUTBOX_POLL_SECS` (default 2) sets how often the watcher drains the outbox.
 Set `DISCORD_BOT_TOKEN` (or `HERMES_DISCORD_TOKEN`) for Discord REST delivery.
 The [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge) owns the poster's User-Agent requirement and real-sender regression coverage.

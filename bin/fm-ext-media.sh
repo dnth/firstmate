@@ -18,7 +18,7 @@
 # Accepted sources. A media path must name a regular file inside this home's
 # data/ or state/ tree, or inside the .qa/evidence/ folder of a ship or scout
 # task worktree this home records (worktree= in state/<id>.meta). Paths with
-# "." or ".." components, a symlink at any component below that root, and
+# "." or ".." components, a symlink at any component of the source path, and
 # anything outside those roots are refused. A source is read once through a
 # no-follow copy, and every check runs on that private copy. Videos have a
 # 32 MiB source cap; images are bounded by ImageMagick resources when decoded.

@@ -16,15 +16,16 @@ A later-chunk transient failure records progress so earlier chunks are not
 sent again, then releases the exclusive inflight send marker so only one
 poster can resume the next chunk. A pre-send split failure or chunk-count
 mismatch after a successful begin also releases that marker; posted_count
-zero still aborts. An in-flight chunk without a confirmed post stays
+zero still aborts unless a media upload was already tried. An in-flight
+chunk without a confirmed post stays
 mid-delivery.
 A transient definite send failure (HTTP 429 or 5xx) before any chunk
 succeeds deletes the posting marker so that generation can retry, unless a
 media upload was already tried: then progress is kept so the one upload
 retry holds across delivery attempts.
-A permanent 4xx records a terminal failed marker so pending stops retrying.
-A posting marker without a receipt is refused so an ambiguous crash or
-transport error after Discord may have accepted the post cannot double-post.
+The delivery and bounded-recovery contract, including ambiguous HTTP 408,
+is owned by docs/configuration.md under "Local Communication Officer bridge";
+"Outbound media" owns nonce reconciliation and upload retry versus fallback.
 
 For a request that arrived as an ordinary Discord message (payload origin
 ``message``), the poster reacts on that message: ``✅`` once an ``answer`` or

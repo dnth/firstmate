@@ -143,7 +143,7 @@ Screen every file yourself before it can post; emit refuses any file without you
 
 - **Post** - add each screened file with `--media <file>` to the emit (or open) call; the text must not name any file or path.
   An oversized video is refused rather than re-encoded: post without it and say the recording was too large.
-  If an upload fails, the poster posts the text with a short note and never posts twice, so do not re-emit.
+  Leave a queued generation to the poster; follow the [delivery and recovery contract](../../../docs/configuration.md#outbound-media) for upload failures or ambiguous sends, and do not re-emit it as a new generation.
 
 ## Acknowledge first, act, then follow up
 

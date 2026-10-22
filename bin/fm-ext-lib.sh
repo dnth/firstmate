@@ -1854,6 +1854,8 @@ fm_ext_attachments_stage_one() {
 # FDs with O_NOFOLLOW, requires a regular-file fstat, creates the destination
 # as a temporary mode-0600 file, and reads at most max-bytes+1 so growth
 # after sizing still trips too-large before atomically replacing dest.
+# The media bound selects a 32 MiB cap for non-images and no source byte cap
+# for recognized image content; bin/fm-ext-media.sh bounds image downscaling.
 # Exits 10 on a non-file or symlink, 11 past the byte cap, and 1 on any other failure.
 fm_ext_attachment_copy_nofollow() {
   FM_EXT_ATTACHMENT_ROOT=$1 FM_EXT_ATTACHMENT_REL=$2 FM_EXT_ATTACHMENT_DEST=$3 FM_EXT_ATTACHMENT_MAX=$4 python3 -c \
