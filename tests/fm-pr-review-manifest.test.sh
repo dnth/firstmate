@@ -636,6 +636,34 @@ test_paginated_reviews() {
   pass "paginated coverage, failed page reads, deduplication, and notification reset after recovery"
 }
 
+test_gitlab_without_github_tools() {
+  local dir out command
+  dir="$TMP_ROOT/gitlab-only"
+  mkdir -p "$dir/bin"
+  ln -s "$BASH" "$dir/bin/bash"
+  ln -s "$(command -v dirname)" "$dir/bin/dirname"
+  printf '#!/bin/sh\nexit 99\n' > "$dir/bin/glab"
+  chmod 0700 "$dir/bin/glab"
+  PATH="$dir/bin" "$BASH" -c 'command -v glab >/dev/null && ! command -v gh >/dev/null && ! command -v jq >/dev/null' \
+    || fail "GitLab-only fixture has the wrong available tools"
+  for command in verify poll; do
+    if [ "$command" = verify ]; then
+      out=$(PATH="$dir/bin" "$BASH" "$MANIFEST" verify https://gitlab.example/group/repo/-/merge_requests/7 --mode direct-PR 2>&1)
+    else
+      out=$(PATH="$dir/bin" "$BASH" "$MANIFEST" poll https://gitlab.example/group/repo/-/merge_requests/7 2>&1)
+    fi
+    [ "$?" -eq 0 ] || fail "$command blocked GitLab on missing GitHub tools: $out"
+    assert_contains "$out" 'notice: review manifest verification covers GitHub pull requests only' "$command did not identify GitLab as out of scope"
+  done
+  out=$(PATH="$dir/bin" "$BASH" "$MANIFEST" verify "$URL" --mode direct-PR 2>&1) \
+    && fail "GitHub verification passed without GitHub prerequisites"
+  assert_contains "$out" 'could not be read' "GitHub missing-tool refusal was lost"
+  out=$(PATH="$dir/bin" "$BASH" "$MANIFEST" poll "$URL" 2>&1) \
+    && fail "GitHub poll passed without GitHub prerequisites"
+  assert_contains "$out" 'could not be read completely' "GitHub poll missing-tool refusal was lost"
+  pass "GitLab skips GitHub prerequisites while GitHub reads still fail closed"
+}
+
 test_slow_paginated_read() {
   local dir head axis started
   for axis in reviews comments; do
@@ -723,6 +751,7 @@ test_remote_custody_mode() {
   pass "remote custody enforces Pipeline and accepts forge-proved fixed commits"
 }
 
+test_gitlab_without_github_tools
 test_slow_paginated_read
 test_private_review_temp_files
 test_review_regressions

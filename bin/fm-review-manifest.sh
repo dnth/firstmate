@@ -105,10 +105,10 @@ rm_trim() {
 # Returns 0 with the response in RM_JSON_FILE, 1 when
 # the read is unavailable, and 2 when the provider is out of scope.
 rm_read() {
-  command -v gh >/dev/null 2>&1 || return 1
-  command -v jq >/dev/null 2>&1 || return 1
   fm_pr_url_parse "$1" || return 1
   [ "$FM_PR_PROVIDER" = github ] || return 2
+  command -v gh >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
   RM_JSON_FILE=$(mktemp "${TMPDIR:-/tmp}/.fm-review-manifest.XXXXXX") || {
     RM_JSON_FILE=
     return 1
