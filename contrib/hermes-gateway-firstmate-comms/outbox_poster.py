@@ -19,7 +19,9 @@ mismatch after a successful begin also releases that marker; posted_count
 zero still aborts. An in-flight chunk without a confirmed post stays
 mid-delivery.
 A transient definite send failure (HTTP 429 or 5xx) before any chunk
-succeeds deletes the posting marker so that generation can retry.
+succeeds deletes the posting marker so that generation can retry, unless a
+media upload was already tried: then progress is kept so the one upload
+retry holds across delivery attempts.
 A permanent 4xx records a terminal failed marker so pending stops retrying.
 A posting marker without a receipt is refused so an ambiguous crash or
 transport error after Discord may have accepted the post cannot double-post.
@@ -2217,7 +2219,11 @@ def deliver_one(
                 if outcome == "transient":
                     progress["inflight"] = None
                     write_progress(payload, progress, home)
-                    if int(progress.get("posted_count") or 0) == 0:
+                    # Abort deletes progress, which would reset the media
+                    # upload count; once an upload was tried, keep progress and
+                    # resume like a later-chunk failure so the one retry holds.
+                    uploads_tried = int((progress.get("media") or {}).get("attempts") or 0) > 0
+                    if int(progress.get("posted_count") or 0) == 0 and not uploads_tried:
                         abort_status = abort_delivery(payload, home=home)
                         if abort_status == "already-receipted":
                             return abort_status

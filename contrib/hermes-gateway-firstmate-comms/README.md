@@ -108,7 +108,7 @@ The following posting-marker, chunk-progress, and receipt rules apply to ordinar
 Unsent payloads retry after a gateway restart.
 Oversized replies split with `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900) and post as ordered Discord messages in the same thread.
 That split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
-A transient definite send failure (HTTP 429 or 5xx) before a successful Discord response deletes the posting marker so that generation can retry.
+A transient definite send failure (HTTP 429 or 5xx) before a successful Discord response deletes the posting marker so that generation can retry, unless a media upload was already tried (see the outbound media reference below).
 A permanent 4xx records a terminal failed marker so pending stops retrying that generation.
 A posting marker without a receipt is refused so an ambiguous crash or transport error after Discord may have accepted the post cannot double-post.
 A post with screenshots or a recording uploads its staged files with its last message as one Discord multipart request (`payload_json` plus `files[n]`), after `bin/fm-ext-media.sh verify` re-checks each file and the poster confirms the bytes it sends hash to the verified digest.

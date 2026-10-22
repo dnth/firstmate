@@ -169,9 +169,14 @@ class Edge(BaseHTTPRequestHandler):
         else:
             record["json"] = json.loads(body or b"{}")
         requests.append(record)
-        refuse = record["files"] and (mode == "fail-always" or (mode == "fail-once" and multipart_seen[0] == 1))
+        # fail-always-text-503: every upload is refused and the text-only
+        # fallback then hits a transient 503, leaving nothing posted.
+        refuse = record["files"] and (mode in ("fail-always", "fail-always-text-503")
+                                      or (mode == "fail-once" and multipart_seen[0] == 1))
         if refuse:
             code, reply = (500, {"message": "upstream"}) if mode == "fail-once" else (413, {"code": 40005, "message": "Request entity too large"})
+        elif mode == "fail-always-text-503":
+            code, reply = 503, {"message": "upstream"}
         else:
             code = 200
             reply = {"id": "90000000000000000%d" % len(requests), "channel_id": self.path.split("/")[-2],
@@ -444,7 +449,32 @@ test_6_retry_once_then_note() {
   out=$(drive "$home" ok)
   printf '%s' "$out" | jq -e '(.requests | length) == 0' >/dev/null \
     || fail "a delivered post must never post again (got: $out)"
-  pass "6 a refused upload is retried once, then the text posts alone with a note, never twice"
+
+  # The one retry is per post, not per delivery attempt: when both uploads are
+  # refused and the text-only fallback then fails transiently with nothing
+  # posted, the next drain posts the text with the note and uploads nothing.
+  home="$TMP_ROOT/c6c"
+  setup_home "$home"
+  slug=$(intake "$home" 460000000000000003)
+  mkdir -p "$home/data/shots"
+  write_png "$home/data/shots/a.png"
+  screen "$home" "$home/data/shots/a.png"
+  emit_media "$home" 460000000000000003 1 "Upload and text both fail." "$home/data/shots/a.png" >/dev/null \
+    || fail "emit must succeed"
+  out=$(drive "$home" fail-always-text-503)
+  printf '%s' "$out" | jq -e '.result == ["failed"]
+    and ([.requests[].content_type] == ["multipart/form-data", "multipart/form-data", "application/json"])' >/dev/null \
+    || fail "two refused uploads and a refused text must leave the post pending (got: $out)"
+  out=$(drive "$home" ok)
+  printf '%s' "$out" | jq -e '.result == ["sent"] and (.requests | length) == 1
+    and .requests[0].content_type == "application/json"
+    and .requests[0].json.content == "Upload and text both fail.\n\n_(screenshot couldn'"'"'t be posted)_"' >/dev/null \
+    || fail "a later drain must post the text with the note and never upload a third time (got: $out)"
+  receipt="$home/state/ext-outbox/$slug.answer.1.receipt.json"
+  jq -e '.attachments == [] and .attachments_dropped == ["image-1.png"] and .media_note == true
+    and .media_upload_attempts == 2 and (.discord_message_ids | length) == 1' "$receipt" >/dev/null \
+    || fail "the receipt must count both uploads across drains (got: $(cat "$receipt"))"
+  pass "6 a refused upload is retried once per post, even across drains, then the text posts alone with a note, never twice"
 }
 
 # --- 7. a file whose verdict turned refused after emit does not upload ------

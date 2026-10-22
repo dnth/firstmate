@@ -939,6 +939,7 @@ The [`bin/fm-ext-media.sh` header](../bin/fm-ext-media.sh) owns screening, frame
 The gateway poster attaches the staged files to the post's last message as one Discord multipart request, after re-checking each file's digest and attestation.
 When Discord answers an upload with an HTTP error, no message was created, so the poster retries the upload exactly once; if the retry also fails, or a file no longer verifies, the text posts without it and ends with `_(screenshot couldn't be posted)_`.
 An ambiguous transport failure follows the mid-delivery rule above instead of retrying blind, and a resumed generation never makes a third upload attempt.
+The upload count lives in chunk progress, so once an upload has been tried, a transient failure with nothing posted keeps that progress and resumes it rather than deleting the posting marker, and a later delivery attempt cannot start the count over.
 The receipt adds `attachments` (name, kind, and bytes of each posted file), `attachments_dropped`, `media_upload_attempts`, and `media_note`.
 The bot needs Discord's Attach Files permission wherever it posts.
 Staged copies follow the 14-day media retention in the retention paragraph above; a worker's own screenshots stay with its task.
