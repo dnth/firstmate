@@ -201,6 +201,7 @@ Follow the guidance no-mistakes itself provides for the mechanics: it loads when
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
 Do not hand-edit, commit, or fix findings yourself while a run is active; fix ordinary findings only after Firstmate directs the supported abort and branch-custody return sequence, and when a finding shows a criterion unsatisfied, record its failure receipt before the fix and a fresh success after it.
 Firstmate's PR-ready helper reads No-Mistakes' own status for your run - branch, PR URL, full head SHA, and outcome - so never push foreign commits over the pipeline's head.
+The pipeline owns the pull request: this worker's environment refuses \`gh pr create\` and \`gh-axi pr create\`, so run the pipeline and let it create the PR instead of opening one yourself.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.

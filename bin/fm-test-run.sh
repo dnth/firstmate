@@ -157,6 +157,7 @@ family_for_basename() {
     fm-wake-drain-unread-status.test.sh|\
     fm-wake-queue.test.sh|fm-inbox.test.sh|fm-inbox-result.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-triage.test.sh|fm-task-inbox.test.sh|fm-idle-sleep-watch.test.sh|\
+    fm-nm-pr-unguarded.test.sh|\
     fm-watcher-lock.test.sh|fm-omp-branch-bash.test.sh|fm-omp-branch-supervision.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
@@ -201,7 +202,7 @@ family_for_basename() {
     fm-backend-herdr-server-detach.test.sh|fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-busy-adapter-wiring.test.sh|fm-dispatch-resolve.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-inbox.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-send-turn-start.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|fm-prepush-guard.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|fm-prepush-guard.test.sh|fm-nm-pr-guard.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|fm-treehouse-orphan-recovery.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
