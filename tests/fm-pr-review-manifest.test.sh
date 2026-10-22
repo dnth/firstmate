@@ -55,9 +55,13 @@ case "${1:-} ${2:-}" in
     # bin/fm-review-manifest.sh's single read; a case pins its answer in
     # $dir/reviews.json.
     case " $* " in
+      *PullRequestReviewThread*) cat "$FM_TEST_REVIEW_STATE.comments"; exit 0 ;;
       *reviewThreads*)
         [ -f "${FM_TEST_REVIEW_STATE:-/nonexistent}" ] || exit 1
-        cat "$FM_TEST_REVIEW_STATE"
+        case " $* " in
+          *reviewsCursor=page2*) [ ! -e "$FM_TEST_REVIEW_STATE.fail" ] || exit 1; cat "$FM_TEST_REVIEW_STATE.next" ;;
+          *) cat "$FM_TEST_REVIEW_STATE" ;;
+        esac
         exit 0
         ;;
     esac
@@ -65,6 +69,11 @@ case "${1:-} ${2:-}" in
     ;;
   "api repos/"*)
     case "${2:-}" in
+      */compare/*)
+        [ ! -e "$FM_TEST_REVIEW_STATE.compare-fail" ] || exit 1
+        printf '{"status":"ahead","merge_base_commit":{"sha":"%s"}}\n' "$FM_TEST_GH_HEAD"
+        exit 0
+        ;;
       */issues/*)
         [ "${FM_TEST_ISSUE_MISSING:-0}" = 0 ] && { printf '7\n'; exit 0; }
         exit 1
@@ -130,7 +139,7 @@ sections() {  # the three required sections with no review table
 }
 
 pipeline() {  # <head>
-  printf '\n## Pipeline\n\nUpdates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)\n\n<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"%s","steps":[{"step":"review","status":"completed"}]} -->\n' "$1"
+  printf '\n## Pipeline\n\nUpdates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)\n\n<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"%s","steps":[{"step":"review","status":"completed"}]} -->\n\n| Test | Result |\n| --- | --- |\n| fixture | passed |\n' "$1"
 }
 
 run_pr_check() {  # <dir>
@@ -217,9 +226,9 @@ test_well_formed_rows_are_ready_with_the_coverage_disclosure() {
 
 | Review | Item | Disposition |
 | --- | --- | --- |
-| $URL#pullrequestreview-55 | \"1. Quote the item text\" | fixed $head |
-| $URL#pullrequestreview-56 | \"2. Rename the helper\" | declined: the name is part of the public contract |
-| $URL#pullrequestreview-57 | \"3. Cover the edge case\" | deferred: https://github.com/o/r/issues/9 |
+| pullrequestreview-55 | \"1. Quote the item text\" | fixed $head |
+| pullrequestreview-56 | \"2. Rename the helper\" | declined: the name is part of the public contract |
+| pullrequestreview-57 | \"3. Cover the edge case\" | deferred: https://github.com/o/r/issues/9 |
 " \
     '[{"databaseId":55,"state":"CHANGES_REQUESTED","body":"1. Quote the item text"},
       {"databaseId":56,"state":"COMMENTED","body":"2. Rename the helper"},
@@ -278,7 +287,7 @@ test_tool_generated_items_are_skipped_by_their_markers() {
   dir=$(make_case tool-markers)
   head=$(head_of "$dir")
   reviews='[{"databaseId":61,"state":"COMMENTED","body":"<!-- no-mistakes-pipeline-attestation:v1 {\"steps\":[]} -->"},
-            {"databaseId":62,"state":"COMMENTED","body":"automated note <!-- fm-worker-note -->"},
+            {"databaseId":62,"state":"COMMENTED","body":"<!-- fm-worker-note -->"},
             {"databaseId":63,"state":"COMMENTED","body":"human note from the author account"}]'
   threads='[{"id":"PRRT_kwDOauto","isResolved":false,"comments":{"nodes":[{"databaseId":908,"body":"<!-- no-mistakes-pr-appendix: generated -->"}]}}]'
   body_state "$dir" "$head" "$(sections)" "$reviews" "$threads"
@@ -495,6 +504,128 @@ test_pr_poll_reports_an_unanswered_review_once() {
   esac
   pass "AC3: the PR poll reports a review posted after ready, and the watcher reports it once"
 }
+
+test_review_regressions() {
+  local dir head out body key
+  dir=$(make_case review-regressions)
+  head=$(head_of "$dir")
+  FM_TEST_GH_HEAD=$head
+  for body in "$(sections)$(pipeline "$head" | sed '/^|/d')" \
+      "$(sections)$(pipeline "$head" | sed 's/\[{"step":"review","status":"completed"}\]/[{}]/')" \
+      "$(pipeline "$head" | sed '/^## Pipeline$/d')$(sections)
+## Pipeline
+| Test | Result |
+| --- | --- |
+| fixture | passed |"; do
+    body_state "$dir" "$head" "$body"
+    out=$(FM_TEST_REVIEW_STATE="$dir/reviews.json" PATH="$dir/fakebin:$BASE_PATH" \
+      "$MANIFEST" verify "$URL" --mode no-mistakes) && fail "altered Pipeline accepted: $out"
+  done
+  body_state "$dir" "$head" "$(sections)" \
+    '[{"databaseId":55,"state":"COMMENTED","body":"Preserve no-mistakes-pipeline-attestation when rewriting"}]' \
+    '[{"id":"PRRT_human","isResolved":false,"comments":{"nodes":[{"databaseId":1,"body":"<!-- fm-worker-note -->"},{"databaseId":2,"body":"human follow-up"}]}}]'
+  run_pr_check "$dir"
+  [ "$CHECK_RC" -ne 0 ] || fail "human marker mentions were skipped"
+  assert_contains "$CHECK_OUT" "pullrequestreview-55" "human review skipped"
+  assert_contains "$CHECK_OUT" "discussion_r1" "human thread follow-up skipped"
+  for key in 'pullrequestreview-55 PRRT_human' 'discussion_r1' "$URL#pullrequestreview-55"; do
+    body_state "$dir" "$head" "$(sections)
+## Review follow-up
+| Review | Item | Disposition |
+| --- | --- | --- |
+| $key | quote | declined: reason |" "$AUTHOR_REVIEW_REVIEWS" '[]'
+    run_pr_check "$dir"
+    [ "$CHECK_RC" -ne 0 ] || fail "noncanonical key accepted: $key"
+  done
+  body_state "$dir" "$head" "$(sections)
+## Review follow-up
+| Review | Item | Disposition |
+| --- | --- | --- |
+| pullrequestreview-55 | a \|\| b | fixed $head |
+| pullrequestreview-55 | second item | declined: reason |" "$AUTHOR_REVIEW_REVIEWS" '[]'
+  run_pr_check "$dir"
+  [ "$CHECK_RC" -eq 0 ] || fail "escaped pipes refused: $CHECK_OUT"
+  assert_contains "$CHECK_OUT" '2 items declared by author' "container count used for disclosure"
+  out=$(FM_TEST_REVIEW_STATE="$dir/reviews.json" FM_TEST_GH_HEAD="$head" PATH="$dir/fakebin:$BASE_PATH" \
+    "$MANIFEST" verify "$URL" --mode direct-PR) || fail "forge reachability refused: $out"
+  touch "$dir/reviews.json.compare-fail"
+  out=$(FM_TEST_REVIEW_STATE="$dir/reviews.json" FM_TEST_GH_HEAD="$head" PATH="$dir/fakebin:$BASE_PATH" \
+    "$MANIFEST" verify "$URL" --mode direct-PR) && fail "unproved forge reachability accepted"
+  pass "Pipeline integrity, human envelopes, canonical keys, escaped pipes, row counts, forge reachability"
+}
+
+test_paginated_reviews() {
+  local dir head out
+  dir=$(make_case paginated-reviews)
+  head=$(head_of "$dir")
+  FM_TEST_GH_HEAD=$head
+  body_state "$dir" "$head" "$(sections)" '[]' \
+    '[{"id":"PRRT_later","isResolved":false,"comments":{"nodes":[{"databaseId":999,"body":"later thread"}]}}]'
+  cp "$dir/reviews.json" "$dir/reviews.json.next"
+  jq '.data.repository.pullRequest.reviews.pageInfo={hasNextPage:true,endCursor:"page2"} | .data.repository.pullRequest.reviewThreads.pageInfo={hasNextPage:true,endCursor:"page2"} | .data.repository.pullRequest.reviewThreads.nodes=[]' \
+    "$dir/reviews.json.next" > "$dir/reviews.json"
+  run_pr_check "$dir"
+  [ "$CHECK_RC" -ne 0 ] || fail "page two thread omitted"
+  assert_contains "$CHECK_OUT" 'discussion_r999' "page two thread not named"
+  run_poll "$dir"
+  assert_contains "$POLL_OUT" 'PRRT_later' "poll omitted page two thread"
+  body_state "$dir" "$head" "$(sections)
+## Review follow-up
+| Review | Item | Disposition |
+| --- | --- | --- |
+| PRRT_later | later thread | fixed $head |" '[]' \
+    '[{"id":"PRRT_later","isResolved":false,"comments":{"nodes":[{"databaseId":999,"body":"later thread"}]}}]'
+  cp "$dir/reviews.json" "$dir/reviews.json.next"
+  jq '.data.repository.pullRequest.reviews.pageInfo={hasNextPage:true,endCursor:"page2"} | .data.repository.pullRequest.reviewThreads.pageInfo={hasNextPage:true,endCursor:"page2"} | .data.repository.pullRequest.reviewThreads.nodes=[]' \
+    "$dir/reviews.json.next" > "$dir/reviews.json"
+  run_pr_check "$dir"
+  [ "$CHECK_RC" -eq 0 ] || fail "covered paginated thread refused: $CHECK_OUT"
+  touch "$dir/reviews.json.fail"
+  run_pr_check "$dir"
+  [ "$CHECK_RC" -ne 0 ] || fail "partial read accepted"
+  out=$(FM_TEST_REVIEW_STATE="$dir/reviews.json" PATH="$dir/fakebin:$BASE_PATH" \
+    "$MANIFEST" poll "$URL" 2>&1) && fail "partial poll silently succeeded"
+  assert_contains "$out" 'could not be read' "partial poll had no error"
+  pass "paginated coverage and failed page reads"
+}
+
+test_paginated_thread_comments() {
+  local dir head out
+  dir=$(make_case paginated-comments)
+  head=$(head_of "$dir")
+  body_state "$dir" "$head" "$(sections)" '[]' \
+    '[{"id":"PRRT_later","isResolved":false,"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"more"},"nodes":[{"databaseId":999,"body":"<!-- fm-worker-note -->"}]}}]'
+  printf '%s\n' '{"data":{"node":{"comments":{"pageInfo":{"hasNextPage":false},"nodes":[{"databaseId":1000,"body":"human follow-up"}]}}}}' > "$dir/reviews.json.comments"
+  out=$(FM_TEST_REVIEW_STATE="$dir/reviews.json" PATH="$dir/fakebin:$BASE_PATH" \
+    "$MANIFEST" poll "$URL" 2>&1) || fail "paginated comments unreadable: $out"
+  assert_contains "$out" 'PRRT_later' "human follow-up on page two skipped"
+  pass "paginated thread comments preserve human follow-ups"
+}
+
+test_remote_custody_mode() {
+  local dir head
+  dir=$(make_case remote-custody)
+  head=$(head_of "$dir")
+  FM_TEST_GH_HEAD=$head
+  printf 'kind=landing\ncustody_mode=no-mistakes\ncustody_evidence=complete\ncustody_blocked=none\npr=%s\n' "$URL" > "$dir/home/state/$ID.meta"
+  body_state "$dir" "$head" "$(sections)"
+  run_pr_merge "$dir"
+  [ "$MERGE_RC" -ne 0 ] || fail "custody bypassed Pipeline"
+  assert_contains "$MERGE_OUT" "no '## Pipeline' section" "custody mode not used"
+  body_state "$dir" "$head" "$(sections)$(pipeline "$head")
+## Review follow-up
+| Review | Item | Disposition |
+| --- | --- | --- |
+| pullrequestreview-55 | item | fixed $head |" "$AUTHOR_REVIEW_REVIEWS" '[]'
+  run_pr_merge "$dir"
+  [ "$MERGE_RC" -eq 0 ] || fail "remote custody refused valid evidence: $MERGE_OUT"
+  pass "remote custody enforces Pipeline and accepts forge-proved fixed commits"
+}
+
+test_review_regressions
+test_paginated_reviews
+test_remote_custody_mode
+test_paginated_thread_comments
 
 test_commented_review_without_a_table_is_not_ready
 test_fixed_sha_must_be_reachable_from_the_pr_head

@@ -186,7 +186,7 @@ EOF
 Rewrite the PR body with the \`pr\` skill at \`~/.agents/skills/pr/SKILL.md\`: \`## Summary\` with the smallest diagram, diff, or tree that makes the change clear, \`## Evidence\` with the before/after result, and \`## Merge Danger\` with the door and the blast radius.
 While you work after that rewrite - another commit, a re-run, a review follow-up - rewrite the body the same way before you report PR-ready.
 When the pull request has any review or any unresolved review thread, add a \`## Review follow-up\` table with one row per item: \`| <key> | "<quoted item>" | <disposition> |\`.
-The key is \`pullrequestreview-<id>\` (a review URL ending in it works too) or a thread's node id or \`discussion_r<comment-id>\` anchor; a review id mentioned only in prose proves nothing.
+The key is exactly one canonical \`pullrequestreview-<id>\` or thread node id; a review id mentioned only in prose proves nothing.
 A disposition is \`fixed <sha>\` with a commit reachable from the PR head, \`declined: <reason>\`, or \`deferred: <issue url>\` with an issue URL that resolves.
 Reviews from any account count, including comments posted from your own account; skip only tool-generated notes carrying \`no-mistakes-pipeline-attestation\`, \`no-mistakes-pr-appendix\`, or \`fm-worker-note\`.
 Firstmate's PR-ready check verifies all of this mechanically and refuses with the review URL or the missing section, so do the rewrite before you append \`done:\`.
@@ -221,7 +221,7 @@ After the final No-Mistakes pass, rewrite the PR body with the \`pr\` skill at \
 Keep No-Mistakes' \`## Pipeline\` section, its attestation comment, and its test table byte for byte; never edit, reorder, or drop them, because firstmate verifies that the attestation still names the PR head.
 While you work after that rewrite - a re-run, a review follow-up, any new commit - rewrite the body the same way and keep the pipeline section verbatim before you report PR-ready.
 When the pull request has any review or any unresolved review thread, add a \`## Review follow-up\` table with one row per item: \`| <key> | "<quoted item>" | <disposition> |\`.
-The key is \`pullrequestreview-<id>\` (a review URL ending in it works too) or a thread's node id or \`discussion_r<comment-id>\` anchor; a review id mentioned only in prose proves nothing.
+The key is exactly one canonical \`pullrequestreview-<id>\` or thread node id; a review id mentioned only in prose proves nothing.
 A disposition is \`fixed <sha>\` with a commit reachable from the PR head, \`declined: <reason>\`, or \`deferred: <issue url>\` with an issue URL that resolves.
 Reviews from any account count, including comments posted from your own account; skip only tool-generated notes carrying \`no-mistakes-pipeline-attestation\`, \`no-mistakes-pr-appendix\`, or \`fm-worker-note\`.
 Firstmate's PR-ready check verifies all of this mechanically and refuses with the review URL or the missing section, so do the rewrite before you append \`done: PR {url} checks green\`.

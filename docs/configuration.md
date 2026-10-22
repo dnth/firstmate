@@ -1262,7 +1262,6 @@ FM_TODO_READY_MAX=10    # maximum Ready tasks bin/fm-todo-project.sh --emit proj
 FM_TODO_PR_TIMEOUT=20   # seconds allowed per direct forge poll in fm-todo-project; invalid or non-positive values reset to 20
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_PR_CHECK_NM_TIMEOUT=10    # seconds allowed per no-mistakes status, CI-log, or decision-audit read inside fm-pr-check.sh
-FM_REVIEW_MANIFEST_TIMEOUT=15  # seconds allowed per forge read inside bin/fm-review-manifest.sh, which owns the review-manifest and PR-body gate
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed directly
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions

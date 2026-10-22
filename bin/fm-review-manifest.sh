@@ -4,7 +4,7 @@
 #
 # The PR body is the only record of what a worker did with the reviews it
 # received, so this script reads the body, the reviews, and the review threads
-# in one GraphQL read and judges that record mechanically.
+# and judges that record mechanically.
 #
 # Counted items. Every review whose state is COMMENTED or CHANGES_REQUESTED,
 # from any account including the pull request author's (workers post under the
@@ -13,13 +13,13 @@
 # its items are the review's, and the row quotes whichever comment answers it.
 # Tool-generated items are skipped by their body markers:
 # `no-mistakes-pipeline-attestation`, `no-mistakes-pr-appendix`, and
-# `fm-worker-note`. A review or thread carrying one of those markers is not a
+# `fm-worker-note`. A generated envelope containing only those markers is not a
 # review item and needs no row.
 #
 # Manifest. A `## Review follow-up` section holds one three-column table row per
 # item: key | item | disposition. The key cell names the item, either as
-# `pullrequestreview-<id>` (or a review URL ending in that anchor) or as the
-# thread's node id / `discussion_r<comment-id>` anchor. The disposition cell is
+# `pullrequestreview-<id>` or as the
+# thread's node id. The disposition cell is
 # one of:
 #   fixed <sha>            <sha> must be a commit reachable from the PR head
 #   declined: <reason>     <reason> must be non-empty
@@ -36,14 +36,13 @@
 #
 # A forge read that cannot be completed fails verification closed, including on
 # a host with no gh: an unread manifest is not evidence that the pull request
-# has no reviews. The poll mode stays silent instead, because a silent poll must
-# never be read as a result. A merge on a host that cannot read the manifest is
+# has no reviews. A merge on a host that cannot read the manifest is
 # therefore covered only by the captain's explicit instruction, which
 # bin/fm-merge-guard-lib.sh records.
 #
 # Usage:
-#   fm-review-manifest.sh verify <pr-url> --mode <mode> [--worktree <dir>] [--timeout <secs>]
-#   fm-review-manifest.sh poll <pr-url> [--timeout <secs>]
+#   fm-review-manifest.sh verify <pr-url> --mode <mode> [--worktree <dir>]
+#   fm-review-manifest.sh poll <pr-url>
 #
 # verify prints one disclosure line on success when counted items exist:
 #   review <url>: N items declared by author; coverage of review text NOT machine-verified
@@ -53,7 +52,7 @@
 #
 # poll prints one line when counted items exist that no manifest row covers:
 #   review <url> <key> [<key>...]
-# and nothing otherwise, always exiting 0.
+# and nothing otherwise; unreadable connections exit 1.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,16 +61,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
-RM_TOOL_MARKERS='no-mistakes-pipeline-attestation|no-mistakes-pr-appendix|fm-worker-note'
-# shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
-RM_QUERY='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){headRefOid body reviews(first:100){pageInfo{hasNextPage} nodes{databaseId state body}} reviewThreads(first:100){pageInfo{hasNextPage} nodes{id isResolved comments(first:1){nodes{databaseId body}}}}}}}'
+RM_TOOL_PATTERN='^\\s*<!-- (no-mistakes-pipeline-attestation:v1 [^\\r\\n]*|no-mistakes-pr-appendix[^\\r\\n]*|fm-worker-note) -->\\s*$'
+# shellcheck disable=SC2016
+RM_QUERY='query($owner:String!,$repo:String!,$number:Int!,$reviewsCursor:String,$threadsCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){headRefOid body reviews(first:100,after:$reviewsCursor){pageInfo{hasNextPage endCursor} nodes{databaseId state body}} reviewThreads(first:100,after:$threadsCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:100){pageInfo{hasNextPage endCursor} nodes{databaseId body}}}}}}}'
 
 RM_JSON_FILE=
 RM_ERRORS=
 RM_BODY=
 RM_HEAD=
 RM_ITEMS=
-RM_ITEM_COUNT=0
+RM_CONTAINER_COUNT=0
 
 rm_cleanup() {
   [ -z "$RM_JSON_FILE" ] || rm -f -- "$RM_JSON_FILE"
@@ -80,8 +79,8 @@ rm_cleanup() {
 trap rm_cleanup EXIT
 
 rm_usage() {
-  echo "usage: fm-review-manifest.sh verify <pr-url> --mode <mode> [--worktree <dir>] [--timeout <secs>]" >&2
-  echo "       fm-review-manifest.sh poll <pr-url> [--timeout <secs>]" >&2
+  echo "usage: fm-review-manifest.sh verify <pr-url> --mode <mode> [--worktree <dir>]" >&2
+  echo "       fm-review-manifest.sh poll <pr-url>" >&2
 }
 
 rm_error() {
@@ -99,7 +98,7 @@ rm_trim() {
   printf '%s' "$s"
 }
 
-# One bounded forge read. Returns 0 with the response in RM_JSON_FILE, 1 when
+# Returns 0 with the response in RM_JSON_FILE, 1 when
 # the read is unavailable, and 2 when the provider is out of scope.
 rm_read() {
   command -v gh >/dev/null 2>&1 || return 1
@@ -110,17 +109,68 @@ rm_read() {
     RM_JSON_FILE=
     return 1
   }
-  if ! fm_run_timed "$RM_TIMEOUT" gh api graphql \
-      -f "query=$RM_QUERY" \
-      -F "owner=$FM_PR_OWNER" -F "repo=$FM_PR_REPO" -F "number=$FM_PR_NUMBER" \
-    > "$RM_JSON_FILE" 2>/dev/null; then
-    rm_cleanup
-    return 1
-  fi
-  if ! jq -e '(.data.repository.pullRequest // null) | type == "object"' "$RM_JSON_FILE" >/dev/null 2>&1; then
-    rm_cleanup
-    return 1
-  fi
+  local page reviews_cursor= threads_cursor= next_reviews next_threads merged thread cursor next reviews_done=0 threads_done=0
+  page="$RM_JSON_FILE.page"
+  while :; do
+    if ! fm_run_timed "$RM_TIMEOUT" gh api graphql -f "query=$RM_QUERY" \
+        -F "owner=$FM_PR_OWNER" -F "repo=$FM_PR_REPO" -F "number=$FM_PR_NUMBER" \
+        ${reviews_cursor:+-f "reviewsCursor=$reviews_cursor"} \
+        ${threads_cursor:+-f "threadsCursor=$threads_cursor"} > "$page" 2>/dev/null; then
+      rm -f "$page"
+      return 1
+    fi
+    if ! jq -e '(.errors // [] | length == 0) and (.data.repository.pullRequest |
+        type == "object" and (.reviews.nodes | type == "array") and (.reviewThreads.nodes | type == "array")
+        and (.reviews.pageInfo.hasNextPage | type == "boolean")
+        and (.reviewThreads.pageInfo.hasNextPage | type == "boolean"))' "$page" >/dev/null 2>&1; then
+      rm -f "$page"
+      return 1
+    fi
+    next_reviews=$(jq -r '.data.repository.pullRequest.reviews.pageInfo | if .hasNextPage then .endCursor // "" else "" end' "$page")
+    next_threads=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo | if .hasNextPage then .endCursor // "" else "" end' "$page")
+    [ "$reviews_done" -eq 0 ] || next_reviews=
+    [ "$threads_done" -eq 0 ] || next_threads=
+    if ! jq -e '.data.repository.pullRequest | [.reviews,.reviewThreads] | all(.[]; (.pageInfo.hasNextPage == false) or (.pageInfo.endCursor | type == "string" and length > 0))' "$page" >/dev/null \
+        || { [ -n "$next_reviews" ] && [ "$next_reviews" = "$reviews_cursor" ]; } \
+        || { [ -n "$next_threads" ] && [ "$next_threads" = "$threads_cursor" ]; }; then
+      rm -f "$page"
+      return 1
+    fi
+    if [ ! -s "$RM_JSON_FILE" ]; then
+      cp "$page" "$RM_JSON_FILE"
+    else
+      merged=$(jq -s '.[0] as $old | .[1] | .data.repository.pullRequest.reviews.nodes += $old.data.repository.pullRequest.reviews.nodes | .data.repository.pullRequest.reviewThreads.nodes += $old.data.repository.pullRequest.reviewThreads.nodes | .data.repository.pullRequest.reviews.nodes |= unique_by(.databaseId) | .data.repository.pullRequest.reviewThreads.nodes |= unique_by(.id)' "$RM_JSON_FILE" "$page") || return 1
+      printf '%s\n' "$merged" > "$RM_JSON_FILE"
+    fi
+    [ -n "$next_reviews" ] || reviews_done=1
+    [ -n "$next_threads" ] || threads_done=1
+    reviews_cursor=$next_reviews
+    threads_cursor=$next_threads
+    [ -n "$reviews_cursor$threads_cursor" ] || break
+  done
+  while IFS=$'\t' read -r thread cursor; do
+    [ -n "$thread" ] || continue
+    [ -n "$cursor" ] && [ "$cursor" != null ] || { rm -f "$page"; return 1; }
+    while :; do
+      if ! fm_run_timed "$RM_TIMEOUT" gh api graphql \
+          -f 'query=query($id:ID!,$cursor:String!){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{databaseId body}}}}}' \
+          -f "id=$thread" -f "cursor=$cursor" > "$page" 2>/dev/null; then
+        rm -f "$page"
+        return 1
+      fi
+      if ! jq -e '(.errors // [] | length == 0) and (.data.node.comments | (.nodes | type == "array") and (.pageInfo.hasNextPage | type == "boolean"))' "$page" >/dev/null 2>&1; then
+        rm -f "$page"
+        return 1
+      fi
+      merged=$(jq -s --arg id "$thread" '.[1].data.node.comments as $c | .[0] | (.data.repository.pullRequest.reviewThreads.nodes[] | select(.id == $id) | .comments) |= {nodes:(.nodes + $c.nodes),pageInfo:$c.pageInfo}' "$RM_JSON_FILE" "$page") || return 1
+      printf '%s\n' "$merged" > "$RM_JSON_FILE"
+      [ "$(jq -r '.data.node.comments.pageInfo.hasNextPage' "$page")" = true ] || break
+      next=$(jq -r '.data.node.comments.pageInfo.endCursor // ""' "$page")
+      if [ -z "$next" ] || [ "$next" = "$cursor" ]; then rm -f "$page"; return 1; fi
+      cursor=$next
+    done
+  done < <(jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.pageInfo.hasNextPage == true) | [.id,.comments.pageInfo.endCursor] | @tsv' "$RM_JSON_FILE")
+  rm -f "$page"
   return 0
 }
 
@@ -135,7 +185,7 @@ rm_items() {
     .data.repository.pullRequest as $pr
     | ($pr.reviews.nodes // [])[]
     | select(.state == "COMMENTED" or .state == "CHANGES_REQUESTED")
-    | select(((.body // "") | test("'"$RM_TOOL_MARKERS"'")) | not)
+    | select(((.body // "") | test("'"$RM_TOOL_PATTERN"'")) | not)
     | "review\tpullrequestreview-\(.databaseId)\t"'
   # shellcheck disable=SC2016  # jq programs read their variables from the document.
   rm_field '
@@ -143,28 +193,14 @@ rm_items() {
     | ($pr.reviewThreads.nodes // [])[]
     | select(.isResolved == false)
     | (.comments.nodes[0] // {}) as $c
-    | select(((([$c.body // ""] | join("")) | test("'"$RM_TOOL_MARKERS"'")) | not))
+    | select((.comments.nodes | length == 0) or any(.comments.nodes[]; ((.body // "") | test("'"$RM_TOOL_PATTERN"'")) | not))
     | "thread\t\(.id)\t" + (if ($c.databaseId // null) == null then "" else "discussion_r\($c.databaseId)" end)'
 }
 
-# True when <key> appears in <cell> as a whole token, so review 1 does not
-# claim the row for review 12.
-rm_key_in_cell() {
-  local key=$1 cell=$2 re
-  re="(^|[^0-9A-Za-z_-])$key([^0-9A-Za-z0-9_-]|$)"
-  [[ "$cell" =~ $re ]]
-}
-
 rm_item_covered() {
-  local kind=$1 key=$2 alt=$3 row
+  local key=$1 row
   while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    if rm_key_in_cell "$key" "$row"; then
-      return 0
-    fi
-    if [ -n "$alt" ] && rm_key_in_cell "$alt" "$row"; then
-      return 0
-    fi
+    [ "$row" != "$key" ] || return 0
   done <<ROWS
 $RM_ROW_KEYS
 ROWS
@@ -176,7 +212,7 @@ ROWS
 # (newline-separated "<line-number><TAB><disposition>"). Unparseable rows are
 # appended to RM_ERRORS naming the line number.
 rm_parse_table() {
-  local in_section=0 line row cells cell_count first_cell item disp lineno=0
+  local in_section=0 line row cell_count first_cell item disp lineno=0 i char cell escaped
   local -a cells
   RM_ROW_KEYS=
   RM_DISPOSITIONS=
@@ -198,7 +234,18 @@ rm_parse_table() {
     row=${row#|}
     row=${row%|}
     cells=()
-    IFS='|' read -r -a cells <<< "$row"
+    cell= escaped=0
+    for ((i=0; i<${#row}; i++)); do
+      char=${row:i:1}
+      if [ "$char" = '|' ] && [ "$escaped" -eq 0 ]; then
+        cells+=("$cell")
+        cell=
+      else
+        cell="$cell$char"
+      fi
+      if [ "$char" = '\' ] && [ "$escaped" -eq 0 ]; then escaped=1; else escaped=0; fi
+    done
+    cells+=("$cell")
     cell_count=${#cells[@]}
     if [ "$cell_count" -ne 3 ]; then
       rm_error "the Review follow-up row at body line $lineno has $cell_count cells; it needs exactly 3 (key | item | disposition)"
@@ -208,6 +255,10 @@ rm_parse_table() {
     item=$(rm_trim "${cells[1]}")
     disp=$(rm_trim "${cells[2]}")
     if [ "$(printf '%s' "$disp" | tr '[:upper:]' '[:lower:]')" = disposition ]; then
+      continue
+    fi
+    if ! [[ "$first_cell" =~ ^(pullrequestreview-[0-9]+|PRRT_[A-Za-z0-9_-]+)$ ]]; then
+      rm_error "the Review follow-up row at body line $lineno needs exactly one canonical review or thread key"
       continue
     fi
     if [ -z "$item" ]; then
@@ -224,7 +275,7 @@ BODY
 # A disposition has to be one of the three the format allows; `fixed` and
 # `deferred` carry evidence this function proves.
 rm_check_disposition() {
-  local lineno=$1 disp=$2 sha url rest owner repo number
+  local lineno=$1 disp=$2 sha url owner repo number compare
   case "$disp" in
     "fixed "*)
       sha=$(rm_trim "${disp#fixed }")
@@ -232,16 +283,15 @@ rm_check_disposition() {
         rm_error "the Review follow-up row at body line $lineno has an unparseable disposition '$disp'; expected 'fixed <sha>', 'declined: <reason>', or 'deferred: <issue url>'"
         return 0
       fi
-      if [ -z "$RM_WORKTREE" ] || [ ! -d "$RM_WORKTREE" ]; then
-        rm_error "the Review follow-up row at body line $lineno claims 'fixed $sha', but the task worktree is unavailable, so that commit cannot be proved reachable from the PR head"
-        return 0
-      fi
-      if ! git -C "$RM_WORKTREE" cat-file -e "$sha^{commit}" 2>/dev/null; then
-        rm_error "the Review follow-up row at body line $lineno claims 'fixed $sha', but $sha is not a commit in the pull request, so it cannot be reachable from its head"
-        return 0
-      fi
-      if [ -n "$RM_HEAD" ] && ! git -C "$RM_WORKTREE" merge-base --is-ancestor "$sha" "$RM_HEAD" 2>/dev/null; then
-        rm_error "the Review follow-up row at body line $lineno claims 'fixed $sha', but $sha is not reachable from the PR head $RM_HEAD"
+      if [ -n "$RM_WORKTREE" ] && [ -d "$RM_WORKTREE" ]; then
+        if ! git -C "$RM_WORKTREE" cat-file -e "$sha^{commit}" 2>/dev/null \
+            || [ -z "$RM_HEAD" ] \
+            || ! git -C "$RM_WORKTREE" merge-base --is-ancestor "$sha" "$RM_HEAD" 2>/dev/null; then
+          rm_error "the Review follow-up row at body line $lineno claims 'fixed $sha', but $sha is not reachable from the PR head $RM_HEAD"
+        fi
+      elif ! compare=$(fm_run_timed "$RM_TIMEOUT" gh api "repos/$FM_PR_OWNER/$FM_PR_REPO/compare/$sha...$RM_HEAD" 2>/dev/null) \
+          || ! printf '%s' "$compare" | jq -es --arg sha "$sha" 'length == 1 and (.[0] | (.status == "ahead" or .status == "identical") and (.merge_base_commit.sha | startswith($sha)))' >/dev/null 2>&1; then
+        rm_error "the Review follow-up row at body line $lineno claims 'fixed $sha', but forge reachability from the PR head $RM_HEAD could not be proved"
       fi
       ;;
     "declined:"|"declined: "*)
@@ -275,7 +325,7 @@ rm_has_heading() {
 }
 
 rm_check_sections() {
-  local section att
+  local section att pipeline
   for section in Summary Evidence "Merge Danger"; do
     rm_has_heading "$section" \
       || rm_error "the PR body has no '## $section' section; rewrite it with the pr skill's template before reporting PR-ready"
@@ -285,7 +335,8 @@ rm_check_sections() {
       rm_error "the PR body has no '## Pipeline' section; keep No-Mistakes' pipeline output, attestation, and test table verbatim"
       return 0
     fi
-    att=$(printf '%s\n' "$RM_BODY" \
+    pipeline=$(printf '%s\n' "$RM_BODY" | awk '/^##[[:space:]]+Pipeline[[:space:]]*$/ {inside=1; next} /^##[[:space:]]/ {inside=0} inside')
+    att=$(printf '%s\n' "$pipeline" \
       | sed -n 's/^<!-- no-mistakes-pipeline-attestation:v1 \(.*\) -->[[:space:]]*$/\1/p' \
       | head -1)
     if [ -z "$att" ]; then
@@ -295,9 +346,19 @@ rm_check_sections() {
     if ! printf '%s' "$att" | jq -e '
         type == "object"
         and (.head_sha | type == "string" and test("^[0-9a-f]{40}$"))
-        and (.steps | type == "array" and length > 0)' >/dev/null 2>&1; then
+        and (.steps | type == "array" and length > 0
+          and all(.[]; type == "object" and (.step | type == "string" and length > 0)
+            and (.status | type == "string" and length > 0)))' >/dev/null 2>&1; then
       rm_error "the PR body's No-Mistakes attestation is malformed; keep it verbatim"
       return 0
+    fi
+    if ! printf '%s\n' "$pipeline" | awk -F'|' '
+      {a=tolower($2); b=tolower($3); gsub(/^[ \t]+|[ \t]+$/, "", a); gsub(/^[ \t]+|[ \t]+$/, "", b)}
+      a == "test" && (b == "result" || b == "status") {header=1; next}
+      header && a ~ /^:?-+:?$/ && b ~ /^:?-+:?$/ {separator=1; next}
+      separator && NF >= 4 && a != "" && b != "" {found=1}
+      END {exit !found}'; then
+      rm_error "the PR body's '## Pipeline' section has no test table; keep it verbatim"
     fi
     if [ -n "$RM_HEAD" ] && [ "$(printf '%s' "$att" | jq -r '.head_sha')" != "$RM_HEAD" ]; then
       rm_error "the PR body's No-Mistakes attestation is for head $(printf '%s' "$att" | jq -r '.head_sha'), not the PR head $RM_HEAD; keep it verbatim and never edit it by hand"
@@ -320,36 +381,31 @@ rm_item_url() {
 }
 
 rm_load() {
-  local more
   RM_BODY=$(rm_field '.data.repository.pullRequest.body // ""')
   RM_HEAD=$(rm_field '.data.repository.pullRequest.headRefOid // ""')
-  more=$(rm_field '.data.repository.pullRequest.reviews.pageInfo.hasNextPage')
-  [ "$more" != true ] || rm_error "the pull request has more than 100 reviews, so the review manifest cannot be verified from one read"
-  more=$(rm_field '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
-  [ "$more" != true ] || rm_error "the pull request has more than 100 review threads, so the review manifest cannot be verified from one read"
   RM_ITEMS=$(rm_items)
-  RM_ITEM_COUNT=0
+  RM_CONTAINER_COUNT=0
   if [ -n "$RM_ITEMS" ]; then
-    RM_ITEM_COUNT=$(printf '%s\n' "$RM_ITEMS" | grep -c .)
+    RM_CONTAINER_COUNT=$(printf '%s\n' "$RM_ITEMS" | grep -c .)
   fi
 }
 
 rm_verify() {
-  local kind key alt url line disp item_word
+  local kind key alt url line disp item_word declared
   rm_load
   rm_check_sections
   rm_parse_table
-  if [ "$RM_ITEM_COUNT" -gt 0 ]; then
+  if [ "$RM_CONTAINER_COUNT" -gt 0 ]; then
     item_word=items
-    [ "$RM_ITEM_COUNT" -ne 1 ] || item_word=item
+    [ "$RM_CONTAINER_COUNT" -ne 1 ] || item_word=item
     [ -n "$RM_ROW_KEYS" ] \
-      || rm_error "the pull request has $RM_ITEM_COUNT review $item_word but the PR body has no '## Review follow-up' table; add one row per item"
+      || rm_error "the pull request has $RM_CONTAINER_COUNT review $item_word but the PR body has no '## Review follow-up' table; add one row per item"
     while IFS= read -r kind_pair; do
       [ -n "$kind_pair" ] || continue
       kind=$(printf '%s' "$kind_pair" | cut -f1)
       key=$(printf '%s' "$kind_pair" | cut -f2)
       alt=$(printf '%s' "$kind_pair" | cut -f3)
-      if [ -n "$RM_ROW_KEYS" ] && rm_item_covered "$kind" "$key" "$alt"; then
+      if [ -n "$RM_ROW_KEYS" ] && rm_item_covered "$key"; then
         continue
       fi
       url=$(rm_item_url "$kind" "$key" "$alt")
@@ -373,25 +429,26 @@ $RM_ERRORS
 ERRORS
     return 1
   fi
-  if [ "$RM_ITEM_COUNT" -gt 0 ]; then
+  if [ "$RM_CONTAINER_COUNT" -gt 0 ]; then
+    declared=$(printf '%s\n' "$RM_ROW_KEYS" | grep -c .)
+    item_word=items
+    [ "$declared" -ne 1 ] || item_word=item
     printf 'review %s: %s %s declared by author; coverage of review text NOT machine-verified\n' \
-      "$RM_URL" "$RM_ITEM_COUNT" "$item_word"
+      "$RM_URL" "$declared" "$item_word"
   fi
   return 0
 }
 
 rm_poll() {
-  local kind_pair kind key alt uncovered=0 url
+  local kind_pair key uncovered=0 url
   rm_load
   [ -z "$RM_ERRORS" ] || return 0
-  [ "$RM_ITEM_COUNT" -gt 0 ] || return 0
+  [ "$RM_CONTAINER_COUNT" -gt 0 ] || return 0
   rm_parse_table
   while IFS= read -r kind_pair; do
     [ -n "$kind_pair" ] || continue
-    kind=$(printf '%s' "$kind_pair" | cut -f1)
     key=$(printf '%s' "$kind_pair" | cut -f2)
-    alt=$(printf '%s' "$kind_pair" | cut -f3)
-    if rm_item_covered "$kind" "$key" "$alt"; then
+    if rm_item_covered "$key"; then
       continue
     fi
     if [ "$uncovered" -eq 0 ]; then
@@ -409,10 +466,7 @@ ITEMS
 
 RM_MODE=
 RM_WORKTREE=
-RM_TIMEOUT=${FM_REVIEW_MANIFEST_TIMEOUT:-15}
-case "$RM_TIMEOUT" in
-  ''|*[!0-9]*|0) RM_TIMEOUT=15 ;;
-esac
+RM_TIMEOUT=15
 
 COMMAND=${1:-}
 [ "$#" -ge 2 ] || { rm_usage; exit 2; }
@@ -431,28 +485,12 @@ if [ "$COMMAND" = verify ]; then
         RM_WORKTREE=$2
         shift 2
         ;;
-      --timeout)
-        [ "$#" -ge 2 ] || { rm_usage; exit 2; }
-        case "$2" in ''|*[!0-9]*|0) rm_usage; exit 2 ;; esac
-        RM_TIMEOUT=$2
-        shift 2
-        ;;
       *) rm_usage; exit 2 ;;
     esac
   done
   [ -n "$RM_MODE" ] || { rm_usage; exit 2; }
 elif [ "$COMMAND" = poll ]; then
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --timeout)
-        [ "$#" -ge 2 ] || { rm_usage; exit 2; }
-        case "$2" in ''|*[!0-9]*|0) rm_usage; exit 2 ;; esac
-        RM_TIMEOUT=$2
-        shift 2
-        ;;
-      *) rm_usage; exit 2 ;;
-    esac
-  done
+  [ "$#" -eq 0 ] || { rm_usage; exit 2; }
 else
   rm_usage
   exit 2
@@ -469,7 +507,8 @@ if [ "$rc" -ne 0 ]; then
     printf 'error: the reviews, threads, and body of %s could not be read, so the review manifest cannot be verified\n' "$RM_URL" >&2
     exit 1
   fi
-  exit 0
+  printf 'error: the reviews, threads, and body of %s could not be read completely\n' "$RM_URL" >&2
+  exit 1
 fi
 
 if [ "$COMMAND" = verify ]; then

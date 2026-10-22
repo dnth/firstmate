@@ -205,6 +205,7 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -n "$MODE" ] || MODE=$(grep '^custody_mode=' "$META" | tail -1 | cut -d= -f2- || true)
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 
 # Read one live GitHub pull request view after gh-axi returns. The selected

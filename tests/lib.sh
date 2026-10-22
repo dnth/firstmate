@@ -289,7 +289,7 @@ fm_write_pr_review_state() {
   [ "$mode" != no-mistakes ] || pipeline=1
   body=$(printf '## Summary\n\nfixture\n\n## Evidence\n\n- **Before:** none\n  **After:** none\n\n## Merge Danger\n\n**Door:** two-way.\n**Blast Radius:** low.\n')
   if [ -n "$pipeline" ]; then
-    body="$body"$'\n'"$(printf '## Pipeline\n\n<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"%s","steps":[{"step":"review","status":"completed"}]} -->\n' "$head")"
+    body="$body"$'\n'"$(printf '## Pipeline\n\n<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"%s","steps":[{"step":"review","status":"completed"}]} -->\n\n| Test | Result |\n| --- | --- |\n| fixture | passed |\n' "$head")"
   fi
   jq -n --arg head "$head" --arg body "$body" --argjson reviews "$reviews" --argjson threads "$threads" \
     '{data:{repository:{pullRequest:{
