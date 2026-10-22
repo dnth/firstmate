@@ -52,6 +52,19 @@ case "${1:-} ${2:-}" in
     ;;
   "pr checks") printf '[]\n'; exit 0 ;;
   "api graphql")
+    if [ -n "${FM_TEST_REVIEW_TEMP_CHECK:-}" ]; then
+      python3 - "$FM_TEST_REVIEW_TEMP_CHECK" <<'CHECK'
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+files = list(Path(os.environ["TMPDIR"]).iterdir())
+with open(sys.argv[1], "a") as report:
+    report.write(json.dumps({"output_mode": stat.S_IMODE(os.fstat(1).st_mode),
+                             "modes": [stat.S_IMODE(p.stat().st_mode) for p in files]}) + "\n")
+CHECK
+    fi
     # bin/fm-review-manifest.sh's single read; a case pins its answer in
     # $dir/reviews.json.
     case " $* " in
@@ -586,7 +599,41 @@ test_paginated_reviews() {
   out=$(FM_TEST_REVIEW_STATE="$dir/reviews.json" PATH="$dir/fakebin:$BASE_PATH" \
     "$MANIFEST" poll "$URL" 2>&1) && fail "partial poll silently succeeded"
   assert_contains "$out" 'could not be read' "partial poll had no error"
-  pass "paginated coverage and failed page reads"
+  run_poll "$dir"
+  [ "$POLL_OUT" = "review $URL unreadable" ] || fail "production poll hid the failed page: $POLL_OUT"
+  run_watcher_cycle "$dir"
+  assert_contains "$(cat "$dir/watch.out")" "review $URL unreadable" "unreadable review state did not wake supervision"
+  assert_contains "$(cat "$dir/home/state/.wake-queue")" "review $URL unreadable" "read failure produced no durable wake"
+  run_watcher_cycle "$dir"
+  case "$(cat "$dir/watch.out")" in
+    *"review $URL unreadable"*) fail "the same read failure repeatedly woke supervision" ;;
+  esac
+  pass "paginated coverage, failed page reads, and deduplicated unreadable-state wakes"
+}
+
+test_private_review_temp_files() {
+  local dir head out rc
+  dir=$(make_case private-review-files)
+  head=$(head_of "$dir")
+  body_state "$dir" "$head" "$(sections)"
+  mkdir "$dir/private"
+  for rc in 0 1; do
+    if [ "$rc" -eq 1 ]; then printf '%s\n' '{"errors":[{"message":"unavailable"}]}' > "$dir/reviews.json"; fi
+    out=$(umask 022; TMPDIR="$dir/private" FM_TEST_REVIEW_TEMP_CHECK="$dir/modes.jsonl" \
+      FM_TEST_REVIEW_STATE="$dir/reviews.json" PATH="$dir/fakebin:$BASE_PATH" \
+      "$MANIFEST" poll "$URL" 2>&1)
+    [ "$?" -eq "$rc" ] || fail "unexpected private-file fixture result: $out"
+    python3 - "$dir/modes.jsonl" "$dir/private" <<'CHECK' || fail "review files were public or leaked"
+import json
+import sys
+from pathlib import Path
+records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
+assert records
+assert all(r["output_mode"] == 0o600 and all(mode == 0o600 for mode in r["modes"]) for r in records)
+assert not list(Path(sys.argv[2]).iterdir())
+CHECK
+  done
+  pass "review temporary files stay private under umask 022 and are cleaned on success and failure"
 }
 
 test_paginated_thread_comments() {
@@ -622,6 +669,7 @@ test_remote_custody_mode() {
   pass "remote custody enforces Pipeline and accepts forge-proved fixed commits"
 }
 
+test_private_review_temp_files
 test_review_regressions
 test_paginated_reviews
 test_remote_custody_mode

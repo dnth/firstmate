@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
 # It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# otherwise. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
 # An open GitHub pull request is also watched for review items its body's
 # `## Review follow-up` table does not answer yet: the sibling
 # bin/fm-review-manifest.sh owns that contract and prints one `review ...` line
-# for the current uncovered set, and only that line breaks the otherwise silent
-# poll. The watcher reports a given line once, so an unanswered review wakes
-# firstmate without repeating every sweep. A missing or unusable sibling stays
-# silent, because this program may only report a merge it proved or a review
-# state it read.
+# for the current uncovered set. The watcher reports a given line once, so an
+# unanswered review wakes firstmate without repeating every sweep.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -79,7 +75,7 @@ case "$provider" in
     [ "$review_dir" != "$0" ] || review_dir=.
     review_line=
     if [ -x "$review_dir/fm-review-manifest.sh" ]; then
-      review_line=$("$review_dir/fm-review-manifest.sh" poll "$url" 2>/dev/null) || review_line=
+      review_line=$("$review_dir/fm-review-manifest.sh" poll "$url" 2>/dev/null) || review_line="review $url unreadable"
     fi
     [ -z "$review_line" ] || printf '%s\n' "$review_line"
     ;;

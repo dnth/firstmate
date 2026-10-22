@@ -66,6 +66,7 @@ RM_TOOL_PATTERN='^\\s*<!-- (no-mistakes-pipeline-attestation:v1 [^\\r\\n]*|no-mi
 RM_QUERY='query($owner:String!,$repo:String!,$number:Int!,$reviewsCursor:String,$threadsCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){headRefOid body reviews(first:100,after:$reviewsCursor){pageInfo{hasNextPage endCursor} nodes{databaseId state body}} reviewThreads(first:100,after:$threadsCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:100){pageInfo{hasNextPage endCursor} nodes{databaseId body}}}}}}}'
 
 RM_JSON_FILE=
+RM_PAGE_FILE=
 RM_ERRORS=
 RM_BODY=
 RM_HEAD=
@@ -74,9 +75,12 @@ RM_CONTAINER_COUNT=0
 
 rm_cleanup() {
   [ -z "$RM_JSON_FILE" ] || rm -f -- "$RM_JSON_FILE"
+  [ -z "$RM_PAGE_FILE" ] || rm -f -- "$RM_PAGE_FILE"
   RM_JSON_FILE=
+  RM_PAGE_FILE=
 }
 trap rm_cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 rm_usage() {
   echo "usage: fm-review-manifest.sh verify <pr-url> --mode <mode> [--worktree <dir>]" >&2
@@ -110,7 +114,8 @@ rm_read() {
     return 1
   }
   local page reviews_cursor= threads_cursor= next_reviews next_threads merged thread cursor next reviews_done=0 threads_done=0
-  page="$RM_JSON_FILE.page"
+  RM_PAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/.fm-review-page.XXXXXX") || return 1
+  page=$RM_PAGE_FILE
   while :; do
     if ! fm_run_timed "$RM_TIMEOUT" gh api graphql -f "query=$RM_QUERY" \
         -F "owner=$FM_PR_OWNER" -F "repo=$FM_PR_REPO" -F "number=$FM_PR_NUMBER" \
@@ -360,7 +365,7 @@ rm_check_sections() {
       END {exit !found}'; then
       rm_error "the PR body's '## Pipeline' section has no test table; keep it verbatim"
     fi
-    if [ -n "$RM_HEAD" ] && [ "$(printf '%s' "$att" | jq -r '.head_sha')" != "$RM_HEAD" ]; then
+    if [ "$(printf '%s' "$att" | jq -r '.head_sha')" != "$RM_HEAD" ]; then
       rm_error "the PR body's No-Mistakes attestation is for head $(printf '%s' "$att" | jq -r '.head_sha'), not the PR head $RM_HEAD; keep it verbatim and never edit it by hand"
     fi
   fi
