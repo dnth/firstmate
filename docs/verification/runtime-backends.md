@@ -1341,12 +1341,14 @@ The command shapes and result summary below retain placeholders rather than the 
 ```sh
 # Guarded non-default lab session: every lifecycle call goes through the helper,
 # and the pane's own herdr is a wrapper that refuses any call not bound to it.
-HERDR_LAB_SESSION=$(bin/fm-herdr-lab.sh name fm-omp-doorbell)
-bin/fm-herdr-lab.sh provision "$HERDR_LAB_SESSION"
-bin/fm-spawn.sh <task-id> <project> --harness omp --model <model> --effort low --mode direct-PR --yolo off
+omp --version
+HERDR_LAB_HELPER=/home/dnth/Desktop/firstmate/bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-omp-doorbell)
+"$HERDR_LAB_HELPER" provision "fm-lab-fm-omp-doorbell-956971-29708"
+bin/fm-spawn.sh omp-doorbell-ac3 <project> --harness omp --model opencode-go-neuralengine-1/deepseek-v4.1-flash --effort low --mode direct-PR --yolo off
 # the worker runs one native `task` subagent, which then disposes normally
-bin/fm-send.sh <task-id> '<instruction>'
-bin/fm-herdr-lab.sh teardown "$HERDR_LAB_SESSION"
+bin/fm-send.sh omp-doorbell-ac3 'Live AC3 check: reply exactly ac3-steer-received and stop.'
+"$HERDR_LAB_HELPER" teardown "fm-lab-fm-omp-doorbell-956971-29708"
 ```
 
 Observed result:
@@ -1354,9 +1356,9 @@ Observed result:
 ```text
 omp/18.10.1
 child exit record: session_exit","data":{"reason":"dispose","kind":"normal
-fm-send: omp-native-received: the bound OMP session acknowledged the request (session-pid=<ready-marker pid>)
-marker intact after the steer
-lab teardown ok: <lab session> deleted, default-session tripwire unchanged
+fm-send: omp-native-received: the bound OMP session acknowledged the request (task=omp-doorbell-ac3 endpoint=herdr:fm-lab-fm-omp-doorbell-956971-29708:w2:p2 session-pid=960819 request=<lab-home>/state/omp-doorbell-ac3.omp-doorbell-ready.requests/request.001.msg record=<lab-home>/state/omp-doorbell-ac3.inbox/001.msg message-bytes=58)
+marker intact after the steer: 960819
+lab teardown ok: fm-lab-fm-omp-doorbell-956971-29708 deleted, default-session tripwire unchanged
 ```
 
 ## Codex App host tools
