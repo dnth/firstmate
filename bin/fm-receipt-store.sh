@@ -386,11 +386,6 @@ refuse("task directory identity changed after entry") unless @cwd_identity
   && $cwd_identity[0] == $task_identity[0]
   && $cwd_identity[1] == $task_identity[1];
 
-sysopen(my $brief, "brief.md", O_RDONLY | O_NOFOLLOW)
-  or refuse("task brief is missing or unsafe");
-my @brief_identity = stat($brief);
-refuse("task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
-
 my $state_path = $ENV{FM_RECEIPT_STORE_STATE} // "";
 my ($state, $state_pins) = pin_absolute_directory($state_path, "state");
 my $meta_name = "$task_name.meta";
@@ -443,8 +438,14 @@ my @lock_identity = stat($task_lock);
 refuse("task evidence lock must be a single-link regular file") unless @lock_identity
   && S_ISREG($lock_identity[2]) && $lock_identity[3] == 1;
 
+flock($task_lock, $ENV{FM_RECEIPT_STORE_MODE} eq "hold" ? LOCK_SH : LOCK_EX)
+  or refuse("task evidence lock could not be acquired");
+sysopen(my $brief, "brief.md", O_RDONLY | O_NOFOLLOW)
+  or refuse("task brief is missing or unsafe");
+my @brief_identity = stat($brief);
+refuse("task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
+
 if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
-  flock($task_lock, LOCK_SH) or refuse("task evidence lock could not be acquired");
   my $ledger_missing = 0;
   my $ledger;
   if (!sysopen($ledger, "evidence.jsonl", O_RDONLY | O_NOFOLLOW)) {
@@ -468,7 +469,6 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
 }
 
 if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
-  flock($task_lock, LOCK_EX) or refuse("task evidence lock could not be acquired");
   my @current_named_lock = lstat(".evidence.lock");
   refuse("task evidence lock identity changed") unless @current_named_lock
     && !S_ISLNK($current_named_lock[2])
@@ -666,14 +666,9 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
 
 if ($ENV{FM_RECEIPT_STORE_MODE} eq "add-criteria") {
   my $parser = $arg1;
-  flock($task_lock, LOCK_EX) or refuse("task evidence lock could not be acquired");
-  sysopen(my $current, "brief.md", O_RDONLY | O_NOFOLLOW)
-    or refuse("task brief is missing or unsafe");
-  my @current_identity = stat($current);
-  refuse("task brief is not a regular file") unless @current_identity && S_ISREG($current_identity[2]);
-  my $text = do { local $/; <$current> };
+  my $text = do { local $/; <$brief> };
   defined($text) or refuse("task brief could not be read");
-  close($current);
+  close($brief) or refuse("task brief could not be closed");
   my @delivery = ($text =~ /^Delivery contract: mode=(no-mistakes|direct-PR|local-only)$/mg);
   refuse("criteria can be added only to a ship task with one delivery contract") unless @delivery == 1;
   my @wanted = grep { length } split(/\n/, $ENV{FM_RECEIPT_ADD_CRITERIA} // "");
@@ -746,7 +741,6 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "add-criteria") {
 
 my $criterion = $arg1;
 my $parser = $arg2;
-flock($task_lock, LOCK_EX) or refuse("task evidence lock could not be acquired");
 sysopen(my $ledger, "evidence.jsonl", O_RDONLY | O_NOFOLLOW)
   or refuse("evidence ledger is missing or unsafe");
 my @ledger_identity = stat($ledger);
