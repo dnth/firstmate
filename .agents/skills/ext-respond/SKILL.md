@@ -142,6 +142,7 @@ Screen every file yourself before it can post; emit refuses any file without you
    - Under either rule, always refuse credentials and secrets: passwords, API keys, tokens, session cookies, auth headers, private keys, connection strings that carry credentials, and one-time codes, wherever they show, including address bars, terminals, dev tools, and notifications.
    - If the command refuses, the opt-in is misconfigured: post no media, and tell the captain the screening setting needs fixing.
 4. Record the verdict: `bin/fm-ext-media.sh screen <file> --verdict clear|refused --reason "<what you checked or found>"`; it records the rule in force with the verdict.
+   A clear verdict made under `private-server` stops posting once the home returns to `strict`; screen that file again under `strict` before posting it.
    Never record `clear` for a file you did not look at.
    A refused file does not post: ask the worker for a clean retake, or post without it and say the screenshot is withheld.
 
