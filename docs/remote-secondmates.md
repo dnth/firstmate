@@ -268,6 +268,7 @@ An SSH exit status of 255 always means transport failure or unknown remote compl
 The transport never retries automatically.
 Semantic callers preserve the route or pending request and require same-host reconciliation rather than resending an operation that may already have happened.
 An unavailable remote home is projected as unknown and is never replaced by a local second mate.
+The [secondmate beacon rule](supervision-protocols/omp.md) owns supervision of quiet remote endpoints and bounded handling of inconclusive probes; the [daemon header](../bin/fm-supervise-daemon.sh) owns away-mode owner-probe retries.
 
 ## Backlog handoff
 

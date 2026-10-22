@@ -1697,6 +1697,7 @@ SH
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
     FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_DEADLINE_CALLS="$deadline_calls" \
     FM_FAKE_REMOTE_BEACON_AGE=hang FM_WATCH_REMOTE_TIMEOUT=1 \
+    FM_REMOTE_INCONCLUSIVE_MAX=1 \
     FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -1792,7 +1793,8 @@ SH
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
     FM_FAKE_REMOTE_CALLS="$calls" FM_TEST_SENTINEL="$sentinel" \
     FM_FAKE_FALLBACK_MARKER="$fallback_marker" FM_FAKE_REAL_TIMEOUT="${real_timeout:-}" \
-    FM_WATCH_REMOTE_TIMEOUT=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_WATCH_REMOTE_TIMEOUT=1 FM_REMOTE_INCONCLUSIVE_MAX=1 \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_numeric_file "$state/.stale-since-$key" 180 \
@@ -1812,7 +1814,8 @@ SH
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
     FM_FAKE_REMOTE_CALLS="$calls" FM_TEST_SENTINEL="$sentinel" \
     FM_FAKE_FALLBACK_MARKER="$fallback_marker" FM_FAKE_REAL_TIMEOUT="${real_timeout:-}" \
-    FM_WATCH_REMOTE_TIMEOUT=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_WATCH_REMOTE_TIMEOUT=1 FM_REMOTE_INCONCLUSIVE_MAX=1 \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 60 || fail "$mode fallback did not reach wedge escalation"
@@ -3800,6 +3803,110 @@ test_idle_open_work_run_step_done_resumed_working_still_fires() {
   pass "resumed work after done still fires the probe"
 }
 
+# --- remote beacon probes: inconclusive evidence is not stale evidence -------
+
+# Shared fixture for the remote beacon-probe cases: a registered remote second
+# mate route, an idle pane, and a fake fm-on.sh whose behaviour follows
+# FM_FAKE_REMOTE_MODE (fresh, stale, once, or hang) while recording every probe
+# in <dir>/probe-calls.
+remote_probe_case() {  # <case-name>
+  local name=$1 dir state fakebin window sig
+  dir=$(make_case "$name")
+  state="$dir/state"; fakebin="$dir/fakebin"
+  window="remote:ios"
+  printf 'window=%s\nkind=secondmate\nremote_host=remote-mac\nhome=/remote/home\n' "$window" > "$state/remote.meta"
+  printf 'working: supervising remote crew\n' > "$state/remote.status"
+  sig=$(seen_sig "$state/remote.status")
+  printf '%s' "$sig" > "$state/.seen-remote_status"
+  cat > "$fakebin/fm-on.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+n=0
+if [ -f "$FM_FAKE_PROBE_COUNTER" ]; then IFS= read -r n < "$FM_FAKE_PROBE_COUNTER"; fi
+n=$((n + 1))
+printf '%s\n' "$n" > "$FM_FAKE_PROBE_COUNTER"
+case "$FM_FAKE_REMOTE_MODE" in
+  once) [ "$n" -eq 1 ] && sleep 30; printf '0\n' ;;
+  hang) sleep 30 ;;
+  stale) printf '500\n' ;;
+  fresh) printf '0\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/fm-on.sh"
+  printf '%s\n' "$dir"
+}
+
+# Starts the watcher as a direct child and records it in PROBE_WATCH_PID, so a
+# test can wait on its real exit status instead of an orphaned command-
+# substitution child.
+run_remote_probe_watch() {  # <dir> <out> [env assignments...]
+  local dir=$1 out=$2
+  shift 2
+  env PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="remote:ios" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_ON_BIN="$dir/fakebin/fm-on.sh" FM_FAKE_PROBE_COUNTER="$dir/probe-calls" \
+    FM_WATCH_REMOTE_TIMEOUT=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+  PROBE_WATCH_PID=$!
+}
+
+test_remote_inconclusive_probe_is_absorbed_then_fresh() {
+  local dir state out pid i key h probes
+  dir=$(remote_probe_case remote-inconclusive-absorbed)
+  state="$dir/state"; out="$dir/watch.out"
+  key=$(printf '%s' 'remote:ios' | tr '.:/' '___')
+  # Prime the pane tracker the way a long-running watcher holds it after one
+  # earlier stable sighting: without the fix, this single timeout is enough for
+  # the next poll to reach the stale verdict and wake firstmate. The probe then
+  # answers a fresh age, so no part of this sequence is stale evidence.
+  h=$(hash_text "secondmate watcher beacon missing or stale: remote:ios")
+  printf '%s' "$h" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  run_remote_probe_watch "$dir" "$out" FM_FAKE_REMOTE_MODE=once
+  pid=$PROBE_WATCH_PID
+  for i in 1 2 3; do
+    wait_poll_cycle "$state" "$pid" 300 \
+      || { reap "$pid"; fail "watcher stopped after one inconclusive remote probe: $(cat "$out")"; }
+  done
+  kill -0 "$pid" 2>/dev/null \
+    || { reap "$pid"; fail "one inconclusive remote probe raised a stale wake: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "one inconclusive remote probe printed a wake reason: $(cat "$out")"; }
+  [ ! -e "$state/.stale-$key" ] \
+    || { reap "$pid"; fail "one inconclusive remote probe recorded a stale verdict"; }
+  [ ! -e "$state/.remote-inconclusive-$key" ] \
+    || { reap "$pid"; fail "a later fresh age did not reset the inconclusive probe count"; }
+  probes=$(cat "$dir/probe-calls" 2>/dev/null || echo 0)
+  [ "$probes" -ge 2 ] \
+    || { reap "$pid"; fail "the remote probe was not retried after its deadline"; }
+  reap "$pid"
+  pass "an inconclusive remote probe is absorbed and a later fresh age clears it"
+}
+
+test_remote_stale_age_and_inconclusive_bound_escalate() {
+  local dir state out pid probes
+  # A conclusive stale beacon age is its own evidence and still escalates.
+  dir=$(remote_probe_case remote-conclusive-stale)
+  state="$dir/state"; out="$dir/watch.out"
+  run_remote_probe_watch "$dir" "$out" FM_FAKE_REMOTE_MODE=stale
+  pid=$PROBE_WATCH_PID
+  wait_for_exit "$pid" 90 || { reap "$pid"; fail "a conclusive stale beacon age did not escalate: $(cat "$out")"; }
+  grep -F "stale: remote:ios" "$out" >/dev/null \
+    || fail "a conclusive stale beacon age omitted the stale wake"
+
+  # Consecutive inconclusive probes escalate only once the documented bound is met.
+  dir=$(remote_probe_case remote-inconclusive-bound)
+  state="$dir/state"; out="$dir/watch.out"
+  run_remote_probe_watch "$dir" "$out" FM_FAKE_REMOTE_MODE=hang FM_REMOTE_INCONCLUSIVE_MAX=3
+  pid=$PROBE_WATCH_PID
+  wait_for_exit "$pid" 120 || { reap "$pid"; fail "three consecutive inconclusive probes never escalated: $(cat "$out")"; }
+  grep -F "stale: remote:ios" "$out" >/dev/null \
+    || fail "the inconclusive-probe bound did not raise a stale wake"
+  probes=$(cat "$dir/probe-calls" 2>/dev/null || echo 0)
+  [ "$probes" -ge 3 ] || fail "stale escalation preceded the documented 3-probe bound ($probes probes)"
+  pass "a conclusive stale age escalates, and 3 consecutive inconclusive probes escalate at the bound"
+}
+
 test_stop_pid_ends_a_term_immune_child
 test_signal_reason_is_actionable_classifier
 test_done_artifact_requires_exact_markers
@@ -3846,6 +3953,8 @@ test_live_declared_wait_churn_honors_the_resurface_throttle
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_remote_secondmate_beacon_is_bounded
+test_remote_inconclusive_probe_is_absorbed_then_fresh
+test_remote_stale_age_and_inconclusive_bound_escalate
 test_remote_deadline_gtimeout_fallback
 test_remote_deadline_perl_process_group_fallback
 test_secondmate_stale_supervisor_beacon_escalates
