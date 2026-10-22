@@ -6,10 +6,11 @@
 # placeholder with the task description, concrete outcomes, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--orchestrate]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--orchestrate] [--screen-change]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #        fm-brief.sh --render-ship-delivery <task-id> <no-mistakes|direct-PR|local-only>
+#        fm-brief.sh --mark-screen-change <task-id>
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -55,7 +56,7 @@
 # When the repo argument resolves to a directory whose git common dir equals
 # this code root's git common dir (any worktree of it counts), the ship scaffold
 # appends reserved criterion AC99 as the section's last line; keep it and use
-# AC1..AC98 for task criteria. projects/<name> resolves under FM_HOME; unresolved
+# AC1..AC96 for task criteria. projects/<name> resolves under FM_HOME; unresolved
 # names, non-git directories, and other repos get no extra criterion.
 # AC99 requires bin/fm-test-run.sh --changed green and
 # FM_LINT_JOBS=1 bin/fm-lint.sh clean, recorded as an evidence line naming the
@@ -63,6 +64,16 @@
 # is required; broad regression is owned by the PR GitHub CI per .no-mistakes.yaml.
 # For local-only, AC99 drops the CI clause and binds the branch-head evidence to
 # reporting "ready in branch".
+# --screen-change marks a ship task whose change alters what a screen shows:
+# the scaffold also declares reserved criteria AC97 ("Screen change before:")
+# and AC98 ("Screen change after:"), each satisfied only by a success receipt
+# whose --artifact names a PNG, JPEG, GIF, or WebP screenshot copied under
+# data/<task-id>/artifacts/; bin/fm-receipt-check.sh enforces that, so the task
+# cannot reach PR-ready without both screenshots. --mark-screen-change adds the
+# same two criteria to an existing ship brief through bin/fm-receipt-store.sh
+# add-criteria, so Firstmate or the worker can mark a screen change found after
+# dispatch; it is idempotent and refuses when AC97 or AC98 already means
+# something else. Every ship brief tells its worker when to run it.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -161,6 +172,7 @@ Run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id\` and do not append \`done:\` un
 The latest receipt per criterion decides it: when a finding or a later test shows a criterion unsatisfied, record a \`--outcome failure\` receipt for it, fix, and record a fresh \`--outcome success\`.
 Receipts establish that you accounted for every declared criterion; they certify nothing about review, CI, No-Mistakes completion, or merge readiness, so keep summaries and results compact and point to commands or artifacts when useful.
 When a cited artifact lives inside this scratch worktree (for example \`.qa/evidence/<run_id>/report.json\`), copy it into \`$artifact_dir/\` (gitignored, survives teardown) before \`done:\` and cite the copied path; worktree-relative paths die with the worktree.
+If your change alters what any screen shows and the acceptance criteria above have no \`Screen change before:\` and \`Screen change after:\` lines, run \`$FM_ROOT/bin/fm-brief.sh --mark-screen-change $task_id\` to add them; each is satisfied only by a success receipt whose \`--artifact\` names a PNG, JPEG, GIF, or WebP screenshot copied into \`$artifact_dir/\`.
 
 EOF
   case "$delivery_mode" in
@@ -217,10 +229,30 @@ EOF
   esac
 }
 
+# The reserved screen-change criteria, one owner for their exact text: the
+# scaffold flag and --mark-screen-change both print them from here, and
+# bin/fm-receipt-check.sh recognizes them by their "Screen change before:" and
+# "Screen change after:" prefixes.
+screen_change_criteria() {
+  local task_id=$1
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks are literal brief text
+  printf -- '- AC97: Screen change before: a screenshot of the affected screen before this change, copied under `data/%s/artifacts/` and recorded as this criterion'"'"'s success receipt with `--artifact` naming that PNG, JPEG, GIF, or WebP copy.\n' "$task_id"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks are literal brief text
+  printf -- '- AC98: Screen change after: a screenshot of the same screen after this change, copied under `data/%s/artifacts/` and recorded as this criterion'"'"'s success receipt with `--artifact` naming that PNG, JPEG, GIF, or WebP copy.\n' "$task_id"
+}
+
 if [ "${1:-}" = --render-ship-delivery ]; then
   [ "$#" -eq 3 ] || { echo "error: --render-ship-delivery requires <task-id> <mode>" >&2; exit 1; }
   case "$2" in ''|.|..|*[!A-Za-z0-9._-]*|[._-]*) echo "error: invalid task id: $2" >&2; exit 1 ;; esac
   render_ship_delivery "$2" "$3"
+  exit $?
+fi
+
+if [ "${1:-}" = --mark-screen-change ]; then
+  [ "$#" -eq 2 ] || { echo "error: --mark-screen-change requires <task-id>" >&2; exit 1; }
+  case "$2" in ''|.|..|*[!A-Za-z0-9._-]*|[._-]*) echo "error: invalid task id: $2" >&2; exit 1 ;; esac
+  FM_RECEIPT_ADD_CRITERIA=$(screen_change_criteria "$2") \
+    "$FM_ROOT/bin/fm-receipt-store.sh" "$2" add-criteria "$FM_ROOT/bin/fm-receipt-check.sh"
   exit $?
 fi
 
@@ -239,6 +271,7 @@ KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
 ORCHESTRATE=0
+SCREEN_CHANGE=0
 MODE=
 MODE_SET=0
 POS=()
@@ -260,6 +293,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --orchestrate) ORCHESTRATE=1 ;;
+    --screen-change) SCREEN_CHANGE=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -299,6 +333,11 @@ fi
 
 if [ "$ORCHESTRATE" -eq 1 ] && [ "$KIND" != ship ]; then
   echo "error: --orchestrate applies only to ship briefs; a scout delivers a report and a secondmate is not a delivery task" >&2
+  exit 1
+fi
+
+if [ "$SCREEN_CHANGE" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --screen-change applies only to ship briefs; a scout or secondmate has no acceptance criteria to mark" >&2
   exit 1
 fi
 
@@ -476,7 +515,7 @@ repo_is_firstmate_code_root() {
   [ -n "$dir_common" ] && [ -n "$root_common" ] && [ "$dir_common" = "$root_common" ]
 }
 
-# Reserved acceptance criterion, appended last so task criteria AC1..AC98 never
+# Reserved acceptance criterion, appended last so task criteria AC1..AC96 never
 # collide. The wording follows .no-mistakes.yaml: targeted local verification,
 # CI owns broad regression, no local full-suite run.
 FIRSTMATE_VERIFICATION_AC=
@@ -491,6 +530,10 @@ if repo_is_firstmate_code_root "$REPO"; then
       FIRSTMATE_VERIFICATION_AC='- AC99: changed tests green via `bin/fm-test-run.sh --changed` and `FM_LINT_JOBS=1 bin/fm-lint.sh` clean, recorded as an evidence line naming the branch head before the implementation-complete report; no local full-suite run is required; broad regression is owned by the PR GitHub CI per .no-mistakes.yaml.'
       ;;
   esac
+fi
+SCREEN_CHANGE_AC=
+if [ "$SCREEN_CHANGE" -eq 1 ]; then
+  SCREEN_CHANGE_AC=$(screen_change_criteria "$ID")
 fi
 
 if [ "$HERDR_LAB" -eq 1 ]; then
@@ -636,7 +679,8 @@ ${ORCHESTRATION_FRONTMATTER:+$ORCHESTRATION_FRONTMATTER}You are a crewmate: an a
 {TASK}
 
 # Acceptance criteria
-- AC1: {ACCEPTANCE CRITERION}${FIRSTMATE_VERIFICATION_AC:+
+- AC1: {ACCEPTANCE CRITERION}${SCREEN_CHANGE_AC:+
+$SCREEN_CHANGE_AC}${FIRSTMATE_VERIFICATION_AC:+
 $FIRSTMATE_VERIFICATION_AC}
 
 ${ORCHESTRATION_SECTION:+$ORCHESTRATION_SECTION}$HERDR_SECTION
@@ -703,8 +747,7 @@ if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
   exit 1
 fi
 BRIEF_COMMITTED=1
-if [ -n "$FIRSTMATE_VERIFICATION_AC" ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and every {ACCEPTANCE CRITERION}; AC99 is pre-filled with the firstmate verification criterion and must be kept)"
-else
-  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and every {ACCEPTANCE CRITERION})"
-fi
+SCAFFOLD_NOTES=
+[ -z "$SCREEN_CHANGE_AC" ] || SCAFFOLD_NOTES="; AC97 and AC98 are the screen-change screenshot criteria and must be kept"
+[ -z "$FIRSTMATE_VERIFICATION_AC" ] || SCAFFOLD_NOTES="$SCAFFOLD_NOTES; AC99 is pre-filled with the firstmate verification criterion and must be kept"
+echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and every {ACCEPTANCE CRITERION}$SCAFFOLD_NOTES)"

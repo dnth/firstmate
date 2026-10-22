@@ -5,7 +5,8 @@ description: >-
   Use on an "ext-request <slug>" check wake or a drain's "EXT REQUESTS AWAITING ANSWER" section to drain the local inbox, classify,
   act through the normal lifecycle, emit ack/answer/follow-up/final into the
   local outbox, and link spawned work; also load before opening a Discord topic
-  thread that no captain request started.
+  thread that no captain request started, and before attaching screenshots or
+  a recording to a post, including when screen-changing work reaches the captain for review.
   Loaded only when the sibling local ext-bridge is enabled.
 user-invocable: false
 metadata:
@@ -114,6 +115,35 @@ To post about a tracked item no captain request started, open its own thread wit
 - Post later updates with `bin/fm-ext-emit.sh --request-id <request_id> --kind followup|final --generation <n>`, starting at generation 1, with thread states as for any thread.
 - `--lookup` also shows whether the first message posted; a failure there names the missing permission or refusal, which goes to the captain as a blocker.
 - Captain replies inside the thread arrive as ordinary requests and follow the procedure below.
+
+## Post screenshots and recordings
+
+Only Firstmate posts media, by attaching files to its own posts; workers save screenshots as evidence and never post to Discord.
+The [outbound media reference](../../../docs/configuration.md#outbound-media) owns limits, delivery, and retention, and the [`bin/fm-ext-media.sh` header](../../../bin/fm-ext-media.sh) owns the commands.
+
+- **When** - post the before and after screenshots automatically when screen-changing work reaches the captain for review: a PR-ready or ready-in-branch report for a task whose brief carries the `Screen change before:` and `Screen change after:` criteria.
+  Otherwise post media only when the captain asks.
+  Make or post a recording only on request; images are the default.
+
+- **Where** - post into the work's own linked thread: emit a `followup` or `final` with the next generation on the `ext_request=` recorded in the task's metadata.
+  Work with no linked thread gets a new `<Project> · <topic> review` thread through `bin/fm-ext-open.sh --media`, keyed by the task's board id.
+
+- **Which files** - use the screenshots the worker recorded as receipt artifacts under `data/<task-id>/artifacts/`, or files in its worktree's `.qa/evidence/` folder.
+  For a remote Mac second mate's work, first copy each file back with `bin/fm-ext-media.sh pull <secondmate-id> data/<task-id>/artifacts/<file>` and use the printed local path.
+  A post carries at most 4 images and 1 video; leave the rest in the work's report and say so in the text.
+
+Screen every file yourself before it can post; emit refuses any file without your recorded clear verdict on its exact content.
+
+1. Open each image with the read tool and look at all of it; crop or zoom into small or dense text rather than skimming it.
+2. For a video, run `bin/fm-ext-media.sh frames <video>` and look at every frame it prints the same way.
+3. Refuse anything that shows client or customer data, people's personal details, hostnames, IP addresses, internal URLs or domains, file paths, branch names, task ids, tokens, keys, passwords, or other secrets, including in address bars, tab titles, terminal prompts, and notifications.
+4. Record the verdict: `bin/fm-ext-media.sh screen <file> --verdict clear|refused --reason "<what you checked or found>"`.
+   Never record `clear` for a file you did not look at.
+   A refused file does not post: ask the worker for a clean retake, or post without it and say the screenshot is withheld.
+
+- **Post** - add each screened file with `--media <file>` to the emit (or open) call; the text must not name any file or path.
+  An oversized video is refused rather than re-encoded: post without it and say the recording was too large.
+  If an upload fails, the poster posts the text with a short note and never posts twice, so do not re-emit.
 
 ## Acknowledge first, act, then follow up
 

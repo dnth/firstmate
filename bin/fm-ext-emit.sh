@@ -5,9 +5,18 @@
 #   fm-ext-emit.sh --request-id discord:<guild>:<channel>:<thread>:<message>
 #     --kind ack|answer|followup|final --generation <n>
 #     (--text-file <path> | --text-file -) [--decision-file <path>]
-#     [--no-buttons "<reason>"]
+#     [--no-buttons "<reason>"] [--media <path>]...
 #     [--thread-title <text>] [--thread-retitle <text>]
 #     [--thread-state needs-you|done|none]
+#
+# --media attaches one screened image or short video to an answer, followup,
+# or final; repeat it for up to 4 images and 1 video. bin/fm-ext-media.sh
+# stage copies each file privately under a generic name, and its header owns
+# the accepted sources, types, size and length limits, downscaling, and the
+# screening attestation every file needs; any refusal there refuses the whole
+# emit before anything is published. The text must not name a media file's
+# path or filename. docs/configuration.md "Outbound media" owns delivery,
+# the failure note, and retention.
 #
 # To ask the captain a choice, use bin/fm-ext-ask.sh: it holds the call, writes
 # the decision file, numbers the options in the text, and posts through this
@@ -100,7 +109,7 @@ usage() {
 usage: fm-ext-emit.sh --request-id discord:<guild>:<channel>:<thread>:<message>
          --kind ack|answer|followup|final --generation <n>
          (--text-file <path> | --text-file -) [--decision-file <path>]
-         [--no-buttons "<reason>"]
+         [--no-buttons "<reason>"] [--media <path>]...
          [--thread-title <text>] [--thread-retitle <text>]
          [--thread-state needs-you|done|none]
 EOF
@@ -122,6 +131,7 @@ NO_BUTTONS_SET=
 THREAD_TITLE=
 THREAD_RETITLE=
 THREAD_STATE=
+MEDIA_PATHS=()
 
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
@@ -139,6 +149,7 @@ while [ "$#" -gt 0 ]; do
     --thread-title) shift; THREAD_TITLE=${1:-} ;;
     --thread-retitle) shift; THREAD_RETITLE=${1:-} ;;
     --thread-state) shift; THREAD_STATE=${1:-} ;;
+    --media) shift; [ -n "${1:-}" ] || die "--media needs a file path"; MEDIA_PATHS+=("$1") ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -173,6 +184,12 @@ if [ -n "$DECISION_FILE" ]; then
   case "$KIND" in
     answer|followup|final) ;;
     *) die "a decision can only post with an answer, followup, or final" ;;
+  esac
+fi
+if [ "${#MEDIA_PATHS[@]}" -gt 0 ]; then
+  case "$KIND" in
+    answer|followup|final) ;;
+    *) die "media attaches only to an answer, followup, or final" ;;
   esac
 fi
 if [ -n "$NO_BUTTONS_SET" ]; then
@@ -224,6 +241,14 @@ if [ -z "$DECISION_FILE" ] && [ -z "$NO_BUTTONS_SET" ]; then
       ;;
   esac
 fi
+
+# Public safety: Discord only ever sees generic media names, so the text must
+# not name a media file's path or filename either.
+for media_path in ${MEDIA_PATHS[@]+"${MEDIA_PATHS[@]}"}; do
+  if printf '%s\n' "$TEXT" | grep -qiF -e "$media_path" -e "${media_path##*/}"; then
+    die "the text names a media file's path or filename; Discord only ever sees generic media names"
+  fi
+done
 
 CTX=
 if fm_ext_private_artifact_file_valid "$CONTEXT_DIR" "$SLUG.json" 600; then
@@ -346,6 +371,16 @@ if [ -n "$DECISION_FILE" ]; then
   ' "$DECISION_FILE") || die "could not build the decision payload" 1
 fi
 
+# Media is staged last, after every other refusal, so a refused emit stages
+# nothing; fm-ext-media.sh prints its own refusal.
+MEDIA_JSON=null
+MEDIA_STAGED=
+if [ "${#MEDIA_PATHS[@]}" -gt 0 ]; then
+  MEDIA_JSON=$(bash "$SCRIPT_DIR/fm-ext-media.sh" stage --slug "$SLUG" --kind "$KIND" \
+    --generation "$GENERATION" -- "${MEDIA_PATHS[@]}") || exit $?
+  MEDIA_STAGED="$(fm_ext_media_dir)/staged/$(printf '%s' "$MEDIA_JSON" | jq -r '.dir')"
+fi
+
 OUTBOX_JSON=$(jq -cn \
   --argjson schema_version "$FM_EXT_SCHEMA_VERSION" \
   --arg request_id "$REQUEST_ID" \
@@ -365,6 +400,7 @@ OUTBOX_JSON=$(jq -cn \
   --arg thread_state "$THREAD_STATE" \
   --arg no_buttons "$NO_BUTTONS" \
   --argjson decision "$DECISION_JSON" \
+  --argjson media "$MEDIA_JSON" \
   --argjson recorded_at "$NOW" \
   '{schema_version:$schema_version, request_id:$request_id, slug:$slug,
     kind:$kind, generation:$generation, platform:$platform, source:$source,
@@ -375,12 +411,18 @@ OUTBOX_JSON=$(jq -cn \
    + if $thread_retitle == "" then {} else {thread_retitle:$thread_retitle} end
    + if $thread_state == "" then {} else {thread_state:$thread_state} end
    + if $no_buttons == "" then {} else {no_buttons_reason:$no_buttons} end
-   + if $decision == null then {} else {decision:$decision} end') \
+   + if $decision == null then {} else {decision:$decision} end
+   + if $media == null then {} else {media:$media} end') \
   || die "could not build the outbox payload" 1
 
 printf '%s\n' "$OUTBOX_JSON" \
   | fm_ext_private_artifact_publish_stdin_once "$OUTBOX" "$PAYLOAD" 600
-case $? in
+PUBLISH_RC=$?
+# Only a payload this emit published can ever name this staged copy.
+if [ "$PUBLISH_RC" != 0 ] && [ -n "$MEDIA_STAGED" ]; then
+  rm -rf -- "$MEDIA_STAGED"
+fi
+case "$PUBLISH_RC" in
   0|1)
     if ! fm_ext_outbox_schema_valid "$OUTBOX/$PAYLOAD"; then
       die "published outbox payload failed schema validation" 1

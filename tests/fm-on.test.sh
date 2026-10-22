@@ -111,7 +111,8 @@ SH
 # the hosts where herdr resolved, so its doctor assertions passed or failed by
 # accident of the runner's herdr install rather than by the transport's own
 # behavior.
-cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" "$REMOTE_ROOT/bin/"
+cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
+  "$ROOT/bin/fm-remote-file.sh" "$ROOT/bin/fm-wake-lib.sh" "$REMOTE_ROOT/bin/"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'mutation\n' >> "$1"
@@ -554,6 +555,32 @@ set -e
 [ "$(cat "$SSH_COUNT")" -eq 1 ] || fail "ambiguous completion was retried"
 [ "$(grep -c mutation "$REMOTE_HOME/mutations")" -eq 1 ] || fail "ambiguous mutation did not execute exactly once"
 pass "unreachable and ambiguous transport failures are surfaced without retry"
+
+# A screenshot larger than the remote job's 1 MiB output bound still copies
+# back: sum sizes and hashes it whole, ranged gets return bounded pieces
+# through the real entrypoint and job worker, and a whole-file or oversized
+# piece request is refused instead of overrunning the bound.
+mkdir -p "$REMOTE_HOME/data/shots"
+head -c 1572864 /dev/urandom > "$REMOTE_HOME/data/shots/big.png"
+BIG_SUM=$(fm_on ios fm-remote-file.sh sum data/shots/big.png 33554432 < /dev/null)
+EXPECTED_SUM="1572864 $(sha256sum "$REMOTE_HOME/data/shots/big.png" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$REMOTE_HOME/data/shots/big.png" | awk '{print $1}')"
+[ "$BIG_SUM" = "$EXPECTED_SUM" ] || fail "remote sum did not report the file's size and digest (got $BIG_SUM)"
+fm_on ios fm-remote-file.sh get data/shots/big.png 33554432 0 786432 < /dev/null > "$TMP_ROOT/piece-1"
+fm_on ios fm-remote-file.sh get data/shots/big.png 33554432 786432 786432 < /dev/null > "$TMP_ROOT/piece-2"
+cat "$TMP_ROOT/piece-1" "$TMP_ROOT/piece-2" | cmp -s - "$REMOTE_HOME/data/shots/big.png" \
+  || fail "ranged remote reads did not reassemble the file byte for byte"
+set +e
+fm_on ios fm-remote-file.sh get data/shots/big.png 33554432 < /dev/null > /dev/null 2> "$TMP_ROOT/whole-get.err"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a whole-file get past the job output bound was accepted"
+assert_grep 'exceeds the 1048576-byte safety bound' "$TMP_ROOT/whole-get.err" "whole-file get refusal was unclear"
+set +e
+fm_on ios fm-remote-file.sh get data/shots/big.png 33554432 0 1048577 < /dev/null > /dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a ranged piece past the job output bound was accepted"
+pass "a file past the job output bound copies back as sized, hashed, bounded ranged reads"
 
 # Regression guard for the EXIT-trap cleanup: fixture removal must wait out a
 # recorded worker whose TERM shutdown still writes inside

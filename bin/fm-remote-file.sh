@@ -3,10 +3,18 @@
 #
 # Usage:
 #   fm-remote-file.sh get <relative-path> [max-bytes]
+#   fm-remote-file.sh get <relative-path> <max-bytes> <offset> <length>
+#   fm-remote-file.sh sum <relative-path> <max-bytes>
 #   fm-remote-file.sh put state/handoff/<id>.outbox.md <max-bytes> <bytes> <sha256> <generation>
 #
 # A get path is relative to FM_HOME, must resolve through ordinary directories
 # to one non-symlink regular file inside that home, and is bounded before output.
+# A whole-file get and put stay within 1048576 bytes, the remote job's output
+# bound. A ranged get prints at most <length> (at most 1048576) bytes starting
+# at <offset> of a file of at most <max-bytes> (at most 33554432), and sum
+# prints "<bytes> <sha256>" for such a file, so a larger file such as a
+# screenshot is copied in bounded pieces and checked whole
+# (bin/fm-ext-media.sh pull).
 # Put is deliberately narrower: it atomically replaces only a backlog handoff
 # scratch file under state/handoff. There is no delete operation and no generic
 # write path; the receiving command owns scratch cleanup after committed ingest.
@@ -20,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
 }
@@ -40,8 +48,8 @@ resolve_file() { # <relative-path>
   printf '%s\n' "$path"
 }
 
-snapshot_bounded_file() { # <file> <max-bytes> <destination> <size-file>
-  local file=$1 max=$2 destination=$3 size_file=$4 parent base actual_parent
+snapshot_bounded_file() { # <file> <max-bytes> <destination> <size-file> [<offset> <length>]
+  local file=$1 max=$2 destination=$3 size_file=$4 offset=${5:-0} length=${6:-} parent base actual_parent
   parent=$(dirname "$file")
   base=$(basename "$file")
   (
@@ -49,20 +57,25 @@ snapshot_bounded_file() { # <file> <max-bytes> <destination> <size-file>
     actual_parent=$(pwd -P) || exit 3
     [ "$actual_parent" = "$parent" ] || exit 3
     perl -MFcntl=:DEFAULT -e '
-      my ($path, $max, $destination, $size_file) = @ARGV;
+      my ($path, $max, $destination, $size_file, $offset, $length) = @ARGV;
       sysopen(my $source, $path, O_RDONLY | O_NOFOLLOW) or exit 3;
       my @stat = stat $source or exit 3;
       exit 3 unless -f _;
       my $size = $stat[7];
       exit 3 unless $size =~ /\A\d+\z/;
       exit 4 if $size > $max;
+      exit 6 if $offset > $size;
+      my $remaining = $size - $offset;
+      $remaining = $length if length($length) && $length < $remaining;
       open(my $output, ">", $destination) or exit 5;
       binmode $source;
       binmode $output;
-      my $remaining = $size;
+      if ($offset > 0) {
+        sysseek($source, $offset, 0) or exit 5;
+      }
       while ($remaining > 0) {
         my $wanted = $remaining > 65536 ? 65536 : $remaining;
-        my $read = read($source, my $buffer, $wanted);
+        my $read = sysread($source, my $buffer, $wanted);
         exit 5 unless defined $read && $read > 0;
         print {$output} $buffer or exit 5;
         $remaining -= $read;
@@ -71,7 +84,7 @@ snapshot_bounded_file() { # <file> <max-bytes> <destination> <size-file>
       open(my $size_output, ">", $size_file) or exit 5;
       print {$size_output} "$size\n" or exit 5;
       close $size_output or exit 5;
-    ' "$base" "$max" "$destination" "$size_file"
+    ' "$base" "$max" "$destination" "$size_file" "$offset" "$length"
   )
 }
 
@@ -174,26 +187,50 @@ COMMAND=${1:-}
 REL=$2
 MAX=${3:-$MAX_DEFAULT}
 case "$MAX" in ''|*[!0-9]*|0) die "max-bytes must be a positive integer" ;; esac
-[ "$MAX" -le 1048576 ] || die "max-bytes exceeds the 1048576-byte safety bound"
+[ "${#MAX}" -le 10 ] || die "max-bytes is out of range"
+OFFSET=
+LENGTH=
+MAX_BOUND=1048576
+case "$COMMAND:$#" in
+  get:5)
+    OFFSET=$4
+    LENGTH=$5
+    case "$OFFSET" in ''|*[!0-9]*) die "offset must be a nonnegative integer" ;; esac
+    case "$LENGTH" in ''|*[!0-9]*|0) die "length must be a positive integer" ;; esac
+    [ "${#OFFSET}" -le 10 ] && [ "${#LENGTH}" -le 10 ] || die "offset or length is out of range"
+    [ "$LENGTH" -le 1048576 ] || die "length exceeds the 1048576-byte safety bound"
+    MAX_BOUND=33554432
+    ;;
+  sum:3) MAX_BOUND=33554432 ;;
+esac
+[ "$MAX" -le "$MAX_BOUND" ] || die "max-bytes exceeds the $MAX_BOUND-byte safety bound"
 case "$COMMAND" in
-  get)
-    [ "$#" -le 3 ] || usage
+  get|sum)
+    case "$COMMAND:$#" in
+      get:2|get:3|get:5|sum:3) ;;
+      *) usage ;;
+    esac
     FILE=$(resolve_file "$REL")
     TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-file.XXXXXX") \
       || die "cannot create file staging directory"
     trap 'rm -rf -- "$TMP"' EXIT
-    if snapshot_bounded_file "$FILE" "$MAX" "$TMP/file" "$TMP/size"; then
+    if snapshot_bounded_file "$FILE" "$MAX" "$TMP/file" "$TMP/size" "${OFFSET:-0}" "$LENGTH"; then
       BYTES=$(tr -d ' ' < "$TMP/size")
     else
       rc=$?
       case "$rc" in
         3) die "file changed into an unsafe file: $REL" ;;
         4) die "file exceeds max-bytes: $REL" ;;
+        6) die "offset is past the end of the file: $REL" ;;
         *) die "file could not be captured safely: $REL" ;;
       esac
     fi
     [ "$BYTES" -le "$MAX" ] || die "file exceeds max-bytes: $REL"
-    cat "$TMP/file"
+    if [ "$COMMAND" = sum ]; then
+      printf '%s %s\n' "$BYTES" "$(sha256_file "$TMP/file")"
+    else
+      cat "$TMP/file"
+    fi
     ;;
   put)
     [ "$#" -eq 6 ] || usage

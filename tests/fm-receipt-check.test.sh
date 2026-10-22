@@ -413,6 +413,51 @@ EOF
   pass "fm-receipt-check pins task evidence and rejects hard-linked ledgers"
 }
 
+# A screen-change task cannot reach PR-ready without before and after
+# screenshots: its two criteria count only with an image artifact under the
+# task's own artifacts folder, at record time and at check time alike.
+test_screen_change_criteria_need_screenshot_artifacts() {
+  local id=screen-change art out rc bad
+  write_brief "$id" no-mistakes
+  out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" --mark-screen-change "$id") \
+    || fail "marking a screen change must work"
+  [ "$out" = "added AC97 AC98" ] || fail "marking must add both criteria (got: $out)"
+  add_receipt "$id" AC1 test passed
+  add_receipt "$id" AC2 lint passed
+  check_json "$id" 1 '.status == "missing" and .missing == ["AC97", "AC98"]' "a marked task without screenshots"
+
+  art="$HOME_DIR/data/$id/artifacts"
+  mkdir -p "$art" "$TMP_ROOT/elsewhere"
+  printf '\211PNG\r\n\032\nbefore' > "$art/before.png"
+  printf '\211PNG\r\n\032\noutside' > "$TMP_ROOT/elsewhere/before.png"
+  printf 'plain text' > "$art/notes.txt"
+  ln -s "$art/before.png" "$art/linked.png"
+  out=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC97 manual "before shot" taken --outcome success 2>&1); rc=$?
+  expect_code 1 "$rc" "a screen-change success without an artifact"
+  assert_contains "$out" "AC97 is a screen-change criterion" "the refusal must say why"
+  for bad in "$TMP_ROOT/elsewhere/before.png" "$art/notes.txt" "$art/linked.png" "$art/../artifacts/before.png"; do
+    FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC97 manual "before shot" taken --outcome success --artifact "$bad" >/dev/null 2>&1
+    rc=$?
+    expect_code 1 "$rc" "a screen-change success with artifact $bad"
+  done
+  # A failure receipt needs no screenshot; only success is gated.
+  add_receipt "$id" AC98 manual "not taken yet" failure
+
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC97 manual "before shot" taken --outcome success \
+    --artifact "$art/before.png" >/dev/null || fail "a screenshot under the artifacts folder must evidence AC97"
+  # A success that bypassed the recorder still evidences nothing without a screenshot.
+  printf '{"criterion":"AC98","type":"manual","outcome":"success","summary":"after","result":"taken"}\n' \
+    >> "$HOME_DIR/data/$id/evidence.jsonl"
+  check_json "$id" 1 '.missing == ["AC98"] and .evidenced == ["AC1", "AC2", "AC97"]' "an artifact-less screen-change success"
+  printf '\377\330\377\340after' > "$art/after.jpg"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC98 manual "after shot" taken --outcome success \
+    --artifact "$art/after.jpg" >/dev/null || fail "a JPEG screenshot must evidence AC98"
+  check_json "$id" 0 '.status == "complete"' "a marked task with both screenshots"
+  rm -f "$art/after.jpg"
+  check_json "$id" 1 '.missing == ["AC98"]' "a screenshot deleted after its receipt"
+  pass "screen-change criteria count only with screenshot artifacts under the task's artifacts folder"
+}
+
 test_checker_never_consults_no_mistakes() {
   [ ! -s "$NM_CALL_LOG" ] || fail "the receipt checker invoked no-mistakes: $(cat "$NM_CALL_LOG")"
   pass "receipt accounting never consults No-Mistakes"
@@ -432,3 +477,4 @@ test_early_snapshot_failure_does_not_block_cleanup
 test_readiness_publication_failure_is_terminal
 test_pinned_checker_rejects_redirected_and_linked_evidence
 test_checker_never_consults_no_mistakes
+test_screen_change_criteria_need_screenshot_artifacts

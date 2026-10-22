@@ -338,8 +338,10 @@ mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
 orchestrate on a scout brief|brief-refused-b5 some-proj --scout --orchestrate|--orchestrate applies only to ship briefs
 orchestrate on a secondmate charter|brief-refused-b6 --secondmate --no-projects --orchestrate|--orchestrate applies only to ship briefs
+screen change on a scout brief|brief-refused-b7 some-proj --scout --screen-change|--screen-change applies only to ship briefs
+screen change on a secondmate charter|brief-refused-b8 --secondmate --no-projects --screen-change|--screen-change applies only to ship briefs
 ROWS
-  pass "fm-brief.sh: --yolo, scout/secondmate --mode, and non-ship --orchestrate are refused, never silently dropped"
+  pass "fm-brief.sh: --yolo, scout/secondmate --mode, and non-ship --orchestrate or --screen-change are refused, never silently dropped"
 }
 
 # The opt-in marker is explicit task data: a ship brief carries
@@ -1142,6 +1144,55 @@ test_firstmate_repo_ship_brief_prefills_verification_criterion() {
   pass "fm-brief.sh: firstmate-repo ship briefs pre-fill AC99, other repos stay unchanged"
 }
 
+# A screen-change task cannot reach PR-ready without before and after
+# screenshots: the flag declares the two reserved criteria the receipt check
+# enforces, and --mark-screen-change adds the same two lines to a brief that was
+# scaffolded without it, once, without overriding a task's own AC97 or AC98.
+test_screen_change_criteria_are_declared_and_markable() {
+  local home brief out status before
+  home="$TMP_ROOT/screen-change-home"
+  mkdir -p "$home/data" "$home/state"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-screen-s1 "$ROOT" --mode no-mistakes --screen-change 2>&1); status=$?
+  expect_code 0 "$status" "a --screen-change ship brief should scaffold"
+  assert_contains "$out" "AC97 and AC98 are the screen-change screenshot criteria" \
+    "the scaffold did not announce the screen-change criteria"
+  brief="$home/data/brief-screen-s1/brief.md"
+  assert_grep '- AC97: Screen change before: ' "$brief" "the marked brief lacks the before criterion"
+  assert_grep '- AC98: Screen change after: ' "$brief" "the marked brief lacks the after criterion"
+  [ "$(grep -oE '^- AC[0-9]+' "$brief" | tail -1)" = "- AC99" ] \
+    || fail "AC99 must stay the last criterion in a marked firstmate brief"
+  sed -i.bak 's/{ACCEPTANCE CRITERION}/the change works/' "$brief"
+  "$ROOT/bin/fm-receipt-check.sh" --parse-criteria "$brief" --require AC98 >/dev/null \
+    || fail "the receipt check must parse the marked brief"
+  fm_write_meta "$home/state/brief-screen-s1.meta" "kind=ship" "mode=no-mistakes"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --mark-screen-change brief-screen-s1)
+  [ "$out" = unchanged ] || fail "marking an already marked brief must change nothing (got: $out)"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-screen-s2 some-proj --mode direct-PR >/dev/null || fail "plain brief should scaffold"
+  brief="$home/data/brief-screen-s2/brief.md"
+  assert_no_grep '- AC97: Screen change before:' "$brief" "an unmarked brief must not carry screen-change criteria"
+  assert_grep 'fm-brief.sh --mark-screen-change brief-screen-s2' "$brief" \
+    "every ship brief must tell its worker how to mark a screen change"
+  sed -i.bak 's/{ACCEPTANCE CRITERION}/the change works/' "$brief"
+  fm_write_meta "$home/state/brief-screen-s2.meta" "kind=ship" "mode=direct-PR"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --mark-screen-change brief-screen-s2) || fail "marking a plain brief must work"
+  [ "$out" = "added AC97 AC98" ] || fail "marking must add both criteria (got: $out)"
+  [ "$(grep -c '^- AC9[78]: Screen change ' "$brief")" = 2 ] || fail "the marked brief must declare both criteria once"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-screen-s3 some-proj --mode direct-PR >/dev/null || fail "plain brief should scaffold"
+  brief="$home/data/brief-screen-s3/brief.md"
+  awk '$0 == "- AC1: {ACCEPTANCE CRITERION}" { print "- AC1: the change works"; print "- AC97: the task owns this id"; next } { print }' \
+    "$brief" > "$brief.new" && mv "$brief.new" "$brief"
+  fm_write_meta "$home/state/brief-screen-s3.meta" "kind=ship" "mode=direct-PR"
+  before=$(cat "$brief")
+  status=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --mark-screen-change brief-screen-s3 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "marking must refuse a brief whose AC97 means something else"
+  assert_contains "$out" "AC97 is already declared with different text" "the conflict refusal must name the id"
+  [ "$(cat "$brief")" = "$before" ] || fail "a refused mark must leave the brief unchanged"
+  pass "fm-brief.sh: --screen-change declares the screenshot criteria and --mark-screen-change adds them once"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1170,3 +1221,4 @@ test_scout_and_secondmate_scaffold
 test_firstmate_repo_ship_brief_prefills_verification_criterion
 test_concurrent_ship_scaffold_has_one_owner
 test_ship_scaffold_rejects_destination_swap_and_retries_cleanly
+test_screen_change_criteria_are_declared_and_markable

@@ -5,6 +5,7 @@
 #   fm-receipt-store.sh <task-id> scaffold
 #   fm-receipt-store.sh <task-id> hold <brief-out> <ledger-out> <meta-out> <ready-file> <release-fifo>
 #   fm-receipt-store.sh <task-id> append <criterion> <criterion-parser>
+#   fm-receipt-store.sh <task-id> add-criteria <criterion-parser>
 #   fm-receipt-store.sh <task-id> meta-read <meta-out>
 #   fm-receipt-store.sh <task-id> meta-replace <expected-meta> <records> <updated-meta-out>
 #   fm-receipt-store.sh <task-id> promote <transaction-command> [<arg> ...]
@@ -17,6 +18,11 @@
 # one line before exiting with the same status.
 # append validates the pinned ship brief and criterion, then appends the compact
 # JSON payload from FM_RECEIPT_PAYLOAD under an exclusive ledger lock.
+# add-criteria appends the "- AC<n>: ..." lines in FM_RECEIPT_ADD_CRITERIA to the
+# pinned ship brief's acceptance-criteria section under the same exclusive lock,
+# skipping a line already declared verbatim and refusing an id declared with
+# other text; it validates the result with the parser before atomically
+# replacing the brief and prints "added <ids>" or "unchanged".
 # meta-read copies the pinned state/<task-id>.meta; meta-replace replaces the
 # FM_RECEIPT_META_REPLACE_KEYS records atomically after confirming the file still
 # equals expected-meta, so a PR publication cannot overwrite a concurrent change.
@@ -69,7 +75,7 @@ case "$MODE" in
     ;;
 esac
 case "$MODE:$#" in
-  scaffold:0|hold:5|append:2|meta-read:1|meta-replace:3) ;;
+  scaffold:0|hold:5|append:2|add-criteria:1|meta-read:1|meta-replace:3) ;;
   promote:0) usage >&2; exit 2 ;;
   promote:*) ;;
   *) usage >&2; exit 2 ;;
@@ -658,6 +664,86 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   exit($exit_code == 0 ? 1 : $exit_code);
 }
 
+if ($ENV{FM_RECEIPT_STORE_MODE} eq "add-criteria") {
+  my $parser = $arg1;
+  flock($task_lock, LOCK_EX) or refuse("task evidence lock could not be acquired");
+  sysopen(my $current, "brief.md", O_RDONLY | O_NOFOLLOW)
+    or refuse("task brief is missing or unsafe");
+  my @current_identity = stat($current);
+  refuse("task brief is not a regular file") unless @current_identity && S_ISREG($current_identity[2]);
+  my $text = do { local $/; <$current> };
+  defined($text) or refuse("task brief could not be read");
+  close($current);
+  my @delivery = ($text =~ /^Delivery contract: mode=(no-mistakes|direct-PR|local-only)$/mg);
+  refuse("criteria can be added only to a ship task with one delivery contract") unless @delivery == 1;
+  my @wanted = grep { length } split(/\n/, $ENV{FM_RECEIPT_ADD_CRITERIA} // "");
+  refuse("no acceptance criteria to add") unless @wanted;
+  my @lines = split(/\n/, $text, -1);
+  my ($section, $last) = (-1, -1);
+  my %declared;
+  for my $index (0 .. $#lines) {
+    if ($lines[$index] =~ /^# Acceptance criteria[[:space:]]*$/) {
+      refuse("ship brief has more than one acceptance-criteria section") if $section >= 0;
+      $section = $index;
+      next;
+    }
+    next unless $section >= 0 && $index > $section;
+    last if $lines[$index] =~ /^#/;
+    if ($lines[$index] =~ /^- (AC[1-9][0-9]*):/) {
+      $declared{$1} = $lines[$index];
+      $last = $index;
+    }
+  }
+  refuse("ship brief has no acceptance criteria to extend") unless $last >= 0;
+  my (@insert, @added);
+  for my $line (@wanted) {
+    refuse("acceptance criterion line is malformed: $line") unless $line =~ /^- (AC[1-9][0-9]*):[[:space:]]+\S/;
+    my $id = $1;
+    if (exists $declared{$id}) {
+      next if $declared{$id} eq $line;
+      refuse("$id is already declared with different text, so it cannot be added");
+    }
+    push @insert, $line;
+    push @added, $id;
+  }
+  if (!@insert) {
+    print "unchanged\n";
+    exit 0;
+  }
+  splice(@lines, $last + 1, 0, @insert);
+  my $updated = join("\n", @lines);
+  for my $id (@added) {
+    open(my $criterion_parser, "|-", $parser, "--parse-criteria", "-", "--require", $id)
+      or refuse("acceptance-criterion parser could not start");
+    print {$criterion_parser} $updated or refuse("updated brief could not reach the acceptance-criterion parser");
+    close($criterion_parser) or refuse("the updated brief would not declare $id validly");
+  }
+  sysopen(my $random, "/dev/urandom", O_RDONLY | O_NOFOLLOW)
+    or refuse("temporary brief nonce source is unavailable");
+  my $nonce_bytes;
+  my $nonce_read = sysread($random, $nonce_bytes, 16);
+  refuse("temporary brief nonce could not be read") unless defined($nonce_read) && $nonce_read == 16;
+  close($random) or refuse("temporary brief nonce source could not be closed");
+  my $temp_name = ".brief.tmp." . unpack("H*", $nonce_bytes);
+  $append_tmp = $temp_name;
+  sysopen(my $temp, $temp_name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+    or refuse("temporary brief could not be created");
+  my $offset = 0;
+  while ($offset < length($updated)) {
+    my $written = syswrite($temp, $updated, length($updated) - $offset, $offset);
+    next if !defined($written) && $! == EINTR;
+    refuse("temporary brief write failed") unless defined($written) && $written > 0;
+    $offset += $written;
+  }
+  $temp->sync or refuse("temporary brief could not be synced");
+  close($temp) or refuse("temporary brief close failed");
+  rename($temp_name, "brief.md") or refuse("task brief replacement failed");
+  $append_tmp = undef;
+  $task->sync or refuse("task directory could not be synced");
+  print "added " . join(" ", @added) . "\n";
+  exit 0;
+}
+
 my $criterion = $arg1;
 my $parser = $arg2;
 flock($task_lock, LOCK_EX) or refuse("task evidence lock could not be acquired");
@@ -672,13 +758,23 @@ my $brief_text = <$brief>;
 defined($brief_text) or refuse("task brief could not be read");
 my @delivery = ($brief_text =~ /^Delivery contract: mode=(no-mistakes|direct-PR|local-only)$/mg);
 refuse("receipts apply only to ship tasks with one delivery contract") unless @delivery == 1;
-open(my $criterion_parser, "|-", $parser, "--parse-criteria", "-", "--require", $criterion)
-  or refuse("acceptance-criterion parser could not start");
-print {$criterion_parser} $brief_text or refuse("task brief could not reach the acceptance-criterion parser");
-close($criterion_parser) or refuse("criterion is not declared by a valid ship brief: $criterion");
-
 my $payload = eval { decode_json($ENV{FM_RECEIPT_PAYLOAD}) };
 refuse("evidence receipt payload is invalid") unless defined($payload) && ref($payload) eq "HASH";
+# A success receipt also passes its artifact, so the parser refuses a
+# screen-change success without its screenshot (exit 3) under this lock.
+my @screen_check = ();
+if (defined($payload->{outcome}) && $payload->{outcome} eq "success") {
+  my $artifact = defined($payload->{artifact}) ? $payload->{artifact} : "";
+  @screen_check = ("--screen-artifact", "$data_path/$task_name/artifacts", $artifact);
+}
+open(my $criterion_parser, "|-", $parser, "--parse-criteria", "-", "--require", $criterion, @screen_check)
+  or refuse("acceptance-criterion parser could not start");
+print {$criterion_parser} $brief_text or refuse("task brief could not reach the acceptance-criterion parser");
+if (!close($criterion_parser)) {
+  refuse("success for screen-change criterion $criterion needs its screenshot artifact") if ($? >> 8) == 3;
+  refuse("criterion is not declared by a valid ship brief: $criterion");
+}
+
 my $payload_text = encode_json($payload);
 my $record = "$payload_text\n";
 sysopen(my $random, "/dev/urandom", O_RDONLY | O_NOFOLLOW)

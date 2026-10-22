@@ -56,7 +56,7 @@ For thread authorization, reply routing, and the exact rules for the channel, re
 The dedicated channel is off until you set it.
 
 1. In Discord, create a text channel for Firstmate, for example `#firstmate`, in the server the bot is in.
-2. Check that the bot can View Channel, Send Messages, Read Message History, Add Reactions, Create Public Threads, and Send Messages in Threads there.
+2. Check that the bot can View Channel, Send Messages, Read Message History, Add Reactions, Attach Files, Create Public Threads, and Send Messages in Threads there.
 3. With Developer Mode on (User Settings, Advanced), right-click the channel and pick Copy Channel ID.
 4. In the Firstmate home, write that id on its own line to `config/ext-channel`, and add a `<guild>:<channel>:<author>` line for it to `config/ext-allowlist` so your messages there carry standing authority.
 5. In the gateway profile's `.env`, add the channel id to `DISCORD_FREE_RESPONSE_CHANNELS` so Hermes hands this plugin messages that do not mention the bot, and set `DISCORD_REACTIONS=false` so Hermes's own processing reactions do not mark a message done before Firstmate has answered it.
@@ -111,6 +111,8 @@ That split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 A transient definite send failure (HTTP 429 or 5xx) before a successful Discord response deletes the posting marker so that generation can retry.
 A permanent 4xx records a terminal failed marker so pending stops retrying that generation.
 A posting marker without a receipt is refused so an ambiguous crash or transport error after Discord may have accepted the post cannot double-post.
+A post with screenshots or a recording uploads its staged files with its last message as one Discord multipart request (`payload_json` plus `files[n]`), after `bin/fm-ext-media.sh verify` re-checks each file and the poster confirms the bytes it sends hash to the verified digest.
+An upload Discord refuses with an HTTP error is retried once, then the text posts alone with a short note, and the receipt records what was attached; the [outbound media reference](../../docs/configuration.md#outbound-media) owns that contract, and [the media regression test](../../tests/fm-ext-media.test.sh) drives the real poster against a local multipart-parsing Discord stub.
 An exclusive inflight send claim means two gateway processes cannot both post the same remaining chunk after a later-chunk resume.
 A dead owner's claim older than `FM_EXT_INFLIGHT_TTL_SECS` (default 30) may be stolen; a live owner is never stolen from.
 A generation left in-flight by an ambiguous send is reopened for another attempt once it has had no claim or progress heartbeat for longer than `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), and after `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts it is failed terminally and surfaced to Firstmate, so an active poster is not interrupted and a network timeout cannot silently truncate a reply.

@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # Shared helpers for the sibling local-bridge Communication Officer
 # (fm-ext-intake.sh, fm-ext-emit.sh, fm-ext-decision.sh, fm-ext-link.sh,
-# fm-ext-poll.sh, and the bridge parts of fm-bootstrap.sh, fm-watch.sh, and
-# fm-wake-drain.sh).
+# fm-ext-poll.sh, fm-ext-media.sh, and the bridge parts of fm-bootstrap.sh,
+# fm-watch.sh, and fm-wake-drain.sh).
 #
 # This file is sourced, never executed. It copies the private-artifact
 # publication pattern used by X mode without sourcing bin/fm-x-lib.sh and
@@ -27,6 +27,14 @@ FM_EXT_INBOX_DIRNAME='ext-inbox'
 FM_EXT_CONTEXT_DIRNAME='ext-context'
 FM_EXT_OUTBOX_DIRNAME='ext-outbox'
 FM_EXT_ATTACHMENTS_DIRNAME='ext-attachments'
+FM_EXT_MEDIA_DIRNAME='ext-media'
+# Outbound media (staged copies, screening attestations, sampled video frames,
+# and files pulled from a remote second mate) is kept 14 days, counted from
+# posting for a staged copy; see fm_ext_media_prune.
+FM_EXT_MEDIA_RETENTION_SECS=1209600
+# The only names a staged outbound file can carry; Discord sees these names,
+# never a source path or filename.
+FM_EXT_MEDIA_NAME_RE='^(image-[1-4]\.(png|jpg|gif|webp)|video-1\.(mp4|webm))$'
 FM_EXT_WATCH_SHIM='ext-watch.check.sh'
 FM_EXT_SECRET_BASENAME='ext-secret'
 FM_EXT_ALLOWLIST_BASENAME='ext-allowlist'
@@ -343,6 +351,7 @@ fm_ext_inbox_dir()  { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_INBOX_
 fm_ext_context_dir(){ printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_CONTEXT_DIRNAME"; }
 fm_ext_outbox_dir() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_OUTBOX_DIRNAME"; }
 fm_ext_attachments_dir() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_ATTACHMENTS_DIRNAME"; }
+fm_ext_media_dir() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_MEDIA_DIRNAME"; }
 fm_ext_watch_shim_path() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_WATCH_SHIM"; }
 
 # --- activation and secret --------------------------------------------------
@@ -1271,14 +1280,18 @@ fm_ext_split_thread_legacy() {
 
 # fm_ext_outbox_schema_valid <file>: payload has required fields and matching
 # slug. An optional decision carries its key, close mode, lifecycle, option
-# buttons, and the post text the buttons answer.
+# buttons, and the post text the buttons answer. Optional media names this
+# generation's staged folder and its generically named files, which
+# bin/fm-ext-media.sh owns.
 fm_ext_outbox_schema_valid() {
   local file=$1
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   jq -e --argjson schema "$FM_EXT_SCHEMA_VERSION" \
     --argjson max_options "$FM_EXT_DECISION_MAX_OPTIONS" \
-    --argjson label_max "$FM_EXT_DECISION_LABEL_MAX" '
-    .schema_version == $schema
+    --argjson label_max "$FM_EXT_DECISION_LABEL_MAX" \
+    --arg media_name "$FM_EXT_MEDIA_NAME_RE" '
+    . as $payload
+    | .schema_version == $schema
     and (.request_id | type == "string" and startswith("discord:"))
     and (.slug | type == "string" and test("^[0-9a-f]{64}$"))
     and (.kind | . == "ack" or . == "answer" or . == "followup" or . == "final")
@@ -1314,6 +1327,19 @@ fm_ext_outbox_schema_valid() {
             and (.cue | type == "string")
             and (.structured | type == "boolean"))
         else true end))
+      else true end)
+    and (if has("media") then
+      (.media | type == "object"
+        and (.dir | type == "string" and test("^[0-9a-f]{64}\\.(answer|followup|final)\\.[0-9]+\\.[0-9a-f]{16}$")
+          and startswith($payload.slug + "." + $payload.kind + "." + ($payload.generation | tostring) + "."))
+        and (.files | type == "array" and length >= 1 and length <= 5
+          and all(.[]; type == "object"
+            and (.name | type == "string" and test($media_name))
+            and (.media == "image" or .media == "video")
+            and (.media_type | type == "string")
+            and (.bytes | type == "number" and . >= 1)
+            and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+            and (.screened_sha256 | type == "string" and test("^[0-9a-f]{64}$")))))
       else true end)
   ' "$file" >/dev/null 2>&1
 }
@@ -1408,7 +1434,8 @@ fm_ext_outbox_begin() {
 # already exists, 2 on failure. The posting marker is left in place so a
 # later begin still sees mid-delivery-or-receipt and refuses a second send.
 # A leftover inflight send marker is released after a successful or already
-# present receipt.
+# present receipt. A new receipt starts the retention clock of the
+# generation's staged media.
 fm_ext_outbox_receipt() {
   local dir=$1 slug=$2 kind=$3 generation=$4 receipt_json=$5 receipt rc
   receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
@@ -1418,6 +1445,7 @@ fm_ext_outbox_receipt() {
   rc=$?
   case "$rc" in
     0|1)
+      [ "$rc" != 0 ] || fm_ext_media_mark_posted "$dir" "$slug" "$kind" "$generation"
       fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true
       fm_ext_outbox_retire "$dir" "$slug" "$kind" "$generation" || true
       ;;
@@ -1457,7 +1485,8 @@ fm_ext_outbox_abort() {
 # Returns 0 on create, 1 when a valid receipt already exists (do not reopen),
 # 4 when a valid failed marker already exists (idempotent), and 2 on failure.
 # Removes the posting marker after a successful failed publication so a later
-# begin sees terminal-failed rather than mid-delivery.
+# begin sees terminal-failed rather than mid-delivery. A new failed marker also
+# starts the retention clock of the generation's staged media.
 fm_ext_outbox_fail() {
   local dir=$1 slug=$2 kind=$3 generation=$4 reason_json=$5 failed posting receipt rc
   failed=$(fm_ext_outbox_failed_basename "$slug" "$kind" "$generation") || return 2
@@ -1478,6 +1507,7 @@ fm_ext_outbox_fail() {
   rc=$?
   case "$rc" in
     0)
+      fm_ext_media_mark_posted "$dir" "$slug" "$kind" "$generation"
       fm_ext_private_artifact_remove "$dir" "$posting" 600 || true
       fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true
       fm_ext_outbox_retire "$dir" "$slug" "$kind" "$generation" || true
@@ -1606,6 +1636,61 @@ fm_ext_attachments_prune() {
     [ "$age" -gt "$max_age" ] 2>/dev/null || continue
     rm -rf -- "$folder" 2>/dev/null || true
   done < <(find "$dir" -maxdepth 1 -mindepth 1 -print0 2>/dev/null)
+  return 0
+}
+
+# fm_ext_media_mark_posted <outbox-dir> <slug> <kind> <generation>: start the
+# retention clock of this generation's staged media folder by setting its
+# modification time to now, so the window counts from posting rather than
+# staging. Best effort: a folder that cannot be touched keeps its staging time.
+fm_ext_media_mark_posted() {
+  local outbox=$1 slug=$2 kind=$3 generation=$4 staged folder
+  staged="${outbox%/*}/$FM_EXT_MEDIA_DIRNAME/staged"
+  [ -d "$staged" ] && [ ! -L "$staged" ] || return 0
+  for folder in "$staged/$slug.$kind.$generation".*; do
+    [ -d "$folder" ] && [ ! -L "$folder" ] || continue
+    touch -c -- "$folder" 2>/dev/null || true
+  done
+  return 0
+}
+
+# fm_ext_media_prune <state>: drop outbound media past FM_EXT_MEDIA_RETENTION_SECS
+# (14 days) so state/ext-media stays bounded. A staged generation folder whose
+# outbox payload is still present is pending or mid-delivery and is never
+# touched; once its post has a receipt or terminal failure, its age counts from
+# that moment (fm_ext_media_mark_posted). Screening attestations, sampled
+# video frames, and files pulled from a remote second mate expire on their own
+# modification time. Best effort, like the other prunes.
+fm_ext_media_prune() {
+  local state=$1 root outbox now sub depth entry base mtime age
+  root="$state/$FM_EXT_MEDIA_DIRNAME"
+  outbox="$state/$FM_EXT_OUTBOX_DIRNAME"
+  [ -d "$root" ] && [ ! -L "$root" ] || return 0
+  now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  for sub in staged screened frames pulled; do
+    [ -d "$root/$sub" ] && [ ! -L "$root/$sub" ] || continue
+    depth=1
+    [ "$sub" != pulled ] || depth=2
+    while IFS= read -r -d '' entry; do
+      base=${entry##*/}
+      if [ "$sub" = staged ] && [ -e "$outbox/${base%.*}.json" ]; then
+        continue
+      fi
+      mtime=$(fm_ext_file_mtime "$entry") || continue
+      case "$mtime" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      age=$((now - mtime))
+      [ "$age" -gt "$FM_EXT_MEDIA_RETENTION_SECS" ] 2>/dev/null || continue
+      rm -rf -- "$entry" 2>/dev/null || true
+    done < <(find "$root/$sub" -mindepth "$depth" -maxdepth "$depth" -print0 2>/dev/null)
+  done
+  if [ -d "$root/pulled" ] && [ ! -L "$root/pulled" ]; then
+    find "$root/pulled" -mindepth 1 -maxdepth 1 -type d -empty -exec rmdir -- {} + 2>/dev/null || true
+  fi
   return 0
 }
 # fm_ext_attachment_safe_name <name>: reject path-like names, strip control
@@ -1782,11 +1867,12 @@ if not parts:
 rfd=os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 try:
   dfd=rfd
-  closer=[]
+  # Each intermediate folder FD is closed exactly once, as the walk moves past
+  # it: closing one twice could close a later, reused descriptor number,
+  # such as the source file itself, two or more folders deep.
   try:
     for part in parts[:-1]:
       nfd=os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
-      closer.append(dfd if dfd != rfd else None)
       if dfd != rfd:
         os.close(dfd)
       dfd=nfd
@@ -1794,12 +1880,6 @@ try:
   finally:
     if dfd != rfd:
       os.close(dfd)
-    for c in closer:
-      if c is not None:
-        try:
-          os.close(c)
-        except OSError:
-          pass
   try:
     st=os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
@@ -1859,7 +1939,7 @@ fm_ext_attachment_cache_match() {
 }
 
 # --- retention prune cadence -----------------------------------------------
-# fm-ext-poll.sh runs the three prunes after it has claimed the inbox offers,
+# fm-ext-poll.sh runs the four prunes after it has claimed the inbox offers,
 # and at most once per interval: the watcher kills a poll that outruns its
 # check timeout, so a prune must never sit in front of a request's claim, and
 # repeating it every poll buys nothing. FM_EXT_PRUNE_INTERVAL_SECS=0 prunes
@@ -1923,6 +2003,7 @@ fm_ext_prune_run() {
   fm_ext_context_prune "$state"
   fm_ext_outbox_prune "$state"
   fm_ext_attachments_prune "$state"
+  fm_ext_media_prune "$state"
   elapsed=$(( $(date +%s) - started ))
   fm_ext_prune_mark "$state" "$elapsed"
   printf 'fm-ext-poll: prune=%ss\n' "$elapsed" >&2

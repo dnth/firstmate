@@ -392,6 +392,7 @@ A click on one of Firstmate's decision buttons is checked by `bin/fm-ext-decisio
 Intake owns durable request publication; the watcher owns notification, and the drain presents pending requests from the inbox independently of wake acknowledgement.
 The `ext-respond` skill drains that inbox, classifies each request, and emits `ack` / `answer` / `followup` / `final` payloads through `bin/fm-ext-emit.sh`.
 `bin/fm-ext-open.sh` lets Firstmate start a topic thread itself by recording a synthetic request in the dedicated channel and emitting its first reply, so opened threads reuse the same outbox and poster rather than a second posting path.
+Outbound media rides the same outbox: `bin/fm-ext-emit.sh --media` stages only files Firstmate itself screened, bound to their content digest, under generic names, and the poster uploads them with the post; the [outbound media reference](configuration.md#outbound-media) owns the contract.
 Spawned work is linked with `bin/fm-ext-link.sh` using `ext_request=`, not `x_request=`.
 The gateway outbox poster delivers those payloads and writes receipts; the [topic-thread contract](configuration.md#topic-threads-one-thread-per-request) owns reply routing, and the [local Communication Officer configuration reference](configuration.md#local-communication-officer-bridge-configext-bridge) owns posting-marker retry versus mid-delivery refuse.
 Crewmate Hermes remains a separate TUI profile (`hermes chat --tui`) and is still refused as a second mate.

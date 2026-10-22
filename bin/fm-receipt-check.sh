@@ -4,7 +4,8 @@
 # Usage:
 #   fm-receipt-check.sh <task-id>
 #   fm-receipt-check.sh <task-id> --criterion <criterion-id>
-#   fm-receipt-check.sh --parse-criteria <brief-file|-> [--require <criterion-id>]
+#   fm-receipt-check.sh --parse-criteria <brief-file|-> [--require <criterion-id>
+#     [--screen-artifact <artifacts-dir> <artifact>]]
 #
 # Evidence receipts establish whether the implementing worker accounted for
 # every acceptance criterion the ship brief declares. They certify nothing
@@ -34,6 +35,17 @@
 # as 401 is successful evidence when the worker records outcome=success.
 # A receipt naming a criterion the brief does not declare, or any malformed
 # record, makes the ledger invalid rather than silently disappearing.
+# A screen-change criterion, one whose description starts "Screen change
+# before:" or "Screen change after:" (bin/fm-brief.sh --screen-change owns the
+# text), is evidenced only by a success receipt whose artifact names a regular,
+# non-symlinked PNG, JPEG, GIF, or WebP file under data/<task-id>/artifacts/;
+# a success without one leaves the criterion missing, so a marked task cannot
+# reach PR-ready without its before and after screenshots.
+# With --require and --screen-artifact, --parse-criteria also exits 3 with the
+# reason when the required criterion is a screen-change criterion and the
+# artifact does not satisfy that rule against <artifacts-dir>;
+# bin/fm-receipt-store.sh append passes it for every success receipt, so such a
+# success is refused at record time under the ledger lock.
 # accepted_blocked is always reported as a distinct list with exception
 # references, never inside evidenced; firstmate never auto-merges a task with
 # any accepted-blocked criterion, which bin/fm-merge-guard-lib.sh enforces.
@@ -90,15 +102,78 @@ parse_criteria() {
   ' "$1"
 }
 
+# is_screen_criterion <criteria-tsv> <criterion-id>: true for a declared
+# screen-change criterion.
+is_screen_criterion() {
+  awk -F '\t' -v id="$2" '
+    $1 == id && ($2 ~ /^Screen change before:/ || $2 ~ /^Screen change after:/) { found = 1 }
+    END { exit !found }
+  ' "$1"
+}
+
+# screen_artifact_problem <artifacts-root> <artifact>: print why the artifact
+# cannot evidence a screen-change criterion, or nothing when it is a screenshot
+# under the task's artifacts folder. The root is matched as the shortest
+# prefix of the artifact path that resolves to the artifacts folder, so a
+# system symlink above the home still matches while any symlink below the
+# folder is refused.
+screen_artifact_problem() {
+  local root_given=$1 path=$2 physical root='' prefix='' rel cur part rest
+  [ -n "$path" ] || { echo "it needs --artifact naming the screenshot"; return 0; }
+  case "$path" in
+    /*) ;;
+    *) echo "its artifact must be an absolute path under $root_given/"; return 0 ;;
+  esac
+  case "$path/" in
+    */./*|*/../*|*//*) echo "its artifact path must not contain '.', '..', or empty components"; return 0 ;;
+  esac
+  physical=$(CDPATH='' cd -P -- "$root_given" 2>/dev/null && pwd -P) || physical=
+  [ -n "$physical" ] && [ ! -L "$root_given" ] \
+    || { echo "its screenshot must be copied under $root_given/"; return 0; }
+  rest=${path#/}
+  while [ -n "$rest" ]; do
+    part=${rest%%/*}
+    [ "$rest" != "$part" ] || break
+    prefix="$prefix/$part"
+    rest=${rest#*/}
+    if [ "$(CDPATH='' cd -P -- "$prefix" 2>/dev/null && pwd -P)" = "$physical" ]; then
+      root=$prefix
+      break
+    fi
+  done
+  [ -n "$root" ] || { echo "its artifact must be a screenshot copied under $root_given/"; return 0; }
+  rel=${path#"$root"/}
+  cur=$root
+  rest=$rel
+  while :; do
+    part=${rest%%/*}
+    cur="$cur/$part"
+    [ ! -L "$cur" ] || { echo "its artifact must not be a symlink"; return 0; }
+    [ "$rest" != "$part" ] || break
+    rest=${rest#*/}
+  done
+  [ -f "$cur" ] || { echo "its artifact $path does not exist"; return 0; }
+  perl -e '
+    open(my $file, "<:raw", $ARGV[0]) or exit 1;
+    read($file, my $head, 12);
+    exit((($head =~ /\A\x89PNG\r\n\x1a\n/) || ($head =~ /\A\xff\xd8\xff/)
+      || ($head =~ /\AGIF8[79]a/) || ($head =~ /\ARIFF/ && substr($head, 8, 4) eq "WEBP")) ? 0 : 1);
+  ' "$cur" || echo "its artifact must be a PNG, JPEG, GIF, or WebP screenshot"
+  return 0
+}
+
 if [ "${1:-}" = --parse-criteria ]; then
-  [ "$#" -eq 2 ] || [ "$#" -eq 4 ] \
-    || { echo "error: --parse-criteria requires <brief-file|-> [--require <criterion-id>]" >&2; exit 2; }
+  [ "$#" -eq 2 ] || [ "$#" -eq 4 ] || [ "$#" -eq 7 ] \
+    || { echo "error: --parse-criteria requires <brief-file|-> [--require <criterion-id> [--screen-artifact <artifacts-dir> <artifact>]]" >&2; exit 2; }
   PARSE_INPUT=$2
   PARSE_REQUIRED=
-  if [ "$#" -eq 4 ]; then
+  if [ "$#" -ge 4 ]; then
     [ "$3" = --require ] || { echo "error: unknown parser option: $3" >&2; exit 2; }
     PARSE_REQUIRED=$4
     case "$PARSE_REQUIRED" in AC[1-9]|AC[1-9][0-9]*) ;; *) exit 1 ;; esac
+  fi
+  if [ "$#" -eq 7 ]; then
+    [ "$5" = --screen-artifact ] || { echo "error: unknown parser option: $5" >&2; exit 2; }
   fi
   PARSE_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-receipt-criteria.XXXXXX")
   trap 'rm -f "$PARSE_TMP"' EXIT
@@ -107,6 +182,13 @@ if [ "${1:-}" = --parse-criteria ]; then
     || { echo "error: ship brief must contain one valid '# Acceptance criteria' section with unique AC ids and no placeholders" >&2; exit 2; }
   if [ -n "$PARSE_REQUIRED" ] && ! cut -f1 "$PARSE_TMP" | grep -Fx "$PARSE_REQUIRED" >/dev/null 2>&1; then
     exit 1
+  fi
+  if [ "$#" -eq 7 ] && is_screen_criterion "$PARSE_TMP" "$PARSE_REQUIRED"; then
+    problem=$(screen_artifact_problem "$6" "$7")
+    if [ -n "$problem" ]; then
+      printf 'error: %s is a screen-change criterion: %s\n' "$PARSE_REQUIRED" "$problem" >&2
+      exit 3
+    fi
   fi
   [ -z "$PARSE_REQUIRED" ] || exit 0
   cat "$PARSE_TMP"
@@ -246,6 +328,8 @@ if [ "$ACTION" = criterion ]; then
   exit $?
 fi
 
+ARTIFACT_ROOT="$DATA/$ID/artifacts"
+
 INVALID="$TMP_ROOT/invalid"
 LATEST="$TMP_ROOT/latest.jsonl"
 : > "$INVALID"
@@ -262,6 +346,14 @@ if [ "$LEDGER_EXISTS" = true ]; then
     receipt_criterion=$(printf '%s' "$line" | jq -r '.criterion')
     if ! cut -f1 "$CRITERIA" | grep -Fx "$receipt_criterion" >/dev/null 2>&1; then
       printf 'line %s: undeclared criterion %s\n' "$line_number" "$receipt_criterion" >> "$INVALID"
+      continue
+    fi
+    receipt_outcome=$(printf '%s' "$line" | jq -r '.outcome')
+    if [ "$receipt_outcome" = success ] && is_screen_criterion "$CRITERIA" "$receipt_criterion" \
+      && [ -n "$(screen_artifact_problem "$ARTIFACT_ROOT" "$(printf '%s' "$line" | jq -r '.artifact // ""')")" ]; then
+      # A screen-change success without its screenshot evidences nothing.
+      printf '%s\n' "$line" \
+        | jq -c '{criterion,outcome:"success-without-screenshot",captain_exception:""}' >> "$LATEST"
       continue
     fi
     printf '%s\n' "$line" \
