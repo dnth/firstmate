@@ -935,8 +935,17 @@ Media is accepted only from this home's `data/` or `state/` tree or a recorded t
 Every file needs a screening attestation that Firstmate records after looking at it, bound to the file's content digest, so a file that was never screened, has changed since, or was screened and refused cannot post; a video also needs its frames sampled before it can be screened.
 A fixed 10000000-byte limit caps each posted file: an oversized image is downscaled with ImageMagick, and an oversized video is refused rather than re-encoded.
 Images have no source byte cap; downscaling is bounded by ImageMagick resource limits and refuses images it cannot bring under the upload limit.
-Emit copies each file into a private folder under `state/ext-media/staged/` under a generic name such as `image-1.png`, so no path, branch name, task id, or original filename reaches Discord, and it refuses post text that names a media file.
-The [`bin/fm-ext-media.sh` header](../bin/fm-ext-media.sh) owns screening, frame sampling, staging, verification, remote pulls, and every refusal.
+Emit copies each file into a private folder under `state/ext-media/staged/` under a generic name such as `image-1.png`, so no path, branch name, task id, or original filename reaches Discord through an attachment name, and it refuses post text that names a media file.
+The [`bin/fm-ext-media.sh` header](../bin/fm-ext-media.sh) owns screening, the screening policy file's grammar, frame sampling, staging, verification, remote pulls, and every refusal.
+
+`config/ext-media-screening` is a local, gitignored opt-in that picks the screening rule; it is not inherited into secondmate homes.
+Absent, the home screens under `strict`, the default: screening refuses client or customer data, people's personal details, hostnames, IP addresses, internal URLs or domains, file paths, branch names, task ids, and secrets.
+Set to `private-server`, screening lets client and customer data, document names and contents, people's details as the apps show them, hostnames, IP addresses, internal URLs or domains, file paths, branch names, and task ids post, so the captain can check real screens.
+Both rules always refuse credentials and secrets: passwords, API keys, tokens, session cookies, auth headers, private keys, connection strings that carry credentials, and one-time codes, including in address bars, terminals, dev tools, and notifications.
+The file names exactly one policy, `strict` or `private-server`; an empty, symlinked, or unreadable file, a second value, or an unknown value is invalid, and screening and staging refuse rather than fall back to either rule.
+`bin/fm-ext-media.sh policy` prints the rule in force, and every screening attestation records the rule it was made under.
+A clear verdict made under `private-server` stops posting once the home returns to `strict`, so that file needs a fresh look; a clear verdict made under `strict` posts under either rule.
+The opt-in widens only what may appear inside an image or video: post text and thread titles still never name files, paths, hostnames, or other internal identifiers.
 
 The gateway poster attaches the staged files to the post's last message as one Discord multipart request (`payload_json` plus `files[n]`), after re-checking each file's digest and attestation and confirming that the bytes it sends hash to the verified digest.
 When Discord answers an upload with a definite HTTP refusal (excluding ambiguous HTTP 408), the poster retries the upload exactly once; if the retry also fails definitely, or a file no longer verifies, the text posts without it and ends with `_(screenshot couldn't be posted)_`.

@@ -769,6 +769,114 @@ test_11_open_review_thread_with_media() {
   pass "11 a new review thread opens with its screened screenshots attached"
 }
 
+# --- 12. the screening policy is recorded, strict by default, never guessed -
+
+test_12_screening_policy() {
+  local home message=520000000000000001 shots out rc strict_sha opt_sha legacy_sha record payload slug
+  home="$TMP_ROOT/c12"
+  setup_home "$home"
+  slug=$(intake "$home" "$message")
+  shots="$home/data/shots"
+  mkdir -p "$shots"
+  write_png "$shots/strict.png"
+  write_png "$shots/opt.png" 300
+  write_png "$shots/legacy.png" 600
+  write_png "$shots/invalid.png" 900
+  attest() { printf '%s/state/ext-media/screened/%s.json' "$home" "$1"; }
+
+  # No config: strict, recorded with the verdict.
+  out=$(home_env "$home" "$MEDIA" policy) || fail "policy must succeed without a config file"
+  [ "$out" = strict ] || fail "an absent config must mean strict, got: $out"
+  out=$(home_env "$home" "$MEDIA" screen "$shots/strict.png" --verdict clear --reason "no client data") \
+    || fail "screening under strict must succeed"
+  strict_sha=$(printf '%s' "$out" | awk '{print $2}')
+  [ "$out" = "screened $strict_sha clear strict" ] || fail "screen must print the policy it used, got: $out"
+  jq -e '.policy == "strict" and .verdict == "clear"' "$(attest "$strict_sha")" >/dev/null \
+    || fail "the attestation must record the strict policy: $(cat "$(attest "$strict_sha")")"
+
+  # Invalid configs refuse with a clear message and record nothing.
+  expect_invalid() {  # <label> <needle>
+    local label=$1 needle=$2
+    out=$(home_env "$home" "$MEDIA" policy 2>&1)
+    rc=$?
+    expect_code 1 "$rc" "policy with $label"
+    assert_contains "$out" "$needle" "the policy refusal for $label must say why (got: $out)"
+    out=$(home_env "$home" "$MEDIA" screen "$shots/invalid.png" --verdict clear --reason looked 2>&1)
+    rc=$?
+    expect_code 1 "$rc" "screening with $label"
+    assert_contains "$out" "invalid screening policy" "the screen refusal for $label must be clear (got: $out)"
+    assert_contains "$out" "$needle" "the screen refusal for $label must say why (got: $out)"
+    if grep -q '"reason":"looked"' "$home/state/ext-media/screened/"*.json 2>/dev/null; then
+      fail "screening with $label must record no attestation"
+    fi
+    out=$(emit_media "$home" "$message" 9 "Screens." "$shots/strict.png" 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "emitting media with $label must be refused"
+    assert_contains "$out" "invalid screening policy" "the emit refusal for $label must be clear (got: $out)"
+  }
+  printf 'public\n' > "$home/config/ext-media-screening"
+  expect_invalid "an unknown value" "unknown policy 'public'"
+  : > "$home/config/ext-media-screening"
+  expect_invalid "an empty file" "exactly one policy"
+  printf 'private-server\nstrict\n' > "$home/config/ext-media-screening"
+  expect_invalid "two values" "exactly one policy"
+  printf 'private-server\n' > "$home/real-policy"
+  rm -f "$home/config/ext-media-screening"
+  ln -s "$home/real-policy" "$home/config/ext-media-screening"
+  expect_invalid "a symlinked file" "not a symlink"
+  rm -f "$home/config/ext-media-screening"
+  [ ! -e "$home/state/ext-outbox/$slug.answer.9.json" ] || fail "no refused emit may publish a payload"
+
+  # An explicit strict value with comments is strict.
+  printf '# outbound media\n\n  strict  \n' > "$home/config/ext-media-screening"
+  [ "$(home_env "$home" "$MEDIA" policy)" = strict ] || fail "an explicit strict value must read as strict"
+
+  # The opt-in: recorded, and its clear verdict posts while it is in force.
+  printf '# client screens\nprivate-server\n' > "$home/config/ext-media-screening"
+  [ "$(home_env "$home" "$MEDIA" policy)" = private-server ] || fail "the opt-in must read as private-server"
+  out=$(home_env "$home" "$MEDIA" screen "$shots/opt.png" --verdict clear --reason "client names only, no secrets") \
+    || fail "screening under the opt-in must succeed"
+  opt_sha=$(printf '%s' "$out" | awk '{print $2}')
+  [ "$out" = "screened $opt_sha clear private-server" ] || fail "screen must print the opt-in policy, got: $out"
+  jq -e '.policy == "private-server" and .verdict == "clear"' "$(attest "$opt_sha")" >/dev/null \
+    || fail "the attestation must record the opt-in policy"
+  emit_media "$home" "$message" 1 "Opt-in screen." "$shots/opt.png" >/dev/null \
+    || fail "an opt-in clear verdict must post while the opt-in is in force"
+  emit_media "$home" "$message" 2 "Strict screen." "$shots/strict.png" >/dev/null \
+    || fail "a strict clear verdict must post under the opt-in"
+
+  # A record from before policies existed counts as strict.
+  out=$(home_env "$home" "$MEDIA" screen "$shots/legacy.png" --verdict clear --reason "no client data") \
+    || fail "screening the legacy file must succeed"
+  legacy_sha=$(printf '%s' "$out" | awk '{print $2}')
+  record=$(attest "$legacy_sha")
+  if ! { jq -c 'del(.policy)' "$record" > "$record.new" && mv "$record.new" "$record" && chmod 600 "$record"; }; then
+    fail "could not shape a legacy attestation"
+  fi
+
+  # Back to strict: the opt-in's clear verdict no longer posts, strict ones do.
+  rm -f "$home/config/ext-media-screening"
+  out=$(emit_media "$home" "$message" 3 "Opt-in screen." "$shots/opt.png" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an opt-in clear verdict must not post once the home is strict again"
+  assert_contains "$out" "cleared under the private-server screening policy" "the refusal must name the policy mismatch (got: $out)"
+  [ ! -e "$home/state/ext-outbox/$slug.answer.3.json" ] || fail "the refused emit must publish no payload"
+  emit_media "$home" "$message" 4 "Legacy screen." "$shots/legacy.png" >/dev/null \
+    || fail "an attestation without a policy must post under strict"
+  payload="$home/state/ext-outbox/$slug.answer.1.json"
+  out=$(home_env "$home" "$MEDIA" verify --payload "$payload") || fail "verify must run"
+  printf '%s' "$out" | jq -e '.files == [] and .dropped == ["image-1.png"]' >/dev/null \
+    || fail "the poster must drop an opt-in file once the home is strict again (got: $out)"
+  out=$(home_env "$home" "$MEDIA" verify --payload "$home/state/ext-outbox/$slug.answer.2.json") || fail "verify must run"
+  printf '%s' "$out" | jq -e '(.files | length) == 1 and .dropped == []' >/dev/null \
+    || fail "the poster must keep a strict file under strict (got: $out)"
+  printf 'bogus\n' > "$home/config/ext-media-screening"
+  out=$(home_env "$home" "$MEDIA" verify --payload "$payload") || fail "verify must run with an invalid config"
+  printf '%s' "$out" | jq -e '.files == [] and .dropped == ["image-1.png"]' >/dev/null \
+    || fail "verify must treat an invalid config as strict (got: $out)"
+  pass "12 the screening policy is recorded with each verdict, strict by default, and an invalid policy refuses"
+}
+
 test_1_worker_and_inactive_home_refused
 test_2_unscreened_refused_screened_staged
 test_3_refusals
@@ -780,3 +888,4 @@ test_8_retention
 test_9_video_frames_and_length
 test_10_remote_pull
 test_11_open_review_thread_with_media
+test_12_screening_policy
