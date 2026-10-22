@@ -1858,6 +1858,76 @@ fm_ext_attachment_cache_match() {
   return 1
 }
 
+# --- retention prune cadence -----------------------------------------------
+# fm_ext_poll.sh runs the three prunes after it has claimed the inbox offers,
+# and at most once per interval: the watcher kills a poll that outruns its
+# check timeout, so a prune must never sit in front of a request's claim, and
+# repeating it every poll buys nothing. FM_EXT_PRUNE_INTERVAL_SECS=0 prunes
+# every poll.
+FM_EXT_PRUNE_STAMP='ext-prune.stamp'
+
+# fm_ext_prune_interval_secs: the prune cadence, defaulting to one hour.
+fm_ext_prune_interval_secs() {
+  local raw=${1:-${FM_EXT_PRUNE_INTERVAL_SECS-}}
+  case "$raw" in
+    ''|*[!0-9]*) raw=3600 ;;
+  esac
+  [ "${#raw}" -le 9 ] || raw=3600
+  printf '%s\n' "$raw"
+}
+
+# fm_ext_prune_due <state>: true when the last recorded prune is old enough.
+fm_ext_prune_due() {
+  local stamp="$1/$FM_EXT_PRUNE_STAMP" now last
+  now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ -L "$stamp" ] || [ ! -f "$stamp" ]; then
+    return 0
+  fi
+  last=$(fm_ext_file_mtime "$stamp") || return 0
+  case "$last" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ $((now - last)) -lt "$(fm_ext_prune_interval_secs)" ] 2>/dev/null && return 1
+  return 0
+}
+
+# fm_ext_prune_mark <state> [duration-seconds]: record that a prune pass just
+# completed. The mtime is the cadence source; the content keeps the pass
+# duration inspectable, because the watcher discards a check's stderr.
+fm_ext_prune_mark() {
+  local state=$1 elapsed=${2:-0} stamp tmp
+  [ -d "$state" ] && [ ! -L "$state" ] || return 0
+  stamp="$state/$FM_EXT_PRUNE_STAMP"
+  [ -L "$stamp" ] && return 0
+  tmp=$(umask 077; mktemp "$state/.fm-ext-prune.XXXXXX" 2>/dev/null) || return 0
+  if printf 'prune=%ss at=%s\n' "$elapsed" "$(date +%s)" >"$tmp" 2>/dev/null; then
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f -- "$tmp" "$stamp" 2>/dev/null || rm -f -- "$tmp"
+  else
+    rm -f -- "$tmp"
+  fi
+  return 0
+}
+
+# fm_ext_prune_run <state>: run the retention prunes when their cadence allows.
+# Logs one journal line when the pass overruns, so a prune that again approaches
+# the watcher's timeout is visible instead of silently failing to finish.
+fm_ext_prune_run() {
+  local state=$1 started elapsed
+  fm_ext_prune_due "$state" || return 0
+  started=$(date +%s)
+  fm_ext_context_prune "$state"
+  fm_ext_outbox_prune "$state"
+  fm_ext_attachments_prune "$state"
+  elapsed=$(( $(date +%s) - started ))
+  fm_ext_prune_mark "$state" "$elapsed"
+  printf 'fm-ext-poll: prune=%ss\n' "$elapsed" >&2
+  return 0
+}
+
 # fm_ext_context_prune <state>: drop destination-context, thread-history, and offer records past
 # the retention window so state/ext-context stays bounded. Every record kind is
 # kept while their request is still sitting unhandled in the inbox: expiring the
@@ -1866,7 +1936,12 @@ fm_ext_attachment_cache_match() {
 # inbox is cleared are what the window itself bounds. Best effort: a record that
 # cannot be read or removed is left alone rather than failing the caller.
 fm_ext_context_prune() {
-  local state=$1 dir inbox now max_age file base slug recorded_at age
+  local state=$1 dir inbox now max_age file base slug line mtime age kind base_name
+  local inbox_list='' context_rows=''
+  local -a fallback doomed
+  # An assigned empty array keeps ${#arr[@]} defined under set -u.
+  fallback=()
+  doomed=()
   dir="$state/$FM_EXT_CONTEXT_DIRNAME"
   inbox="$state/$FM_EXT_INBOX_DIRNAME"
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
@@ -1875,29 +1950,93 @@ fm_ext_context_prune() {
     ''|*[!0-9]*) return 0 ;;
   esac
   max_age=$(fm_ext_retention_max_age_secs)
-  while IFS= read -r -d '' file; do
+  # The inbox is usually empty, so the pin check below only runs for a slug the
+  # inbox actually lists instead of for every record in the directory.
+  if [ -d "$inbox" ] && [ ! -L "$inbox" ]; then
+    for base_name in "$inbox"/*.json; do
+      [ -e "$base_name" ] || continue
+      inbox_list="$inbox_list${base_name##*/}"$'\n'
+    done
+  fi
+  # One jq process per batch decides every record with a numeric recorded_at
+  # and lists the ones that need an mtime check; a launch per file is what made
+  # this prune outlast the watcher's check timeout, so retention never ran.
+  # Batches stay bounded so one unreadable record cannot hide the rest.
+  # shellcheck disable=SC2016  # jq program: $now, $max_age, $r, and $kind are jq variables.
+  context_rows=$(find "$dir" -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null \
+    | xargs -0 -n 100 jq -rn --argjson now "$now" --argjson max_age "$max_age" '
+      inputs
+      | .recorded_at as $r
+      | (if ($r | type) == "number" then
+           (if ($r | tostring | test("^[0-9]+$")) then
+              (if ($now - $r) > $max_age then "old" else "keep" end)
+            else "keep" end)
+         else "mtime" end) as $kind
+      | [$kind, input_filename] | @tsv' 2>/dev/null)
+  while IFS=$'\t' read -r kind file; do
+    [ -n "$file" ] || continue
+    case "$kind" in
+      keep) continue ;;
+      mtime) fallback[${#fallback[@]}]=$file; continue ;;
+    esac
     base=${file##*/}
     case "$base" in
       *.offered.json) slug=${base%.offered.json} ;;
       *.history.json) slug=${base%.history.json} ;;
       *) slug=${base%.json} ;;
     esac
-    if fm_ext_private_artifact_file_valid "$inbox" "$slug.json" 600; then
-      continue
-    fi
-    recorded_at=$(jq -er '.recorded_at | select(type=="number")' "$file" 2>/dev/null) \
-      || recorded_at=
-    if [ -z "$recorded_at" ]; then
-      recorded_at=$(fm_ext_file_mtime "$file") || continue
-    fi
-    case "$recorded_at" in
-      ''|*[!0-9]*) continue ;;
-    esac
-    age=$((now - recorded_at))
-    [ "$age" -gt "$max_age" ] 2>/dev/null || continue
-    rm -f -- "$file" 2>/dev/null || true
-  done < <(find "$dir" -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null)
+    fm_ext_inbox_pins "$inbox" "$inbox_list" "$slug" && continue
+    doomed[${#doomed[@]}]=$file
+  done <<<"$context_rows"
+  # Records without a numeric recorded_at fall back to their file mtime, read
+  # in one stat batch rather than one process each.
+  if [ "${#fallback[@]}" -gt 0 ]; then
+    while IFS= read -r line; do
+      mtime=${line%% *}
+      file=${line#* }
+      case "$mtime" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      base=${file##*/}
+      case "$base" in
+        *.offered.json) slug=${base%.offered.json} ;;
+        *.history.json) slug=${base%.history.json} ;;
+        *) slug=${base%.json} ;;
+      esac
+      fm_ext_inbox_pins "$inbox" "$inbox_list" "$slug" && continue
+      age=$((now - mtime))
+      [ "$age" -gt "$max_age" ] 2>/dev/null || continue
+      doomed[${#doomed[@]}]=$file
+    done < <(printf '%s\0' "${fallback[@]}" | fm_ext_path_mtimes)
+  fi
+  [ "${#doomed[@]}" -gt 0 ] || return 0
+  printf '%s\0' "${doomed[@]}" | fm_ext_remove_all
   return 0
+}
+
+# fm_ext_inbox_pins <inbox> <inbox-list> <slug>: true when this request still
+# waits in the inbox, so its records must survive the retention window.
+fm_ext_inbox_pins() {
+  case $'\n'"$2"$'\n' in
+    *$'\n'"$3.json"$'\n'*) fm_ext_private_artifact_file_valid "$1" "$3.json" 600 ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_ext_path_mtimes: read NUL-separated paths, print "<mtime> <path>" for each.
+# One stat process per batch keeps a thousands-of-files prune inside the poll's
+# check timeout; a path that vanished is simply absent.
+fm_ext_path_mtimes() {
+  if [ "$(uname)" = Darwin ]; then
+    xargs -0 -n 200 stat -f '%m %N'
+  else
+    xargs -0 -n 200 stat -c '%Y %n'
+  fi 2>/dev/null
+}
+
+# fm_ext_remove_all: delete the NUL-separated paths on stdin in batches.
+fm_ext_remove_all() {
+  xargs -0 -n 200 rm -f -- 2>/dev/null
 }
 
 # fm_ext_outbox_prune <state>: drop the leftover markers of retired generations
@@ -1909,7 +2048,11 @@ fm_ext_context_prune() {
 # A decision post's sent, settled, and finalized markers go the same way as its
 # chunk-progress record, so its buttons expire with it.
 fm_ext_outbox_prune() {
-  local state=$1 dir now max_age file base stem mtime age
+  local state=$1 dir now max_age line file base stem slug mtime age other
+  local -a doomed thread_doomed
+  # An assigned empty array keeps ${#arr[@]} defined under set -u.
+  doomed=()
+  thread_doomed=()
   dir="$state/$FM_EXT_OUTBOX_DIRNAME"
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
@@ -1917,7 +2060,26 @@ fm_ext_outbox_prune() {
     ''|*[!0-9]*) return 0 ;;
   esac
   max_age=$(fm_ext_retention_max_age_secs)
-  while IFS= read -r -d '' file; do
+  # Removals are queued and applied in batches: a stat and a uname per file is
+  # what made this prune take tens of seconds on a mature outbox. A thread
+  # record's sibling test still sees the same files the immediate-removal walk
+  # saw, because the queue is flushed before it is evaluated.
+  flush_prune_queue() {
+    if [ "${#doomed[@]}" -gt 0 ]; then
+      printf '%s\0' "${doomed[@]}" | fm_ext_remove_all
+    fi
+    if [ "${#thread_doomed[@]}" -gt 0 ]; then
+      printf '%s\0' "${thread_doomed[@]}" | fm_ext_remove_all
+    fi
+    doomed=()
+    thread_doomed=()
+  }
+  while IFS= read -r line; do
+    mtime=${line%% *}
+    file=${line#* }
+    case "$mtime" in
+      ''|*[!0-9]*) continue ;;
+    esac
     base=${file##*/}
     # Only marker suffixes are pruned. A payload is <stem>.json and falls
     # through to the default, so this can never delete undelivered work.
@@ -1937,10 +2099,11 @@ fm_ext_outbox_prune() {
       continue
     fi
     # A thread record belongs to the whole request, not one generation: keep
-    # it while any non-thread JSON file for its slug remains, so markers of retired
-    # generations keep it alive until they expire too.
+    # it while any non-thread JSON file for its slug remains, so markers of
+    # retired generations keep it alive until they expire too.
     case "$base" in
       *.thread.json)
+        flush_prune_queue
         slug=${base%.thread.json}
         for other in "$dir/$slug".*.json; do
           [ -e "$other" ] || continue
@@ -1951,14 +2114,14 @@ fm_ext_outbox_prune() {
         done
         ;;
     esac
-    mtime=$(fm_ext_file_mtime "$file") || continue
-    case "$mtime" in
-      ''|*[!0-9]*) continue ;;
-    esac
     age=$((now - mtime))
     [ "$age" -gt "$max_age" ] 2>/dev/null || continue
-    rm -f -- "$file" 2>/dev/null || true
-  done < <(find "$dir" -maxdepth 1 -type f -print0 2>/dev/null)
+    case "$base" in
+      *.thread.json) thread_doomed[${#thread_doomed[@]}]=$file ;;
+      *) doomed[${#doomed[@]}]=$file ;;
+    esac
+  done < <(find "$dir" -maxdepth 1 -type f -print0 2>/dev/null | fm_ext_path_mtimes)
+  flush_prune_queue
   return 0
 }
 

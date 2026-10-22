@@ -42,6 +42,10 @@ for a later outcome header.
 ``reconcile_decision_posts`` edits only that final message under the display
 rules in docs/configuration.md, "Decision buttons". ``reconcile_thread_states`` then
 clears answered needs-you threads and retries failed renames.
+
+The watcher runs delivery and reconciliation on two daemon threads so a sweep
+that takes minutes can never delay a queued reply, and the two paths serialize
+their writes to a request's thread record under one lock.
 """
 
 from __future__ import annotations
@@ -75,6 +79,17 @@ ThreadFn = Callable[[dict, str], dict]
 
 _WATCHER_STARTED = False
 _WATCHER_LOCK = threading.Lock()
+# One lock serializes every writer of a request-wide "<slug>.thread.json"
+# record. Delivery (save_request_thread, maybe_rename_topic_thread) and the
+# periodic thread-state sweep both read-merge-write that file, so without it a
+# sweep that has been reconciling for minutes can overwrite a rename a
+# delivery recorded meanwhile. Reentrant because apply_thread_state holds it
+# across its re-read and its own save.
+_THREAD_RECORD_LOCK = threading.RLock()
+# A watcher step slower than this is worth a journal line: the loop's whole
+# point is that no step can hold up delivery, and a slow step is how the
+# sweeps drifted into minutes-long cycles before.
+SLOW_STEP_SECS = 5.0
 _TRANSIENT_HTTP = {429, 500, 502, 503, 504}
 # Discord REST base. Hermetic tests point the real sender at a local stub by
 # assigning this module attribute; nothing in production overrides it.
@@ -705,7 +720,23 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     0600, replaced atomically. Its basename is <slug>.thread.json, which the
     pending scan skips as a marker, avoiding payload validation for completed
     topics.
+
+    Every writer holds ``_THREAD_RECORD_LOCK`` across its read-merge-write, so
+    a delivery rename and a sweep state update for the same record cannot lose
+    one another.
     """
+    with _THREAD_RECORD_LOCK:
+        _merge_thread_record(path, request_id, thread_id, topic_name, thread_state,
+                             creating_title, retitle, creator, state_at, rename,
+                             marked_open, open_attempt, opening_posted)
+
+
+def _merge_thread_record(path: Path, request_id: object, thread_id: str,
+                         topic_name: str, thread_state: str,
+                         creating_title: str, retitle: str | None,
+                         creator: str, state_at: float | None, rename: dict | None,
+                         marked_open: bool | None, open_attempt: bool | None,
+                         opening_posted: bool | None) -> None:
     if path.is_symlink():
         raise RuntimeError("thread record is a symlink")
     try:
@@ -1043,7 +1074,35 @@ def apply_thread_state(
     rename can never wedge a later marker; an unreadable name renames anyway.
     ``retitle`` replaces the base name the state is applied to and is stored
     with it, so later markers build on the new name. Never raises.
+
+    ``recorded`` may be minutes old when the sweep reaches a thread, so the
+    record is re-read under ``_THREAD_RECORD_LOCK`` before the state is
+    applied: the name, retitle, and provenance this rename builds on are the
+    ones a delivery recorded meanwhile, not the ones the sweep read.
     """
+    thread_id = recorded.get("topic_thread_id") or ""
+    with _THREAD_RECORD_LOCK:
+        path = recorded.get("path")
+        fresh = _read_thread_record(path) if isinstance(path, Path) else {}
+        if fresh and fresh.get("topic_thread_id") == thread_id:
+            recorded = fresh
+        return _apply_thread_state(recorded, state, home, state_at=state_at,
+                                   rename_thread=rename_thread, thread_owner=thread_owner,
+                                   read_thread=read_thread, marked_open=marked_open,
+                                   retitle=retitle)
+
+
+def _apply_thread_state(
+    recorded: dict,
+    state: str,
+    home: Path,
+    state_at: float | None = None,
+    rename_thread=None,
+    thread_owner=None,
+    read_thread=None,
+    marked_open: bool | None = None,
+    retitle: str = "",
+) -> str:
     thread_id = recorded.get("topic_thread_id") or ""
     provenance = recorded.get("creator") or ""
     if provenance == "adopted":
@@ -1880,6 +1939,12 @@ def deliver_one(
         if result != "mid-delivery":
             path.unlink(missing_ok=True)
         return result
+    # The delivery clock: queued_at comes from the payload's emit time and
+    # picked_at from here, so the journal line and receipt can show how long a
+    # reply waited for a poster rather than only when Discord accepted it.
+    # A payload without a numeric emit time records 0 and logs wait=unknown.
+    queued_at = _epoch(payload.get("recorded_at"))
+    picked_at = time.time()
     status = begin_delivery(payload, home=home)
     if status == "recovery-exhausted":
         react_to_request(payload, REACT_FAILED, react)
@@ -1993,6 +2058,7 @@ def deliver_one(
             progress["buttons"] = bool(receipt.get("buttons"))
             progress["posted_at"] = time.time()
         write_progress(payload, progress, home)
+    posted_at = time.time()
     record_receipt(
         payload,
         {
@@ -2002,9 +2068,17 @@ def deliver_one(
             "chunks": len(chunks),
             "channel_id": str(send_payload.get("thread_id") or send_payload.get("channel_id") or ""),
             "thread_id": str(send_payload.get("thread_id") or ""),
+            "queued_at": queued_at,
+            "picked_at": picked_at,
         },
         home=home,
     )
+    waited = f"{max(0.0, picked_at - queued_at):.1f}s" if queued_at > 0 else "unknown"
+    print(f"fm-ext-poster: delivered {str(payload.get('slug') or '')[:12]} "
+          f"{payload.get('kind')}.{payload.get('generation')} queued={queued_at:.3f} "
+          f"picked={picked_at:.3f} posted={posted_at:.3f} "
+          f"wait={waited} post={max(0.0, posted_at - picked_at):.1f}s chunks={len(chunks)}",
+          file=sys.stderr)
     if payload.get("origin") == "open" and payload.get("kind") == "answer" and payload.get("generation") == 1:
         save_request_thread(payload, thread_id, home, opening_posted=True)
     if payload.get("kind") in ("answer", "final"):
@@ -2033,6 +2107,70 @@ def drain_outbox(
     return results
 
 
+def _run_step(label: str, step) -> None:
+    """Run one watcher step, logging a journal line when it overruns.
+
+    A step's failure is swallowed here, exactly as the single loop swallowed
+    it: one bad sweep must not end the watcher.
+    """
+    started = time.monotonic()
+    try:
+        step()
+    except Exception:
+        pass
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed >= SLOW_STEP_SECS:
+            print(f"fm-ext-poster: slow step {label}={elapsed:.1f}s", file=sys.stderr)
+
+
+def _wait_tick(interval: float, stop: threading.Event | None) -> bool:
+    """Sleep one poll tick; True when the caller should stop instead."""
+    if stop is None:
+        time.sleep(interval)
+        return False
+    return stop.wait(interval)
+
+
+def outbox_delivery_loop(interval: float, stop: threading.Event | None = None) -> None:
+    """Post queued payloads every ``interval`` seconds until ``stop`` is set.
+
+    This runs on its own daemon thread so a reconciliation sweep that takes
+    minutes can never delay a reply. Delivery and reconciliation share only
+    the thread-record lock.
+    """
+    while not (stop is not None and stop.is_set()):
+        _run_step("ensure-click-route", decisions.ensure_click_route)
+        _run_step("drain", drain_outbox)
+        if _wait_tick(interval, stop):
+            return
+
+
+def outbox_reconcile_loop(interval: float, stop: threading.Event | None = None) -> None:
+    """Sweep decision posts and topic threads until ``stop`` is set.
+
+    Clicks settle posts locally, so their edits follow within a cycle; posts
+    closed on another channel need a ledger read and are swept on the slower
+    cadence, followed by the topic-thread pass that clears answered threads
+    and retries failed renames.
+    """
+    last_full = 0.0
+    while not (stop is not None and stop.is_set()):
+        full = time.monotonic() - last_full >= DECISION_SWEEP_SECS
+        if full:
+            last_full = time.monotonic()
+        _run_step("posts", lambda: _reconcile_posts_step(full))
+        if full:
+            _run_step("threads", reconcile_thread_states)
+        if _wait_tick(interval, stop):
+            return
+
+
+def _reconcile_posts_step(full: bool) -> None:
+    if full or _unshown_settled_posts():
+        reconcile_decision_posts(full=full)
+
+
 def start_outbox_watcher(interval: float | None = None) -> None:
     global _WATCHER_STARTED
     with _WATCHER_LOCK:
@@ -2044,35 +2182,7 @@ def start_outbox_watcher(interval: float | None = None) -> None:
     if wait is None:
         wait = float(os.environ.get("FM_EXT_OUTBOX_POLL_SECS", "2"))
 
-    def _loop() -> None:
-        last_full = 0.0
-        while True:
-            try:
-                decisions.ensure_click_route()
-            except Exception:
-                pass
-            try:
-                drain_outbox()
-            except Exception:
-                pass
-            # Clicks settle posts locally, so their edits follow within a
-            # cycle; posts closed on another channel need a ledger read and
-            # are swept on the slower cadence, followed by the topic-thread
-            # pass that clears answered threads and retries failed renames.
-            full = time.monotonic() - last_full >= DECISION_SWEEP_SECS
-            if full:
-                last_full = time.monotonic()
-            try:
-                if full or _unshown_settled_posts():
-                    reconcile_decision_posts(full=full)
-            except Exception:
-                pass
-            if full:
-                try:
-                    reconcile_thread_states()
-                except Exception:
-                    pass
-            time.sleep(wait)
-
-    thread = threading.Thread(target=_loop, name="fm-ext-outbox", daemon=True)
-    thread.start()
+    threading.Thread(target=outbox_delivery_loop, args=(wait,),
+                     name="fm-ext-outbox-delivery", daemon=True).start()
+    threading.Thread(target=outbox_reconcile_loop, args=(wait,),
+                     name="fm-ext-outbox-reconcile", daemon=True).start()

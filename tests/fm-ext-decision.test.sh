@@ -1841,6 +1841,59 @@ PYTEST
 }
 
 
+# --- 22. a replaced post needs a newer button post --------------------------
+
+test_22_replaced_posts_need_a_newer_button_post() {
+  local home key first second first_stem second_stem out
+  home="$TMP_ROOT/c22-replaced"
+  setup_home "$home"
+  open_request "$home"
+  open_key "$home" replace-me
+  key="key:$TASK:replace-me"
+  first=$(emit_decision "$home" 1 '{"key":"'"$key"'","options":[{"label":"North"},{"label":"South"}]}')
+  deliver "$home" "$POST"
+  second=$(emit_decision "$home" 2 '{"key":"'"$key"'","options":[{"label":"North"},{"label":"South"}]}')
+  deliver "$home" 700000000000000002
+  first_stem=$(basename "$first" .json)
+  second_stem=$(basename "$second" .json)
+
+  c22_set_post() {  # <stem> <posted_at> <buttons>
+    local file="$home/state/ext-outbox/$1.progress.json" tmp="$home/rewrite.json"
+    jq --argjson at "$2" --argjson buttons "$3" \
+      '.posted_at = $at | .buttons = $buttons' "$file" > "$tmp" \
+      && mv "$tmp" "$file"
+  }
+  c22_posts() { home_env "$home" "$ROOT/bin/fm-ext-decision.sh" posts; }
+  c22_settle_kind() { jq -r '.kind // empty' "$home/state/ext-outbox/$1.settled.json" 2>/dev/null; }
+
+  # A newer button post for the same key replaces the older one.
+  c22_set_post "$first_stem" 1000 true
+  c22_set_post "$second_stem" 2000 true
+  out=$(c22_posts)
+  assert_equals replaced "$(c22_settle_kind "$first_stem")" \
+    "a post with a newer button post must settle as replaced"
+  assert_absent "$home/state/ext-outbox/$second_stem.settled.json" \
+    "the newer post itself must stay live"
+  assert_contains "$out" "\"post\":\"$first_stem\"" \
+    "the replaced post must be listed for its edit"
+
+  # A newer post without buttons asks nothing: it never replaces.
+  rm -f "$home/state/ext-outbox/$first_stem.settled.json"
+  c22_set_post "$second_stem" 2000 false
+  out=$(c22_posts)
+  assert_absent "$home/state/ext-outbox/$first_stem.settled.json" \
+    "a newer post without buttons must not replace an open decision"
+  assert_not_contains "$out" "\"post\":\"$first_stem\"" \
+    "an unreplaced open post must not be listed for an edit"
+
+  # Equal posted_at is not newer.
+  c22_set_post "$second_stem" 1000 true
+  out=$(c22_posts)
+  assert_absent "$home/state/ext-outbox/$first_stem.settled.json" \
+    "an equal posted_at must not count as newer"
+  pass "22 replacement needs a strictly newer post that still carries buttons"
+}
+
 test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records
@@ -1865,3 +1918,4 @@ test_18_decision_plans_preserve_questions_and_legacy_boundaries
 test_19_legacy_buttons_settle_in_every_outcome_state
 test_20_legacy_waiting_receipts_need_no_original_or_payload
 test_21_legacy_settled_choices_survive_reopened_keys
+test_22_replaced_posts_need_a_newer_button_post

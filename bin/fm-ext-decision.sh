@@ -205,21 +205,92 @@ post_field() {  # <stem> <jq filter>
   jq -r "($2) // empty | tostring" "$OUTBOX/$1.progress.json" 2>/dev/null
 }
 
-# post_thread <stem>: the Discord thread or channel the post actually lives in.
-# The poster records a topic thread it opened for the request in the post's
-# chunk progress; otherwise the post went where the request came from.
-post_thread() {
-  local thread
-  thread=$(post_field "$1" '.topic_thread_id')
+# --- one pass over the decision posts --------------------------------------
+# posts and threads both walk every decision post, and one jq launch per field
+# read was what made each sweep take minutes. One pass stores every field they
+# need - plus whether a newer button post replaced this one, and which post
+# that is - as one US-separated (0x1f) row per post; the walkers read that
+# table instead of the files. No id, key, or name here can carry US.
+POST_TABLE=
+POST_TABLE_LOADED=0
+
+post_table_load() {
+  [ "$POST_TABLE_LOADED" = 1 ] && return 0
+  POST_TABLE_LOADED=1
+  # shellcheck disable=SC2016  # jq program: $all, $x, $best, $stem, $newer, $p are jq variables.
+  POST_TABLE=$(progress_files | tr '\n' '\0' | xargs -0 jq -rn '
+    [inputs
+     | {f: input_filename,
+        k: ((.decision.key // "") | tostring),
+        haskey: (if (.decision.key != null and .decision.key != false) then 1 else 0 end),
+        occ: ((.decision.occurrence // "") | tostring),
+        p: (((.posted_at // 0) | tonumber?) // 0),
+        b: (if .buttons == true then 1 else 0 end),
+        hasmsg: (if ((.discord_message_ids // []) | length) > 0 then 1 else 0 end),
+        msg: ((.discord_message_ids // []) | if length > 0 then (.[-1] | tostring) else "" end),
+        sec: (if ((.decision.sections | type) == "object")
+                and ((.texts[-1] | type) == "string") and ((.texts[-1] | length) > 0)
+              then 1 else 0 end),
+        topic: ((.topic_thread_id // "") | tostring),
+        req: ((.request_id // "") | tostring)}] as $all
+    | (reduce ($all[] | select(.b == 1)) as $x ({};
+         .[$x.k] = (if (.[$x.k] == null) or ($x.p > .[$x.k].p)
+                    then {p: $x.p, f: $x.f} else .[$x.k] end))) as $best
+    | $all[]
+    | (.f | split("/") | last | sub("\\.progress\\.json$"; "")) as $stem
+    | ($best[.k]) as $newer
+    | [$stem, .haskey, .k, .occ, .p, .b, .hasmsg, .msg, .sec, .topic, .req,
+       (if $newer != null and $newer.p > .p then 1 else 0 end),
+       (if $newer != null and $newer.p > .p
+        then ($newer.f | split("/") | last | sub("\\.progress\\.json$"; "")) else "" end)]
+    | map(tostring) | join("\u001f")' 2>/dev/null)
+  return 0
+}
+
+# post_row <stem>: this stem's table row, when the pass reached it.
+post_row() {
+  local stem=$1 line
+  post_table_load
+  while IFS= read -r line; do
+    case "$line" in
+      "$stem"$'\x1f'*) printf '%s\n' "$line"; return 0 ;;
+    esac
+  done <<<"$POST_TABLE"
+  return 1
+}
+
+# row_field <row> <n>: field <n>, 1-based, of one table row.
+row_field() {
+  local row=$1 n=$2
+  while [ "$n" -gt 1 ]; do
+    row=${row#*$'\x1f'}
+    n=$((n - 1))
+  done
+  printf '%s\n' "${row%%$'\x1f'*}"
+}
+
+# post_thread_of <topic> <request>: the Discord thread or channel the post
+# actually lives in. The poster records a topic thread it opened for the
+# request in the post's chunk progress; otherwise the post went where the
+# request came from.
+post_thread_of() {
+  local thread=$1
   if [ -z "$thread" ]; then
-    thread=$(post_field "$1" '.request_id')
-    thread=${thread#discord:*:*:}
+    thread=${2#discord:*:*:}
     thread=${thread%%:*}
   fi
   case "$thread" in
     ''|*[!0-9]*) return 1 ;;
   esac
   printf '%s\n' "$thread"
+}
+
+# post_thread <stem>: the same for one post read from its own record.
+post_thread() {
+  local topic request=
+  topic=$(post_field "$1" '.topic_thread_id')
+  [ -n "$topic" ] || request=$(post_field "$1" '.request_id')
+  post_thread_of "$topic" "$request"
 }
 
 settled() { [ -f "$OUTBOX/$1.settled.json" ]; }
@@ -253,49 +324,33 @@ settle_post() {
 }
 
 # newer_post <stem>: true when a later button post exists for the same key.
+# The table answers it for the walkers; the single-post click path uses this.
 newer_post() {
-  local stem=$1 key posted file
-  key=$(post_field "$stem" '.decision.key')
-  posted=$(post_field "$stem" '.posted_at')
-  while IFS= read -r file; do
-    [ "$(basename "$file" .progress.json)" = "$stem" ] && continue
-    if jq -e --arg key "$key" --argjson posted "${posted:-0}" \
-      '.decision.key == $key and .buttons == true and ((.posted_at // 0) > $posted)' \
-      "$file" >/dev/null 2>&1; then
-      return 0
-    fi
-  done < <(progress_files)
-  return 1
+  local row
+  row=$(post_row "$1") || return 1
+  [ "$(row_field "$row" 12)" = 1 ]
+}
+
+# post_link <stem>: the post's jump URL, when its request and message are known.
+post_link() {
+  local request guild thread message
+  request=$(post_field "$1" '.request_id')
+  guild=${request#discord:}
+  guild=${guild%%:*}
+  message=$(post_field "$1" '.discord_message_ids[-1]')
+  case "$guild" in ''|*[!0-9]*) return 0 ;; esac
+  case "$message" in ''|*[!0-9]*) return 0 ;; esac
+  thread=$(post_thread "$1") || return 0
+  printf 'https://discord.com/channels/%s/%s/%s\n' "$guild" "$thread" "$message"
 }
 
 # newer_post_link <stem>: the newest newer button post's jump URL, when known.
 newer_post_link() {
-  local stem=$1 key posted file candidate candidate_posted best_stem=
-  local request guild thread message best_posted=0
-  key=$(post_field "$stem" '.decision.key')
-  posted=$(post_field "$stem" '.posted_at')
-  while IFS= read -r file; do
-    candidate=$(basename "$file" .progress.json)
-    [ "$candidate" = "$stem" ] && continue
-    if jq -e --arg key "$key" --argjson posted "${posted:-0}" --argjson best "$best_posted" \
-      '.decision.key == $key and .buttons == true
-       and ((.posted_at // 0) > $posted) and ((.posted_at // 0) > $best)' \
-      "$file" >/dev/null 2>&1; then
-      candidate_posted=$(jq -r '.posted_at // 0' "$file" 2>/dev/null)
-      best_posted=$candidate_posted
-      best_stem=$candidate
-    fi
-  done < <(progress_files)
-  [ -n "$best_stem" ] || return 0
-  file="$OUTBOX/$best_stem.progress.json"
-  request=$(jq -r '.request_id // ""' "$file")
-  guild=${request#discord:}
-  guild=${guild%%:*}
-  message=$(jq -r '.discord_message_ids[-1] // empty' "$file")
-  case "$guild" in ''|*[!0-9]*) return 0 ;; esac
-  case "$message" in ''|*[!0-9]*) return 0 ;; esac
-  thread=$(post_thread "$best_stem") || return 0
-  printf 'https://discord.com/channels/%s/%s/%s\n' "$guild" "$thread" "$message"
+  local row best
+  row=$(post_row "$1") || return 0
+  best=$(row_field "$row" 13)
+  [ -n "$best" ] || return 0
+  post_link "$best"
 }
 
 # selected_option_id <stem>: the option chosen for this settled or sent post.
@@ -399,16 +454,24 @@ outcome_text() {
 # post_outcome <stem>: the ledger outcome for this post's own lifecycle of its
 # decision, as "<state>\t<answer>".
 post_outcome() {
-  fm_ext_decision_key_outcome "$(post_field "$1" '.decision.key')" "$(post_field "$1" '.decision.occurrence')"
+  fm_ext_decision_key_outcome "$(post_field "$1" '.decision.key')" \
+    "$(post_field "$1" '.decision.occurrence')"
 }
 
-# settle_if_closed <stem>: settle a post whose decision a newer post replaced
-# or whose own lifecycle closed. Returns 0 when the post is settled after it,
-# 1 while the decision is still open, and 2 when its state cannot be read.
-settle_if_closed() {
-  local stem=$1 outcome state option
+# settle_if_closed <stem> [newer]: settle a post whose decision a newer post
+# replaced or whose own lifecycle closed. ``newer`` is the table's answer; the
+# click path omits it and the lookup runs here. Returns 0 when the post is
+# settled after it, 1 while the decision is still open, and 2 when its state
+# cannot be read.
+settle_if_closed() {  # <stem> [newer]
+  local stem=$1 newer=${2-} replaced=0 outcome state option
   settled "$stem" && return 0
-  if newer_post "$stem"; then
+  if [ -n "$newer" ]; then
+    [ "$newer" = 1 ] && replaced=1
+  elif newer_post "$stem"; then
+    replaced=1
+  fi
+  if [ "$replaced" = 1 ]; then
     settle_post "$stem" replaced "Replaced by a newer post $(discord_time "$NOW")" || return 2
     return 0
   fi
@@ -662,14 +725,17 @@ fit_post_content() {
 }
 
 command_posts() {
-  local settled_only=0 file stem thread content original displayed shown final receipt legacy
-  local kind header replacement_url selected
+  local settled_only=0 stem haskey key occ posted buttons hasmessages message sections
+  local topic request newer newer_stem thread content original displayed shown final receipt
+  local legacy kind header replacement_url selected
   [ "${1:-}" != --settled-only ] || settled_only=1
-  while IFS= read -r file; do
-    stem=$(basename "$file" .progress.json)
-    jq -e '.decision.key and .buttons == true' "$file" >/dev/null 2>&1 || continue
+  post_table_load
+  while IFS=$'\x1f' read -r stem haskey key occ posted buttons hasmessages message \
+    sections topic request newer newer_stem; do
+    [ -n "$stem" ] || continue
+    [ "$haskey" = 1 ] && [ "$buttons" = 1 ] || continue
     if [ "$settled_only" = 0 ]; then
-      settle_if_closed "$stem" || true
+      settle_if_closed "$stem" "$newer" || true
     fi
     if ! settled "$stem"; then
       if ! sent "$stem"; then
@@ -684,8 +750,7 @@ command_posts() {
     settled "$stem" && final=true
     legacy=true
     displayed=
-    if jq -e '(.decision.sections | type == "object")
-      and (.texts[-1] | type == "string" and length > 0)' "$file" >/dev/null 2>&1; then
+    if [ "$sections" = 1 ]; then
       legacy=false
       content=$(post_content "$stem")
       [ -n "$content" ] || continue
@@ -696,7 +761,7 @@ command_posts() {
         kind=waiting
       fi
       if [ "$kind" = replaced ]; then
-        replacement_url=$(newer_post_link "$stem")
+        [ -z "$newer_stem" ] || replacement_url=$(post_link "$newer_stem")
         if [ -n "$replacement_url" ]; then
           header="♻️ **Replaced by a newer question** ([open]($replacement_url))"
         else
@@ -705,9 +770,9 @@ command_posts() {
       else
         header="**$content**"
       fi
-      original=$(jq -j '.texts[-1]' "$file"; printf '\001')
+      original=$(jq -j '.texts[-1]' "$OUTBOX/$stem.progress.json"; printf '\001')
       original=${original%$'\001'}
-      displayed=$(fit_post_content "$header" "$original" "$file") || continue
+      displayed=$(fit_post_content "$header" "$original" "$OUTBOX/$stem.progress.json") || continue
       receipt=$displayed
     else
       receipt=$(jq -cn --arg selected "$selected" --argjson final "$final" '
@@ -717,22 +782,23 @@ command_posts() {
     shown=$(cat "$OUTBOX/$stem.finalized" 2>/dev/null; printf '\001') || shown=
     shown=${shown%$'\001'}
     [ "$receipt" != "$shown" ] || continue
-    thread=$(post_thread "$stem") || continue
+    thread=$(post_thread_of "$topic" "$request") || continue
     jq -cn --arg post "$stem" --arg channel "$thread" \
-      --arg message "$(post_field "$stem" '.discord_message_ids[-1]')" \
+      --arg message "$message" \
       --arg content "$displayed" --arg receipt "$receipt" --argjson legacy "$legacy" \
       --arg selected "$selected" --argjson final "$final" \
-      --slurpfile progress "$file" \
+      --slurpfile progress "$OUTBOX/$stem.progress.json" \
       '{post:$post, channel_id:$channel, message_id:$message,
         content:(if $legacy then null else $content end), receipt:$receipt,
         final:$final,
         selected_option_id:(if $selected == "" then null else ($selected | tonumber) end),
         key:$progress[0].decision.key, options:$progress[0].decision.options}'
-  done < <(progress_files)
+  done <<<"$POST_TABLE"
 }
 
 command_threads() {
-  local only='' file stem thread state posted
+  local only='' stem haskey key occ posted buttons hasmessages message sections
+  local topic request newer newer_stem thread state
   case "${1:-}" in
     '') ;;
     --thread)
@@ -743,27 +809,27 @@ command_threads() {
       ;;
     *) usage; exit 2 ;;
   esac
-  while IFS= read -r file; do
-    stem=$(basename "$file" .progress.json)
-    jq -e '.decision.key and ((.discord_message_ids // []) | length > 0)' "$file" >/dev/null 2>&1 || continue
-    thread=$(post_thread "$stem") || continue
+  post_table_load
+  while IFS=$'\x1f' read -r stem haskey key occ posted buttons hasmessages message \
+    sections topic request newer newer_stem; do
+    [ -n "$stem" ] || continue
+    [ "$haskey" = 1 ] && [ "$hasmessages" = 1 ] || continue
+    thread=$(post_thread_of "$topic" "$request") || continue
     [ -z "$only" ] || [ "$thread" = "$only" ] || continue
-    if settled "$stem" || newer_post "$stem"; then
+    if settled "$stem" || [ "$newer" = 1 ]; then
       state=closed
     else
-      case "$(fm_ext_decision_key_state "$(post_field "$stem" '.decision.key')" \
-        "$(post_field "$stem" '.decision.occurrence')")" in
+      case "$(fm_ext_decision_key_state "$key" "$occ")" in
         decided|superseded) state=closed ;;
         *) state=open ;;
       esac
     fi
-    posted=$(post_field "$stem" '.posted_at')
     case "$posted" in
       ''|*[!0-9.]*) posted=0 ;;
     esac
     jq -cn --arg thread "$thread" --arg state "$state" --argjson posted "$posted" \
       '{thread_id:$thread, state:$state, posted_at:$posted}'
-  done < <(progress_files) \
+  done <<<"$POST_TABLE" \
     | jq -sc 'group_by(.thread_id)[]
         | {thread_id: .[0].thread_id,
            open: (map(select(.state == "open")) | length),

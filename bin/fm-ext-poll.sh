@@ -14,8 +14,11 @@
 # watcher does not append a second record for this check.
 # An already claimed offer stays silent, including after Firstmate restart, so
 # each offer wakes once.
-# Each poll also expires local bridge records past the retention window, the
-# same way fm-x-poll.sh expires X-mode context.
+# Each poll expires local bridge records past the retention window, the same
+# way fm-x-poll.sh expires X-mode context.
+# The claim loop runs first and the prunes follow it at their own cadence
+# (fm_ext_prune_run in fm-ext-lib.sh owns the interval), so a prune that
+# outruns the watcher's check timeout can never sit in front of a request.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,40 +33,47 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 fm_ext_active "$FM_HOME" || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
-fm_ext_context_prune "$STATE"
-fm_ext_outbox_prune "$STATE"
-fm_ext_attachments_prune "$STATE"
-
 INBOX=$(fm_ext_inbox_dir)
 CONTEXT=$(fm_ext_context_dir)
-[ -d "$INBOX" ] && [ ! -L "$INBOX" ] || exit 0
 
-for file in "$INBOX"/*.json; do
-  [ -e "$file" ] || continue
-  base=$(basename "$file")
-  slug=${base%.json}
-  fm_ext_slug_valid "$slug" || continue
-  fm_ext_private_artifact_file_valid "$INBOX" "$base" 600 || continue
-  rid=$(jq -r '.request_id // empty' "$file" 2>/dev/null) || continue
-  fm_ext_request_id_valid "$rid" || continue
-  expected=$(fm_ext_request_slug "$rid") || continue
-  [ "$expected" = "$slug" ] || continue
-  if fm_ext_private_artifact_file_valid "$CONTEXT" "$slug.offered.json" 600; then
-    continue
-  fi
-  fm_ext_offer_registry_claim "$STATE" "$slug" "$rid"
-  case $? in
-    0) ;;
-    *) continue ;;
-  esac
-  # Make the wake durable here rather than leaving it to the watcher: the
-  # watcher can exit between this claim and its own append, and a claimed
-  # offer never surfaces again, so that window silently dropped the request.
-  if ! fm_wake_append check "$(fm_ext_wake_key ext-request "$slug")" "ext-request $slug"; then
-    fm_ext_offer_registry_unclaim "$STATE" "$slug" || true
-    continue
-  fi
-  printf 'ext-request %s\n' "$slug"
-done
+# Offers are claimed before anything is pruned. The watcher kills a poll that
+# outruns its check timeout, so a slow retention prune in front of this loop
+# would starve every queued request, which is exactly what happened while the
+# context prune needed a minute.
+claim_inbox_offers() {
+  local file base slug rid expected
+  [ -d "$INBOX" ] && [ ! -L "$INBOX" ] || return 0
+  for file in "$INBOX"/*.json; do
+    [ -e "$file" ] || continue
+    base=$(basename "$file")
+    slug=${base%.json}
+    fm_ext_slug_valid "$slug" || continue
+    fm_ext_private_artifact_file_valid "$INBOX" "$base" 600 || continue
+    rid=$(jq -r '.request_id // empty' "$file" 2>/dev/null) || continue
+    fm_ext_request_id_valid "$rid" || continue
+    expected=$(fm_ext_request_slug "$rid") || continue
+    [ "$expected" = "$slug" ] || continue
+    if fm_ext_private_artifact_file_valid "$CONTEXT" "$slug.offered.json" 600; then
+      continue
+    fi
+    fm_ext_offer_registry_claim "$STATE" "$slug" "$rid"
+    case $? in
+      0) ;;
+      *) continue ;;
+    esac
+    # Make the wake durable here rather than leaving it to the watcher: the
+    # watcher can exit between this claim and its own append, and a claimed
+    # offer never surfaces again, so that window silently dropped the request.
+    if ! fm_wake_append check "$(fm_ext_wake_key ext-request "$slug")" "ext-request $slug"; then
+      fm_ext_offer_registry_unclaim "$STATE" "$slug" || true
+      continue
+    fi
+    printf 'ext-request %s\n' "$slug"
+  done
+}
+
+claim_inbox_offers
+# Retention follows the claim, at its own cadence (see fm_ext_prune_run).
+fm_ext_prune_run "$STATE"
 
 exit 0

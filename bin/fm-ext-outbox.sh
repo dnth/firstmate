@@ -181,10 +181,13 @@ case "$cmd" in
       [ -e "$file" ] || continue
       # Marker names are matched with parameter expansion, not basename: this
       # loop runs on every poll, and one process per marker is what made the
-      # scan cost grow with the number of replies already delivered.
+      # scan cost grow with the number of replies already delivered. Decision
+      # posts leave one settled or sent marker per clicked post, which can
+      # never be a payload, so they are skipped by name too.
       base=${file##*/}
       case "$base" in
         *.receipt.json|*.failed.json|*.progress.json|*.thread.json) continue ;;
+        *.settled.json|*.sent.json) continue ;;
         waiting-pin.*.json)
           fm_ext_private_artifact_file_valid "$OUTBOX" "$base" 600 || continue
           kind=$(jq -r '.kind // empty' "$file") || continue
