@@ -96,11 +96,20 @@ CHECK
     case "${2:-}" in
       */compare/*)
         [ ! -e "$FM_TEST_REVIEW_STATE.compare-fail" ] || exit 1
-        printf '{"status":"ahead","merge_base_commit":{"sha":"%s"}}\n' "$FM_TEST_GH_HEAD"
+        if [ -e "$FM_TEST_REVIEW_STATE.evidence-delay" ]; then
+          printf 'compare\n' >> "$FM_TEST_REVIEW_STATE.calls"
+          sleep 5
+        fi
+        head=${FM_TEST_GH_HEAD:-$(jq -r '.data.repository.pullRequest.headRefOid' "$FM_TEST_REVIEW_STATE")}
+        printf '{"status":"ahead","merge_base_commit":{"sha":"%s"}}\n' "$head"
         exit 0
         ;;
       */issues/*)
-        [ "${FM_TEST_ISSUE_MISSING:-0}" = 0 ] && { printf '7\n'; exit 0; }
+        if [ -e "$FM_TEST_REVIEW_STATE.evidence-delay" ]; then
+          printf 'issue\n' >> "$FM_TEST_REVIEW_STATE.calls"
+          sleep 5
+        fi
+        [ ! -e "$FM_TEST_REVIEW_STATE.issue-fail" ] && [ "${FM_TEST_ISSUE_MISSING:-0}" = 0 ] && { printf '7\n'; exit 0; }
         exit 1
         ;;
     esac
@@ -530,6 +539,96 @@ test_pr_poll_reports_an_unanswered_review_once() {
   pass "AC3: the PR poll reports a review posted after ready, and the watcher reports it once"
 }
 
+test_poll_validates_dispositions() {
+  local dir head reviews threads key disp item
+  dir=$(make_case poll-dispositions)
+  head=$(head_of "$dir")
+  FM_TEST_GH_HEAD=$head
+  body_state "$dir" "$head" "$(sections)"
+  run_pr_check "$dir"
+  [ "$CHECK_RC" -eq 0 ] || fail "disposition seed refused: $CHECK_OUT"
+  reviews='[{"databaseId":56,"state":"COMMENTED","body":"quoted item"}]'
+  threads='[{"id":"PRRT_draft","isResolved":false,"comments":{"nodes":[{"databaseId":902,"body":"quoted item"}]}}]'
+  body_state "$dir" "$head" "$(sections)
+## Review follow-up
+| Review | Item | Disposition |
+| --- | --- | --- |
+| pullrequestreview-56 | quoted item | TODO |" "$reviews" '[]'
+  run_poll "$dir"
+  [ "$POLL_OUT" = "review $URL pullrequestreview-56" ] || fail "draft review row produced clear: $POLL_OUT"
+  run_watcher_cycle "$dir"
+  assert_contains "$(cat "$dir/watch.out")" 'pullrequestreview-56' "review posted after ready with a TODO row did not wake supervision"
+  for key in pullrequestreview-56 PRRT_draft; do
+    for disp in TODO 'fixed deadbeef' 'declined:' 'deferred: not-an-issue' malformed-row; do
+      item='quoted item'
+      if [ "$disp" = malformed-row ]; then item='quoted | item'; disp='declined: reason'; fi
+      if [ "$key" = pullrequestreview-56 ]; then
+        body_state "$dir" "$head" "$(sections)
+## Review follow-up
+| Review | Item | Disposition |
+| --- | --- | --- |
+| $key | $item | $disp |" "$reviews" '[]'
+      else
+        body_state "$dir" "$head" "$(sections)
+## Review follow-up
+| Review | Item | Disposition |
+| --- | --- | --- |
+| $key | $item | $disp |" '[]' "$threads"
+      fi
+      run_poll "$dir"
+      [ "$POLL_OUT" = "review $URL $key" ] || fail "invalid $key row was covered: $POLL_OUT"
+    done
+    for disp in "fixed $head" 'declined: reason' 'deferred: https://github.com/o/r/issues/9'; do
+      body_state "$dir" "$head" "$(sections)
+## Review follow-up
+| Review | Item | Disposition |
+| --- | --- | --- |
+| $key | quoted item | $disp |" \
+        "$(if [ "$key" = pullrequestreview-56 ]; then printf '%s' "$reviews"; else printf '[]'; fi)" \
+        "$(if [ "$key" = PRRT_draft ]; then printf '%s' "$threads"; else printf '[]'; fi)"
+      run_poll "$dir"
+      [ "$POLL_OUT" = "review $URL clear" ] || fail "valid $key disposition refused: $POLL_OUT"
+      case "$disp" in
+        fixed*) touch "$dir/reviews.json.compare-fail" ;;
+        deferred*) touch "$dir/reviews.json.issue-fail" ;;
+        *) continue ;;
+      esac
+      run_poll "$dir"
+      [ "$POLL_OUT" = "review $URL unreadable" ] || fail "failed disposition evidence read was hidden: $POLL_OUT"
+      rm -f "$dir/reviews.json.compare-fail" "$dir/reviews.json.issue-fail"
+    done
+  done
+  pass "poll and verify share row validation for reviews and threads, including TODO rows after ready"
+}
+
+test_poll_evidence_deadline() {
+  local dir head disp
+  for disp in fixed deferred; do
+    dir=$(make_case "poll-evidence-$disp")
+    head=$(head_of "$dir")
+    FM_TEST_GH_HEAD=$head
+    body_state "$dir" "$head" "$(sections)"
+    run_pr_check "$dir"
+    [ "$CHECK_RC" -eq 0 ] || fail "evidence deadline seed refused: $CHECK_OUT"
+    case "$disp" in
+      fixed) disp="fixed $head" ;;
+      deferred) disp='deferred: https://github.com/o/r/issues/9' ;;
+    esac
+    body_state "$dir" "$head" "$(sections)
+## Review follow-up
+| Review | Item | Disposition |
+| --- | --- | --- |
+| pullrequestreview-56 | quoted item | $disp |" \
+      '[{"databaseId":56,"state":"COMMENTED","body":"quoted item"}]' '[]'
+    touch "$dir/reviews.json.delay" "$dir/reviews.json.evidence-delay"
+    run_watcher_cycle "$dir" 6 \
+      || fail "disposition evidence did not wake before the outer timeout: $(cat "$dir/watch.out" "$dir/watch.err")"
+    assert_contains "$(cat "$dir/watch.out")" "review $URL unreadable" "slow disposition evidence failed silently"
+    [ "$(wc -l < "$dir/reviews.json.calls" | tr -d ' ')" -eq 2 ] || fail "deadline fixture did not reach disposition evidence"
+  done
+  pass "disposition evidence shares the paginated read deadline"
+}
+
 test_reopened_thread_wakes_again() {
   local dir head threads expected
   dir=$(make_case reopened-thread)
@@ -784,6 +883,8 @@ test_remote_custody_mode() {
   pass "remote custody enforces Pipeline and accepts forge-proved fixed commits"
 }
 
+test_poll_validates_dispositions
+test_poll_evidence_deadline
 test_reopened_thread_wakes_again
 test_gitlab_without_github_tools
 test_slow_paginated_read

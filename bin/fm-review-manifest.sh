@@ -72,6 +72,8 @@ RM_BODY=
 RM_HEAD=
 RM_ITEMS=
 RM_CONTAINER_COUNT=0
+RM_DEADLINE=0
+RM_READ_FAILED=0
 
 rm_cleanup() {
   [ -z "$RM_JSON_FILE" ] || rm -f -- "$RM_JSON_FILE"
@@ -102,6 +104,12 @@ rm_trim() {
   printf '%s' "$s"
 }
 
+rm_forge_read() {
+  local remaining=$((RM_DEADLINE - SECONDS))
+  [ "$remaining" -gt 0 ] || return 1
+  fm_run_timed "$remaining" gh "$@"
+}
+
 # Returns 0 with the response in RM_JSON_FILE, 1 when
 # the read is unavailable, and 2 when the provider is out of scope.
 rm_read() {
@@ -114,17 +122,15 @@ rm_read() {
     return 1
   }
   local page reviews_cursor= threads_cursor= next_reviews next_threads merged thread cursor next reviews_done=0 threads_done=0
-  local read_limit=$RM_TIMEOUT watch_limit=${FM_CHECK_TIMEOUT:-30} deadline remaining
+  local read_limit=$RM_TIMEOUT watch_limit=${FM_CHECK_TIMEOUT:-30}
   case "$watch_limit" in ''|*[!0-9]*) watch_limit=30 ;; esac
   watch_limit=$((10#$watch_limit / 2))
   [ "$watch_limit" -ge "$read_limit" ] || read_limit=$watch_limit
-  deadline=$((SECONDS + read_limit))
+  RM_DEADLINE=$((SECONDS + read_limit))
   RM_PAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/.fm-review-page.XXXXXX") || return 1
   page=$RM_PAGE_FILE
   while :; do
-    remaining=$((deadline - SECONDS))
-    [ "$remaining" -gt 0 ] || return 1
-    if ! fm_run_timed "$remaining" gh api graphql -f "query=$RM_QUERY" \
+    if ! rm_forge_read api graphql -f "query=$RM_QUERY" \
         -F "owner=$FM_PR_OWNER" -F "repo=$FM_PR_REPO" -F "number=$FM_PR_NUMBER" \
         ${reviews_cursor:+-f "reviewsCursor=$reviews_cursor"} \
         ${threads_cursor:+-f "threadsCursor=$threads_cursor"} > "$page" 2>/dev/null; then
@@ -164,9 +170,7 @@ rm_read() {
     [ -n "$thread" ] || continue
     [ -n "$cursor" ] && [ "$cursor" != null ] || { rm -f "$page"; return 1; }
     while :; do
-      remaining=$((deadline - SECONDS))
-      [ "$remaining" -gt 0 ] || return 1
-      if ! fm_run_timed "$remaining" gh api graphql \
+      if ! rm_forge_read api graphql \
           -f 'query=query($id:ID!,$cursor:String!){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{databaseId body}}}}}' \
           -f "id=$thread" -f "cursor=$cursor" > "$page" 2>/dev/null; then
         rm -f "$page"
@@ -185,7 +189,7 @@ rm_read() {
     done
   done < <(jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.pageInfo.hasNextPage == true) | [.id,.comments.pageInfo.endCursor] | @tsv' "$RM_JSON_FILE")
   rm -f "$page"
-  [ "$SECONDS" -lt "$deadline" ]
+  [ "$SECONDS" -lt "$RM_DEADLINE" ]
 }
 
 rm_field() {
@@ -289,7 +293,7 @@ BODY
 # A disposition has to be one of the three the format allows; `fixed` and
 # `deferred` carry evidence this function proves.
 rm_check_disposition() {
-  local lineno=$1 disp=$2 sha url owner repo number compare
+  local lineno=$1 disp=$2 sha url owner repo number compare issue
   case "$disp" in
     "fixed "*)
       sha=$(rm_trim "${disp#fixed }")
@@ -303,8 +307,13 @@ rm_check_disposition() {
             || ! git -C "$RM_WORKTREE" merge-base --is-ancestor "$sha" "$RM_HEAD" 2>/dev/null; then
           rm_error "the Review follow-up row at body line $lineno claims 'fixed $sha', but $sha is not reachable from the PR head $RM_HEAD"
         fi
-      elif ! compare=$(fm_run_timed "$RM_TIMEOUT" gh api "repos/$FM_PR_OWNER/$FM_PR_REPO/compare/$sha...$RM_HEAD" 2>/dev/null) \
-          || ! printf '%s' "$compare" | jq -es --arg sha "$sha" 'length == 1 and (.[0] | (.status == "ahead" or .status == "identical") and (.merge_base_commit.sha | startswith($sha)))' >/dev/null 2>&1; then
+      elif ! compare=$(rm_forge_read api "repos/$FM_PR_OWNER/$FM_PR_REPO/compare/$sha...$RM_HEAD" 2>/dev/null); then
+        RM_READ_FAILED=1
+        rm_error "the Review follow-up row at body line $lineno claims 'fixed $sha', but forge reachability from the PR head $RM_HEAD could not be proved"
+      elif ! printf '%s' "$compare" | jq -es 'length == 1 and (.[0] | (.status | type == "string") and (.merge_base_commit.sha | type == "string"))' >/dev/null 2>&1; then
+        RM_READ_FAILED=1
+        rm_error "the Review follow-up row at body line $lineno has an unreadable forge comparison"
+      elif ! printf '%s' "$compare" | jq -es --arg sha "$sha" 'length == 1 and (.[0] | (.status == "ahead" or .status == "identical") and (.merge_base_commit.sha | startswith($sha)))' >/dev/null 2>&1; then
         rm_error "the Review follow-up row at body line $lineno claims 'fixed $sha', but forge reachability from the PR head $RM_HEAD could not be proved"
       fi
       ;;
@@ -321,7 +330,9 @@ rm_check_disposition() {
       owner=${BASH_REMATCH[1]}
       repo=${BASH_REMATCH[2]}
       number=${BASH_REMATCH[3]}
-      if ! fm_run_timed "$RM_TIMEOUT" gh api "repos/$owner/$repo/issues/$number" --jq .number >/dev/null 2>&1; then
+      if ! issue=$(rm_forge_read api "repos/$owner/$repo/issues/$number" --jq .number 2>/dev/null) \
+          || ! [[ "$issue" =~ ^[1-9][0-9]*$ ]]; then
+        RM_READ_FAILED=1
         rm_error "the Review follow-up row at body line $lineno defers to $url, which does not resolve"
       fi
       ;;
@@ -404,8 +415,23 @@ rm_load() {
   fi
 }
 
+rm_check_rows() {
+  local line disp
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    disp=$(printf '%s' "$line" | cut -f2-)
+    rm_check_disposition "${line%%$'\t'*}" "$disp"
+  done <<DISPOSITIONS
+$RM_DISPOSITIONS
+DISPOSITIONS
+  if [ "$SECONDS" -ge "$RM_DEADLINE" ]; then
+    RM_READ_FAILED=1
+    rm_error "the review evidence read deadline was exhausted"
+  fi
+}
+
 rm_verify() {
-  local kind key alt url line disp item_word declared
+  local kind key alt url line item_word declared
   rm_load
   rm_check_sections
   rm_parse_table
@@ -428,13 +454,7 @@ rm_verify() {
 $RM_ITEMS
 ITEMS
   fi
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    disp=$(printf '%s' "$line" | cut -f2-)
-    rm_check_disposition "${line%%$'\t'*}" "$disp"
-  done <<DISPOSITIONS
-$RM_DISPOSITIONS
-DISPOSITIONS
+  rm_check_rows
   if [ -n "$RM_ERRORS" ]; then
     while IFS= read -r line; do
       printf 'error: %s\n' "$line" >&2
@@ -456,13 +476,13 @@ ERRORS
 rm_poll() {
   local kind_pair key uncovered=0 url
   rm_load
-  [ -z "$RM_ERRORS" ] || return 0
-  [ "$RM_CONTAINER_COUNT" -gt 0 ] || return 0
   rm_parse_table
+  rm_check_rows
+  [ "$RM_READ_FAILED" -eq 0 ] || return 1
   while IFS= read -r kind_pair; do
     [ -n "$kind_pair" ] || continue
     key=$(printf '%s' "$kind_pair" | cut -f2)
-    if rm_item_covered "$key"; then
+    if [ -z "$RM_ERRORS" ] && rm_item_covered "$key"; then
       continue
     fi
     if [ "$uncovered" -eq 0 ]; then
@@ -474,7 +494,11 @@ rm_poll() {
   done <<ITEMS
 $RM_ITEMS
 ITEMS
-  [ "$uncovered" -eq 0 ] || printf 'review %s\n' "$url"
+  if [ "$uncovered" -gt 0 ]; then
+    printf 'review %s\n' "$url"
+  elif [ -n "$RM_ERRORS" ]; then
+    printf 'review %s invalid\n' "$RM_URL"
+  fi
   return 0
 }
 
@@ -530,4 +554,4 @@ if [ "$COMMAND" = verify ]; then
   exit $?
 fi
 rm_poll
-exit 0
+exit $?
