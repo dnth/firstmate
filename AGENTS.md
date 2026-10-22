@@ -394,6 +394,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
 Every new ship brief declares stable acceptance-criterion ids and receives an append-only `evidence.jsonl`; `bin/fm-receipt-schema.sh` owns the receipt schema, `bin/fm-receipt-check.sh` owns criterion parsing and acceptance-evidence accounting, and scout/report behavior remains separate.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
+Scaffold a ship task whose change alters what a screen shows with `--screen-change`, so it cannot reach PR-ready without before and after screenshots.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
@@ -428,7 +429,7 @@ When X mode is enabled, load `fmx-respond` on an `x-mention <request_id>`, `x-mo
 The sibling local Discord bridge ships inert until the home opts in with `config/ext-bridge` plus a mode-0600 secret file.
 That opt-in is consent for local inbox intake and Discord follow-ups through the Hermes Gateway plugin, not authority for destructive, irreversible, or security-sensitive action.
 It is also not by itself standing authority to change projects: only an author-scoped allowlist rule carries that, and a request admitted by a broader rule needs the captain's confirmation first.
-On an `ext-request <slug>` check wake or a drain's `EXT REQUESTS AWAITING ANSWER` section, or before opening a topic thread no captain request started, load `ext-respond`, which owns activation mechanics, the seam's transport boundary, and follow-ups.
+On an `ext-request <slug>` check wake or a drain's `EXT REQUESTS AWAITING ANSWER` section, before opening a topic thread no captain request started, or before attaching screenshots or a recording to a post, load `ext-respond`, which owns activation mechanics, the seam's transport boundary, media screening, and follow-ups.
 
 ## Captain instruction precedence
 

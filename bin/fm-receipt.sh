@@ -30,6 +30,9 @@
 #
 # The helper validates input schema and delegates the pinned ship-contract append
 # to fm-receipt-store.sh, then emits exactly one compact JSON object.
+# The append refuses a success receipt for a screen-change criterion unless
+# --artifact names a screenshot under data/<task-id>/artifacts/;
+# bin/fm-receipt-check.sh owns that rule.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

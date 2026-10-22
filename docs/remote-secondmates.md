@@ -246,6 +246,8 @@ The source log is never truncated or consumed.
 A captured delta cannot be `handled` before it was ingested - the runner's `handled-gate` seam requires an ingest receipt, cursor coverage, or a recorded continuity break.
 A shortened or changed prefix stops the relay, writes a durable `state/remote-replies/<id>.continuity-broken` marker naming the sequence and reason, and keeps the route pinned until an operator rebases the cursor.
 
+Screenshots and recordings a remote second mate's crew saves are not relayed automatically: the primary copies one back on demand with `bin/fm-ext-media.sh pull <id> <data-or-state-path>`, in bounded ranged reads that must match the remote file's size and digest, and then screens and posts it like local media under the [outbound media contract](configuration.md#outbound-media).
+
 ### Landing owner
 
 A remote second mate sleeps between turns and its merge poll runs only while it is awake, so the primary owns the landing of every PR the mate reports.

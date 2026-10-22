@@ -4,6 +4,7 @@
 # Usage:
 #   fm-ext-open.sh --key <key> --thread-title <text>
 #     (--text-file <path> | --text-file -) [--thread-state needs-you|done|none]
+#     [--media <path>]...
 #   fm-ext-open.sh --key <key> --lookup
 #
 # Firstmate opens one titled thread in the dedicated channel (config/ext-channel)
@@ -26,7 +27,8 @@
 # answer generation 1, so later posts use bin/fm-ext-emit.sh with the printed
 # request id and --kind followup or final from generation 1, including
 # --thread-state renames. A captain reply inside the thread is an ordinary
-# in-thread request.
+# in-thread request. --media attaches screened media to that first message
+# exactly as bin/fm-ext-emit.sh --media does; its header owns the rules.
 #
 # On success the request id is printed on stdout and the open is recorded in
 # state/ext-context/<slug>.json (origin "open", open_key <key>), which keeps it
@@ -52,6 +54,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: fm-ext-open.sh --key <key> --thread-title <text>
          (--text-file <path> | --text-file -) [--thread-state needs-you|done|none]
+         [--media <path>]...
        fm-ext-open.sh --key <key> --lookup
 EOF
 }
@@ -67,6 +70,7 @@ TITLE=
 TEXT_FILE=
 THREAD_STATE=
 LOOKUP=0
+MEDIA_ARGS=()
 
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
@@ -80,6 +84,7 @@ while [ "$#" -gt 0 ]; do
     --text-file) shift; TEXT_FILE=${1:-} ;;
     --thread-state) shift; THREAD_STATE=${1:-} ;;
     --lookup) LOOKUP=1 ;;
+    --media) shift; [ -n "${1:-}" ] || die "--media needs a file path"; MEDIA_ARGS+=(--media "$1") ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -191,5 +196,6 @@ context_is_this_open || die "the recorded context for this key is not an opened 
 set -- --request-id "$REQUEST_ID" --kind answer --generation 1 \
   --text-file "$TEXT_FILE" --thread-title "$TITLE"
 [ -z "$THREAD_STATE" ] || set -- "$@" --thread-state "$THREAD_STATE"
+[ "${#MEDIA_ARGS[@]}" -eq 0 ] || set -- "$@" "${MEDIA_ARGS[@]}"
 bash "$SCRIPT_DIR/fm-ext-emit.sh" "$@" >/dev/null || exit $?
 printf '%s\n' "$REQUEST_ID"

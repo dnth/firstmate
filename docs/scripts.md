@@ -30,7 +30,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-decision-hold.sh`    | Transitional compatibility shim mapping the retired decision verbs onto fm-captain-hold.sh |
 | `fm-bearings-board.sh`   | Build and arm the interactive Lavish fleet board; writes the durable state/decision-cards store |
 | `fm-tasks-axi.sh`        | Run tasks-axi against this home's backlog from any working directory                 |
-| `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, and Herdr-lab briefs   |
+| `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, and Herdr-lab briefs, and mark screen-change tasks |
 | `fm-brief-heading-lib.sh` | Extract the dispatch router's task sections with scaffold heading tolerance; `fm-receipt-check.sh` keeps its own acceptance-criteria parser |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
@@ -160,3 +160,4 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-public-followup.sh`  | Reconcile typed terminal work results into a public commitment and deliver its final reply once |
 | `fm-public-followup-emit.sh` | Report one typed terminal work result into the home that owes the public reply    |
 | `fm-ext-waiting-pin.sh`  | Refresh the pinned Discord "Waiting on you" message from board and PR records     |
+| `fm-ext-media.sh`        | Screen, stage, and verify outbound Discord media, and copy screenshots back from a remote second mate |

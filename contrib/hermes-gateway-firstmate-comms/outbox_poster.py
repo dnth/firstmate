@@ -16,13 +16,16 @@ A later-chunk transient failure records progress so earlier chunks are not
 sent again, then releases the exclusive inflight send marker so only one
 poster can resume the next chunk. A pre-send split failure or chunk-count
 mismatch after a successful begin also releases that marker; posted_count
-zero still aborts. An in-flight chunk without a confirmed post stays
+zero still aborts unless a media upload was already tried. An in-flight
+chunk without a confirmed post stays
 mid-delivery.
 A transient definite send failure (HTTP 429 or 5xx) before any chunk
-succeeds deletes the posting marker so that generation can retry.
-A permanent 4xx records a terminal failed marker so pending stops retrying.
-A posting marker without a receipt is refused so an ambiguous crash or
-transport error after Discord may have accepted the post cannot double-post.
+succeeds deletes the posting marker so that generation can retry, unless a
+media upload was already tried: then progress is kept so the one upload
+retry holds across delivery attempts.
+The delivery and bounded-recovery contract, including ambiguous HTTP 408,
+is owned by docs/configuration.md under "Local Communication Officer bridge";
+"Outbound media" owns nonce reconciliation and upload retry versus fallback.
 
 For a request that arrived as an ordinary Discord message (payload origin
 ``message``), the poster reacts on that message: ``✅`` once an ``answer`` or
@@ -43,12 +46,17 @@ for a later outcome header.
 rules in docs/configuration.md, "Decision buttons". ``reconcile_thread_states`` then
 clears answered needs-you threads and retries failed renames.
 
+A payload with ``media`` uploads its staged files with its last chunk as one
+multipart message; docs/configuration.md, "Outbound media", owns the single
+retry, the failure note, and the receipt fields.
+
 The watcher loop and delivery diagnostics are described in README.md under
 "How it works".
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -60,6 +68,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Callable
 
@@ -112,6 +121,19 @@ _BOT_USER_ID = ""
 # How often the watcher sweeps decision posts for decisions closed on another
 # channel, which reads Firstmate's ledgers; click outcomes show within a cycle.
 DECISION_SWEEP_SECS = 30.0
+# Outbound media. bin/fm-ext-media.sh owns screening, staging, and the generic
+# names Discord sees; docs/configuration.md "Outbound media" owns delivery.
+# A media upload is tried at most MEDIA_UPLOAD_ATTEMPTS times per delivery
+# attempt - the first try plus exactly one retry - and only after Discord
+# answered with an HTTP error, so no try can have created a message. After
+# that the text posts alone with MEDIA_FAILED_NOTE.
+MEDIA_UPLOAD_ATTEMPTS = 2
+# Pause before the one retry; hermetic tests set it to 0.
+MEDIA_RETRY_DELAY_SECS = 2.0
+MEDIA_UPLOAD_TIMEOUT_SECS = 120
+MEDIA_FAILED_NOTE = "_(screenshot couldn't be posted)_"
+# Room the splitter keeps free on a media post for the note above.
+MEDIA_NOTE_RESERVE = len(MEDIA_FAILED_NOTE) + 2
 
 
 class DiscordSendError(Exception):
@@ -158,6 +180,77 @@ def failure_reason(exc: BaseException) -> dict:
 
 def outbox_cli() -> Path:
     return firstmate_root() / "bin" / "fm-ext-outbox.sh"
+
+
+def media_cli() -> Path:
+    return firstmate_root() / "bin" / "fm-ext-media.sh"
+
+
+def load_media_uploads(payload_path: Path, payload: dict, home: Path) -> tuple[list[dict], list[str]]:
+    """Read this payload's staged media for upload: (uploads, dropped names).
+
+    ``bin/fm-ext-media.sh verify`` owns which staged files may still post. The
+    bytes read here must hash to the digest it verified, so the bytes sent are
+    exactly the bytes checked; any doubt drops the file rather than sending it.
+    """
+    media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+    entries = media.get("files") if isinstance(media.get("files"), list) else []
+    names = [str(entry.get("name") or "") for entry in entries if isinstance(entry, dict)]
+    try:
+        result = subprocess.run(
+            [str(media_cli()), "verify", "--payload", str(payload_path)],
+            check=False,
+            env=_env_for(home),
+            capture_output=True,
+            text=True,
+        )
+        verified = json.loads(result.stdout) if result.returncode == 0 else {}
+    except (OSError, ValueError):
+        verified = {}
+    if not isinstance(verified, dict) or not isinstance(verified.get("files"), list):
+        return [], names
+    staged = state_dir(home) / "ext-media" / "staged" / str(media.get("dir") or "")
+    uploads: list[dict] = []
+    dropped = [str(name) for name in verified.get("dropped") or []]
+    for item in verified["files"]:
+        name = str(item.get("name") or "") if isinstance(item, dict) else ""
+        try:
+            path = Path(str(item["path"]))
+            if path.name != name or path.parent.resolve() != staged.resolve():
+                raise ValueError("staged media escaped its folder")
+            fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as handle:
+                data = handle.read()
+            if hashlib.sha256(data).hexdigest() != item["sha256"]:
+                raise ValueError("staged media changed after verification")
+            uploads.append({"name": name, "media_type": str(item["media_type"]), "data": data})
+        except (KeyError, OSError, TypeError, ValueError):
+            dropped.append(name)
+    return uploads, dropped
+
+
+def _multipart_body(message: dict, files: list[dict]) -> tuple[bytes, str]:
+    """Discord's multipart create-message body: payload_json plus files[n]."""
+    boundary = "fm-ext-" + uuid.uuid4().hex
+    body = dict(message)
+    body["attachments"] = [{"id": index, "filename": item["name"]} for index, item in enumerate(files)]
+    parts = [
+        f"--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="payload_json"\r\n',
+        b"Content-Type: application/json\r\n\r\n",
+        json.dumps(body).encode("utf-8"),
+        b"\r\n",
+    ]
+    for index, item in enumerate(files):
+        parts += [
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="files[{index}]"; filename="{item["name"]}"\r\n'.encode(),
+            f"Content-Type: {item['media_type']}\r\n\r\n".encode(),
+            item["data"],
+            b"\r\n",
+        ]
+    parts.append(f"--{boundary}--\r\n".encode())
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
 def state_dir(home: Path) -> Path:
@@ -348,6 +441,7 @@ def split_reply(
     limit: int | None = None,
     cap: int | None = None,
     legacy: bool = False,
+    reserve: int = 0,
 ) -> dict:
     """Split a reply into Discord chunks.
 
@@ -355,12 +449,16 @@ def split_reply(
     jq. A legacy resume - a generation that was already partially posted before
     chunk plans were persisted - keeps the pre-change splitter through
     `fm-ext-outbox.sh split --legacy`, so it finishes the chunks it started with.
+    ``reserve`` keeps that many characters of Discord's message limit free on
+    every new chunk, for text the poster may append later.
     """
     home = home or firstmate_home()
     if not legacy:
         resolved = reply_limits(home) if limit is None or cap is None else None
         used_limit = limit if limit is not None else resolved["limit"]
         used_cap = cap if cap is not None else resolved["cap"]
+        if reserve:
+            used_limit = min(used_limit, DISCORD_MESSAGE_MAX - reserve)
         texts = discord_split.split_discord(text, used_limit, used_cap)
         if not texts:
             texts = [text]
@@ -1584,30 +1682,43 @@ def ensure_open_thread(
 
 
 def discord_send(payload: dict) -> dict:
-    """Post one outbox payload to Discord REST. No Discord library."""
+    """Post one outbox payload to Discord REST. No Discord library.
+
+    A chunk carrying ``files`` (loaded by ``load_media_uploads``) posts as one
+    multipart message: the text and buttons in ``payload_json`` and each file
+    as ``files[n]`` under its generic staged name.
+    """
     token = _bot_token()
     if not token:
         raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
     channel = payload["thread_id"] or payload["channel_id"]
     message = {"content": payload["text"]}
+    if payload.get("nonce"):
+        message.update(nonce=payload["nonce"], enforce_nonce=True)
     decision = payload.get("decision")
     last_chunk = int(payload.get("chunk_index") or 0) + 1 >= int(payload.get("chunk_count") or 1)
     buttons = isinstance(decision, dict) and last_chunk and decisions.buttons_ready()
     if buttons:
         message["components"] = decisions.components_for(decision)
-    body = json.dumps(message).encode("utf-8")
+    files = payload.get("files") or []
+    if files:
+        body, content_type = _multipart_body(message, files)
+        timeout = MEDIA_UPLOAD_TIMEOUT_SECS
+    else:
+        body, content_type = json.dumps(message).encode("utf-8"), "application/json"
+        timeout = 15
     request = urllib.request.Request(
         f"{DISCORD_API_BASE}/channels/{channel}/messages",
         data=body,
         method="POST",
         headers={
             "Authorization": f"Bot {token}",
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
             "User-Agent": USER_AGENT,
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8") or "{}"
     except urllib.error.HTTPError as err:
         outcome = classify_http_code(err.code)
@@ -1620,12 +1731,16 @@ def discord_send(payload: dict) -> dict:
         data = json.loads(raw)
     except json.JSONDecodeError as err:
         raise DiscordSendError("ambiguous", "discord HTTP 200 with invalid JSON") from err
-    return {
+    receipt = {
         "ok": True,
         "discord_message_id": str(data.get("id") or ""),
         "channel_id": str(data.get("channel_id") or channel),
         "buttons": bool(buttons),
     }
+    if files:
+        attached = data.get("attachments")
+        receipt["attachments"] = len(attached) if isinstance(attached, list) else len(files)
+    return receipt
 
 
 def discord_edit(channel_id: str, message_id: str, content: str | None, components: list) -> None:
@@ -1948,6 +2063,35 @@ def _waiting_pin_deliver_claimed(payload: dict, home: Path) -> str:
     return "edited"
 
 
+def recover_pending_message(payload: dict, pending: dict) -> dict | None:
+    token = _bot_token()
+    if not token:
+        raise RuntimeError("missing bot token")
+    channel = payload.get("thread_id") or payload.get("channel_id")
+    headers = {"Authorization": f"Bot {token}", "User-Agent": USER_AGENT}
+    def get(path):
+        request = urllib.request.Request(f"{DISCORD_API_BASE}{path}", headers=headers)
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.load(response)
+    bot = get("/users/@me")
+    messages = get(f"/channels/{channel}/messages?limit=100")
+    if not isinstance(messages, list) or not bot.get("id"):
+        raise RuntimeError("invalid message lookup")
+    for message in messages:
+        if str((message.get("author") or {}).get("id")) != str(bot["id"]):
+            continue
+        matches = str(message.get("nonce") or "") == pending["nonce"]
+        if not message.get("nonce"):
+            created = (int(message["id"]) >> 22) / 1000 + 1420070400
+            matches = (created >= int(pending["attempted_at"] * 1000) / 1000
+                       and message.get("content") == pending["text"]
+                       and [item.get("filename") for item in message.get("attachments") or []] == pending["names"])
+        if matches and _SNOWFLAKE.fullmatch(str(message.get("id") or "")):
+            return {"discord_message_id": str(message["id"]),
+                    "buttons": bool(message.get("components"))}
+    return None
+
+
 def deliver_one(
     path: Path,
     send: SendFn | None = None,
@@ -1984,6 +2128,7 @@ def deliver_one(
     sender = send or discord_send
     stored = load_progress(payload, home)
     decision = isinstance(payload.get("decision"), dict)
+    media = payload.get("media") if isinstance(payload.get("media"), dict) else None
     try:
         if stored and "texts" in stored:
             split = {"texts": stored["texts"], "limit": stored["limit"], "cap": stored["cap"]}
@@ -2005,6 +2150,7 @@ def deliver_one(
                     limit=limit,
                     cap=cap,
                     legacy=bool(stored),
+                    reserve=MEDIA_NOTE_RESERVE if media else 0,
                 )
     except Exception:
         if stored and int(stored.get("posted_count") or 0) > 0:
@@ -2031,6 +2177,9 @@ def deliver_one(
             post_decision.pop("sections", None)
         progress["decision"] = post_decision
     progress["texts"] = chunks
+    if media and not isinstance(progress.get("media"), dict):
+        # Upload state for the post's last message: pending, posted, or dropped.
+        progress["media"] = {"state": "pending", "attempts": 0, "posted": [], "dropped": []}
     if int(progress.get("total") or 0) != len(chunks):
         release_inflight(payload, home=home)
         return "mid-delivery"
@@ -2056,59 +2205,147 @@ def deliver_one(
     if thread_id:
         send_payload["thread_id"] = thread_id
     for index in range(start, len(chunks)):
-        progress["inflight"] = index
-        write_progress(payload, progress, home)
-        try:
-            receipt = sender(_chunk_payload(send_payload, chunks[index], index, len(chunks)))
-        except Exception as err:
-            outcome = classify_send_failure(err)
-            if outcome == "transient":
-                progress["inflight"] = None
-                write_progress(payload, progress, home)
-                if int(progress.get("posted_count") or 0) == 0:
-                    abort_status = abort_delivery(payload, home=home)
-                    if abort_status == "already-receipted":
-                        return abort_status
+        last = index + 1 == len(chunks)
+        media_state = progress.get("media") if media and last else None
+        uploads: list[dict] = []
+        recovered = None
+        pending = progress.get("pending_send")
+        if pending:
+            progress["inflight"] = index
+            write_progress(payload, progress, home)
+            try:
+                recovered = recover_pending_message(send_payload, pending)
+            except Exception:
+                return "mid-delivery"
+            if recovered is None:
+                return "mid-delivery"
+            text = pending["text"]
+            if media_state is not None and pending["names"]:
+                media_state["state"] = "posted"
+                media_state["posted"] = pending["names"]
+        if not recovered and media_state is not None and media_state.get("state") == "pending":
+            if int(media_state.get("attempts") or 0) >= MEDIA_UPLOAD_ATTEMPTS:
+                # A resumed ambiguous upload already used its one retry.
+                media_state["state"] = "dropped"
+                media_state["dropped"] = [str(entry.get("name") or "") for entry in media.get("files") or []
+                                          if isinstance(entry, dict)]
+            else:
+                uploads, unverified = load_media_uploads(path, payload, home)
+                media_state["dropped"] = unverified
+                if not uploads:
+                    media_state["state"] = "dropped"
+        while True:
+            if recovered:
+                receipt = recovered
+                break
+            attaching = bool(uploads) and media_state is not None and media_state.get("state") == "pending"
+            text = chunks[index]
+            if media_state is not None and (media_state.get("state") == "dropped" or media_state.get("dropped")) \
+                    and not text.endswith(MEDIA_FAILED_NOTE):
+                text = f"{text}\n\n{MEDIA_FAILED_NOTE}"
+            chunk = _chunk_payload(send_payload, text, index, len(chunks))
+            if attaching:
+                chunk["files"] = uploads
+                media_state["attempts"] = int(media_state.get("attempts") or 0) + 1
+            chunk["nonce"] = hashlib.sha256(
+                f"{payload['slug']}:{payload['kind']}:{payload['generation']}:{index}".encode()
+            ).hexdigest()[:25]
+            progress["pending_send"] = {
+                "nonce": chunk["nonce"], "text": text, "names": [item["name"] for item in uploads] if attaching else [],
+                "attempted_at": time.time(),
+            }
+            progress["inflight"] = index
+            write_progress(payload, progress, home)
+            try:
+                receipt = sender(chunk)
+                if not isinstance(receipt, dict) or not _message_id(receipt):
+                    raise DiscordSendError("ambiguous", "discord post returned no message id")
+            except Exception as err:
+                outcome = classify_send_failure(err)
+                refused = getattr(err, "http_code", None) is not None or isinstance(err, urllib.error.HTTPError)
+                if outcome != "ambiguous":
+                    progress.pop("pending_send", None)
+                if attaching and refused and outcome in ("transient", "permanent"):
+                    # Discord answered with an HTTP error, so this try created no
+                    # message: retry the upload once, then post the text alone.
+                    progress["inflight"] = None
+                    if int(media_state.get("attempts") or 0) >= MEDIA_UPLOAD_ATTEMPTS:
+                        media_state["state"] = "dropped"
+                        media_state["dropped"] = [item["name"] for item in uploads] + list(media_state.get("dropped") or [])
+                        media_state["reason"] = failure_reason(err)
+                    write_progress(payload, progress, home)
+                    if media_state.get("state") == "pending" and MEDIA_RETRY_DELAY_SECS > 0:
+                        time.sleep(MEDIA_RETRY_DELAY_SECS)
+                    continue
+                if outcome == "transient":
+                    progress["inflight"] = None
+                    write_progress(payload, progress, home)
+                    # Abort deletes progress, which would reset the media
+                    # upload count; once an upload was tried, keep progress and
+                    # resume like a later-chunk failure so the one retry holds.
+                    uploads_tried = int((progress.get("media") or {}).get("attempts") or 0) > 0
+                    if int(progress.get("posted_count") or 0) == 0 and not uploads_tried:
+                        abort_status = abort_delivery(payload, home=home)
+                        if abort_status == "already-receipted":
+                            return abort_status
+                        return "failed"
+                    release_inflight(payload, home=home)
                     return "failed"
-                release_inflight(payload, home=home)
-                return "failed"
-            if outcome == "permanent":
-                fail_status = record_failed(payload, failure_reason(err), home=home)
-                if fail_status == "already-receipted":
-                    return fail_status
-                react_to_request(payload, REACT_FAILED, react)
-                return "terminal-failed"
-            return "mid-delivery"
+                if outcome == "permanent":
+                    fail_status = record_failed(payload, failure_reason(err), home=home)
+                    if fail_status == "already-receipted":
+                        return fail_status
+                    react_to_request(payload, REACT_FAILED, react)
+                    return "terminal-failed"
+                return "mid-delivery"
+            if attaching:
+                media_state["state"] = "posted"
+                media_state["posted"] = [item["name"] for item in uploads]
+            break
         if not isinstance(receipt, dict):
             receipt = {}
+        # The stored plan keeps what this message actually showed, note included.
+        chunks[index] = text
         ids.append(_message_id(receipt))
         progress["discord_message_ids"] = ids
         progress["posted_count"] = index + 1
+        progress.pop("pending_send", None)
         progress["inflight"] = None
         if "decision" in progress and index + 1 == len(chunks):
             progress["buttons"] = bool(receipt.get("buttons"))
             progress["posted_at"] = time.time()
         write_progress(payload, progress, home)
     posted_at = time.time()
-    record_receipt(
-        payload,
-        {
-            "ok": True,
-            "discord_message_id": ids[0] if ids else "",
-            "discord_message_ids": ids,
-            "chunks": len(chunks),
-            "channel_id": str(send_payload.get("thread_id") or send_payload.get("channel_id") or ""),
-            "thread_id": str(send_payload.get("thread_id") or ""),
-            "queued_at": queued_at,
-            "picked_at": picked_at,
-        },
-        home=home,
-    )
+    receipt_record = {
+        "ok": True,
+        "discord_message_id": ids[0] if ids else "",
+        "discord_message_ids": ids,
+        "chunks": len(chunks),
+        "channel_id": str(send_payload.get("thread_id") or send_payload.get("channel_id") or ""),
+        "thread_id": str(send_payload.get("thread_id") or ""),
+        "queued_at": queued_at,
+        "picked_at": picked_at,
+    }
+    attachments = ""
+    media_state = progress.get("media") if media else None
+    if isinstance(media_state, dict):
+        posted_names = list(media_state.get("posted") or [])
+        dropped_names = list(media_state.get("dropped") or [])
+        receipt_record["attachments"] = [
+            {"name": entry.get("name"), "media": entry.get("media"), "bytes": entry.get("bytes")}
+            for entry in media.get("files") or []
+            if isinstance(entry, dict) and entry.get("name") in posted_names
+        ]
+        receipt_record["attachments_dropped"] = dropped_names
+        receipt_record["media_upload_attempts"] = int(media_state.get("attempts") or 0)
+        receipt_record["media_note"] = media_state.get("state") == "dropped" or bool(dropped_names)
+        attachments = f" attachments={len(posted_names)}"
+    record_receipt(payload, receipt_record, home=home)
     waited = f"{max(0.0, picked_at - queued_at):.1f}s" if queued_at > 0 else "unknown"
     print(f"fm-ext-poster: delivered {str(payload.get('slug') or '')[:12]} "
           f"{payload.get('kind')}.{payload.get('generation')} queued={queued_at:.3f} "
           f"picked={picked_at:.3f} posted={posted_at:.3f} "
-          f"wait={waited} post={max(0.0, posted_at - picked_at):.1f}s chunks={len(chunks)}",
+          f"wait={waited} post={max(0.0, posted_at - picked_at):.1f}s chunks={len(chunks)}{attachments}",
           file=sys.stderr)
     if payload.get("origin") == "open" and payload.get("kind") == "answer" and payload.get("generation") == 1:
         save_request_thread(payload, thread_id, home, opening_posted=True)

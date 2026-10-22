@@ -861,8 +861,8 @@ Steal serialization keeps a 1-second floor even when that TTL is 0, so two steal
 A live owner stays protected from TTL-based claim stealing, including an ambiguous crash-after-post while the poster process is still alive.
 `receipt` writes the receipt once.
 The gateway poster includes `queued_at` (the payload's emit time, or 0 when unavailable) and `picked_at` (the delivery attempt's start time) as epoch seconds in ordinary reply receipts.
-`abort` deletes the posting marker after a transient definite send failure (HTTP 429 or 5xx) so that generation can retry.
-`fail` records a terminal failed marker after a permanent 4xx so pending stops retrying that generation.
+`abort` deletes the posting marker after a transient definite send failure (HTTP 429 or 5xx) before any chunk succeeds, unless a media upload has already been tried; the [outbound media contract](#outbound-media) owns preservation of that upload progress.
+`fail` records a terminal failed marker after a permanent 4xx so pending stops retrying that generation; HTTP 408 is ambiguous and follows recovery instead.
 The gateway poster splits oversized Discord replies using the budget resolved by `bin/fm-ext-lib.sh`: `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900, min 50, values above 2000 reset to 1900) and `FM_EXT_DISCORD_THREAD_MAX` (default 25).
 Its module docstring in [`discord_split.py`](../contrib/hermes-gateway-firstmate-comms/discord_split.py) owns that algorithm; the poster imports it directly, and `bin/fm-ext-outbox.sh split` runs the same module through `uv run --no-project` for manual use.
 A reply that already fits is one message; a longer reply is posted as ordered chunks into the same thread, with no `(k/n)` counter.
@@ -874,10 +874,11 @@ The poster identifies itself with a `DiscordBot (<url>, <version>)` User-Agent t
 The [bridge regression test](../tests/fm-ext-bridge.test.sh) drives the real sender against a local stub of that edge rule by overriding the module attribute `DISCORD_API_BASE`; this is a test seam, not an operator setting.
 
 That mid-delivery state is bounded rather than permanent.
-Once a generation has recorded the same in-flight chunk without a fresh claim or progress heartbeat for longer than `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), the next `begin` reopens exactly that chunk for one more attempt and records the attempt in chunk progress.
+Once a generation has recorded the same in-flight chunk without a fresh claim or progress heartbeat for longer than `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), the next `begin` reopens exactly that chunk for recovery and records the attempt in chunk progress.
+The poster applies the nonce and recent-message reconciliation described under [outbound media](#outbound-media) to every reply chunk, including text-only replies.
 Each chunk attempt refreshes the progress artifact before sending, so a poster still making progress is never recovered out from under its sender regardless of the recovery window.
 After `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts, `begin` records a terminal failed marker, exits 5, and appends `ext-delivery-failed <slug>` keyed `ext-delivery-failed:<slug>` for the watcher to ring.
-So an ordinary network timeout costs at most a repeated chunk and, at worst, a surfaced failure - never a silently truncated reply that no shipped command can clear.
+An unresolved network timeout therefore ends in a surfaced failure after bounded recovery, rather than a blind resend.
 
 For ordinary replies, `pending` lists only generations that are still genuinely pending.
 A payload whose generation has reached a receipt or a terminal failed marker is retired on sight, so poll cost stays flat as delivered replies accumulate instead of growing with every reply ever sent.
@@ -887,6 +888,7 @@ Local bridge records expire on the same seven-day window X mode uses for its own
 A due retention pass drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.
 It drops the leftover markers of already retired outbox generations.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
+The same pass deletes [outbound media](#outbound-media) on its own fixed 14-day window: a staged post's copies 14 days after the post's receipt or terminal failure (never while its payload is still pending), and screening attestations, sampled video frames, and files pulled from a remote second mate 14 days after they were recorded.
 The poll claims its inbox offers before it prunes, and prunes at most once per `FM_EXT_PRUNE_INTERVAL_SECS` (default 3600), so the claim runs first; a prune interrupted by the watcher's check timeout is retried on the next poll whose cadence is due.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
 Request-wide thread records remain while any other JSON record for the request remains, then become eligible for pruning based on their own age.
@@ -924,6 +926,31 @@ Published inbox records and their copied files survive later intake failures, so
 Text-only requests retain their existing record shape without attachment fields.
 The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#how-it-works) owns raw-message text selection and its compatibility fallback.
 The [`ext-respond` safety rules](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) own treating attachment bytes as untrusted data and keeping file contents, names, and paths out of Discord replies.
+
+### Outbound media
+
+Firstmate can attach screenshots and short recordings to its own posts; workers never post to Discord and save screenshots as task evidence instead.
+`bin/fm-ext-emit.sh --media <path>` (or `bin/fm-ext-open.sh --media <path>`) attaches up to 4 images (PNG, JPEG, GIF, or WebP) and 1 video (MP4 or WebM, at most 30 seconds) to an `answer`, `followup`, or `final`.
+Media is accepted only from this home's `data/` or `state/` tree or a recorded task worktree's `.qa/evidence/` folder; a symlink, a `.` or `..` component, an unsupported type, or a path outside those roots is refused, as is a request from a task worker's environment.
+Every file needs a screening attestation that Firstmate records after looking at it, bound to the file's content digest, so a file that was never screened, has changed since, or was screened and refused cannot post; a video also needs its frames sampled before it can be screened.
+A fixed 10000000-byte limit caps each posted file: an oversized image is downscaled with ImageMagick, and an oversized video is refused rather than re-encoded.
+Images have no source byte cap; downscaling is bounded by ImageMagick resource limits and refuses images it cannot bring under the upload limit.
+Emit copies each file into a private folder under `state/ext-media/staged/` under a generic name such as `image-1.png`, so no path, branch name, task id, or original filename reaches Discord, and it refuses post text that names a media file.
+The [`bin/fm-ext-media.sh` header](../bin/fm-ext-media.sh) owns screening, frame sampling, staging, verification, remote pulls, and every refusal.
+
+The gateway poster attaches the staged files to the post's last message as one Discord multipart request (`payload_json` plus `files[n]`), after re-checking each file's digest and attestation and confirming that the bytes it sends hash to the verified digest.
+When Discord answers an upload with a definite HTTP refusal (excluding ambiguous HTTP 408), the poster retries the upload exactly once; if the retry also fails definitely, or a file no longer verifies, the text posts without it and ends with `_(screenshot couldn't be posted)_`.
+Each chunk carries a stable Discord nonce with enforced deduplication.
+After an ambiguous send, recovery checks recent bot messages for that nonce, or for matching content and attachment names after the attempt when Discord omits the nonce, and records a matched message as delivered.
+An inconclusive lookup leaves delivery pending under the bounded mid-delivery recovery rule above; it never triggers a resend or text fallback, and a resumed generation never makes a third upload attempt.
+The upload count lives in chunk progress, so once an upload has been tried, a transient failure with nothing posted keeps that progress and resumes it rather than deleting the posting marker, and a later delivery attempt cannot start the count over.
+The receipt adds `attachments` (name, kind, and bytes of each posted file), `attachments_dropped`, `media_upload_attempts`, and `media_note`.
+The bot needs Discord's Attach Files permission wherever it posts.
+Staged copies follow the 14-day media retention in the retention paragraph above; a worker's own screenshots stay with its task.
+
+`bin/fm-ext-media.sh pull <secondmate-id> <path>` copies a screenshot or recording from a remote second mate's `data/` or `state/` tree over the existing [remote link](remote-secondmates.md) into `state/ext-media/pulled/<secondmate-id>/`, where it is screened and posted like a local file.
+The copy travels as bounded ranged reads of `bin/fm-remote-file.sh` that must add up to the remote file's size and digest, so the remote home needs a Firstmate checkout with that ranged read.
+The [`ext-respond` media procedure](../.agents/skills/ext-respond/SKILL.md#post-screenshots-and-recordings) owns when Firstmate posts media, where it goes, and how Firstmate screens it.
 
 ### Dedicated channel and reply continuation (config/ext-channel)
 
