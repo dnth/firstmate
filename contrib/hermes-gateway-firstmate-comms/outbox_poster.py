@@ -42,6 +42,9 @@ for a later outcome header.
 ``reconcile_decision_posts`` edits only that final message under the display
 rules in docs/configuration.md, "Decision buttons". ``reconcile_thread_states`` then
 clears answered needs-you threads and retries failed renames.
+
+The watcher loop and delivery diagnostics are described in README.md under
+"How it works".
 """
 
 from __future__ import annotations
@@ -75,6 +78,15 @@ ThreadFn = Callable[[dict, str], dict]
 
 _WATCHER_STARTED = False
 _WATCHER_LOCK = threading.Lock()
+# One lock serializes every writer of a request-wide "<slug>.thread.json"
+# record. Delivery (save_request_thread, maybe_rename_topic_thread) and the
+# periodic thread-state sweep both read-merge-write that file, so without it a
+# sweep that has been reconciling for minutes can overwrite a rename a
+# delivery recorded meanwhile.
+_THREAD_RECORD_LOCK = threading.RLock()
+# Time each watcher step separately so a slow drain or reconciliation step
+# can be identified in the journal.
+SLOW_STEP_SECS = 5.0
 _TRANSIENT_HTTP = {429, 500, 502, 503, 504}
 # Discord REST base. Hermetic tests point the real sender at a local stub by
 # assigning this module attribute; nothing in production overrides it.
@@ -446,27 +458,28 @@ def load_progress(payload: dict, home: Path) -> dict | None:
 
 
 def write_progress(payload: dict, progress: dict, home: Path) -> None:
-    with _temp_json(progress) as progress_file:
-        result = subprocess.run(
-            [
-                str(outbox_cli()),
-                "progress",
-                "--slug",
-                payload["slug"],
-                "--kind",
-                payload["kind"],
-                "--generation",
-                str(payload["generation"]),
-                "--progress-file",
-                progress_file,
-            ],
-            check=False,
-            env=_env_for(home),
-            capture_output=True,
-            text=True,
-        )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "progress failed")
+    with _THREAD_RECORD_LOCK:
+        with _temp_json(progress) as progress_file:
+            result = subprocess.run(
+                [
+                    str(outbox_cli()),
+                    "progress",
+                    "--slug",
+                    payload["slug"],
+                    "--kind",
+                    payload["kind"],
+                    "--generation",
+                    str(payload["generation"]),
+                    "--progress-file",
+                    progress_file,
+                ],
+                check=False,
+                env=_env_for(home),
+                capture_output=True,
+                text=True,
+            )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "progress failed")
 
 
 def _chunk_payload(payload: dict, text: str, index: int, total: int) -> dict:
@@ -705,7 +718,23 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     0600, replaced atomically. Its basename is <slug>.thread.json, which the
     pending scan skips as a marker, avoiding payload validation for completed
     topics.
+
+    Every writer holds ``_THREAD_RECORD_LOCK`` across its read-merge-write, so
+    a delivery rename and a sweep state update for the same record cannot lose
+    one another.
     """
+    with _THREAD_RECORD_LOCK:
+        _merge_thread_record(path, request_id, thread_id, topic_name, thread_state,
+                             creating_title, retitle, creator, state_at, rename,
+                             marked_open, open_attempt, opening_posted)
+
+
+def _merge_thread_record(path: Path, request_id: object, thread_id: str,
+                         topic_name: str, thread_state: str,
+                         creating_title: str, retitle: str | None,
+                         creator: str, state_at: float | None, rename: dict | None,
+                         marked_open: bool | None, open_attempt: bool | None,
+                         opening_posted: bool | None) -> None:
     if path.is_symlink():
         raise RuntimeError("thread record is a symlink")
     try:
@@ -1023,6 +1052,17 @@ def discord_thread_name(thread_id: str) -> str:
     return name if isinstance(name, str) else ""
 
 
+def _decision_post_snapshot(home: Path) -> tuple | None:
+    try:
+        records = []
+        for path in (state_dir(home) / "ext-outbox").glob("*.progress.json"):
+            stat = path.stat()
+            records.append((str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size))
+        return tuple(sorted(records))
+    except OSError:
+        return None
+
+
 def apply_thread_state(
     recorded: dict,
     state: str,
@@ -1033,6 +1073,8 @@ def apply_thread_state(
     read_thread=None,
     marked_open: bool | None = None,
     retitle: str = "",
+    require_current: bool = False,
+    decision_posts: tuple | None = None,
 ) -> str:
     """Show ``state`` on one recorded topic thread and record the outcome.
 
@@ -1043,63 +1085,105 @@ def apply_thread_state(
     rename can never wedge a later marker; an unreadable name renames anyway.
     ``retitle`` replaces the base name the state is applied to and is stored
     with it, so later markers build on the new name. Never raises.
+
+    ``recorded`` may be minutes old when the sweep reaches a thread, so the
+    record is re-read under ``_THREAD_RECORD_LOCK`` before the state is
+    applied: the name, retitle, and provenance this rename builds on are the
+    ones a delivery recorded meanwhile, not the ones the sweep read.
+    Sweep calls use ``require_current`` to reject stale state decisions;
+    auto-clear also checks the progress snapshot for concurrent publication.
+    Discord work runs outside the record lock. If eligibility changes during
+    that work, retry the current desired name without saving the stale outcome.
     """
-    thread_id = recorded.get("topic_thread_id") or ""
-    provenance = recorded.get("creator") or ""
-    if provenance == "adopted":
-        return "skipped"
-    if provenance != "firstmate":
-        owner = thread_owner or discord_thread_owner
-        try:
-            owner_id = owner(thread_id)
-        except Exception as err:
-            print(f"fm-ext-poster: thread owner lookup skipped: {err}", file=sys.stderr)
+    repairing = False
+    while True:
+        thread_id = recorded.get("topic_thread_id") or ""
+        with _THREAD_RECORD_LOCK:
+            path = recorded.get("path")
+            fresh = _read_thread_record(path) if isinstance(path, Path) else {}
+            if require_current and fresh != recorded:
+                if not repairing or not fresh:
+                    return "skipped"
+                state = fresh.get("thread_state")
+            if decision_posts is not None and _decision_post_snapshot(home) != decision_posts:
+                return "skipped"
+            if fresh:
+                if fresh.get("topic_thread_id") != thread_id:
+                    return "skipped"
+                recorded = fresh
+        thread_id = recorded.get("topic_thread_id") or ""
+        provenance = recorded.get("creator") or ""
+        if provenance == "adopted":
             return "skipped"
-        if not owner_id or owner_id != _bot_user_id():
-            print(f"fm-ext-poster: thread {thread_id} ownership unproved; leaving its name alone",
-                  file=sys.stderr)
-            return "skipped"
-        provenance = "firstmate"
-    try:
-        creator = _creating_request(recorded)
-        base = retitle or (thread_name_for(creator, home) if creator else "")
-    except Exception as err:
-        print(f"fm-ext-poster: thread name check skipped: {err}", file=sys.stderr)
-        return "skipped"
-    want = state_thread_name(base, state)
-    if want is None:
-        return "skipped"
-    stored = recorded.get("topic_name") or base
-    rename = {"name": want, "at": time.time()}
-    if want == stored:
+        if provenance != "firstmate":
+            owner = thread_owner or discord_thread_owner
+            try:
+                owner_id = owner(thread_id)
+            except Exception as err:
+                print(f"fm-ext-poster: thread owner lookup skipped: {err}", file=sys.stderr)
+                return "skipped"
+            if not owner_id or owner_id != _bot_user_id():
+                print(f"fm-ext-poster: thread {thread_id} ownership unproved; leaving its name alone",
+                      file=sys.stderr)
+                return "skipped"
+            provenance = "firstmate"
         try:
-            shown = (read_thread or discord_thread_name)(thread_id)
-        except Exception:
-            shown = ""
-        if shown == want:
-            rename["outcome"] = "unchanged"
-    if "outcome" not in rename:
-        try:
-            (rename_thread or discord_rename_thread)(thread_id, want)
+            creator = _creating_request(recorded)
+            base = retitle or (thread_name_for(creator, home) if creator else "")
         except Exception as err:
-            prior = recorded.get("rename") or {}
-            attempts = prior.get("attempts") if prior.get("outcome") == "failed" else 0
-            rename.update(outcome="failed", error=str(err),
-                          retryable=classify_send_failure(err) != "permanent",
-                          attempts=(attempts if isinstance(attempts, int) else 0) + 1)
-            print(f"fm-ext-poster: thread {thread_id} rename failed: {err}", file=sys.stderr)
-        else:
-            rename["outcome"] = "applied"
-    try:
-        save_thread_record(recorded["path"], recorded.get("request_id"), thread_id,
-                           topic_name="" if rename["outcome"] == "failed" else want,
-                           thread_state=state, creator=provenance,
-                           creating_title=recorded.get("creating_title") or "",
-                           retitle=retitle or None,
-                           state_at=state_at, rename=rename, marked_open=marked_open)
-    except Exception as err:
-        print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
-    return rename["outcome"]
+            print(f"fm-ext-poster: thread name check skipped: {err}", file=sys.stderr)
+            return "skipped"
+        want = state_thread_name(base, state)
+        if want is None:
+            return "skipped"
+        stored = recorded.get("topic_name") or base
+        rename = {"name": want, "at": time.time()}
+        if want == stored:
+            try:
+                shown = (read_thread or discord_thread_name)(thread_id)
+            except Exception:
+                shown = ""
+            if shown == want:
+                rename["outcome"] = "unchanged"
+        if "outcome" not in rename:
+            try:
+                (rename_thread or discord_rename_thread)(thread_id, want)
+            except Exception as err:
+                prior = recorded.get("rename") or {}
+                attempts = prior.get("attempts") if prior.get("outcome") == "failed" else 0
+                rename.update(outcome="failed", error=str(err),
+                              retryable=classify_send_failure(err) != "permanent",
+                              attempts=(attempts if isinstance(attempts, int) else 0) + 1)
+                print(f"fm-ext-poster: thread {thread_id} rename failed: {err}", file=sys.stderr)
+            else:
+                rename["outcome"] = "applied"
+        changed = False
+        try:
+            with _THREAD_RECORD_LOCK:
+                current = _read_thread_record(recorded["path"])
+                changed = (require_current and current != recorded
+                           or decision_posts is not None and _decision_post_snapshot(home) != decision_posts)
+                if not changed:
+                    save_thread_record(recorded["path"], recorded.get("request_id"), thread_id,
+                                       topic_name="" if rename["outcome"] == "failed" else want,
+                                       thread_state=state, creator=provenance,
+                                       creating_title=recorded.get("creating_title") or "",
+                                       retitle=retitle or None,
+                                       state_at=state_at, rename=rename, marked_open=marked_open)
+        except Exception as err:
+            print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
+        if changed:
+            if not current or current.get("topic_thread_id") != thread_id:
+                return "skipped"
+            recorded = current
+            state = current.get("thread_state")
+            state_at = marked_open = None
+            retitle = ""
+            require_current = True
+            decision_posts = None
+            repairing = True
+            continue
+        return rename["outcome"]
 
 
 def maybe_rename_topic_thread(
@@ -1143,7 +1227,8 @@ def maybe_rename_topic_thread(
         if not recorded:
             return thread_id
     state_at = marked_open = None
-    if state is None and not retitle:
+    retry = state is None and not retitle
+    if retry:
         if (recorded.get("rename") or {}).get("outcome") != "failed":
             return thread_id
         state = recorded.get("thread_state")
@@ -1178,7 +1263,7 @@ def maybe_rename_topic_thread(
                     state = "none"
     apply_thread_state(recorded, state, home, state_at=state_at, rename_thread=rename_thread,
                        thread_owner=thread_owner, read_thread=read_thread, marked_open=marked_open,
-                       retitle=retitle)
+                       retitle=retitle, require_current=retry)
     return thread_id
 
 
@@ -1223,6 +1308,7 @@ def reconcile_thread_states(
         return []
     channel = dedicated_channel(home)
     summaries = None
+    decision_posts = None
     touched = []
     for path in paths:
         record = _read_thread_record(path)
@@ -1233,19 +1319,23 @@ def reconcile_thread_states(
         state = record.get("thread_state")
         if state == "needs-you":
             if summaries is None:
+                with _THREAD_RECORD_LOCK:
+                    decision_posts = _decision_post_snapshot(home)
                 summaries = decision_threads(home)
             summary = summaries.get(record["topic_thread_id"])
-            if (summary and summary["open"] == 0 and summary["closed"] > 0
+            if (decision_posts is not None and summary and summary["open"] == 0 and summary["closed"] > 0
                     and (record.get("marked_open")
                          or record.get("state_at", 0) <= summary["last_posted_at"])):
                 apply_thread_state(record, "none", home, state_at=time.time(),
                                    rename_thread=rename_thread, read_thread=read_thread,
-                                   marked_open=False)
+                                   marked_open=False, require_current=True,
+                                   decision_posts=decision_posts)
                 touched.append(record["topic_thread_id"])
                 continue
         failed = record.get("rename") or {}
         if failed.get("outcome") == "failed" and failed.get("retryable") and state_prefix(state) is not None:
-            apply_thread_state(record, state, home, rename_thread=rename_thread, read_thread=read_thread)
+            apply_thread_state(record, state, home, rename_thread=rename_thread,
+                               read_thread=read_thread, require_current=True)
             touched.append(record["topic_thread_id"])
     return touched
 
@@ -1880,6 +1970,12 @@ def deliver_one(
         if result != "mid-delivery":
             path.unlink(missing_ok=True)
         return result
+    # The delivery clock: queued_at comes from the payload's emit time and
+    # picked_at from here, so the journal line and receipt can show how long a
+    # reply waited for a poster rather than only when Discord accepted it.
+    # A payload without a numeric emit time records 0 and logs wait=unknown.
+    queued_at = _epoch(payload.get("recorded_at"))
+    picked_at = time.time()
     status = begin_delivery(payload, home=home)
     if status == "recovery-exhausted":
         react_to_request(payload, REACT_FAILED, react)
@@ -1993,6 +2089,7 @@ def deliver_one(
             progress["buttons"] = bool(receipt.get("buttons"))
             progress["posted_at"] = time.time()
         write_progress(payload, progress, home)
+    posted_at = time.time()
     record_receipt(
         payload,
         {
@@ -2002,9 +2099,17 @@ def deliver_one(
             "chunks": len(chunks),
             "channel_id": str(send_payload.get("thread_id") or send_payload.get("channel_id") or ""),
             "thread_id": str(send_payload.get("thread_id") or ""),
+            "queued_at": queued_at,
+            "picked_at": picked_at,
         },
         home=home,
     )
+    waited = f"{max(0.0, picked_at - queued_at):.1f}s" if queued_at > 0 else "unknown"
+    print(f"fm-ext-poster: delivered {str(payload.get('slug') or '')[:12]} "
+          f"{payload.get('kind')}.{payload.get('generation')} queued={queued_at:.3f} "
+          f"picked={picked_at:.3f} posted={posted_at:.3f} "
+          f"wait={waited} post={max(0.0, posted_at - picked_at):.1f}s chunks={len(chunks)}",
+          file=sys.stderr)
     if payload.get("origin") == "open" and payload.get("kind") == "answer" and payload.get("generation") == 1:
         save_request_thread(payload, thread_id, home, opening_posted=True)
     if payload.get("kind") in ("answer", "final"):
@@ -2033,6 +2138,59 @@ def drain_outbox(
     return results
 
 
+def _run_step(label: str, step) -> None:
+    """Run one watcher step, logging a journal line when it overruns.
+
+    A step's failure is swallowed here, exactly as the single loop swallowed
+    it: one bad sweep must not end the watcher.
+    """
+    started = time.monotonic()
+    try:
+        step()
+    except Exception:
+        pass
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed >= SLOW_STEP_SECS:
+            print(f"fm-ext-poster: slow step {label}={elapsed:.1f}s", file=sys.stderr)
+
+
+def outbox_delivery_loop(interval: float) -> None:
+    """Post queued payloads every ``interval`` seconds.
+
+    This runs separately from reconciliation so delivery does not wait for a
+    sweep to finish; local record updates still share the thread-record lock.
+    """
+    while True:
+        _run_step("ensure-click-route", decisions.ensure_click_route)
+        _run_step("drain", drain_outbox)
+        time.sleep(interval)
+
+
+def outbox_reconcile_loop(interval: float) -> None:
+    """Sweep decision posts and topic threads every ``interval`` seconds.
+
+    Clicks settle posts locally, so their edits follow within a cycle; posts
+    closed on another channel need a ledger read and are swept on the slower
+    cadence, followed by the topic-thread pass that clears answered threads
+    and retries failed renames.
+    """
+    last_full = 0.0
+    while True:
+        full = time.monotonic() - last_full >= DECISION_SWEEP_SECS
+        if full:
+            last_full = time.monotonic()
+        _run_step("posts", lambda: _reconcile_posts_step(full))
+        if full:
+            _run_step("threads", reconcile_thread_states)
+        time.sleep(interval)
+
+
+def _reconcile_posts_step(full: bool) -> None:
+    if full or _unshown_settled_posts():
+        reconcile_decision_posts(full=full)
+
+
 def start_outbox_watcher(interval: float | None = None) -> None:
     global _WATCHER_STARTED
     with _WATCHER_LOCK:
@@ -2044,35 +2202,7 @@ def start_outbox_watcher(interval: float | None = None) -> None:
     if wait is None:
         wait = float(os.environ.get("FM_EXT_OUTBOX_POLL_SECS", "2"))
 
-    def _loop() -> None:
-        last_full = 0.0
-        while True:
-            try:
-                decisions.ensure_click_route()
-            except Exception:
-                pass
-            try:
-                drain_outbox()
-            except Exception:
-                pass
-            # Clicks settle posts locally, so their edits follow within a
-            # cycle; posts closed on another channel need a ledger read and
-            # are swept on the slower cadence, followed by the topic-thread
-            # pass that clears answered threads and retries failed renames.
-            full = time.monotonic() - last_full >= DECISION_SWEEP_SECS
-            if full:
-                last_full = time.monotonic()
-            try:
-                if full or _unshown_settled_posts():
-                    reconcile_decision_posts(full=full)
-            except Exception:
-                pass
-            if full:
-                try:
-                    reconcile_thread_states()
-                except Exception:
-                    pass
-            time.sleep(wait)
-
-    thread = threading.Thread(target=_loop, name="fm-ext-outbox", daemon=True)
-    thread.start()
+    threading.Thread(target=outbox_delivery_loop, args=(wait,),
+                     name="fm-ext-outbox-delivery", daemon=True).start()
+    threading.Thread(target=outbox_reconcile_loop, args=(wait,),
+                     name="fm-ext-outbox-reconcile", daemon=True).start()

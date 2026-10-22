@@ -3252,7 +3252,449 @@ PY
   pass "50 generated replies keep their lines, limits, fences, and content"
 }
 
+# --- 51. delivery does not wait for a reconciliation sweep -----------------
+
+test_51_delivery_survives_a_long_sweep() {
+  local home slug stem staged out
+  home="$TMP_ROOT/c51-watcher"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "reply while the sweep runs")
+  write_text "$home/ans.txt" "queued mid-sweep"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  stem="$slug.answer.1"
+  # Stage the payload outside the outbox so it is queued only once the sweep
+  # is already running.
+  staged="$home/staged-$stem.json"
+  mv "$home/state/ext-outbox/$stem.json" "$staged"
+
+  out=$(home_env "$home" env STEM="$stem" STAGED="$staged" PYTHONPATH="$PLUGIN" \
+    "$PYTHON_BIN" - "$home" <<'PY'
+import os, sys, threading, time
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster as poster
+home = Path(sys.argv[1])
+outbox = home / "state" / "ext-outbox"
+stem = os.environ["STEM"]
+payload = outbox / f"{stem}.json"
+staged = Path(os.environ["STAGED"])
+receipt = outbox / f"{stem}.receipt.json"
+sweeping = threading.Event()
+
+def send(chunk):
+    return {"ok": True, "discord_message_id": "900000000000000001",
+            "buttons": bool(chunk.get("decision"))}
+
+def blocking_sweep(full=False):
+    sweeping.set()
+    # Stands in for a sweep whose ledger and edit passes take minutes.
+    time.sleep(30)
+
+real_drain = poster.drain_outbox
+poster.drain_outbox = lambda **kwargs: real_drain(send=send, home=home)
+poster.reconcile_decision_posts = blocking_sweep
+poster.reconcile_thread_states = lambda **kwargs: []
+poster.decisions.ensure_click_route = lambda: False
+
+os.environ["FM_EXT_OUTBOX_POLL_SECS"] = "0.05"
+poster.start_outbox_watcher()
+if not sweeping.wait(10):
+    print("no-sweep")
+    sys.stdout.flush()
+    os._exit(0)
+os.replace(staged, payload)
+deadline = time.monotonic() + 3.0
+while time.monotonic() < deadline and not receipt.exists():
+    time.sleep(0.05)
+print("delivered" if receipt.exists() else "queued")
+sys.stdout.flush()
+os._exit(0)
+PY
+)
+  [ "$out" = "delivered" ] \
+    || fail "a payload queued during a long sweep must still be delivered within a few poll ticks (got '$out')"
+  assert_present "$home/state/ext-outbox/$stem.receipt.json" \
+    "the mid-sweep reply must be receipted while the sweep is still running"
+  pass "51 a queued reply is delivered while a reconciliation sweep is blocked"
+}
+
+# --- 52. concurrent thread-record writes lose neither update ---------------
+
+test_52_thread_record_writes_are_serialized() {
+  local home slug out
+  home="$TMP_ROOT/c52-thread-record"
+  setup_home "$home"
+  slug=$(printf 'd%.0s' $(seq 1 64))
+  out=$(home_env "$home" env SLUG="$slug" RID="$RID" THREAD="$THREAD" \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
+import json, os, sys, tempfile, threading, time
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster as poster
+home = Path(sys.argv[1])
+outbox = home / "state" / "ext-outbox"
+outbox.mkdir(mode=0o700, parents=True, exist_ok=True)
+path = outbox / f"{os.environ['SLUG']}.thread.json"
+
+# Hold every writer at the point just before it publishes its record. Two
+# writers that read the same prior therefore both write from it unless the
+# records are serialized, which is how the delivery and sweep paths raced.
+real_mkstemp = tempfile.mkstemp
+def gated_mkstemp(*args, **kwargs):
+    time.sleep(0.05)
+    return real_mkstemp(*args, **kwargs)
+poster.tempfile.mkstemp = gated_mkstemp
+
+updates = [
+    {"topic_name": "Name One"},
+    {"thread_state": "needs-you"},
+    {"creating_title": "Title Three"},
+    {"retitle": "Retitle Four"},
+    {"creator": "firstmate"},
+    {"state_at": 1234.5},
+    {"rename": {"name": "Name Seven", "at": 1, "outcome": "applied"}},
+    {"marked_open": True},
+]
+
+def writer(update):
+    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"], **update)
+
+threads = [threading.Thread(target=writer, args=(update,)) for update in updates]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join()
+
+record = json.loads(path.read_text())
+missing = [key for key in dict.fromkeys(k for update in updates for k in update)
+           if key not in record]
+poster.thread_name_for = lambda payload, home: poster._read_thread_record(path).get("retitle") or "Topic"
+poster.dedicated_channel = lambda home: os.environ["RID"].split(":")[2]
+renamed = []
+remote = {}
+def rename(thread, name):
+    renamed.append(name)
+    remote[thread] = name
+
+def seed(state="needs-you", failed=None):
+    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
+        topic_name="Topic", thread_state=state, creator="firstmate",
+        state_at=1, marked_open=True, retitle="", rename=failed or {"outcome": "applied"})
+
+def summaries(home):
+    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
+                              thread_state="done", state_at=3)
+    return {os.environ["THREAD"]: {"open": 0, "closed": 1, "last_posted_at": 2}}
+
+real_summaries = poster.decision_threads
+seed()
+poster.decision_threads = summaries
+poster.reconcile_thread_states(home, rename_thread=rename)
+assert poster._read_thread_record(path)["thread_state"] == "done"
+assert not renamed
+
+seed("done", {"outcome": "failed", "retryable": True})
+real_apply = poster.apply_thread_state
+def interleaved_apply(recorded, *args, **kwargs):
+    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
+                              thread_state="needs-you", state_at=4)
+    return real_apply(recorded, *args, **kwargs)
+poster.apply_thread_state = interleaved_apply
+poster.reconcile_thread_states(home, rename_thread=rename)
+assert poster._read_thread_record(path)["thread_state"] == "needs-you"
+assert not renamed
+poster.apply_thread_state = real_apply
+
+for operation in ("read", "rename"):
+    seed()
+    entered, release, saved = threading.Event(), threading.Event(), threading.Event()
+    def block(*args):
+        entered.set()
+        assert release.wait(5)
+        if len(args) == 2:
+            rename(*args)
+        return "Topic"
+    def deliver():
+        assert real_apply(poster._read_thread_record(path), "done", home,
+                          retitle="Delivered title", rename_thread=rename) == "applied"
+        saved.set()
+    sweep = threading.Thread(target=real_apply,
+        args=(poster._read_thread_record(path), "none", home),
+        kwargs={"read_thread": block if operation == "read" else lambda tid: "",
+                "rename_thread": block if operation == "rename" else rename,
+                "require_current": True})
+    sweep.start()
+    assert entered.wait(3)
+    delivery = threading.Thread(target=deliver)
+    delivery.start()
+    try:
+        assert saved.wait(1), "Discord work blocked a delivery record save"
+    finally:
+        release.set()
+        sweep.join(5)
+        delivery.join(5)
+    assert poster._read_thread_record(path)["thread_state"] == "done"
+    assert poster._read_thread_record(path)["retitle"] == "Delivered title"
+    assert remote[os.environ["THREAD"]] == "✅ Delivered title"
+    assert poster._read_thread_record(path)["topic_name"] == remote[os.environ["THREAD"]]
+
+seed()
+entered, release = threading.Event(), threading.Event()
+def delivery_rename(*args):
+    entered.set()
+    assert release.wait(5)
+    rename(*args)
+delivery = threading.Thread(target=real_apply,
+    args=(poster._read_thread_record(path), "done", home),
+    kwargs={"rename_thread": delivery_rename, "state_at": 10})
+delivery.start()
+assert entered.wait(3)
+try:
+    assert real_apply(poster._read_thread_record(path), "none", home,
+        rename_thread=rename, read_thread=lambda tid: "other",
+        require_current=True) == "applied"
+finally:
+    release.set()
+    delivery.join(5)
+assert poster._read_thread_record(path)["thread_state"] == "done"
+assert poster._read_thread_record(path)["state_at"] == 10
+assert remote[os.environ["THREAD"]] == "✅ Topic"
+
+assert real_apply(poster._read_thread_record(path), "needs-you", home,
+                  rename_thread=rename) == "applied"
+assert poster._read_thread_record(path)["thread_state"] == "needs-you"
+
+(home / "state" / "route-fix.status").write_text("needs-decision [key=publication]: pick a route\n")
+publication = {"slug": os.environ["SLUG"], "kind": "followup", "generation": 2}
+progress = {"request_id": os.environ["RID"], "topic_thread_id": os.environ["THREAD"],
+            "decision": {"key": "key:route-fix:publication"},
+            "buttons": True, "discord_message_ids": ["900000000000000001"], "posted_at": 2}
+closed = dict(publication, generation=1)
+poster.write_progress(closed, dict(progress, posted_at=1), home)
+(outbox / f"{os.environ['SLUG']}.followup.1.settled.json").write_text('{"kind":"decided"}')
+published_path = outbox / f"{os.environ['SLUG']}.followup.2.progress.json"
+
+def publish():
+    poster.write_progress(publication, progress, home)
+
+for phase in ("summary", "apply", "rename"):
+    published_path.unlink(missing_ok=True)
+    seed()
+    renamed.clear()
+    remote[os.environ["THREAD"]] = "❓ Topic"
+    def snapshot(home):
+        summary = real_summaries(home)
+        assert summary[os.environ["THREAD"]]["open"] == 0
+        if phase == "summary":
+            publish()
+        return summary
+    poster.decision_threads = snapshot
+    def publish_before_apply(*args, **kwargs):
+        publish()
+        return real_apply(*args, **kwargs)
+    poster.apply_thread_state = publish_before_apply if phase == "apply" else real_apply
+    entered, release = threading.Event(), threading.Event()
+    def clearing_rename(*args):
+        entered.set()
+        assert release.wait(5)
+        rename(*args)
+    if phase == "rename":
+        sweep = threading.Thread(target=poster.reconcile_thread_states, args=(home,),
+            kwargs={"rename_thread": clearing_rename, "read_thread": lambda tid: "other"})
+        sweep.start()
+        assert entered.wait(3)
+        try:
+            publish()
+        finally:
+            release.set()
+            sweep.join(5)
+        assert not sweep.is_alive()
+    else:
+        poster.reconcile_thread_states(home, rename_thread=rename,
+                                       read_thread=lambda tid: "other")
+        assert not renamed
+    assert real_summaries(home)[os.environ["THREAD"]]["open"] == 1
+    assert poster._read_thread_record(path)["thread_state"] == "needs-you"
+    assert remote[os.environ["THREAD"]] == "❓ Topic"
+    assert poster._read_thread_record(path)["marked_open"]
+poster.apply_thread_state = real_apply
+poster.decision_threads = real_summaries
+
+print(json.dumps({"missing": missing, "record": record}))
+PY
+) || fail "thread-record concurrency regression failed"
+  printf '%s\n' "$out" | jq -e '.missing == []' >/dev/null \
+    || fail "concurrent thread-record writers must lose no update: $out"
+  printf '%s\n' "$out" | jq -e '
+    .record.topic_name == "Name One" and .record.thread_state == "needs-you"
+    and .record.creator == "firstmate" and .record.marked_open == true' >/dev/null \
+    || fail "concurrent thread-record writers must keep every value: $out"
+  pass "52 concurrent sweeps and deliveries keep every thread-record update"
+}
+
+# --- 53. a delivery receipt carries its queue times ------------------------
+
+test_53_delivery_receipt_carries_queue_times() {
+  local home slug stem recorded out journal receipt
+  home="$TMP_ROOT/c53-receipt"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "time my pickup")
+  write_text "$home/ans.txt" "delivered with timing"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  stem="$slug.answer.1"
+  recorded=$(jq -r '.recorded_at' "$home/state/ext-outbox/$stem.json")
+  journal="$home/journal.log"
+  out=$(home_env "$home" env STEM="$stem" PYTHONPATH="$PLUGIN" \
+    "$PYTHON_BIN" - "$home" "$stem" 2>"$journal" <<'PY'
+import sys
+from pathlib import Path
+import outbox_poster as poster
+home, stem = Path(sys.argv[1]), sys.argv[2]
+def send(chunk):
+    return {"ok": True, "discord_message_id": "910000000000000001", "buttons": False}
+print(poster.deliver_one(home / "state" / "ext-outbox" / f"{stem}.json",
+                         send=send, home=home))
+PY
+)
+  assert_equals "sent" "$out" "the queued reply must deliver"
+  receipt="$home/state/ext-outbox/$stem.receipt.json"
+  assert_present "$receipt" "a delivered generation must record its receipt"
+  jq -e --argjson recorded "$recorded" \
+    '.queued_at == $recorded and .picked_at >= .queued_at and .picked_at > 0' \
+    "$receipt" >/dev/null \
+    || fail "the receipt must carry queued_at/picked_at: $(cat "$receipt")"
+  assert_contains "$(cat "$journal")" "fm-ext-poster: delivered ${slug:0:12} answer.1 queued=" \
+    "the delivery must log one journal line with its queue times"
+  assert_contains "$(cat "$journal")" "wait=" "the journal line must report the queue wait"
+  assert_contains "$(cat "$journal")" "post=" "the journal line must report the post time"
+  assert_contains "$(cat "$journal")" "chunks=1" "the journal line must report the chunk count"
+  pass "53 delivery receipts carry queued_at/picked_at and the journal line is emitted"
+}
+
+# --- 54. pending ignores decision markers ----------------------------------
+
+test_54_pending_skips_terminal_markers() {
+  local home slug stem i listed expected ms
+  home="$TMP_ROOT/c54-pending-markers"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "list me")
+  write_text "$home/ans.txt" "pending payload"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  write_text "$home/two.txt" "second pending payload"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind followup --generation 1 \
+    --text-file "$home/two.txt" >/dev/null
+  # 120 delivered decision posts leave a settled marker and a sent marker each.
+  # Neither can ever be a payload, and scanning them made every poll pay for
+  # the whole decision history.
+  for i in $(seq 1 120); do
+    stem="$home/state/ext-outbox/$(printf '%064d' "$i").followup.$i"
+    printf '{"kind":"replaced","text":"gone","at":1}\n' > "$stem.settled.json"
+    printf '{"request_id":"%s","option":"1","at":1}\n' "$RID" > "$stem.sent.json"
+    chmod 600 "$stem.settled.json" "$stem.sent.json"
+  done
+  expected=$(printf '%s\n%s\n' "$home/state/ext-outbox/$slug.answer.1.json" \
+    "$home/state/ext-outbox/$slug.followup.1.json" | sort)
+  listed=$(home_env "$home" "$OUTBOX" pending | sort)
+  assert_equals "$expected" "$listed" \
+    "pending must list exactly the undelivered payloads beside settled/sent markers"
+  ms=$(steady_pending_ms "$home")
+  printf 'pending with 240 terminal markers: %sms\n' "$ms"
+  [ "$ms" -lt 2000 ] || fail "settled/sent markers must not cost a launch each, got ${ms}ms"
+  pass "54 pending skips settled and sent markers and lists the same payloads"
+}
+
+# --- 55. retention completes inside the poll and never starves the claim ----
+
+test_55_retention_prune_completes_without_starving_the_claim() {
+  local home slug offered ctx out rc start elapsed i
+  local stale fresh_recorded no_recorded young_mtime pinned late fresh_marker old_marker
+  local old_thread kept_thread
+  home="$TMP_ROOT/c55-prune"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "claim me before you prune")
+  offered="$home/state/ext-context/${slug}.offered.json"
+  # An unclaimed offer is exactly what the poll exists to pick up.
+  rm -f "$offered"
+  : > "$home/state/.wake-queue"
+  ctx="$home/state/ext-context"
+  mkdir -p "$ctx" "$home/state/ext-outbox"
+  chmod 700 "$ctx" "$home/state/ext-outbox"
+
+  # Thousands of records past the retention window: one jq launch per file made
+  # this prune outlast the watcher's 30-second check timeout, so it never
+  # finished and the claim behind it never ran.
+  for i in $(seq 1 2000); do
+    printf '{"request_id":"%s","recorded_at":1}\n' "$RID" > "$ctx/$(printf '%064x' "$i").json"
+  done
+
+  # Every rule variant the prune must keep or drop.
+  stale="$ctx/$(printf 'a%.0s' $(seq 1 64)).json"
+  printf '{"request_id":"%s","recorded_at":1}\n' "$RID" > "$stale"
+  fresh_recorded="$ctx/$(printf 'b%.0s' $(seq 1 64)).json"
+  printf '{"request_id":"%s","recorded_at":%s}\n' "$RID" "$(date +%s)" > "$fresh_recorded"
+  touch -t 202001010000.00 "$fresh_recorded"
+  no_recorded="$ctx/$(printf 'c%.0s' $(seq 1 64)).json"
+  printf '{}\n' > "$no_recorded"
+  touch -t 202001010000.00 "$no_recorded"
+  young_mtime="$ctx/$(printf 'd%.0s' $(seq 1 64)).json"
+  printf '{}\n' > "$young_mtime"
+  pinned="$ctx/$slug.json"
+  printf '{"request_id":"%s","recorded_at":1}\n' "$RID" > "$pinned"
+  fresh_marker="$home/state/ext-outbox/$(printf 'e%.0s' $(seq 1 64)).followup.1.progress.json"
+  printf '{"decision":{}}\n' > "$fresh_marker"
+  old_marker="$home/state/ext-outbox/$(printf 'f%.0s' $(seq 1 64)).followup.1.settled.json"
+  printf '{"kind":"replaced","text":"gone","at":1}\n' > "$old_marker"
+  touch -t 202001010000.00 "$old_marker"
+  # A thread record whose request left no other record expires with them; one
+  # whose request still has a live record stays.
+  old_thread="$home/state/ext-outbox/$(printf '1%.0s' $(seq 1 64)).thread.json"
+  printf '{"request_id":"discord:1:2:3:4","topic_thread_id":"5"}\n' > "$old_thread"
+  touch -t 202001010000.00 "$old_thread"
+  kept_thread="$home/state/ext-outbox/$(printf '2%.0s' $(seq 1 64)).thread.json"
+  printf '{"request_id":"discord:1:2:3:4","topic_thread_id":"5"}\n' > "$kept_thread"
+  touch -t 202001010000.00 "$kept_thread"
+  printf '{"decision":{}}\n' > "$home/state/ext-outbox/$(printf '2%.0s' $(seq 1 64)).followup.9.progress.json"
+
+  start=$(date +%s)
+  out=$(home_env "$home" "$POLL" 2>/dev/null)
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  expect_code 0 "$rc" "the poll must finish"
+  assert_contains "$out" "ext-request $slug" "the queued offer must be claimed"
+  assert_present "$offered" "a successful poll must claim the offer"
+  [ "$elapsed" -lt 25 ] \
+    || fail "the retention prune must finish inside the watcher's 30s check timeout, took ${elapsed}s"
+
+  assert_absent "$stale" "a record past the window must expire"
+  assert_absent "$no_recorded" "a record with no recorded_at must expire on its mtime"
+  assert_absent "$old_marker" "a retired generation's old marker must expire"
+  assert_absent "$old_thread" "a thread record with no surviving record must expire"
+  assert_present "$kept_thread" "a thread record with a live record left must stay"
+  assert_present "$fresh_recorded" "recorded_at decides over a newer file mtime"
+  assert_present "$young_mtime" "a young mtime must survive the window"
+  assert_present "$pinned" "a request still waiting in the inbox pins its records"
+  assert_present "$fresh_marker" "a fresh marker must never be pruned"
+
+  # The prune is rate-limited, so a poll inside the interval leaves new work
+  # for the next due pass instead of repeating the walk.
+  late="$ctx/$(printf '9%.0s' $(seq 1 64)).json"
+  printf '{"request_id":"%s","recorded_at":1}\n' "$RID" > "$late"
+  home_env "$home" "$POLL" >/dev/null
+  assert_present "$late" "a poll inside the prune interval must not prune again"
+  home_env "$home" env FM_EXT_PRUNE_INTERVAL_SECS=0 "$POLL" >/dev/null
+  assert_absent "$late" "the next due prune must remove the expired record"
+  pass "55 retention completes inside the poll, drops exactly the expired records, and never starves the claim"
+}
+
 test_48_discord_splitter_boundaries
 test_49_split_plan_survives_restart
 test_50_discord_splitter_properties
+test_51_delivery_survives_a_long_sweep
+test_52_thread_record_writes_are_serialized
+test_53_delivery_receipt_carries_queue_times
+test_54_pending_skips_terminal_markers
+test_55_retention_prune_completes_without_starving_the_claim
 echo "all fm-ext-bridge tests passed"

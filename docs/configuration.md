@@ -860,6 +860,7 @@ A leftover claim is stolen only when it is older than `FM_EXT_INFLIGHT_TTL_SECS`
 Steal serialization keeps a 1-second floor even when that TTL is 0, so two stealers cannot both win.
 A live owner stays protected from TTL-based claim stealing, including an ambiguous crash-after-post while the poster process is still alive.
 `receipt` writes the receipt once.
+The gateway poster includes `queued_at` (the payload's emit time, or 0 when unavailable) and `picked_at` (the delivery attempt's start time) as epoch seconds in ordinary reply receipts.
 `abort` deletes the posting marker after a transient definite send failure (HTTP 429 or 5xx) so that generation can retry.
 `fail` records a terminal failed marker after a permanent 4xx so pending stops retrying that generation.
 The gateway poster splits oversized Discord replies using the budget resolved by `bin/fm-ext-lib.sh`: `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900, min 50, values above 2000 reset to 1900) and `FM_EXT_DISCORD_THREAD_MAX` (default 25).
@@ -883,11 +884,12 @@ A payload whose generation has reached a receipt or a terminal failed marker is 
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
 Local bridge records expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
-Each poll drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.
+A due retention pass drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.
 It drops the leftover markers of already retired outbox generations.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
+The poll claims its inbox offers before it prunes, and prunes at most once per `FM_EXT_PRUNE_INTERVAL_SECS` (default 3600), so the claim runs first; a prune interrupted by the watcher's check timeout is retried on the next poll whose cadence is due.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
-Request-wide thread records remain while any payload, progress, receipt, or failed JSON record for the request remains, then become eligible for pruning based on their own age.
+Request-wide thread records remain while any other JSON record for the request remains, then become eligible for pruning based on their own age.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id`; its header owns the recorded metadata fields.
@@ -1245,7 +1247,8 @@ FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds without a claim or progress hea
 FM_EXT_MIDDELIVERY_RECOVERY_MAX=3   # reopen attempts before a stuck generation is failed terminally and surfaced as ext-delivery-failed
 FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records and retired ext-outbox markers (7 days); larger values clamp back to it
 FM_EXT_HISTORY_MAX_CHARS=8000   # characters of message text kept in a request's thread-history sidecar; the replied-to message and Firstmate's latest recognised post are kept past it
-FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes
+FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes; the delivery pass runs on its own thread, independent of the decision sweeps
+FM_EXT_PRUNE_INTERVAL_SECS=3600   # minimum seconds between retention prunes in the inbox poll; the poll claims offers before pruning, so this only bounds prune frequency
 FM_EXT_WAITING_PIN_MIN_SECS=60   # minimum seconds between waiting-pin snapshot publications; see bin/fm-ext-waiting-pin.sh --help for bypass and skip behavior
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
