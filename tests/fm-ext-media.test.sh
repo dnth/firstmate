@@ -2,7 +2,7 @@
 # Behavior tests for outbound Discord media through the local Communication
 # Officer bridge: screening, private staging under generic names, refusals,
 # the real gateway poster's multipart upload, retry without a duplicate post,
-# 14-day retention, and pulling a screenshot from a remote second mate.
+# 7-day retention, and pulling a screenshot from a remote second mate.
 #
 # Hermetic: no Discord network. The real poster posts to a local fake Discord
 # REST server through the DISCORD_API_BASE test seam, and the remote second
@@ -129,6 +129,19 @@ slug_of() {
 
 file_mode() {
   if [ "$(uname)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+}
+
+file_mtime() {
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$1"; else stat -c %Y "$1"; fi
+}
+
+# pin_mtime <epoch> <path>: set a path's modification time to an exact second.
+pin_mtime() {
+  if [ "$(uname)" = Darwin ]; then
+    touch -t "$(date -r "$1" +%Y%m%d%H%M.%S)" "$2"
+  else
+    touch -d "@$1" "$2"
+  fi
 }
 
 # A fake Discord REST edge that parses multipart bodies, then the real poster.
@@ -581,10 +594,10 @@ test_7_revoked_screening_not_uploaded() {
   pass "7 a file whose screening turned refused after emit is never uploaded"
 }
 
-# --- 8. staged media is kept while pending and deleted 14 days after posting
+# --- 8. staged media is kept while pending and deleted 7 days after posting --
 
 test_8_retention() {
-  local home slug pending_slug dir pending_dir now attestation
+  local home slug pending_slug dir pending_dir posted attestation frame window entry
   home="$TMP_ROOT/c8"
   setup_home "$home"
   slug=$(intake "$home" 480000000000000001)
@@ -599,20 +612,33 @@ test_8_retention() {
   touch -d '@1000000000' "$dir" 2>/dev/null || touch -t 200109090146 "$dir"
   drive "$home" ok >/dev/null
   [ -e "$home/state/ext-outbox/$slug.answer.1.receipt.json" ] || fail "the first post must have a receipt"
+  posted=$(file_mtime "$dir")
+  [ "$posted" -gt 1000000000 ] || fail "posting must restart the staged copy's retention clock"
   # A second post stays queued: no poster runs after it.
   emit_media "$home" 480000000000000002 1 "Waiting." "$home/data/shots/a.png" >/dev/null || fail "emit must succeed"
   pending_dir=$(find "$home/state/ext-media/staged" -maxdepth 1 -name "$pending_slug.answer.1.*")
   [ -d "$pending_dir" ] || fail "the queued post must stage its media"
   attestation=$(find "$home/state/ext-media/screened" -name '*.json')
-  now=$(date +%s)
-  home_env "$home" env FM_EXT_PRUNE_INTERVAL_SECS=0 FM_EXT_NOW_OVERRIDE=$((now + 13 * 86400)) "$POLL" >/dev/null 2>&1
-  [ -d "$dir" ] || fail "staged media must survive 13 days after posting"
-  [ -e "$attestation" ] || fail "an attestation must survive 13 days"
-  home_env "$home" env FM_EXT_PRUNE_INTERVAL_SECS=0 FM_EXT_NOW_OVERRIDE=$((now + 15 * 86400)) "$POLL" >/dev/null 2>&1
-  [ ! -e "$dir" ] || fail "staged media must be deleted 14 days after posting"
-  [ ! -e "$attestation" ] || fail "an attestation must be deleted after 14 days"
+  [ -n "$attestation" ] || fail "screening must record an attestation"
+  frame="$home/state/ext-media/frames/retention-probe"
+  mkdir -p "$frame"
+  # Pin every entry, including the pending copy, to the posting moment so the
+  # boundary is exact and the pending copy is as old as the expired ones.
+  for entry in "$dir" "$pending_dir" "$attestation" "$frame"; do
+    pin_mtime "$posted" "$entry" || fail "could not pin a retention timestamp"
+  done
+  # The outbound window is the inbound one: the default seven days.
+  window=604800
+  home_env "$home" env FM_EXT_PRUNE_INTERVAL_SECS=0 FM_EXT_NOW_OVERRIDE=$((posted + window - 60)) "$POLL" >/dev/null 2>&1
+  [ -d "$dir" ] || fail "staged media must survive just under 7 days after posting"
+  [ -e "$attestation" ] || fail "an attestation must survive just under 7 days"
+  [ -d "$frame" ] || fail "sampled video frames must survive just under 7 days"
+  home_env "$home" env FM_EXT_PRUNE_INTERVAL_SECS=0 FM_EXT_NOW_OVERRIDE=$((posted + window + 60)) "$POLL" >/dev/null 2>&1
+  [ ! -e "$dir" ] || fail "staged media must be deleted just over 7 days after posting"
+  [ ! -e "$attestation" ] || fail "an attestation must be deleted just over 7 days"
+  [ ! -e "$frame" ] || fail "sampled video frames must be deleted just over 7 days"
   [ -d "$pending_dir" ] || fail "staged media of a still-pending post must never be deleted"
-  pass "8 staged media is kept while its post is pending and deleted 14 days after posting"
+  pass "8 staged media is kept while its post is pending and deleted just over 7 days after posting"
 }
 
 # --- 9. video: frames are sampled before screening; length is enforced -----

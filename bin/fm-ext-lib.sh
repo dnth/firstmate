@@ -28,10 +28,6 @@ FM_EXT_CONTEXT_DIRNAME='ext-context'
 FM_EXT_OUTBOX_DIRNAME='ext-outbox'
 FM_EXT_ATTACHMENTS_DIRNAME='ext-attachments'
 FM_EXT_MEDIA_DIRNAME='ext-media'
-# Outbound media (staged copies, screening attestations, sampled video frames,
-# and files pulled from a remote second mate) is kept 14 days, counted from
-# posting for a staged copy; see fm_ext_media_prune.
-FM_EXT_MEDIA_RETENTION_SECS=1209600
 # The only names a staged outbound file can carry; Discord sees these names,
 # never a source path or filename.
 FM_EXT_MEDIA_NAME_RE='^(image-[1-4]\.(png|jpg|gif|webp)|video-1\.(mp4|webm))$'
@@ -1570,9 +1566,10 @@ fm_ext_outbox_progress() {
 
 # --- retention --------------------------------------------------------------
 
-# Retention window for local bridge records, mirroring X mode's seven-day cap
-# (FMX_FOLLOWUP_MAX_AGE_SECS). A larger request clamps back down to the cap, so
-# the bridge cannot be configured to keep durable Discord records indefinitely.
+# Retention window for local bridge records, inbound attachments, and outbound
+# media, mirroring X mode's seven-day cap (FMX_FOLLOWUP_MAX_AGE_SECS). A larger
+# request clamps back down to the cap, so the bridge cannot be configured to
+# keep durable Discord records indefinitely.
 fm_ext_retention_max_age_secs() {
   local raw=${1:-${FM_EXT_CONTEXT_MAX_AGE_SECS-}}
   case "$raw" in
@@ -1654,15 +1651,16 @@ fm_ext_media_mark_posted() {
   return 0
 }
 
-# fm_ext_media_prune <state>: drop outbound media past FM_EXT_MEDIA_RETENTION_SECS
-# (14 days) so state/ext-media stays bounded. A staged generation folder whose
+# fm_ext_media_prune <state>: drop outbound media past the bridge retention
+# window (fm_ext_retention_max_age_secs, the same window as inbound
+# attachments) so state/ext-media stays bounded. A staged generation folder whose
 # outbox payload is still present is pending or mid-delivery and is never
 # touched; once its post has a receipt or terminal failure, its age counts from
 # that moment (fm_ext_media_mark_posted). Screening attestations, sampled
 # video frames, and files pulled from a remote second mate expire on their own
 # modification time. Best effort, like the other prunes.
 fm_ext_media_prune() {
-  local state=$1 root outbox now sub depth entry base mtime age
+  local state=$1 root outbox now max_age sub depth entry base mtime age
   root="$state/$FM_EXT_MEDIA_DIRNAME"
   outbox="$state/$FM_EXT_OUTBOX_DIRNAME"
   [ -d "$root" ] && [ ! -L "$root" ] || return 0
@@ -1670,6 +1668,7 @@ fm_ext_media_prune() {
   case "$now" in
     ''|*[!0-9]*) return 0 ;;
   esac
+  max_age=$(fm_ext_retention_max_age_secs)
   for sub in staged screened frames pulled; do
     [ -d "$root/$sub" ] && [ ! -L "$root/$sub" ] || continue
     depth=1
@@ -1684,7 +1683,7 @@ fm_ext_media_prune() {
         ''|*[!0-9]*) continue ;;
       esac
       age=$((now - mtime))
-      [ "$age" -gt "$FM_EXT_MEDIA_RETENTION_SECS" ] 2>/dev/null || continue
+      [ "$age" -gt "$max_age" ] 2>/dev/null || continue
       rm -rf -- "$entry" 2>/dev/null || true
     done < <(find "$root/$sub" -mindepth "$depth" -maxdepth "$depth" -print0 2>/dev/null)
   done

@@ -884,11 +884,11 @@ For ordinary replies, `pending` lists only generations that are still genuinely 
 A payload whose generation has reached a receipt or a terminal failed marker is retired on sight, so poll cost stays flat as delivered replies accumulate instead of growing with every reply ever sent.
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
-Local bridge records expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
+Local bridge records and outbound media expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
 A due retention pass drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.
 It drops the leftover markers of already retired outbox generations.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
-The same pass deletes [outbound media](#outbound-media) on its own fixed 14-day window: a staged post's copies 14 days after the post's receipt or terminal failure (never while its payload is still pending), and screening attestations, sampled video frames, and files pulled from a remote second mate 14 days after they were recorded.
+The same pass deletes [outbound media](#outbound-media) on that same window: a staged post's copies once the window has passed since the post's receipt or terminal failure (never while its payload is still pending), and screening attestations, sampled video frames, and files pulled from a remote second mate once the window has passed since they were recorded.
 The poll claims its inbox offers before it prunes, and prunes at most once per `FM_EXT_PRUNE_INTERVAL_SECS` (default 3600), so the claim runs first; a prune interrupted by the watcher's check timeout is retried on the next poll whose cadence is due.
 A generation whose payload is still present is pending or mid-delivery and is never pruned.
 Request-wide thread records remain while any other JSON record for the request remains, then become eligible for pruning based on their own age.
@@ -955,7 +955,7 @@ An inconclusive lookup leaves delivery pending under the bounded mid-delivery re
 The upload count lives in chunk progress, so once an upload has been tried, a transient failure with nothing posted keeps that progress and resumes it rather than deleting the posting marker, and a later delivery attempt cannot start the count over.
 The receipt adds `attachments` (name, kind, and bytes of each posted file), `attachments_dropped`, `media_upload_attempts`, and `media_note`.
 The bot needs Discord's Attach Files permission wherever it posts.
-Staged copies follow the 14-day media retention in the retention paragraph above; a worker's own screenshots stay with its task.
+Staged copies follow the seven-day retention in the retention paragraph above; a worker's own screenshots stay with its task.
 
 `bin/fm-ext-media.sh pull <secondmate-id> <path>` copies a screenshot or recording from a remote second mate's `data/` or `state/` tree over the existing [remote link](remote-secondmates.md) into `state/ext-media/pulled/<secondmate-id>/`, where it is screened and posted like a local file.
 The copy travels as bounded ranged reads of `bin/fm-remote-file.sh` that must add up to the remote file's size and digest, so the remote home needs a Firstmate checkout with that ranged read.
@@ -1281,7 +1281,7 @@ FM_EXT_DISCORD_THREAD_MAX=25   # maximum messages in one local-bridge auto-split
 FM_EXT_INFLIGHT_TTL_SECS=30   # seconds a dead-owner exclusive send claim must age before another poster may steal it; live owners are never stolen from; steal serialization keeps a 1s floor even when this is 0
 FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds without a claim or progress heartbeat before the next begin reopens the in-flight chunk for another attempt
 FM_EXT_MIDDELIVERY_RECOVERY_MAX=3   # reopen attempts before a stuck generation is failed terminally and surfaced as ext-delivery-failed
-FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records and retired ext-outbox markers (7 days); larger values clamp back to it
+FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records, retired ext-outbox markers, inbound attachments, and outbound media (7 days); larger values clamp back to it
 FM_EXT_HISTORY_MAX_CHARS=8000   # characters of message text kept in a request's thread-history sidecar; the replied-to message and Firstmate's latest recognised post are kept past it
 FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes; the delivery pass runs on its own thread, independent of the decision sweeps
 FM_EXT_PRUNE_INTERVAL_SECS=3600   # minimum seconds between retention prunes in the inbox poll; the poll claims offers before pruning, so this only bounds prune frequency
