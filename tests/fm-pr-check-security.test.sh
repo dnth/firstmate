@@ -123,6 +123,17 @@ case " $* " in
     fi
     printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     ;;
+  # The review-manifest read (bin/fm-review-manifest.sh) comes first: its query
+  # carries the words `state` and `headRefOid`, so a later pattern would answer
+  # it with a poll state or a bare head. A case that pins reviews answers from
+  # its own file instead.
+  *" api graphql "*)
+    if [ -n "${FM_TEST_GH_REVIEW_STATE:-}" ]; then
+      cat "$FM_TEST_GH_REVIEW_STATE"
+      exit 0
+    fi
+    exec "$FM_TEST_FAKE_GH_REVIEW" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" direct-PR
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
@@ -620,8 +631,11 @@ run_watcher_bounded() {
   # announcement still resolves to resurface-and-exit. Pin the bound high so a
   # repeated unacked run cannot trip into stay-alive supervision; a test that
   # wants the bound can lower it through FM_TEST_WATCH_RESURFACE_*.
+  # FM_CHECK_TIMEOUT leaves the PR poll room for its bounded review-manifest
+  # read (bin/fm-review-manifest.sh budgets half the check timeout); a 1-second
+  # check budget would leave no read at all and report every poll unreadable.
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
-    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=4 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
       FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS="${FM_TEST_WATCH_RESURFACE_MAX_ANNOUNCEMENTS:-999999}" \
       FM_WATCH_RESURFACE_MAX_SECS="${FM_TEST_WATCH_RESURFACE_MAX_SECS:-999999}" \

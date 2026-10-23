@@ -1030,6 +1030,68 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   rm -f -- "$marker"
 }
 
+# The review-wake marker remembers the last `review ...` line a poll reported,
+# so an unanswered review item wakes firstmate once rather than once per check
+# sweep. It holds no PR identity of its own: the line already names the PR URL,
+# and a changed result is a different line, so a new review wakes again.
+# The watcher removes it after every successful clear review result, allowing
+# a reopened thread or a later read failure to wake again with the same line.
+# Removed at teardown with the other per-task PR-poll artifacts.
+fm_pr_poll_review_marker_matches() {  # <marker> <device> <line>
+  local marker=$1 device=$2 expected=$3 version line
+  fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r line <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-review-notified-v1 ] && [ "$line" = "$expected" ]
+}
+
+fm_pr_poll_review_notified() {  # <state> <id> <line>
+  local state=$1 id=$2 line=$3 state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_poll_review_marker_matches "$state/$id.pr-poll-review-notified" \
+    "$state_device" "$line"
+}
+
+fm_pr_poll_review_mark() {  # <state> <id> <line>
+  local state=$1 id=$2 line=$3 marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  case "$line" in
+    ''|*$'\n'*) return 1 ;;
+  esac
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-review-notified"
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-poll-review-notified.XXXXXX") || return 1
+  if ! printf '%s\n%s\n' fm-pr-poll-review-notified-v1 "$line" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_poll_review_marker_matches "$tmp" "$state_device" "$line" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker" \
+    || ! fm_pr_poll_review_marker_matches "$marker" "$state_device" "$line"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_pr_poll_review_notified_remove() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-poll-review-notified"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  rm -f -- "$marker"
+}
+
 # Per-task PR-poll cleanup shared by bin/fm-teardown.sh and bin/fm-landing.sh.
 # Validation refuses any artifact that is not an ordinary single-link file on
 # the state device, so a doctored sidecar is preserved instead of removed;
@@ -1041,7 +1103,7 @@ fm_pr_poll_cleanup_validate() {
   fm_task_id_path_safe "$id" || return 0
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-review-notified" "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
@@ -1050,7 +1112,7 @@ fm_pr_poll_cleanup_validate() {
   state_device=$(fm_pr_file_device "$state_dir") || return 1
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-review-notified" "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
       || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
@@ -1073,6 +1135,7 @@ fm_pr_poll_cleanup_remove() {  # <state> <id> <fm-pr-poll.sh template>
   fm_pr_poll_cleanup_validate "$state_dir" "$id" || return 1
   fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$template" || return 1
   fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
+  fm_pr_poll_review_notified_remove "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.check-trust" || return 1

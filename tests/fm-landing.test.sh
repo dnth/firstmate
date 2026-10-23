@@ -69,6 +69,25 @@ case "${1:-} ${2:-}" in
   "pr view") number=${3##*/} ;;
   "pr checks") echo '[]'; exit 0 ;;
   "api graphql")
+    # bin/fm-review-manifest.sh's review read shares this handler; the review
+    # query carries reviewThreads and takes the shared fixture answer.
+    case " $* " in
+      *reviewThreads*)
+        # The manifest check needs the delivery mode and head the landing record
+        # carries, because mode=no-mistakes requires an intact Pipeline section.
+        number= head= mode=direct-PR
+        for arg in "$@"; do
+          case "$arg" in number=*) number=${arg#number=} ;; esac
+        done
+        for meta in "${FM_HOME:-/nonexistent}"/state/*.meta; do
+          [ -e "$meta" ] || continue
+          grep -qx "pr=.*/pull/$number" "$meta" || continue
+          grep -qx 'custody_mode=no-mistakes' "$meta" && mode=no-mistakes
+          head=$(grep '^pr_head=' "$meta" | tail -1 | cut -d= -f2-)
+        done
+        exec "$FM_TEST_FAKE_GH_REVIEW" "$head" "$mode"
+        ;;
+    esac
     f="$FM_TEST_FORGE/merged-by-main"
     if [ -f "$f" ]; then
       printf 'state=MERGED\nmerged=true\nqueued=false\nbase=main\n'
@@ -234,15 +253,16 @@ test_main_merges_through_the_landing_record_and_settles_it() {
   report_custody_through_the_relay "$home" "$(make_mate_home "$home" no)"
   id=$(assert_one_landing "$home" "$URL7")
   # The mate's worker is gone, so only main's record can carry the merge.
-  out=$(home_env "$home" "$ROOT/bin/fm-pr-merge.sh" "$id" "$URL7" -- --squash 2>&1) \
-    || fail "fm-pr-merge refused the landing record: $out"
+  out=$(home_env "$home" "$ROOT/bin/fm-pr-merge.sh" "$id" "$URL7" \
+    --captain-instruction "captain: merge this remote PR despite unavailable local Pipeline evidence" -- --squash 2>&1) \
+    || fail "fm-pr-merge refused the explicitly authorized landing: $out"
   grep -qxF 'pr merge 7 --repo acme/alpha --squash' "$home/forge/gh-axi.log" \
     || fail "the merge did not go through the guarded gh-axi call"
   grep -qF "merge landed: $id $URL7" "$home/state/.wake-queue" || fail "the main merge left no durable outcome"
   out=$(home_env "$home" "$PROJECT" --check --reconcile)
   case "$out" in *"landing-merged: $id"*) ;; *) fail "reconcile did not settle after the main merge: $out" ;; esac
   [ -z "$(landing_ids "$home")" ] || fail "the landing record survived the main merge"
-  pass "main merges a second mate's PR through its landing record with the ordinary guards, then settles it"
+  pass "main merges a second mate's PR through its landing record under explicit instruction, then settles it"
 }
 
 test_a_pr_closed_without_merging_settles_without_a_refresh() {
@@ -397,7 +417,13 @@ test_custody_survives_the_workers_release_and_the_guards_hold_at_merge() {
     grep -qx "$want" "$meta" || fail "the landing record lost the mate's custody ($want): $(cat "$meta")"
   done
   fm_pr_poll_artifacts_valid "$home/state" "$id" "$POLL" || fail "recording custody broke the landing poll"
-  out=$(merge_through_the_guards "$home" "$id" -- --squash) || fail "the owner could not merge after release: $out"
+  if out=$(merge_through_the_guards "$home" "$id" -- --squash); then
+    fail "the owner merged remote custody without a registered Pipeline digest"
+  fi
+  assert_contains "$out" 'Pipeline digest is missing' 'remote custody did not require the ready digest'
+  [ ! -s "$home/forge/gh-axi.log" ] || fail "missing Pipeline digest reached the forge"
+  out=$(merge_through_the_guards "$home" "$id" --captain-instruction "captain: merge despite unavailable local Pipeline record" -- --squash) \
+    || fail "explicit override could not merge after release: $out"
   grep -qxF 'pr merge 7 --repo acme/alpha --squash' "$home/forge/gh-axi.log" || fail "the guarded merge never reached the forge"
   # The report is idempotent, and a report that repeats changes nothing.
   FM_HOME="$mate" FM_ROOT_OVERRIDE="$ROOT" "$LANDING" report worker-1 >/dev/null

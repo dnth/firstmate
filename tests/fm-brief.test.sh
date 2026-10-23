@@ -1066,6 +1066,48 @@ test_completion_boundary_contract_in_briefs() {
 # verification criterion (targeted local tests plus lint, CI owns broad
 # regression - per .no-mistakes.yaml) as the last criterion; every other repo's
 # scaffold stays free of it. fm-receipt-check.sh must parse the result.
+# The PR-body and review-manifest contract bin/fm-review-manifest.sh verifies
+# must reach every worker that opens a PR, and only those.
+test_ship_brief_carries_the_pr_body_contract() {
+  local home id brief mode
+  home="$TMP_ROOT/pr-body-home"
+  write_registry "$home"
+  for mode in direct-PR no-mistakes; do
+    id="brief-pr-body-${mode}"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode brief scaffold failed"
+    brief="$home/data/$id/brief.md"
+    assert_grep "the \`pr\` skill at \`~/.agents/skills/pr/SKILL.md\`" "$brief" \
+      "$mode brief lost the pr-skill rewrite step"
+    assert_grep "## Review follow-up" "$brief" \
+      "$mode brief lost the review follow-up table"
+    assert_grep "fixed <sha>" "$brief" \
+      "$mode brief lost the fixed-sha disposition"
+    assert_grep "declined: <reason>" "$brief" \
+      "$mode brief lost the declined disposition"
+    assert_grep "deferred: <issue url>" "$brief" \
+      "$mode brief lost the deferred disposition"
+    assert_grep "pullrequestreview-<id>" "$brief" \
+      "$mode brief lost the review key format"
+    assert_grep "a review id mentioned only in prose proves nothing" "$brief" \
+      "$mode brief lost the prose-is-not-coverage rule"
+    assert_grep "Do not reply publicly to a review unless this brief authorizes public comments." "$brief" \
+      "$mode brief lost the public-reply boundary"
+  done
+  id="brief-pr-body-no-mistakes"
+  brief="$home/data/$id/brief.md"
+  assert_grep "Keep No-Mistakes' \`## Pipeline\` section" "$brief" \
+    "no-mistakes brief lost the verbatim pipeline-section rule"
+  id="brief-pr-body-local"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "## Review follow-up" "$brief" \
+    "local-only brief carried a PR review manifest it never opens a PR for"
+  assert_no_grep "pr\` skill" "$brief" \
+    "local-only brief carried the PR-body rewrite step"
+  pass "fm-brief.sh: PR modes carry the PR-body and review-manifest contract, local-only does not"
+}
+
 test_firstmate_repo_ship_brief_prefills_verification_criterion() {
   local home brief filled criteria out status other_repo mode non_git_root
   home="$TMP_ROOT/firstmate-ac99-home"
@@ -1218,6 +1260,7 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_captain_hold_policy
 test_commit_identity_rule_in_briefs
 test_scout_and_secondmate_scaffold
+test_ship_brief_carries_the_pr_body_contract
 test_firstmate_repo_ship_brief_prefills_verification_criterion
 test_concurrent_ship_scaffold_has_one_owner
 test_ship_scaffold_rejects_destination_swap_and_retries_cleanly

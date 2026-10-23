@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
-# It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# It emits exactly one merged line for a merged PR or MR.
+# The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Unmerged GitHub PRs also use bin/fm-review-manifest.sh's poll contract.
+# Its uncovered or invalid result is forwarded; a failed review read emits
+# `review <url> unreadable`, and a successful empty result emits
+# `review <url> clear` for the watcher to consume without waking.
+# Other lookup failures stay silent and can never be read as a merge.
+# bin/fm-pr-lib.sh owns review-notification deduplication and reset semantics.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -63,7 +68,21 @@ case "$provider" in
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
     state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    if [ "$state" = MERGED ]; then
+      printf '%s\n' merged
+      exit 0
+    fi
+    review_dir=${0%/*}
+    [ "$review_dir" != "$0" ] || review_dir=.
+    review_line=
+    if [ -x "$review_dir/fm-review-manifest.sh" ]; then
+      if review_line=$("$review_dir/fm-review-manifest.sh" poll "$url" 2>/dev/null); then
+        [ -n "$review_line" ] || review_line="review $url clear"
+      else
+        review_line="review $url unreadable"
+      fi
+    fi
+    [ -z "$review_line" ] || printf '%s\n' "$review_line"
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0

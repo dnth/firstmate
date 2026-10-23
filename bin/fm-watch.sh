@@ -2017,6 +2017,10 @@ while :; do
           continue
         fi
       fi
+      if [ "$is_pr_poll" -eq 1 ] && [ "$out" = "review $url clear" ]; then
+        fm_pr_poll_review_notified_remove "$STATE" "$id" || exit 1
+        out=
+      fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
@@ -2047,6 +2051,18 @@ while :; do
           fi
           wake "$reason"
         fi
+        if [ "$is_pr_poll" -eq 1 ]; then
+          # Deduplicate review wakes under bin/fm-pr-lib.sh's marker contract;
+          # bin/fm-pr-poll.sh owns the review-result protocol.
+          case "$out" in
+            review\ *)
+              if fm_pr_poll_review_notified "$STATE" "$id" "$out"; then
+                touch "$STATE/.last-check"
+                continue
+              fi
+              ;;
+          esac
+        fi
         if [ "$check_owns_wake" -eq 1 ]; then
           # fm-ext-poll.sh already made one record durable per claimed request,
           # and released the claim again for any record it could not append.
@@ -2060,6 +2076,14 @@ while :; do
           continue
         fi
         fm_wake_append check "$c" "$reason" || exit 1
+        if [ "$is_pr_poll" -eq 1 ]; then
+          case "$out" in
+            review\ *)
+              fm_pr_poll_review_mark "$STATE" "$id" "$out" \
+                || triage_log "unanswered-review wake for $id was not marked delivered"
+              ;;
+          esac
+        fi
         touch "$STATE/.last-check"
         wake "$reason"
       fi

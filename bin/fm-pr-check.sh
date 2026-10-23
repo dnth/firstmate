@@ -8,6 +8,10 @@
 # Initial ship PR registration requires complete acceptance evidence
 # (bin/fm-receipt-check.sh <task-id> exits 0); missing or invalid receipts
 # refuse registration naming the criteria.
+# A ship PR-ready also proves its review manifest and body format through
+# bin/fm-review-manifest.sh, whose header owns the GitHub-only contract and
+# coverage disclosure. A verified Pipeline digest is atomically recorded as
+# pipeline_sha256= for the merge guard; GitLab skips this gate with a notice.
 # A no-mistakes task additionally proves its run from No-Mistakes' own status:
 # `axi status` in the task worktree must report a run whose branch is the task
 # branch, whose pr is this URL, and whose full head_sha equals the forge's PR
@@ -18,8 +22,10 @@
 # refuse registration. Nothing here reconstructs what the pipeline validated
 # from the worker's object store.
 # Re-registering the recorded pr= URL refreshes pr_head= and re-arms the poll
-# without re-running the handoff gates, provided a no-mistakes ship also has
-# nm_run_id= recorded. Older no-mistakes records without that run identity and
+# without re-running the evidence and run-identity handoff gates, provided a
+# no-mistakes ship also has nm_run_id= recorded. Ship re-registration still
+# re-verifies the review manifest unless the merge guard owns that decision.
+# Older no-mistakes records without that run identity and
 # registrations of a different URL are gated in full. fm-pr-merge.sh calls this
 # before every merge, and reconciliation re-arms a skipped poll.
 # Publication is serialized per task through state/.<task-id>.pr-publication.lock
@@ -199,6 +205,32 @@ if [ "$ALREADY_REGISTERED" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" = no-mista
   fi
 fi
 
+# The review manifest and body format are verified from the forge, not from the
+# worker's report, so a body whose table came back only in prose cannot pass.
+# The disclosure is held until publication succeeds and printed with the arm
+# line, so a registration that refuses never claims coverage it did not record.
+REVIEW_DISCLOSURE=
+PIPELINE_DIGEST=
+REVIEW_VERIFIED=0
+if [ "$KIND" = ship ]; then
+  if [ "${FM_PR_CHECK_REVIEW_OVERRIDE:-0}" = 1 ]; then
+    echo "notice: review manifest verification delegated to the caller for $ID" >&2
+  else
+    REVIEW_ARGS=("$URL" --mode "$MODE")
+    [ -z "$WT" ] || [ ! -d "$WT" ] || REVIEW_ARGS+=(--worktree "$WT")
+    REVIEW_RC=0
+    REVIEW_OUT=$("$SCRIPT_DIR/fm-review-manifest.sh" verify "${REVIEW_ARGS[@]}" 2>&1) || REVIEW_RC=$?
+    if [ "$REVIEW_RC" -ne 0 ]; then
+      printf '%s\n' "$REVIEW_OUT" >&2
+      echo "error: PR-ready refused for $ID: the review manifest or the PR body does not pass bin/fm-review-manifest.sh" >&2
+      exit 1
+    fi
+    PIPELINE_DIGEST=$(printf '%s\n' "$REVIEW_OUT" | sed -n 's/^pipeline_sha256=//p')
+    REVIEW_DISCLOSURE=$(printf '%s\n' "$REVIEW_OUT" | sed '/^pipeline_sha256=/d')
+    REVIEW_VERIFIED=1
+  fi
+fi
+
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
@@ -208,6 +240,10 @@ mkdir "$PUBLICATION_LOCK" 2>/dev/null \
 printf 'pr=%s\n' "$URL" > "$META_RECORDS" || exit 1
 [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_RECORDS" || exit 1
 META_REPLACE_KEYS=pr,pr_head
+if [ "$REVIEW_VERIFIED" -eq 1 ]; then
+  META_REPLACE_KEYS="$META_REPLACE_KEYS,pipeline_sha256"
+  [ -z "$PIPELINE_DIGEST" ] || printf 'pipeline_sha256=%s\n' "$PIPELINE_DIGEST" >> "$META_RECORDS" || exit 1
+fi
 if [ -n "$NM_RUN_ID" ]; then
   printf 'nm_run_id=%s\n' "$NM_RUN_ID" >> "$META_RECORDS" || exit 1
   META_REPLACE_KEYS="$META_REPLACE_KEYS,nm_run_id"
@@ -234,6 +270,7 @@ fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
 # worker can be released; the main home's landing record keeps it (bin/fm-landing.sh).
 "$SCRIPT_DIR/fm-landing.sh" report "$ID" >/dev/null \
   || echo "warning: could not report PR custody for $ID to the main home" >&2
+[ -z "$REVIEW_DISCLOSURE" ] || printf '%s\n' "$REVIEW_DISCLOSURE"
 printf 'armed: state/%s.check.sh\n' "$ID"
 # Keep the pinned waiting message current after a PR turns ready.
 # Best effort: a failed refresh never blocks the arm.

@@ -48,6 +48,10 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# direct-PR and no-mistakes scaffolds also carry the PR-body and review-manifest
+# contract that bin/fm-pr-check.sh and bin/fm-pr-merge.sh verify mechanically,
+# so a worker never reports PR-ready on a body whose review follow-up exists only
+# in prose. local-only briefs carry none of it: they open no PR.
 # Every ship scaffold also declares stable acceptance-criterion ids in an exact
 # "# Acceptance criteria" section and creates the append-only evidence ledger at
 # data/<task-id>/evidence.jsonl. bin/fm-receipt-check.sh owns the section parser
@@ -178,6 +182,16 @@ EOF
   case "$delivery_mode" in
     direct-PR)
       cat <<EOF
+# PR body and review manifest
+Rewrite the PR body with the \`pr\` skill at \`~/.agents/skills/pr/SKILL.md\`: \`## Summary\` with the smallest diagram, diff, or tree that makes the change clear, \`## Evidence\` with the before/after result, and \`## Merge Danger\` with the door and the blast radius.
+While you work after that rewrite - another commit, a re-run, a review follow-up - rewrite the body the same way before you report PR-ready.
+When the pull request has any review or any unresolved review thread, add a \`## Review follow-up\` table with one row per item: \`| <key> | "<quoted item>" | <disposition> |\`.
+The key is exactly one canonical \`pullrequestreview-<id>\` or thread node id; a review id mentioned only in prose proves nothing.
+A disposition is \`fixed <sha>\` with a commit reachable from the PR head, \`declined: <reason>\`, or \`deferred: <issue url>\` with an issue URL that resolves.
+Reviews from any account count, including comments posted from your own account; skip only tool-generated notes carrying \`no-mistakes-pipeline-attestation\`, \`no-mistakes-pr-appendix\`, or \`fm-worker-note\`.
+Firstmate's PR-ready check verifies all of this mechanically and refuses with the review URL or the missing section, so do the rewrite before you append \`done:\`.
+Do not reply publicly to a review unless this brief authorizes public comments.
+
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
@@ -202,6 +216,17 @@ EOF
       ;;
     no-mistakes)
       cat <<EOF
+# PR body and review manifest
+After the final No-Mistakes pass, rewrite the PR body with the \`pr\` skill at \`~/.agents/skills/pr/SKILL.md\`: \`## Summary\` with the smallest diagram, diff, or tree that makes the change clear, \`## Evidence\` with the before/after result, and \`## Merge Danger\` with the door and the blast radius.
+Keep No-Mistakes' \`## Pipeline\` section, its attestation comment, and its test table byte for byte; never edit, reorder, or drop them, because firstmate verifies that the attestation still names the PR head.
+While you work after that rewrite - a re-run, a review follow-up, any new commit - rewrite the body the same way and keep the pipeline section verbatim before you report PR-ready.
+When the pull request has any review or any unresolved review thread, add a \`## Review follow-up\` table with one row per item: \`| <key> | "<quoted item>" | <disposition> |\`.
+The key is exactly one canonical \`pullrequestreview-<id>\` or thread node id; a review id mentioned only in prose proves nothing.
+A disposition is \`fixed <sha>\` with a commit reachable from the PR head, \`declined: <reason>\`, or \`deferred: <issue url>\` with an issue URL that resolves.
+Reviews from any account count, including comments posted from your own account; skip only tool-generated notes carrying \`no-mistakes-pipeline-attestation\`, \`no-mistakes-pr-appendix\`, or \`fm-worker-note\`.
+Firstmate's PR-ready check verifies all of this mechanically and refuses with the review URL or the missing section, so do the rewrite before you append \`done: PR {url} checks green\`.
+Do not reply publicly to a review unless this brief authorizes public comments.
+
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.

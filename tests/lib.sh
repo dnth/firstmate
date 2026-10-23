@@ -268,6 +268,37 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- PR review-manifest fixtures -------------------------------------------
+#
+# bin/fm-review-manifest.sh owns the review manifest and PR body contract, and
+# both bin/fm-pr-check.sh and bin/fm-pr-merge.sh consult it, so every fake `gh`
+# that a suite drives through those scripts has to answer its GraphQL queries.
+# A fake delegates to the shared responder below rather than re-rolling the
+# response shape.
+#
+# shellcheck disable=SC2034  # Consumed by sourcing test files, not here.
+FM_TEST_FAKE_GH_REVIEW="$ROOT/tests/fake-gh-review.sh"
+export FM_TEST_FAKE_GH_REVIEW
+
+# fm_write_pr_review_state <file> <head> [reviews-json] [threads-json] [mode]
+# Writes the GraphQL envelope the review verifier reads, so a case can pin
+# counted reviews and unresolved threads exactly.
+fm_write_pr_review_state() {
+  local file=$1 head=$2 reviews=${3:-[]} threads=${4:-[]} mode=${5:-direct-PR}
+  local body pipeline=
+  [ "$mode" != no-mistakes ] || pipeline=1
+  body=$(printf '## Summary\n\nfixture\n\n## Evidence\n\n- **Before:** none\n  **After:** none\n\n## Merge Danger\n\n**Door:** two-way.\n**Blast Radius:** low.\n')
+  if [ -n "$pipeline" ]; then
+    body="$body"$'\n'"$(printf '## Pipeline\n\n<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"%s","steps":[{"step":"review","status":"completed"}]} -->\n\n| Test | Result |\n| --- | --- |\n| fixture | passed |\n' "$head")"
+  fi
+  jq -n --arg head "$head" --arg body "$body" --argjson reviews "$reviews" --argjson threads "$threads" \
+    '{data:{repository:{pullRequest:{
+      headRefOid:$head,
+      body:$body,
+      reviews:{pageInfo:{hasNextPage:false},nodes:$reviews},
+      reviewThreads:{pageInfo:{hasNextPage:false},nodes:$threads}}}}}' > "$file"
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>

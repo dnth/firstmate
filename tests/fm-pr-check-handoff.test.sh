@@ -22,7 +22,16 @@ NM_CALL_LOG="$TMP_ROOT/no-mistakes-calls.log"
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
-  *" headRefOid "*) [ -z "${FM_FAKE_GH_HEAD:-}" ] || printf '%s\n' "$FM_FAKE_GH_HEAD" ;;
+  *" headRefOid "*) [ -z "${FM_FAKE_GH_HEAD:-}" ] || printf '%s\n' "$FM_FAKE_GH_HEAD"; exit 0 ;;
+esac
+# bin/fm-pr-check.sh verifies the review manifest and body format through
+# bin/fm-review-manifest.sh, whose GraphQL query this answers with a valid
+# body for the head this fixture also reports.
+case " $* " in
+  *" api graphql "*)
+    [ -n "${FM_FAKE_GH_HEAD:-}" ] || exit 1
+    exec "$FM_TEST_FAKE_GH_REVIEW" "$FM_FAKE_GH_HEAD" "${FM_FAKE_DELIVERY_MODE:-direct-PR}"
+    ;;
 esac
 SH
 cat > "$FAKEBIN/no-mistakes" <<EOF
@@ -46,7 +55,7 @@ python3 - "$NM_DIR" <<'PY'
 import os, sqlite3, sys
 db = sqlite3.connect(os.path.join(sys.argv[1], "state.sqlite"))
 db.executescript("""
-CREATE TABLE runs (id TEXT PRIMARY KEY);
+CREATE TABLE runs (id TEXT PRIMARY KEY, head_sha TEXT, pr_url TEXT, created_at INTEGER DEFAULT 1);
 CREATE TABLE step_results (
   id TEXT PRIMARY KEY, run_id TEXT, step_name TEXT, step_order INTEGER, status TEXT,
   findings_json TEXT, approval_reason TEXT, override_reason TEXT, skip_reason TEXT
@@ -73,6 +82,15 @@ HEAD_A=0123456789abcdef0123456789abcdef01234567
 HEAD_B=89abcdef0123456789abcdef0123456789abcdef
 
 nm_status() {  # <run-id> <branch> <head_sha> <status> [outcome] [pr]
+  python3 - "$NM_DIR/state.sqlite" "$1" "$3" "${6:-}" <<'PYDB'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("UPDATE runs SET head_sha = ?, pr_url = ? WHERE id = ?", (sys.argv[3], sys.argv[4], sys.argv[2]))
+if db.execute("SELECT 1 FROM runs WHERE id = ?", (sys.argv[2],)).fetchone() and not db.execute(
+        "SELECT 1 FROM step_results WHERE run_id = ?", (sys.argv[2],)).fetchone():
+    db.execute("INSERT INTO step_results (id,run_id,step_name,step_order,status,findings_json) VALUES (?,?,'review',1,'completed','{}')", ("sr-" + sys.argv[2], sys.argv[2]))
+db.commit()
+PYDB
   printf 'run:\n  id: "%s"\n  branch: %s\n  status: %s\n  head: %s\n  head_sha: %s\n' "$1" "$2" "$4" "${3:0:8}" "$3"
   [ -z "${6:-}" ] || printf '  pr: "%s"\n' "$6"
   [ -z "${5:-}" ] || printf 'outcome: %s\n' "$5"
@@ -109,7 +127,9 @@ receipt() {  # <id> <criterion> [outcome]
 }
 
 run_pr_check() {  # <id> <url>
-  PR_OUT=$(FM_HOME="$HOME_DIR" PATH="$FAKEBIN:$PATH" "$PR_CHECK" "$1" "$2" 2>&1)
+  local delivery_mode
+  delivery_mode=$(sed -n 's/^mode=//p' "$HOME_DIR/state/$1.meta")
+  PR_OUT=$(FM_FAKE_DELIVERY_MODE="$delivery_mode" FM_HOME="$HOME_DIR" PATH="$FAKEBIN:$PATH" "$PR_CHECK" "$1" "$2" 2>&1)
   PR_RC=$?
 }
 
@@ -146,7 +166,7 @@ test_no_mistakes_handoff_proves_run_from_pipeline_status() {
   make_task "$id" no-mistakes >/dev/null
   receipt "$id" AC1
   receipt "$id" AC2
-  nm_db "INSERT INTO runs VALUES ('RUN-pass');"
+  nm_db "INSERT INTO runs (id) VALUES ('RUN-pass');"
   status=$(nm_status RUN-pass "fm/$id" "$HEAD_A" completed passed "$url")
   FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" run_pr_check "$id" "$url"
   expect_code 0 "$PR_RC" "passed run on the task branch and PR was refused: $PR_OUT"
@@ -174,7 +194,7 @@ test_ci_green_active_run_is_pr_ready() {
   make_task "$id" no-mistakes >/dev/null
   receipt "$id" AC1
   receipt "$id" AC2
-  nm_db "INSERT INTO runs VALUES ('RUN-ci');"
+  nm_db "INSERT INTO runs (id) VALUES ('RUN-ci');"
   status=$(nm_status RUN-ci "fm/$id" "$HEAD_A" ci "" "$url")
   FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_CI_LOG='CI checks running' run_pr_check "$id" "$url"
   expect_code 1 "$PR_RC" "a run still waiting on CI was accepted"
@@ -214,7 +234,7 @@ test_wrong_or_foreign_runs_are_refused() {
 
 seed_ask_user_run() {  # <run-id>
   nm_db "
-    INSERT INTO runs VALUES ('$1');
+    INSERT INTO runs (id) VALUES ('$1');
     INSERT INTO step_results (id, run_id, step_name, step_order, status, findings_json)
     VALUES ('sr-$1', '$1', 'review', 3, 'completed',
       '{\"findings\":[{\"id\":\"R9\",\"action\":\"ask-user\",\"severity\":\"error\"}]}');
