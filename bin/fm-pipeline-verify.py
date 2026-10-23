@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate and fingerprint the Pipeline block in a forge response."""
+"""Validate Pipeline identity and fingerprint post-ready integrity only.
+
+Pre-ready status and test-result edits are not detected; they become the
+trusted fingerprint when PR-ready accepts the block.
+"""
 import hashlib
 import json
 import os

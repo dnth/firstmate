@@ -96,10 +96,15 @@ CHECK
   "api repos/"*)
     case "${2:-}" in
       */compare/*)
+        printf 'compare\n' >> "$FM_TEST_REVIEW_STATE.compare-calls"
         [ ! -e "$FM_TEST_REVIEW_STATE.compare-fail" ] || exit 1
         if [ -e "$FM_TEST_REVIEW_STATE.evidence-delay" ]; then
           printf 'compare\n' >> "$FM_TEST_REVIEW_STATE.calls"
           sleep 5
+        fi
+        if [ -e "$FM_TEST_REVIEW_STATE.compare" ]; then
+          cat "$FM_TEST_REVIEW_STATE.compare"
+          exit 0
         fi
         head=${FM_TEST_GH_HEAD:-$(jq -r '.data.repository.pullRequest.headRefOid' "$FM_TEST_REVIEW_STATE")}
         printf '{"status":"ahead","merge_base_commit":{"sha":"%s"}}\n' "$head"
@@ -269,6 +274,67 @@ test_fixed_sha_must_be_reachable_from_the_pr_head() {
   assert_contains "$CHECK_OUT" "$foreign" "AC1b1: the refusal did not name the unreachable commit"
   [ ! -e "$dir/home/state/$ID.check.sh" ] || fail "AC1b1: a refused PR armed the poll"
   pass "AC1b1: a fixed <sha> that is not in the PR refuses PR-ready"
+}
+
+test_stale_worktree_uses_forge_reachability() {
+  local dir variant base fixed head out
+  for variant in both-missing head-missing fixed-missing ancestry-missing; do
+    dir=$(make_case "stale-$variant")
+    base=$(head_of "$dir")
+    git clone -q "$dir/wt" "$dir/pipeline"
+    git -C "$dir/pipeline" commit -q --allow-empty -m "pipeline fix"
+    fixed=$(git -C "$dir/pipeline" rev-parse HEAD)
+    git -C "$dir/pipeline" commit -q --allow-empty -m "pipeline head"
+    head=$(git -C "$dir/pipeline" rev-parse HEAD)
+    case "$variant" in
+      both-missing)
+        git -C "$dir/wt" cat-file -e "$fixed^{commit}" 2>/dev/null && fail "fixed object unexpectedly local"
+        git -C "$dir/wt" cat-file -e "$head^{commit}" 2>/dev/null && fail "head object unexpectedly local"
+        ;;
+      head-missing)
+        git -C "$dir/wt" fetch -q "$dir/pipeline" "$fixed"
+        git -C "$dir/wt" cat-file -e "$fixed^{commit}" || fail "fixed object missing from fixture"
+        git -C "$dir/wt" cat-file -e "$head^{commit}" 2>/dev/null && fail "head object unexpectedly local"
+        ;;
+      fixed-missing)
+        git -C "$dir/wt" fetch -q --depth=1 "$dir/pipeline" "$head"
+        git -C "$dir/wt" cat-file -e "$head^{commit}" || fail "head object missing from fixture"
+        git -C "$dir/wt" cat-file -e "$fixed^{commit}" 2>/dev/null && fail "fixed object unexpectedly local"
+        ;;
+      ancestry-missing)
+        git -C "$dir/wt" fetch -q --depth=1 "$dir/pipeline" "$head"
+        fixed=$base
+        git -C "$dir/wt" cat-file -e "$fixed^{commit}" || fail "ancestor missing from fixture"
+        git -C "$dir/wt" cat-file -e "$head^{commit}" || fail "head missing from fixture"
+        git -C "$dir/wt" merge-base --is-ancestor "$fixed" "$head" && fail "shallow fixture already proves ancestry"
+        ;;
+    esac
+    body_state "$dir" "$head" "$(sections)
+## Review follow-up
+| Review | Item | Disposition |
+| --- | --- | --- |
+| pullrequestreview-55 | pipeline fix | fixed $fixed |" "$AUTHOR_REVIEW_REVIEWS" '[]'
+    printf '{"status":"ahead","merge_base_commit":{"sha":"%s"}}\n' "$fixed" > "$dir/reviews.json.compare"
+    FM_TEST_GH_HEAD=$head
+    run_pr_check "$dir"
+    [ "$CHECK_RC" -eq 0 ] || fail "$variant refused forge-proved fix at ready: $CHECK_OUT"
+    out=$(NM_HOME="$dir/nm" FM_TEST_REVIEW_STATE="$dir/reviews.json" PATH="$dir/fakebin:$BASE_PATH" \
+      "$MANIFEST" verify "$URL" --mode direct-PR --worktree "$dir/wt" 2>&1) \
+      || fail "$variant refused forge-proved fix in verify: $out"
+    run_poll "$dir"
+    [ "$POLL_OUT" = "review $URL clear" ] || fail "$variant did not clear the covered review: $POLL_OUT"
+    run_pr_merge "$dir"
+    [ "$MERGE_RC" -eq 0 ] || fail "$variant refused forge-proved fix at merge: $MERGE_OUT"
+    [ "$(wc -l < "$dir/reviews.json.compare-calls" | tr -d ' ')" -eq 4 ] || fail "$variant did not consult the forge for each caller"
+    printf '{"status":"diverged","merge_base_commit":{"sha":"%s"}}\n' "$base" > "$dir/reviews.json.compare"
+    run_pr_check "$dir"
+    [ "$CHECK_RC" -ne 0 ] || fail "$variant accepted a negative forge comparison"
+    assert_contains "$CHECK_OUT" 'forge reachability' 'negative comparison not named'
+    touch "$dir/reviews.json.compare-fail"
+    run_pr_check "$dir"
+    [ "$CHECK_RC" -ne 0 ] || fail "$variant accepted unavailable forge evidence"
+  done
+  pass "stale and shallow worktrees use bounded forge proof across verify, ready, poll and merge"
 }
 
 test_well_formed_rows_are_ready_with_the_coverage_disclosure() {
@@ -540,6 +606,48 @@ test_pipeline_digest_guards_merge() {
   [ "$CHECK_RC" -ne 0 ] || fail "ready accepted step names absent from local run"
   assert_contains "$CHECK_OUT" 'step names' 'step name mismatch not named'
   pass "Pipeline digest refuses post-ready edits, missing digests and records; completed statuses pass"
+}
+
+test_pipeline_pre_ready_edits_become_trusted() {
+  local dir head original body mode original_digest digest expected meta
+  for mode in status result; do
+    dir=$(make_case "pre-ready-$mode")
+    head=$(head_of "$dir")
+    FM_TEST_GH_HEAD=$head
+    meta="$dir/home/state/$ID.meta"
+    original="$(sections)$(pipeline "$head")"
+    body_state "$dir" "$head" "$original"
+    original_digest=$(python3 - "$dir/reviews.json" <<'HASH'
+import hashlib, json, sys
+body = json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"]["body"]
+print(hashlib.sha256(body[body.index("## Pipeline"):].encode()).hexdigest())
+HASH
+)
+    body=$original
+    case "$mode" in
+      status) body=${body/\"status\":\"completed\"/\"status\":\"skipped\"} ;;
+      result) body=${body/fixture | passed/fixture | failed} ;;
+    esac
+    body_state "$dir" "$head" "$body"
+    expected=$(python3 - "$dir/reviews.json" <<'HASH'
+import hashlib, json, sys
+body = json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"]["body"]
+print(hashlib.sha256(body[body.index("## Pipeline"):].encode()).hexdigest())
+HASH
+)
+    [ "$original_digest" != "$expected" ] || fail "pre-ready $mode edit did not alter the Pipeline bytes"
+    run_pr_check "$dir"
+    [ "$CHECK_RC" -eq 0 ] || fail "pre-ready $mode edit unexpectedly detected: $CHECK_OUT"
+    digest=$(sed -n 's/^pipeline_sha256=//p' "$meta")
+    [ "$digest" = "$expected" ] || fail "pre-ready $mode edit did not become the trusted fingerprint"
+    run_pr_merge "$dir"
+    [ "$MERGE_RC" -eq 0 ] || fail "trusted pre-ready $mode edit refused at merge: $MERGE_OUT"
+    body_state "$dir" "$head" "$original"
+    run_pr_merge "$dir"
+    [ "$MERGE_RC" -ne 0 ] || fail "restoring the original $mode bytes after ready did not invalidate the fingerprint"
+    assert_contains "$MERGE_OUT" 'digest changed' 'post-ready change not named'
+  done
+  pass "post-ready integrity only: pre-ready status and test-result edits become trusted fingerprints"
 }
 
 test_merge_refuses_an_unanswered_review() {
@@ -981,6 +1089,7 @@ test_paginated_thread_comments
 
 test_commented_review_without_a_table_is_not_ready
 test_fixed_sha_must_be_reachable_from_the_pr_head
+test_stale_worktree_uses_forge_reachability
 test_well_formed_rows_are_ready_with_the_coverage_disclosure
 test_review_id_in_prose_only_is_not_ready
 test_unresolved_thread_needs_its_own_row
@@ -990,5 +1099,6 @@ test_no_reviews_requires_no_table
 test_body_sections_are_required
 test_pipeline_attestation_must_be_intact
 test_pipeline_digest_guards_merge
+test_pipeline_pre_ready_edits_become_trusted
 test_merge_refuses_an_unanswered_review
 test_pr_poll_reports_an_unanswered_review_once

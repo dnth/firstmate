@@ -42,8 +42,10 @@
 # compared. Successful verify emits pipeline_sha256=<digest> for the exact
 # Pipeline block, including its heading and whitespace. PR-ready stores it in
 # task metadata; --pipeline-digest requires that saved digest at merge. A
-# missing digest or unavailable local record refuses verification. Workers
-# must preserve the pipeline output verbatim.
+# missing digest or unavailable local record refuses verification. This is
+# post-ready integrity only: edits to statuses or test results before PR-ready
+# are not detected and become the trusted fingerprint. Workers must preserve
+# the pipeline output verbatim.
 #
 # A forge read that cannot be completed fails verification closed, including on
 # a host with no gh: an unread manifest is not evidence that the pull request
@@ -322,12 +324,12 @@ rm_check_disposition() {
         rm_error "the Review follow-up row at body line $lineno has an unparseable disposition '$disp'; expected 'fixed <sha>', 'declined: <reason>', or 'deferred: <issue url>'"
         return 0
       fi
-      if [ -n "$RM_WORKTREE" ] && [ -d "$RM_WORKTREE" ]; then
-        if ! git -C "$RM_WORKTREE" cat-file -e "$sha^{commit}" 2>/dev/null \
-            || [ -z "$RM_HEAD" ] \
-            || ! git -C "$RM_WORKTREE" merge-base --is-ancestor "$sha" "$RM_HEAD" 2>/dev/null; then
-          rm_error "the Review follow-up row at body line $lineno claims 'fixed $sha', but $sha is not reachable from the PR head $RM_HEAD"
-        fi
+      if [ -n "$RM_WORKTREE" ] && [ -d "$RM_WORKTREE" ] \
+          && [ -n "$RM_HEAD" ] \
+          && git -C "$RM_WORKTREE" cat-file -e "$sha^{commit}" 2>/dev/null \
+          && git -C "$RM_WORKTREE" cat-file -e "$RM_HEAD^{commit}" 2>/dev/null \
+          && git -C "$RM_WORKTREE" merge-base --is-ancestor "$sha" "$RM_HEAD" 2>/dev/null; then
+        return 0
       elif ! compare=$(rm_forge_read api "repos/$FM_PR_OWNER/$FM_PR_REPO/compare/$sha...$RM_HEAD" 2>/dev/null); then
         RM_READ_FAILED=1
         rm_error "the Review follow-up row at body line $lineno claims 'fixed $sha', but forge reachability from the PR head $RM_HEAD could not be proved"
