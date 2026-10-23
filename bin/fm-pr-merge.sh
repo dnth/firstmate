@@ -559,9 +559,10 @@ github_check_checks_green() {
 # The review manifest and the PR body format, re-verified from the forge and the
 # task worktree at merge time; bin/fm-review-manifest.sh owns both contracts.
 github_check_review_manifest() {
-  local out rc=0 line
+  local out rc=0 line digest
   local -a verify_args
-  verify_args=("$URL" --mode "${MODE:-unknown}")
+  digest=$(grep '^pipeline_sha256=' "$META" | tail -1 | cut -d= -f2- || true)
+  verify_args=("$URL" --mode "${MODE:-unknown}" --pipeline-digest "$digest")
   [ -z "$WT" ] || [ ! -d "$WT" ] || verify_args+=(--worktree "$WT")
   out=$("$SCRIPT_DIR/fm-review-manifest.sh" verify "${verify_args[@]}" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] && return 0

@@ -10,7 +10,8 @@
 # refuse registration naming the criteria.
 # A ship PR-ready also proves its review manifest and body format through
 # bin/fm-review-manifest.sh, whose header owns the GitHub-only contract and
-# coverage disclosure; GitLab registration skips this gate with a notice.
+# coverage disclosure. A verified Pipeline digest is atomically recorded as
+# pipeline_sha256= for the merge guard; GitLab skips this gate with a notice.
 # A no-mistakes task additionally proves its run from No-Mistakes' own status:
 # `axi status` in the task worktree must report a run whose branch is the task
 # branch, whose pr is this URL, and whose full head_sha equals the forge's PR
@@ -209,6 +210,8 @@ fi
 # The disclosure is held until publication succeeds and printed with the arm
 # line, so a registration that refuses never claims coverage it did not record.
 REVIEW_DISCLOSURE=
+PIPELINE_DIGEST=
+REVIEW_VERIFIED=0
 if [ "$KIND" = ship ]; then
   if [ "${FM_PR_CHECK_REVIEW_OVERRIDE:-0}" = 1 ]; then
     echo "notice: review manifest verification delegated to the caller for $ID" >&2
@@ -222,7 +225,9 @@ if [ "$KIND" = ship ]; then
       echo "error: PR-ready refused for $ID: the review manifest or the PR body does not pass bin/fm-review-manifest.sh" >&2
       exit 1
     fi
-    REVIEW_DISCLOSURE=$REVIEW_OUT
+    PIPELINE_DIGEST=$(printf '%s\n' "$REVIEW_OUT" | sed -n 's/^pipeline_sha256=//p')
+    REVIEW_DISCLOSURE=$(printf '%s\n' "$REVIEW_OUT" | sed '/^pipeline_sha256=/d')
+    REVIEW_VERIFIED=1
   fi
 fi
 
@@ -235,6 +240,10 @@ mkdir "$PUBLICATION_LOCK" 2>/dev/null \
 printf 'pr=%s\n' "$URL" > "$META_RECORDS" || exit 1
 [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_RECORDS" || exit 1
 META_REPLACE_KEYS=pr,pr_head
+if [ "$REVIEW_VERIFIED" -eq 1 ]; then
+  META_REPLACE_KEYS="$META_REPLACE_KEYS,pipeline_sha256"
+  [ -z "$PIPELINE_DIGEST" ] || printf 'pipeline_sha256=%s\n' "$PIPELINE_DIGEST" >> "$META_RECORDS" || exit 1
+fi
 if [ -n "$NM_RUN_ID" ]; then
   printf 'nm_run_id=%s\n' "$NM_RUN_ID" >> "$META_RECORDS" || exit 1
   META_REPLACE_KEYS="$META_REPLACE_KEYS,nm_run_id"

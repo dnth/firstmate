@@ -22,6 +22,7 @@ TMP_ROOT=$(fm_test_tmproot fm-pr-review-manifest)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.invalid
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; exit 0; }
 
 ID=task-rm
 URL=https://github.com/o/r/pull/41
@@ -121,7 +122,7 @@ SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
+  "pr merge") [ -z "${FM_TEST_MERGE_LOG:-}" ] || printf 'merge\n' >> "$FM_TEST_MERGE_LOG"; printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
   "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
 esac
 exit 0
@@ -143,7 +144,27 @@ SH
     "project=$dir/wt" \
     "kind=ship" \
     "mode=${FM_TEST_MODE:-direct-PR}"
+  seed_pipeline_run "$dir" "$(git -C "$dir/wt" rev-parse HEAD)"
   printf '%s\n' "$dir"
+}
+
+seed_pipeline_run() {
+  local dir=$1 head=$2 names=${3:-'["review"]'}
+  mkdir -p "$dir/nm"
+  python3 - "$dir/nm/state.sqlite" "$head" "$URL" "$names" <<'PYDB'
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.executescript("""
+CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, head_sha TEXT, pr_url TEXT, created_at INTEGER);
+CREATE TABLE IF NOT EXISTS step_results (run_id TEXT, step_name TEXT, step_order INTEGER, status TEXT);
+DELETE FROM runs;
+DELETE FROM step_results;
+""")
+db.execute("INSERT INTO runs VALUES ('local-run', ?, ?, 1)", (sys.argv[2], sys.argv[3]))
+for i, name in enumerate(json.loads(sys.argv[4])):
+    db.execute("INSERT INTO step_results VALUES ('local-run', ?, ?, 'completed')", (name, i))
+db.commit()
+PYDB
 }
 
 head_of() {  # <dir>
@@ -178,7 +199,7 @@ pipeline() {  # <head>
 
 run_pr_check() {  # <dir>
   local dir=$1
-  CHECK_OUT=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+  CHECK_OUT=$(NM_HOME="${FM_TEST_NM_HOME:-$dir/nm}" FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_REVIEW_STATE="$dir/reviews.json" \
     FM_TEST_GH_HEAD="${FM_TEST_GH_HEAD:-}" \
     FM_TEST_ISSUE_MISSING="${FM_TEST_ISSUE_MISSING:-0}" \
@@ -188,7 +209,7 @@ run_pr_check() {  # <dir>
 
 run_pr_merge() {  # <dir>
   local dir=$1
-  MERGE_OUT=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+  MERGE_OUT=$(NM_HOME="${FM_TEST_NM_HOME:-$dir/nm}" FM_TEST_MERGE_LOG="$dir/merge-called" FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_REVIEW_STATE="$dir/reviews.json" \
     FM_TEST_GH_HEAD="${FM_TEST_GH_HEAD:-}" \
     PATH="$dir/fakebin:$BASE_PATH" "$PR_MERGE" "$ID" "$URL" 2>&1)
@@ -416,7 +437,7 @@ test_pipeline_attestation_must_be_intact() {
 
   # The verifier owns the mode rule; the gates call it in the task's own mode.
   verify_out() {
-    FM_TEST_REVIEW_STATE="$dir/reviews.json" PATH="$dir/fakebin:$BASE_PATH" \
+    NM_HOME="$dir/nm" FM_TEST_REVIEW_STATE="$dir/reviews.json" PATH="$dir/fakebin:$BASE_PATH" \
       "$MANIFEST" verify "$URL" --mode no-mistakes --worktree "$dir/wt" 2>&1
   }
 
@@ -449,9 +470,6 @@ Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
   body_state "$dir" "$head" "$(sections)$(pipeline "$head")"
   out=$(verify_out) || fail "AC2: a correct body was refused: $out"
 
-  # A body that carries a Pipeline section in any mode has to carry an intact
-  # attestation, so the same rule reaches PR-ready through fm-pr-check.sh. The
-  # task is a direct-PR one, so no No-Mistakes run has to exist.
   body_state "$dir" "$head" "$(sections)
 ## Pipeline
 
@@ -465,6 +483,63 @@ Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
   run_pr_check "$dir"
   [ "$CHECK_RC" -eq 0 ] || fail "AC2: a correct body was refused at PR-ready: $CHECK_OUT"
   pass "AC2: the Pipeline section and its attestation must be intact, and a correct body is ready"
+}
+
+test_pipeline_digest_guards_merge() {
+  local dir head original body digest mode meta
+  dir=$(make_case pipeline-digest)
+  head=$(head_of "$dir")
+  FM_TEST_GH_HEAD=$head
+  meta="$dir/home/state/$ID.meta"
+  seed_pipeline_run "$dir" "$head" '["review","pr","ci"]'
+  original="$(sections)$(pipeline "$head" | sed 's/{"step":"review","status":"completed"}/{"step":"review","status":"completed"},{"step":"pr","status":"running"},{"step":"ci","status":"pending"}/')"
+  body_state "$dir" "$head" "$original"
+  FM_TEST_NM_HOME="$dir/unavailable" run_pr_check "$dir"
+  [ "$CHECK_RC" -ne 0 ] || fail "PR-ready accepted an unavailable local run record"
+  assert_contains "$CHECK_OUT" 'local No-Mistakes run record is unavailable' 'PR-ready did not name its unavailable record'
+  [ -z "$(sed -n 's/^pipeline_sha256=//p' "$meta")" ] || fail "failed registration recorded a digest"
+  run_pr_check "$dir"
+  [ "$CHECK_RC" -eq 0 ] || fail "completed local statuses refused a published snapshot: $CHECK_OUT"
+  digest=$(sed -n 's/^pipeline_sha256=//p' "$meta")
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail "PR-ready did not persist its Pipeline digest"
+  for mode in status evidence whitespace newline deleted moved; do
+    body=$original
+    case "$mode" in
+      status) body=${body/\"status\":\"running\"/\"status\":\"completed\"} ;;
+      evidence) body=${body/fixture | passed/replaced | passed} ;;
+      whitespace) body="$body " ;;
+      newline) body="$body"$'\n' ;;
+      deleted) body=$(printf '%s\n' "$body" | sed '/^|/d') ;;
+      moved) body=${body/| Test/## Elsewhere$'\n'| Test} ;;
+    esac
+    body_state "$dir" "$head" "$body"
+    run_pr_merge "$dir"
+    [ "$MERGE_RC" -ne 0 ] || fail "merge accepted post-ready Pipeline edit: $mode"
+    assert_contains "$MERGE_OUT" Pipeline "Pipeline refusal not named for $mode"
+    [ ! -e "$dir/merge-called" ] || fail "Pipeline edit reached the forge merge"
+    [ "$(sed -n 's/^pipeline_sha256=//p' "$meta")" = "$digest" ] || fail "merge rebaselined the Pipeline digest"
+  done
+  body_state "$dir" "$head" "$original"
+  sed '/^pipeline_sha256=/d' "$meta" > "$dir/meta-new"
+  mv "$dir/meta-new" "$meta"
+  run_pr_merge "$dir"
+  [ "$MERGE_RC" -ne 0 ] || fail "merge accepted a missing Pipeline digest"
+  assert_contains "$MERGE_OUT" 'digest is missing' 'missing digest refusal not named'
+  [ ! -e "$dir/merge-called" ] || fail "missing digest reached forge merge"
+  printf 'pipeline_sha256=%s\n' "$digest" >> "$meta"
+  FM_TEST_NM_HOME="$dir/unavailable" run_pr_merge "$dir"
+  [ "$MERGE_RC" -ne 0 ] || fail "merge accepted an unavailable local run record"
+  assert_contains "$MERGE_OUT" 'local No-Mistakes run record is unavailable' 'missing local record not named'
+  body_state "$dir" "$head" "${original/fixture/updated summary}"
+  run_pr_merge "$dir"
+  [ "$MERGE_RC" -eq 0 ] || fail "valid preserved snapshot with completed run statuses refused: $MERGE_OUT"
+  [ "$(cat "$dir/merge-called")" = merge ] || fail "valid merge did not reach forge exactly once"
+  [ "$(sed -n 's/^pipeline_sha256=//p' "$meta")" = "$digest" ] || fail "merge registration dropped the Pipeline digest"
+  body_state "$dir" "$head" "${original/\"step\":\"review\"/\"step\":\"invented\"}"
+  run_pr_check "$dir"
+  [ "$CHECK_RC" -ne 0 ] || fail "ready accepted step names absent from local run"
+  assert_contains "$CHECK_OUT" 'step names' 'step name mismatch not named'
+  pass "Pipeline digest refuses post-ready edits, missing digests and records; completed statuses pass"
 }
 
 test_merge_refuses_an_unanswered_review() {
@@ -883,6 +958,11 @@ test_remote_custody_mode() {
 | Review | Item | Disposition |
 | --- | --- | --- |
 | pullrequestreview-55 | item | fixed $head |" "$AUTHOR_REVIEW_REVIEWS" '[]'
+  local digest
+  digest=$(NM_HOME="$dir/nm" FM_TEST_REVIEW_STATE="$dir/reviews.json" PATH="$dir/fakebin:$BASE_PATH" \
+    "$MANIFEST" verify "$URL" --mode no-mistakes | sed -n 's/^pipeline_sha256=//p')
+  [ -n "$digest" ] || fail "could not register custody Pipeline"
+  printf 'pipeline_sha256=%s\n' "$digest" >> "$dir/home/state/$ID.meta"
   run_pr_merge "$dir"
   [ "$MERGE_RC" -eq 0 ] || fail "remote custody refused valid evidence: $MERGE_OUT"
   pass "remote custody enforces Pipeline and accepts forge-proved fixed commits"
@@ -909,5 +989,6 @@ test_inline_only_review_still_needs_a_row
 test_no_reviews_requires_no_table
 test_body_sections_are_required
 test_pipeline_attestation_must_be_intact
+test_pipeline_digest_guards_merge
 test_merge_refuses_an_unanswered_review
 test_pr_poll_reports_an_unanswered_review_once

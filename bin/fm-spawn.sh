@@ -20,7 +20,8 @@
 #   refused as a flag value.
 #   A ship relaunch recovers --mode and --yolo from the recorded task metadata
 #   when the caller does not repeat them, carries the delivery identity records
-#   pr=, pr_head=, and nm_run_id= (written only by bin/fm-pr-check.sh) into the
+#   pr=, pr_head=, nm_run_id=, and pipeline_sha256= (written only by
+#   bin/fm-pr-check.sh) into the
 #   replacement record so a restart mid-handoff keeps the registered PR and
 #   No-Mistakes run, and a non-secondmate OMP relaunch also
 #   recovers --prewalk-into and --allow-project-omp-extensions so the replacement
@@ -5086,7 +5087,7 @@ fi
   # these records and a restarted worker cannot recreate them, so the done and
   # PR-ready gates would otherwise never be satisfiable after a restart.
   if [ "$RELAUNCH" -eq 1 ]; then
-    for delivery_key in pr pr_head nm_run_id; do
+    for delivery_key in pr pr_head nm_run_id pipeline_sha256; do
       delivery_value=$(fm_meta_get "$RELAUNCH_META" "$delivery_key")
       [ -z "$delivery_value" ] || echo "$delivery_key=$delivery_value"
     done

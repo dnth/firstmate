@@ -37,8 +37,13 @@
 # equal the PR head, with a nonempty steps array whose entries have nonempty
 # step and status strings, and a test table in that same section.
 # Any body that has a `## Pipeline` section must satisfy these checks whatever
-# its delivery mode; these structural checks do not compare the section's bytes
-# with the original pipeline output, which workers must preserve verbatim.
+# its delivery mode. The local No-Mistakes record must resolve the PR head and
+# PR URL to a run with the same ordered step names; transient statuses are not
+# compared. Successful verify emits pipeline_sha256=<digest> for the exact
+# Pipeline block, including its heading and whitespace. PR-ready stores it in
+# task metadata; --pipeline-digest requires that saved digest at merge. A
+# missing digest or unavailable local record refuses verification. Workers
+# must preserve the pipeline output verbatim.
 #
 # A forge read that cannot be completed fails verification closed, including on
 # a host with no gh: an unread manifest is not evidence that the pull request
@@ -50,7 +55,7 @@
 # deadline of at most 15 seconds, reduced to half FM_CHECK_TIMEOUT when smaller.
 #
 # Usage:
-#   fm-review-manifest.sh verify <pr-url> --mode <mode> [--worktree <dir>]
+#   fm-review-manifest.sh verify <pr-url> --mode <mode> [--worktree <dir>] [--pipeline-digest <sha256>]
 #   fm-review-manifest.sh poll <pr-url>
 #
 # verify prints one disclosure line on success when counted items exist:
@@ -101,7 +106,7 @@ trap rm_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 rm_usage() {
-  echo "usage: fm-review-manifest.sh verify <pr-url> --mode <mode> [--worktree <dir>]" >&2
+  echo "usage: fm-review-manifest.sh verify <pr-url> --mode <mode> [--worktree <dir>] [--pipeline-digest <sha256>]" >&2
   echo "       fm-review-manifest.sh poll <pr-url>" >&2
 }
 
@@ -366,44 +371,20 @@ rm_has_heading() {
 }
 
 rm_check_sections() {
-  local section att pipeline
+  local section detail
   for section in Summary Evidence "Merge Danger"; do
     rm_has_heading "$section" \
       || rm_error "the PR body has no '## $section' section; rewrite it with the pr skill's template before reporting PR-ready"
   done
-  if [ "$RM_MODE" = no-mistakes ] || rm_has_heading Pipeline; then
-    if ! rm_has_heading Pipeline; then
-      rm_error "the PR body has no '## Pipeline' section; keep No-Mistakes' pipeline output, attestation, and test table verbatim"
-      return 0
-    fi
-    pipeline=$(printf '%s\n' "$RM_BODY" | awk '/^##[[:space:]]+Pipeline[[:space:]]*$/ {inside=1; next} /^##[[:space:]]/ {inside=0} inside')
-    att=$(printf '%s\n' "$pipeline" \
-      | sed -n 's/^<!-- no-mistakes-pipeline-attestation:v1 \(.*\) -->[[:space:]]*$/\1/p' \
-      | head -1)
-    if [ -z "$att" ]; then
-      rm_error "the PR body's '## Pipeline' section carries no intact No-Mistakes attestation (<!-- no-mistakes-pipeline-attestation:v1 {...} -->); keep it verbatim"
-      return 0
-    fi
-    if ! printf '%s' "$att" | jq -e '
-        type == "object"
-        and (.head_sha | type == "string" and test("^[0-9a-f]{40}$"))
-        and (.steps | type == "array" and length > 0
-          and all(.[]; type == "object" and (.step | type == "string" and length > 0)
-            and (.status | type == "string" and length > 0)))' >/dev/null 2>&1; then
-      rm_error "the PR body's No-Mistakes attestation is malformed; keep it verbatim"
-      return 0
-    fi
-    if ! printf '%s\n' "$pipeline" | awk -F'|' '
-      {a=tolower($2); b=tolower($3); gsub(/^[ \t]+|[ \t]+$/, "", a); gsub(/^[ \t]+|[ \t]+$/, "", b)}
-      a == "test" && (b == "result" || b == "status") {header=1; next}
-      header && a ~ /^:?-+:?$/ && b ~ /^:?-+:?$/ {separator=1; next}
-      separator && NF >= 4 && a != "" && b != "" {found=1}
-      END {exit !found}'; then
-      rm_error "the PR body's '## Pipeline' section has no test table; keep it verbatim"
-    fi
-    if [ "$(printf '%s' "$att" | jq -r '.head_sha')" != "$RM_HEAD" ]; then
-      rm_error "the PR body's No-Mistakes attestation is for head $(printf '%s' "$att" | jq -r '.head_sha'), not the PR head $RM_HEAD; keep it verbatim and never edit it by hand"
-    fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    rm_error "python3 is required to verify the Pipeline block"
+    return 0
+  fi
+  if detail=$(fm_run_timed "$RM_TIMEOUT" python3 "$SCRIPT_DIR/fm-pipeline-verify.py" \
+      "$RM_JSON_FILE" "$RM_MODE" "$RM_WORKTREE" "$RM_URL" "$RM_CHECK_DIGEST" "$RM_EXPECTED_DIGEST" 2>&1); then
+    RM_PIPELINE_DIGEST=$detail
+  else
+    rm_error "${detail:-the Pipeline verification could not be completed}"
   fi
 }
 
@@ -479,6 +460,7 @@ $RM_ERRORS
 ERRORS
     return 1
   fi
+  [ -z "$RM_PIPELINE_DIGEST" ] || printf 'pipeline_sha256=%s\n' "$RM_PIPELINE_DIGEST"
   if [ "$RM_CONTAINER_COUNT" -gt 0 ]; then
     declared=$(printf '%s\n' "$RM_ROW_KEYS" | grep -c .)
     item_word=items
@@ -520,6 +502,9 @@ ITEMS
 
 RM_MODE=
 RM_WORKTREE=
+RM_PIPELINE_DIGEST=
+RM_EXPECTED_DIGEST=
+RM_CHECK_DIGEST=0
 RM_TIMEOUT=15
 
 COMMAND=${1:-}
@@ -532,6 +517,12 @@ if [ "$COMMAND" = verify ]; then
       --mode)
         [ "$#" -ge 2 ] || { rm_usage; exit 2; }
         RM_MODE=$2
+        shift 2
+        ;;
+      --pipeline-digest)
+        [ "$#" -ge 2 ] || { rm_usage; exit 2; }
+        RM_CHECK_DIGEST=1
+        RM_EXPECTED_DIGEST=$2
         shift 2
         ;;
       --worktree)
