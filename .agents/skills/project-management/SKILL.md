@@ -41,7 +41,7 @@ Choose that posture when adding or creating the project:
 - `no-mistakes` runs the full validation pipeline before a PR.
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
-- `no-mistakes-prod-only` is a conditional policy rather than one flat mode: genuinely internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`, and `AGENTS.md` section 7 owns the full classification including the notes-versus-instructions test for documentation-only changes.
+- `no-mistakes-prod-only` is a conditional policy rather than one flat mode; follow [`AGENTS.md` section 7](../../../AGENTS.md#7-task-lifecycle) for its classification, including the notes-versus-instructions test for documentation-only changes.
 
 `no-mistakes-prod-only` is the default for a newly added or created remote-backed project when the captain specifies nothing, and a project with no remote defaults to `local-only`.
 State that resolved default while confirming the source, local name, and posture instead of asking the captain to choose from scratch, and record a flat mode instead whenever they ask for one.
@@ -56,7 +56,7 @@ Default it off for every project and every posture, and enable it only on the ca
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
-A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
+A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because either posture can require the pipeline at task intake.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
