@@ -27,6 +27,9 @@
 #   fixed <sha>            <sha> must be a commit reachable from the PR head
 #   declined: <reason>     <reason> must be non-empty
 #   deferred: <issue-url>  a github.com issue URL that must resolve
+# Reachability uses local ancestry when proved; otherwise a bounded forge
+# comparison must prove it, including when pipeline commits are absent from
+# an existing worker worktree's object store.
 # A row the parser cannot read fails the check rather than being ignored, and a
 # counted item with no covering row fails it naming the item's URL.
 #
