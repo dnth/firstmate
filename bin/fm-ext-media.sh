@@ -84,8 +84,9 @@
 # still be a supported type. The second mate's Firstmate checkout needs the
 # sum and ranged get subcommands, so update it first if the pull is refused.
 #
-# Everything under state/ext-media follows the 14-day media retention owned by
-# fm_ext_media_prune in bin/fm-ext-lib.sh, which the bridge poll runs.
+# Everything under state/ext-media follows the bridge's seven-day retention
+# window, enforced by fm_ext_media_prune in bin/fm-ext-lib.sh, which the bridge
+# poll runs.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
