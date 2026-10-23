@@ -41,6 +41,7 @@ config/ext-bridge    optional presence flag enabling the sibling local Communica
 config/ext-secret    local ext-bridge shared secret; LOCAL, gitignored, mode 0600, not inherited
 config/ext-allowlist fail-closed Discord guild/channel/author allowlist for the local ext-bridge; LOCAL, gitignored, not inherited
 config/ext-channel   optional dedicated Discord channel id for the local ext-bridge, read by the gateway plugin per message; LOCAL, gitignored, not inherited
+config/ext-media-screening  optional outbound Discord media screening policy for the local ext-bridge; absent or "strict" = strict, "private-server" = client data and hostnames may post while secrets never do, anything else refuses; LOCAL, gitignored, not inherited; see docs/configuration.md "Outbound media"
 config/inbox-result-targets  mode-0600 exact Hermes reply-target allowlist for trusted-local inbox results; LOCAL, gitignored, not inherited; see docs/configuration.md "Trusted-local inbox results"
 config/runpod.env    RUNPOD_API_KEY for the optional RunPod compute lifecycle beneath a remote secondmate; LOCAL, gitignored, parsed never sourced, not inherited; see docs/runpod-secondmates.md
 config/runpod/       generated SSH state plus the mode-600 workstation OMP broker bearer for RunPod-backed remote routes; LOCAL, gitignored, written only by bin/fm-runpod.sh and bin/fm-runpod-omp-auth.sh

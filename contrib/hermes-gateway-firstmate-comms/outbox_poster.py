@@ -2223,21 +2223,21 @@ def deliver_one(
             if media_state is not None and pending["names"]:
                 media_state["state"] = "posted"
                 media_state["posted"] = pending["names"]
-        if not recovered and media_state is not None and media_state.get("state") == "pending":
-            if int(media_state.get("attempts") or 0) >= MEDIA_UPLOAD_ATTEMPTS:
-                # A resumed ambiguous upload already used its one retry.
-                media_state["state"] = "dropped"
-                media_state["dropped"] = [str(entry.get("name") or "") for entry in media.get("files") or []
-                                          if isinstance(entry, dict)]
-            else:
-                uploads, unverified = load_media_uploads(path, payload, home)
-                media_state["dropped"] = unverified
-                if not uploads:
-                    media_state["state"] = "dropped"
         while True:
             if recovered:
                 receipt = recovered
                 break
+            if media_state is not None and media_state.get("state") == "pending":
+                if int(media_state.get("attempts") or 0) >= MEDIA_UPLOAD_ATTEMPTS:
+                    # A resumed ambiguous upload already used its one retry.
+                    media_state["state"] = "dropped"
+                    media_state["dropped"] = [str(entry.get("name") or "") for entry in media.get("files") or []
+                                              if isinstance(entry, dict)]
+                else:
+                    uploads, unverified = load_media_uploads(path, payload, home)
+                    media_state["dropped"] = unverified
+                    if not uploads:
+                        media_state["state"] = "dropped"
             attaching = bool(uploads) and media_state is not None and media_state.get("state") == "pending"
             text = chunks[index]
             if media_state is not None and (media_state.get("state") == "dropped" or media_state.get("dropped")) \

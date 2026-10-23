@@ -3,6 +3,7 @@
 # Communication Officer bridge.
 #
 # Usage:
+#   fm-ext-media.sh policy
 #   fm-ext-media.sh frames <video>
 #   fm-ext-media.sh screen <file> --verdict clear|refused --reason <text>
 #   fm-ext-media.sh pull <secondmate-id> <remote-relative-path>
@@ -38,12 +39,28 @@
 # state/ext-media/frames/<sha256>/ and prints their paths. screen <file>
 # records Firstmate's verdict as an attestation bound to the content digest at
 # state/ext-media/screened/<sha256>.json (mode 0600) and prints
-# "screened <sha256> <verdict>"; a video needs its frames sampled first.
-# Screening the same content again replaces its verdict. The reason stays
-# private and never reaches Discord.
+# "screened <sha256> <verdict> <policy>"; a video needs its frames sampled
+# first. Screening the same content again replaces its verdict. The reason
+# stays private and never reaches Discord.
+#
+# Screening policy. config/ext-media-screening picks the rule Firstmate
+# screens under; the ext-respond skill owns what each policy allows and
+# refuses. Absent means strict. Otherwise it must be a regular, readable,
+# non-symlink file naming exactly one policy, strict or private-server, on
+# one line; blank lines and lines starting with # are ignored. Anything else
+# (empty, symlinked, unreadable, two values, or an unknown value) is invalid,
+# and policy, screen, and stage refuse rather than guess, so a typo never
+# widens what can post. policy prints the policy in force. screen records it
+# in the attestation as "policy". A clear verdict recorded under strict, or
+# one with no policy field from an older checkout, posts under either policy;
+# one recorded under private-server posts only while the home still uses
+# private-server, so turning the opt-in off never posts what only the opt-in
+# allowed. verify applies the same rule and treats an invalid configuration
+# as strict.
 #
 # stage is what bin/fm-ext-emit.sh runs. It takes at most 4 images and 1
-# video, refuses any file whose content digest lacks a clear attestation, and
+# video, refuses any file whose content digest lacks a clear attestation the
+# current screening policy admits, and
 # copies the files into state/ext-media/staged/<slug>.<kind>.<generation>.<nonce>/
 # (mode 0700, files 0600) under generic names (image-1.png ... image-4.webp,
 # video-1.mp4) that never carry a source path or filename. It prints
@@ -53,7 +70,7 @@
 #
 # verify is what the gateway poster runs before an upload. It re-checks every
 # staged file of one outbox payload (generic name, private regular file,
-# digest, and a still-clear attestation) and prints
+# digest, and a still-clear attestation the current policy admits) and prints
 # {"files":[{name, path, media_type, bytes, sha256}], "dropped":[names]};
 # the poster posts a short note in place of a dropped file.
 #
@@ -81,7 +98,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 usage() {
   cat >&2 <<'EOF'
-usage: fm-ext-media.sh frames <video>
+usage: fm-ext-media.sh policy
+       fm-ext-media.sh frames <video>
        fm-ext-media.sh screen <file> --verdict clear|refused --reason <text>
        fm-ext-media.sh pull <secondmate-id> <remote-relative-path>
        fm-ext-media.sh stage --slug <slug> --kind answer|followup|final --generation <n> <file>...
@@ -267,13 +285,59 @@ video_length_ok() {
   awk -v d="$1" -v max="$MEDIA_VIDEO_MAX_SECS" 'BEGIN { exit !(d + 0 <= max + 0.05) }'
 }
 
-# attestation_verdict <sha256>: print clear or refused, or fail when this
-# content has no valid attestation.
+# media_policy: print the screening policy in force, strict or private-server,
+# or print why config/ext-media-screening is invalid on stderr and fail.
+media_policy() {
+  local cfg line value='' count=0
+  cfg="$(fm_ext_config_dir "$FM_HOME")/ext-media-screening"
+  if [ ! -e "$cfg" ] && [ ! -L "$cfg" ]; then
+    printf 'strict\n'
+    return 0
+  fi
+  if [ -L "$cfg" ] || [ ! -f "$cfg" ] || [ ! -r "$cfg" ]; then
+    printf 'fm-ext-media: %s must be a readable regular file, not a symlink\n' "$cfg" >&2
+    return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=$(printf '%s' "$line" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    count=$((count + 1))
+    value=$line
+  done < "$cfg"
+  if [ "$count" -ne 1 ]; then
+    printf 'fm-ext-media: %s must name exactly one policy (strict or private-server); it names %s\n' "$cfg" "$count" >&2
+    return 1
+  fi
+  case "$value" in
+    strict|private-server) printf '%s\n' "$value" ;;
+    *)
+      printf "fm-ext-media: %s names unknown policy '%s'; use strict or private-server, or remove the file for strict\n" \
+        "$cfg" "$value" >&2
+      return 1
+      ;;
+  esac
+}
+
+# policy_admits <current-policy> <verdict-policy>: true when a clear verdict
+# recorded under <verdict-policy> may post while <current-policy> is in force.
+# strict is the narrowest rule, so its clear verdicts post under either.
+policy_admits() {
+  [ "$2" = strict ] || [ "$2" = "$1" ]
+}
+
+# attestation_verdict <sha256>: print "<verdict> <policy>" with verdict clear
+# or refused, or fail when this content has no valid attestation. A record
+# without a policy field predates policies and was screened under strict.
 attestation_verdict() {
   local sha=$1
   fm_ext_private_artifact_file_valid "$MEDIA/screened" "$sha.json" 600 || return 1
   jq -er --arg sha "$sha" \
-    'select(.schema == 1 and .sha256 == $sha) | .verdict | select(. == "clear" or . == "refused")' \
+    'select(.schema == 1 and .sha256 == $sha)
+     | select(.verdict == "clear" or .verdict == "refused")
+     | select((.policy // "strict") as $p | $p == "strict" or $p == "private-server")
+     | "\(.verdict) \(.policy // "strict")"' \
     "$MEDIA/screened/$sha.json" 2>/dev/null
 }
 
@@ -367,7 +431,7 @@ cmd_frames() {
 }
 
 cmd_screen() {
-  local path verdict='' reason='' media media_type ext sha bytes frames=0 record
+  local path verdict='' reason='' policy media media_type ext sha bytes frames=0 record
   [ "$#" -ge 1 ] || { usage; exit 2; }
   path=$1
   shift
@@ -388,6 +452,7 @@ cmd_screen() {
     *$'\n'*|*$'\r'*) die "--reason must be one line" ;;
   esac
   [ "${#reason}" -le "$MEDIA_REASON_MAX" ] || die "--reason must be at most $MEDIA_REASON_MAX characters"
+  policy=$(media_policy) || die "refusing to screen under an invalid screening policy; fix or remove config/ext-media-screening (absent means strict)" 1
   work_dir
   media_source_copy "$path" "$WORK/source"
   read -r media media_type ext sha bytes < <(media_sniff "$WORK/source") || die "could not read the media file" 1
@@ -398,19 +463,19 @@ cmd_screen() {
       || die "sample this video's frames first with 'fm-ext-media.sh frames <video>' and look at every frame: $path"
   fi
   record=$(jq -cn --arg sha "$sha" --arg media "$media" --arg media_type "$media_type" \
-    --argjson bytes "$bytes" --arg verdict "$verdict" --arg reason "$reason" \
+    --argjson bytes "$bytes" --arg verdict "$verdict" --arg policy "$policy" --arg reason "$reason" \
     --argjson frames "$frames" --argjson screened_at "${FM_EXT_NOW_OVERRIDE:-$(date +%s)}" \
     '{schema:1, sha256:$sha, media:$media, media_type:$media_type, bytes:$bytes,
-      verdict:$verdict, reason:$reason, frames:$frames, screened_by:"firstmate",
+      verdict:$verdict, policy:$policy, reason:$reason, frames:$frames, screened_by:"firstmate",
       screened_at:$screened_at}') || die "could not build the attestation" 1
   printf '%s\n' "$record" | fm_ext_private_artifact_publish_stdin "$MEDIA/screened" "$sha.json" 600 \
     || die "could not record the attestation" 1
-  printf 'screened %s %s\n' "$sha" "$verdict"
+  printf 'screened %s %s %s\n' "$sha" "$verdict" "$policy"
 }
 
 cmd_stage() {
   local slug='' kind='' generation='' max nonce stage final path media media_type ext sha bytes
-  local verdict duration name images=0 videos=0 total index=0 lines out
+  local verdict verdict_policy policy duration name images=0 videos=0 total index=0 lines out
   local staged_media staged_type staged_ext staged_sha staged_bytes
   local -a plan_media=() plan_type=() plan_ext=() plan_sha=() plan_bytes=() plan_name=() plan_path=()
   while [ "$#" -gt 0 ]; do
@@ -430,6 +495,7 @@ cmd_stage() {
     *) die "media attaches only to an answer, followup, or final" ;;
   esac
   fm_ext_generation_valid "$generation" || die "generation must be a positive integer"
+  policy=$(media_policy) || die "refusing to stage media under an invalid screening policy; fix or remove config/ext-media-screening (absent means strict)" 1
   total=$#
   [ "$total" -ge 1 ] || die "stage needs at least one media file"
   [ "$total" -le $((MEDIA_MAX_IMAGES + MEDIA_MAX_VIDEOS)) ] \
@@ -489,10 +555,12 @@ cmd_stage() {
     bytes=${plan_bytes[index]}
     name=${plan_name[index]}
     path=${plan_path[index]}
-    if ! verdict=$(attestation_verdict "$sha"); then
+    if ! read -r verdict verdict_policy < <(attestation_verdict "$sha"); then
       die "not screened: $path - look at it yourself and record 'fm-ext-media.sh screen' before posting"
     fi
     [ "$verdict" = clear ] || die "screened and refused, so it cannot be posted: $path"
+    policy_admits "$policy" "$verdict_policy" \
+      || die "cleared under the $verdict_policy screening policy, but this home now screens under $policy: look at it again and record a new verdict: $path"
     if [ "$media" = video ]; then
       duration=$(video_duration "$stage/.source-$index") || die "not a playable video: $path"
       video_length_ok "$duration" || die "video is ${duration}s long; at most ${MEDIA_VIDEO_MAX_SECS}s is allowed: $path"
@@ -522,6 +590,7 @@ cmd_stage() {
 
 cmd_verify() {
   local payload='' dir staged entry name expected screened path actual bytes media_type files dropped
+  local policy verdict verdict_policy
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --payload) shift; payload=${1:-} ;;
@@ -535,6 +604,9 @@ cmd_verify() {
     printf '{"files":[],"dropped":[]}\n'
     return 0
   fi
+  # Unattended: an invalid configuration admits only strict clear verdicts,
+  # which every policy allows.
+  policy=$(media_policy 2>/dev/null) || policy=strict
   dir=$(jq -r '.media.dir' "$payload")
   staged="$MEDIA/staged/$dir"
   files=$(mktemp "${TMPDIR:-/tmp}/fm-ext-media-files.XXXXXX") || die "could not create a temp file" 1
@@ -546,12 +618,15 @@ cmd_verify() {
     media_type=$(printf '%s' "$entry" | jq -r '.media_type')
     path="$staged/$name"
     actual=
+    verdict=
+    verdict_policy=
     if printf '%s' "$name" | grep -Eq "$FM_EXT_MEDIA_NAME_RE" \
       && fm_ext_private_artifact_file_valid "$staged" "$name" 600; then
       actual=$(fm_ext_sha256 < "$path")
     fi
+    read -r verdict verdict_policy < <(attestation_verdict "$screened" 2>/dev/null) || verdict=
     if [ -n "$actual" ] && [ "$actual" = "$expected" ] \
-      && [ "$(attestation_verdict "$screened" 2>/dev/null)" = clear ]; then
+      && [ "$verdict" = clear ] && policy_admits "$policy" "$verdict_policy"; then
       bytes=$(wc -c < "$path" | tr -d ' ')
       jq -cn --arg name "$name" --arg path "$path" --arg media_type "$media_type" \
         --argjson bytes "$bytes" --arg sha256 "$actual" \
@@ -629,6 +704,7 @@ EOF
 }
 
 case "$CMD" in
+  policy) [ "$#" -eq 0 ] || { usage; exit 2; }; media_policy || exit 1 ;;
   frames) cmd_frames "$@" ;;
   screen) cmd_screen "$@" ;;
   stage) cmd_stage "$@" ;;

@@ -136,12 +136,17 @@ Screen every file yourself before it can post; emit refuses any file without you
 
 1. Open each image with the read tool and look at all of it; crop or zoom into small or dense text rather than skimming it.
 2. For a video, run `bin/fm-ext-media.sh frames <video>` and look at every frame it prints the same way.
-3. Refuse anything that shows client or customer data, people's personal details, hostnames, IP addresses, internal URLs or domains, file paths, branch names, task ids, tokens, keys, passwords, or other secrets, including in address bars, tab titles, terminal prompts, and notifications.
-4. Record the verdict: `bin/fm-ext-media.sh screen <file> --verdict clear|refused --reason "<what you checked or found>"`.
+3. Run `bin/fm-ext-media.sh policy` to learn which screening rule this home uses, then apply exactly that rule; the [outbound media reference](../../../docs/configuration.md#outbound-media) owns its `config/ext-media-screening` opt-in.
+   - `strict`, the default when the opt-in is absent: refuse anything that shows client or customer data, people's personal details, hostnames, IP addresses, internal URLs or domains, file paths, branch names, task ids, tokens, keys, passwords, or other secrets, including in address bars, tab titles, terminal prompts, and notifications.
+   - `private-server`, only when the captain has opted this home in: client and customer data, document names and contents, people's details as the apps show them, hostnames, IP addresses, internal URLs or domains, file paths, branch names, and task ids may post.
+   - Under either rule, always refuse credentials and secrets: passwords, API keys, tokens, session cookies, auth headers, private keys, connection strings that carry credentials, and one-time codes, wherever they show, including address bars, terminals, dev tools, and notifications.
+   - If the command refuses, the opt-in is misconfigured: post no media, and tell the captain the screening setting needs fixing.
+4. Record the verdict: `bin/fm-ext-media.sh screen <file> --verdict clear|refused --reason "<what you checked or found>"`; it records the rule in force with the verdict.
+   A clear verdict made under `private-server` stops posting once the home returns to `strict`; screen that file again under `strict` before posting it.
    Never record `clear` for a file you did not look at.
    A refused file does not post: ask the worker for a clean retake, or post without it and say the screenshot is withheld.
 
-- **Post** - add each screened file with `--media <file>` to the emit (or open) call; the text must not name any file or path.
+- **Post** - add each screened file with `--media <file>` to the emit (or open) call; under either screening rule, the text must not name any file or path.
   An oversized video is refused rather than re-encoded: post without it and say the recording was too large.
   Leave a queued generation to the poster; follow the [delivery and recovery contract](../../../docs/configuration.md#outbound-media) for upload failures or ambiguous sends, and do not re-emit it as a new generation.
 
