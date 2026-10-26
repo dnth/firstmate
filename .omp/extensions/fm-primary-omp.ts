@@ -336,6 +336,29 @@ export function installSilentWakeTurns(omp: Pick<ExtensionAPI, "on">): void {
 export default function (omp: ExtensionAPI) {
   if (!primaryIntegrationApplies()) return;
   publishNativeProcessIdentity();
+  // Attempt-private native error evidence for the secondmate launch ack. Read
+  // only fresh message_end events, never errors replayed from a resumed pane.
+  const launchErrorFile = process.env.FM_OMP_LAUNCH_ERROR;
+  if (launchErrorFile && isAbsolute(launchErrorFile)) {
+    omp.on("message_end", (event) => {
+      const message = event.message;
+      if (message.role !== "assistant") return;
+      if (message.stopReason !== "error" || !message.errorMessage) {
+        try { unlinkSync(launchErrorFile); } catch { /* No current error. */ }
+        return;
+      }
+      const temporary = `${launchErrorFile}.tmp.${process.pid}.${randomUUID()}`;
+      try {
+        writeFileSync(temporary, JSON.stringify({
+          version: 1, pid: process.pid, errorMessage: message.errorMessage,
+          provider: message.provider, model: message.model,
+        }) + "\n", { mode: 0o600, flag: "wx" });
+        renameSync(temporary, launchErrorFile);
+      } catch {
+        try { unlinkSync(temporary); } catch { /* Reporting must not break OMP. */ }
+      }
+    });
+  }
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, { observeTurns: false, deferUntilTurnStart: true });
   installSilentWakeTurns(omp);
   let pendingStartupNudge = "";

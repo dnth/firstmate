@@ -192,7 +192,7 @@ family_for_basename() {
     fm-devin-herdr-live-e2e.test.sh|fm-hermes-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-omp-herdr-exit-live-e2e.test.sh|fm-omp-herdr-live-e2e.test.sh|\
     fm-omp-secondmate-live-e2e.test.sh|fm-omp-worker-tmux-live-e2e.test.sh|\
-    fm-omp-compact-adviser-live-e2e.test.sh|\
+    fm-omp-compact-adviser-live-e2e.test.sh|fm-omp-launch-error-live-e2e.test.sh|\
     fm-omp-primary-live-e2e.test.sh|fm-remote-omp-update-restart-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-inbox-doorbell-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\

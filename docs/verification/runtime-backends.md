@@ -251,6 +251,40 @@ A smaller crew-specific MCP profile remains a follow-up because no supported iso
 
 ### OMP lifecycle
 
+The persistent-secondmate tmux lifecycle reran on 2026-10-26 against OMP 18.12.5 with `opencode-go-dnth-1/deepseek-v4.1-flash` and high thinking:
+
+```sh
+FM_TASK_ID='' FM_OMP_SECONDMATE_LIVE_E2E=1 \
+  FM_OMP_SECONDMATE_LIVE_MODEL=opencode-go-dnth-1/deepseek-v4.1-flash \
+  FM_OMP_SECONDMATE_LIVE_THINKING=high \
+  bash tests/fm-omp-secondmate-live-e2e.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - real isolated tmux OMP secondmate launch, idle health, marked replies, exit, same-session resume, context, and duplicate refusal
+```
+
+This proves the complete isolated-home lifecycle on the installed Linux runtime; it does not establish macOS or Herdr compatibility for that version.
+The deterministic launch guard in `tests/fm-omp-secondmate.test.sh` owns independent lock-PID, loaded-version, and session-pointer rejection checks and their named failure diagnostics.
+
+The native launch-error publisher was verified on the same installed OMP 18.12.5 against a disposable localhost HTTP 429 endpoint, using only a synthetic API key:
+
+```sh
+FM_OMP_LAUNCH_ERROR_LIVE_E2E=1 bash tests/fm-omp-launch-error-live-e2e.test.sh
+```
+
+Observed bounded output:
+
+```text
+omp/18.12.5
+ok - real OMP published exact native 429 provider error/retry window under its own PID
+```
+
+The guard checks the real process PID and preserves the provider's exact `errorMessage`, including `retry-after-ms=363080000`.
+`tests/fm-omp-primary.test.sh` additionally checks atomic private journal publication and removal after provider recovery; `tests/fm-omp-secondmate.test.sh` checks that the ack refuses a foreign-PID journal and preserves all binding refusals.
+
 The complete tmux role matrix reran on 2026-07-31 against OMP 17.1.8 using separate private tmux sockets, temporary homes, and disposable git worktrees:
 The ordinary-text steering transport described in the dated OMP role-matrix records below was superseded by the local steering inbox; [Local steering inbox](#local-steering-inbox) owns the current record-to-ack proof, while slash commands, keys, explicit targets, and remote secondmates retain the typed transport those records exercise.
 

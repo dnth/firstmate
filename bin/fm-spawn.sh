@@ -53,6 +53,12 @@
 #   not repeat the flag, so exact-session recovery keeps the same launch profile.
 #   Remote secondmates refuse it because their control protocol does not carry a
 #   Prewalk target.
+#   OMP secondmate acknowledgement keeps every process/session/lock binding
+#   strict. A failed ack reports a fresh native assistant provider error first,
+#   including its original retry window, when an attempt-private journal's PID
+#   matches the loaded adapter marker. FM_OMP_LAUNCH_ERROR points the adapter at
+#   that generation's journal under the private task temp root; successful
+#   assistant messages clear obsolete errors. No resumed pane history is parsed.
 #   --allow-project-omp-extensions bypasses omp's fail-closed check for tracked
 #   project `.omp/extensions` code and `.omp/settings.json#extensions` roots.
 #   Use it only after explicit captain approval:
@@ -5323,7 +5329,8 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
   if [ "$HARNESS" = omp ]; then
-    LAUNCH="FM_OMP_TASK_TURN_STARTED=$(shell_quote "$STATE_REAL/$ID.omp-started") FM_OMP_SESSION_POINTER=$(shell_quote "$OMP_SESSION_POINTER") $LAUNCH"
+    OMP_LAUNCH_ERROR="$TASK_TMP/omp-launch-error.$SPAWN_GEN.json"
+    LAUNCH="FM_OMP_LAUNCH_ERROR=$(shell_quote "$OMP_LAUNCH_ERROR") FM_OMP_TASK_TURN_STARTED=$(shell_quote "$STATE_REAL/$ID.omp-started") FM_OMP_SESSION_POINTER=$(shell_quote "$OMP_SESSION_POINTER") $LAUNCH"
   fi
   if [ -n "${FM_OMP_AUTH_BROKER_URL:-}" ] && [ "$HARNESS" != omp ]; then
     LAUNCH="FM_OMP_AUTH_BROKER_URL=$sq_omp_auth_url FM_OMP_AUTH_BROKER_TOKEN_FILE=$sq_omp_auth_token_file $LAUNCH"
@@ -5558,26 +5565,52 @@ if [ "$HARNESS" = omp ] && [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ]; then
           [ "$OMP_ACK_PARENT" != "$OMP_SESSION_DIR" ] || [ -L "$OMP_ACK_SESSION" ] || [ ! -f "$OMP_ACK_SESSION" ] || OMP_ACK_SESSION_OK=1
           ;;
       esac
-      if [ "$OMP_ACK_SESSION_OK" -eq 1 ] \
-         && [ "$OMP_ACK_PID_OK" -eq 1 ] \
-         && [ "$OMP_ACK_POINTER_BYTES_OK" -eq 1 ] \
-         && [ -n "$OMP_PRIMARY_VERSION" ] \
-         && [ "$OMP_MARKER_VERSION" = "$OMP_PRIMARY_VERSION" ] \
-         && [ "$OMP_MARKER_BUN" = "$OMP_BUN_CANON" ] \
-         && [ "$OMP_MARKER_BIN" = "$OMP_BIN_CANON" ] \
-         && [ "$OMP_MARKER_PID" = "$OMP_LOCK_PID" ] \
-         && [ -n "$OMP_MARKER_PID" ] \
-         && kill -0 "$OMP_MARKER_PID" 2>/dev/null \
-         && [ "$(fm_backend_agent_state "$BACKEND" "$T" "$STATE/$ID.meta" 2>/dev/null || true)" = alive ]; then
+      # Preserve every predicate's result before abort cleanup retires the
+      # failed generation's marker and lock. All checks must still pass.
+      OMP_BINDING_FAILURES=()
+      [ "$OMP_ACK_SESSION_OK" -eq 1 ] || OMP_BINDING_FAILURES+=("OMP_ACK_SESSION_OK=0 (pointer=$OMP_SESSION_POINTER session=$OMP_ACK_SESSION expected direct ordinary child of $OMP_SESSION_DIR; let OMP persist its session)")
+      [ "$OMP_ACK_PID_OK" -eq 1 ] || OMP_BINDING_FAILURES+=("OMP_ACK_PID_OK=0 (marker_pid=$OMP_MARKER_PID; restore the primary adapter's valid process marker)")
+      [ "$OMP_ACK_POINTER_BYTES_OK" -eq 1 ] || OMP_BINDING_FAILURES+=("OMP_ACK_POINTER_BYTES_OK=0 (pointer=$OMP_SESSION_POINTER; require one newline-terminated line in an ordinary file)")
+      [ -n "$OMP_PRIMARY_VERSION" ] || OMP_BINDING_FAILURES+=("OMP_PRIMARY_VERSION is empty (extension=$OMP_PRIMARY_EXTENSION root=$PROJ_ABS; restore its hash closure and SHA-256 utility)")
+      [ "$OMP_MARKER_VERSION" = "$OMP_PRIMARY_VERSION" ] || OMP_BINDING_FAILURES+=("OMP_MARKER_VERSION mismatch (loaded=$OMP_MARKER_VERSION expected=$OMP_PRIMARY_VERSION; reload the matching primary adapter closure)")
+      [ "$OMP_MARKER_BUN" = "$OMP_BUN_CANON" ] || OMP_BINDING_FAILURES+=("OMP_MARKER_BUN mismatch (loaded=$OMP_MARKER_BUN expected=$OMP_BUN_CANON; launch the selected Bun executable)")
+      [ "$OMP_MARKER_BIN" = "$OMP_BIN_CANON" ] || OMP_BINDING_FAILURES+=("OMP_MARKER_BIN mismatch (loaded=$OMP_MARKER_BIN expected=$OMP_BIN_CANON; launch the selected OMP executable)")
+      [ "$OMP_MARKER_PID" = "$OMP_LOCK_PID" ] || OMP_BINDING_FAILURES+=("OMP_MARKER_PID != OMP_LOCK_PID (marker_pid=$OMP_MARKER_PID lock_pid=$OMP_LOCK_PID lock=$PROJ_ABS/state/.lock; run session start in this secondmate home to acquire its own lock)")
+      if [ -z "$OMP_MARKER_PID" ] || ! kill -0 "$OMP_MARKER_PID" 2>/dev/null; then
+        OMP_BINDING_FAILURES+=("OMP_MARKER_PID is not live (pid=$OMP_MARKER_PID; inspect the OMP process exit)")
+      fi
+      OMP_ACK_BACKEND_STATE=$(fm_backend_agent_state "$BACKEND" "$T" "$STATE/$ID.meta" 2>/dev/null || true)
+      [ "$OMP_ACK_BACKEND_STATE" = alive ] || OMP_BINDING_FAILURES+=("backend alive predicate failed (backend=$BACKEND endpoint=$T state=$OMP_ACK_BACKEND_STATE; restore the owned OMP endpoint)")
+      if [ "${#OMP_BINDING_FAILURES[@]}" -eq 0 ]; then
         OMP_ACKED=1
         break
       fi
       sleep "$OMP_ACK_INTERVAL"
     done
     if [ "$OMP_ACKED" -ne 1 ]; then
+      OMP_BINDING_DETAIL=$(printf '%s; ' "${OMP_BINDING_FAILURES[@]}")
       OMP_SECONDMATE_TAIL=$(fm_pane_launch_tail "$BACKEND" "$T" 15 "$W")
-      printf 'failed: OMP secondmate primary integration and durable session did not bind to its live session lock; pane %s tail:\n%s\n' "$T" "$OMP_SECONDMATE_TAIL" >> "$STATE/$ID.status"
-      echo "error: OMP secondmate primary integration and durable session did not bind to its live session lock; pane $T tail: $OMP_SECONDMATE_TAIL; stopping only the owned endpoint and preserving the persistent home" >&2
+      OMP_LAUNCH_FAILURE="OMP secondmate primary integration and durable session did not bind to its live session lock"
+      # The native adapter journals only this launch's fresh assistant errors.
+      # Bind the journal to the loaded process before preferring provider
+      # evidence over the downstream missing session-lock symptom.
+      OMP_PROVIDER_ERROR=$(node -e '
+        const fs = require("node:fs");
+        try {
+          const stat = fs.lstatSync(process.argv[1]);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid()) process.exit(1);
+          const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+          if (value.version !== 1 || !Number.isSafeInteger(value.pid) || value.pid <= 1 ||
+              String(value.pid) !== process.argv[2] || typeof value.errorMessage !== "string" || !value.errorMessage.trim()) process.exit(1);
+          const quota = /429|rate.?limit|usage.?limit|quota|resource.?exhausted/i.test(value.errorMessage);
+          console.log((quota ? "provider/quota exhaustion" : "provider request failure") + ": " + JSON.stringify(value.errorMessage));
+        } catch { process.exit(1); }
+      ' "$OMP_LAUNCH_ERROR" "$OMP_MARKER_PID" 2>/dev/null || true)
+      if [ -n "$OMP_PROVIDER_ERROR" ]; then
+        OMP_LAUNCH_FAILURE="OMP secondmate could not complete session startup: $OMP_PROVIDER_ERROR; restore provider headroom or select an available provider before relaunching"
+      fi
+      printf 'failed: %s; unmet: %s; pane %s tail:\n%s\n' "$OMP_LAUNCH_FAILURE" "$OMP_BINDING_DETAIL" "$T" "$OMP_SECONDMATE_TAIL" >> "$STATE/$ID.status"
+      echo "error: $OMP_LAUNCH_FAILURE; unmet: $OMP_BINDING_DETAIL; pane $T tail: $OMP_SECONDMATE_TAIL; stopping only the owned endpoint and preserving the persistent home" >&2
       exit 1
     fi
   else

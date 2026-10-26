@@ -3093,6 +3093,42 @@ test_silent_wake_turn_with_real_sdk() {
     bun "$fixture/driver.mjs" || fail "real-SDK silent wake-turn regression failed"
 }
 
+test_native_omp_launch_error_journal() {
+  local fixture out
+  fixture=$(make_omp_queue_fixture native-launch-error)
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    FM_OMP_LAUNCH_ERROR="$fixture/launch-error.json" node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { const list = handlers.get(name) || []; list.push(handler); handlers.set(name, list); },
+  registerCommand() {}, registerTool() {}, sendMessage() {},
+};
+process.argv[1] = process.env.EXTENSION;
+(await import(pathToFileURL(process.env.EXTENSION).href)).default(api);
+const file = process.env.FM_OMP_LAUNCH_ERROR;
+if (existsSync(file)) throw new Error("startup fabricated a provider failure");
+const errorMessage = "429 Go usage limit exceeded retry-after-ms=363080000";
+const emit = async (message) => {
+  for (const handler of handlers.get("message_end") || []) await handler({ message });
+};
+await emit({ role: "assistant", stopReason: "error", errorMessage, provider: "opencode-go", model: "deepseek-v4.1-flash", content: [] });
+const value = JSON.parse(readFileSync(file, "utf8"));
+if (value.pid !== process.pid || value.errorMessage !== errorMessage || value.provider !== "opencode-go") throw new Error("native provider error or runtime identity lost");
+if ((statSync(file).mode & 0o777) !== 0o600) throw new Error("journal not private");
+await emit({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "recovered" }] });
+if (existsSync(file)) throw new Error("recovered provider retained a stale failure");
+console.log("native-launch-error-journal-ok");
+JS
+  ) || fail "native OMP launch failure journal failed: $out"
+  assert_contains "$out" native-launch-error-journal-ok "native error journal did not complete"
+  pass "OMP journals fresh native provider errors with exact retry windows and clears recovered errors"
+}
+
+test_native_omp_launch_error_journal
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
