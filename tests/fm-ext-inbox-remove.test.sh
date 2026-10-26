@@ -216,6 +216,29 @@ if out=$(run_remove "$home" --slug "$SLUG" 2>&1); then
 fi
 assert_contains "$out" "no safe inbox record" "a missing inbox record must name the refusal"
 
+for kind in ack answer followup final; do
+  home="$TMP_ROOT/refused-emit-$kind"
+  setup_home "$home"
+  write_inbox "$home" "$SLUG" "$RID"
+  printf 'Reply for the request.\n' > "$TMP_ROOT/refused-reply.txt"
+  home_env "$home" bash "$EMIT" --request-id "$RID" --kind "$kind" --generation 1 \
+    --text-file "$TMP_ROOT/refused-reply.txt" >/dev/null \
+    || fail "$kind emit must publish before delivery starts"
+  home_env "$home" bash "$OUTBOX" begin --slug "$SLUG" --kind "$kind" --generation 1 \
+    >/dev/null || fail "$kind delivery must begin"
+  if out=$(home_env "$home" bash "$EMIT" --request-id "$RID" --kind "$kind" --generation 1 \
+    --text-file "$TMP_ROOT/refused-reply.txt" 2>&1); then
+    fail "$kind emit must refuse while delivery has no receipt"
+  fi
+  assert_contains "$out" "refusing a second emit" "$kind emit must diagnose its refusal"
+  inbox_present "$home" "$SLUG" || fail "$kind refused emit must preserve inbox"
+  if out=$(run_remove "$home" --slug "$SLUG" 2>&1); then
+    fail "$kind removal must refuse after a refused emit"
+  fi
+  assert_contains "$out" "mid-delivery with no receipt" "$kind removal must diagnose missing confirmation"
+  inbox_present "$home" "$SLUG" || fail "$kind removal after refused emit must preserve inbox"
+done
+
 # --- real emit then real receipt clears only after delivery -----------------
 
 home="$TMP_ROOT/j"
