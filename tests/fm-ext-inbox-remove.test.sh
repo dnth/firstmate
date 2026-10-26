@@ -290,11 +290,11 @@ for delivered_kind in ack answer followup final; do
           no-reply) args=(--no-reply) ;;
         esac
         if [ "$mode" = task ] && { [ "$marker" = json ] || [ "$marker" = progress.json ]; }; then
-          run_remove "$home" --slug "$SLUG" "${args[@]}" >/dev/null \
+          run_remove "$home" --slug "$SLUG" ${args[@]+"${args[@]}"} >/dev/null \
             || fail "linked task must allow queued $pending_kind alongside delivered $delivered_kind"
           inbox_present "$home" "$SLUG" && fail "linked task must clear queued work"
         else
-          if out=$(run_remove "$home" --slug "$SLUG" "${args[@]}" 2>&1); then
+          if out=$(run_remove "$home" --slug "$SLUG" ${args[@]+"${args[@]}"} 2>&1); then
             fail "$mode must not borrow $delivered_kind receipt for $pending_kind $marker"
           fi
           assert_contains "$out" "refusing to remove" "mixed delivery must refuse loudly"
@@ -315,7 +315,7 @@ for kind in ack answer followup final; do
     printf 'ext_request_slug=%s\n' "$SLUG" > "$home/state/task-one.meta"
     args=()
     [ "$mode" != task ] || args=(--task task-one)
-    if out=$(run_remove "$home" --slug "$SLUG" "${args[@]}" 2>&1); then
+    if out=$(run_remove "$home" --slug "$SLUG" ${args[@]+"${args[@]}"} 2>&1); then
       fail "a receipt must not hide a same-kind terminal failure on $mode removal"
     fi
     assert_contains "$out" "terminal delivery failure" "terminal failure must veto removal"

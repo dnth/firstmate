@@ -187,7 +187,7 @@ fi
 
 latest_receipt_ok=0
 latest_pending=0
-for base in "${latest_records[@]}"; do
+for base in ${latest_records[@]+"${latest_records[@]}"}; do
   rest=${base#"$SLUG".}
   kind=${rest%%.*}
   remainder=${rest#*.}
