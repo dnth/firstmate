@@ -12,9 +12,10 @@
 #
 #   receipt    `state/ext-outbox/<slug>.<kind>.<generation>.receipt.json` for
 #              the highest generation this request reached, carrying
-#              `"ok": true`. Answer, followup, final, and ack deliveries all
-#              qualify. The latest generation decides: an older receipt never
-#              clears a request whose newest attempt is still pending or
+#              `"ok": true` for every reply kind present at that generation.
+#              Answer, followup, final, and ack deliveries all qualify. The
+#              latest generation decides: an older receipt never clears a
+#              request whose newest attempt is still pending or
 #              terminally failed.
 #   task       `--task <task-id>` plus the link `bin/fm-ext-link.sh` records
 #              (`ext_request` or `ext_request_slug`) in that task's meta. This
@@ -152,10 +153,7 @@ fi
 # an old receipt must never clear a request whose newest attempt is pending,
 # mid-delivery, or failed.
 max_gen=0
-max_kind=''
-latest_posting=0
-latest_receipt=''
-latest_failed=0
+latest_records=()
 reply_records=0
 
 if [ -d "$OUTBOX" ] && [ ! -L "$OUTBOX" ]; then
@@ -178,38 +176,43 @@ if [ -d "$OUTBOX" ] && [ ! -L "$OUTBOX" ]; then
     esac
     gen=$((10#$gen))
     reply_records=$((reply_records + 1))
-    if [ "$gen" -gt "$max_gen" ] || { [ "$gen" -eq "$max_gen" ] && [ -z "$max_kind" ]; }; then
+    if [ "$gen" -gt "$max_gen" ]; then
       max_gen=$gen
-      max_kind=$kind
-      latest_posting=0
-      latest_receipt=''
-      latest_failed=0
+      latest_records=()
     fi
-    # Only the highest generation's markers decide; markers of an older
-    # generation never veto the newest attempt.
     [ "$gen" -eq "$max_gen" ] || continue
-    case "$suffix" in
-      posting) latest_posting=1 ;;
-      receipt.json) latest_receipt=$base ;;
-      failed.json) latest_failed=1 ;;
-    esac
+    latest_records+=("$base")
   done
 fi
 
-# The latest generation must not be mid-delivery: a posting marker without a
-# receipt means Discord may already have the post and no confirmation exists.
-if [ "$latest_posting" -eq 1 ] && [ -z "$latest_receipt" ]; then
-  refuse "generation $max_gen ($max_kind) is mid-delivery with no receipt"
-fi
-
 latest_receipt_ok=0
-if [ -n "$latest_receipt" ]; then
-  fm_ext_private_artifact_file_valid "$OUTBOX" "$latest_receipt" 600 \
-    || refuse "latest receipt $latest_receipt is not a safe private artifact"
-  ok=$(jq -r 'if .ok == true then "true" else "false" end' "$OUTBOX/$latest_receipt" 2>/dev/null) || ok='false'
-  [ "$ok" = 'true' ] || refuse "latest receipt $latest_receipt does not record ok: true"
-  latest_receipt_ok=1
-fi
+latest_pending=0
+for base in "${latest_records[@]}"; do
+  rest=${base#"$SLUG".}
+  kind=${rest%%.*}
+  remainder=${rest#*.}
+  suffix=${remainder#*.}
+  receipt="${base%."$suffix"}.receipt.json"
+  case "$suffix" in
+    failed.json)
+      refuse "generation $max_gen ($kind) recorded a terminal delivery failure"
+      ;;
+    receipt.json)
+      fm_ext_private_artifact_file_valid "$OUTBOX" "$base" 600 \
+        || refuse "latest receipt $base is not a safe private artifact"
+      ok=$(jq -r 'if .ok == true then "true" else "false" end' "$OUTBOX/$base" 2>/dev/null) || ok='false'
+      [ "$ok" = 'true' ] || refuse "latest receipt $base does not record ok: true"
+      latest_receipt_ok=1
+      ;;
+    *)
+      if ! fm_ext_private_artifact_file_valid "$OUTBOX" "$receipt" 600; then
+        [ "$suffix" != posting ] \
+          || refuse "generation $max_gen ($kind) is mid-delivery with no receipt"
+        latest_pending=1
+      fi
+      ;;
+  esac
+done
 
 disposition=''
 if [ "$NO_REPLY" -eq 1 ]; then
@@ -224,10 +227,8 @@ elif [ -n "$TASK" ]; then
   if [ "$LINKED_SLUG" != "$SLUG" ] && { [ -z "$REQUEST_ID" ] || [ "$LINKED_RID" != "$REQUEST_ID" ]; }; then
     refuse "task $TASK does not link this request"
   fi
-  [ "$latest_failed" -eq 0 ] \
-    || refuse "generation $max_gen ($max_kind) recorded a terminal delivery failure"
   disposition="task:$TASK"
-elif [ "$latest_receipt_ok" -eq 1 ]; then
+elif [ "$latest_receipt_ok" -eq 1 ] && [ "$latest_pending" -eq 0 ]; then
   disposition='receipt'
 else
   refuse "no delivery receipt for the latest generation; a published emit is not a delivery"

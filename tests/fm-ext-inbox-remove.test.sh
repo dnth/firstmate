@@ -121,7 +121,7 @@ write_outbox "$home" "$SLUG.answer.1.failed.json" '{"ok":false,"reason":"permane
 if out=$(run_remove "$home" --slug "$SLUG" 2>&1); then
   fail "a terminally failed delivery must not clear the inbox"
 fi
-assert_contains "$out" "no delivery receipt" "failed delivery refuses on the missing receipt"
+assert_contains "$out" "terminal delivery failure" "failed delivery must name the refusal"
 inbox_present "$home" "$SLUG" || fail "a failed delivery must leave the inbox record"
 
 # --- mid-delivery marker without a receipt ---------------------------------
@@ -249,5 +249,70 @@ if out=$(run_remove "$home" --slug "$SLUG" 2>&1); then
 fi
 assert_contains "$out" "mid-delivery" "the newest generation must decide"
 inbox_present "$home" "$SLUG" || fail "a newer mid-delivery generation must leave the inbox record"
+
+for delivered_kind in ack answer followup final; do
+  for pending_kind in ack answer followup final; do
+    [ "$delivered_kind" != "$pending_kind" ] || continue
+    for marker in json progress.json posting receipt.json failed.json; do
+      for mode in receipt task no-reply; do
+        home="$TMP_ROOT/mixed-$delivered_kind-$pending_kind-$marker-$mode"
+        setup_home "$home"
+        write_inbox "$home" "$SLUG" "$RID"
+        write_outbox "$home" "$SLUG.$delivered_kind.1.receipt.json" '{"ok":true}'
+        write_outbox "$home" "$SLUG.$pending_kind.1.$marker" '{"ok":false}'
+        printf 'ext_request_slug=%s\n' "$SLUG" > "$home/state/task-one.meta"
+        args=()
+        case "$mode" in
+          task) args=(--task task-one) ;;
+          no-reply) args=(--no-reply) ;;
+        esac
+        if [ "$mode" = task ] && { [ "$marker" = json ] || [ "$marker" = progress.json ]; }; then
+          run_remove "$home" --slug "$SLUG" "${args[@]}" >/dev/null \
+            || fail "linked task must allow queued $pending_kind alongside delivered $delivered_kind"
+          inbox_present "$home" "$SLUG" && fail "linked task must clear queued work"
+        else
+          if out=$(run_remove "$home" --slug "$SLUG" "${args[@]}" 2>&1); then
+            fail "$mode must not borrow $delivered_kind receipt for $pending_kind $marker"
+          fi
+          assert_contains "$out" "refusing to remove" "mixed delivery must refuse loudly"
+          inbox_present "$home" "$SLUG" || fail "mixed delivery refusal must preserve inbox"
+        fi
+      done
+    done
+  done
+done
+
+for kind in ack answer followup final; do
+  for mode in receipt task; do
+    home="$TMP_ROOT/failed-$kind-$mode"
+    setup_home "$home"
+    write_inbox "$home" "$SLUG" "$RID"
+    write_outbox "$home" "$SLUG.$kind.1.receipt.json" '{"ok":true}'
+    write_outbox "$home" "$SLUG.$kind.1.failed.json" '{"ok":false}'
+    printf 'ext_request_slug=%s\n' "$SLUG" > "$home/state/task-one.meta"
+    args=()
+    [ "$mode" != task ] || args=(--task task-one)
+    if out=$(run_remove "$home" --slug "$SLUG" "${args[@]}" 2>&1); then
+      fail "a receipt must not hide a same-kind terminal failure on $mode removal"
+    fi
+    assert_contains "$out" "terminal delivery failure" "terminal failure must veto removal"
+    inbox_present "$home" "$SLUG" || fail "terminal failure must preserve inbox"
+  done
+done
+
+home="$TMP_ROOT/all-delivered"
+setup_home "$home"
+write_inbox "$home" "$SLUG" "$RID"
+write_inbox "$home" "$SLUG2" "$RID2"
+for kind in ack answer followup final; do
+  write_outbox "$home" "$SLUG.$kind.1.failed.json" '{"ok":false}'
+  write_outbox "$home" "$SLUG.$kind.2.json" '{}'
+  write_outbox "$home" "$SLUG.$kind.2.posting" '{}'
+  write_outbox "$home" "$SLUG.$kind.2.progress.json" '{}'
+  write_outbox "$home" "$SLUG.$kind.2.receipt.json" '{"ok":true}'
+done
+run_remove "$home" --slug "$SLUG" >/dev/null || fail "matching receipts must clear all newest kinds"
+inbox_present "$home" "$SLUG" && fail "all-delivered request must be removed"
+inbox_present "$home" "$SLUG2" || fail "all-delivered removal must preserve another slug"
 
 pass "ext-inbox removal clears only on a recorded delivery disposition"
