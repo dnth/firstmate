@@ -243,7 +243,10 @@ MODE=$(fm_meta_get "$META" mode)
 [ -n "$MODE" ] || MODE=no-mistakes
 
 STATUS="$STATE/$TASK.status"
-[ -f "$STATUS" ] && [ ! -L "$STATUS" ] || refused "$TASK" "status file is missing or unsafe"
+# A receipt recorded after teardown removed the record has nothing left to
+# judge; an unsafe path is ambiguity worth refusing.
+[ ! -L "$STATUS" ] || refused "$TASK" "status path is unsafe"
+[ -f "$STATUS" ] || kept "$TASK" "no live status record"
 LIVE_IDENT=$(_fm_open_decisions_file_ident "$STATUS") || refused "$TASK" "status file identity cannot be read"
 [ "$LIVE_IDENT" = "$STATUS_IDENT" ] \
   || kept "$TASK" "receipt status identity no longer matches this status file"
