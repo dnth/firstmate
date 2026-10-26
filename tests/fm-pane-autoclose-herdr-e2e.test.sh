@@ -49,7 +49,9 @@ SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-pane-autoclose-e2e.XXXXXX") || exit 1
 # failed teardown or tripwire fails this suite and keeps its scratch evidence.
 cleanup_all() {
   local rc
-  if ! "$LAB_HELPER" teardown "$LAB_SESSION"; then
+  if "$LAB_HELPER" teardown "$LAB_SESSION"; then
+    :
+  else
     rc=$?
     printf 'not ok - LAB TEARDOWN FAILED (rc=%s): the default-session tripwire or session cleanup did not verify\n' "$rc" >&2
     printf 'scratch evidence preserved at %s\n' "$SCRATCH" >&2
@@ -160,6 +162,8 @@ write_herdr_meta() { # <task> <workspace> <tab> <pane> [kind] [session-override]
     "endpoint_task_id=$task" \
     "kind=$kind" \
     "mode=no-mistakes" \
+    "decisions_reviewed=1" \
+    "decision_keys=" \
     "worktree=$WORK" \
     "project=$WORK" \
     "herdr_session=$session" \
@@ -230,8 +234,13 @@ case "$SIBLING_READ" in
 esac
 [ -f "$MARKER" ] || fail "the closed pane's process-owned file must persist"
 grep -F 'kept-on-disk' "$MARKER" >/dev/null || fail "the closed pane's file content must persist"
-grep -F 'transcript-marker-alpha' "$TRANSCRIPT" >/dev/null \
-  || fail "the captured transcript artifact must persist after the close"
+SESSION_DIR=$(printf '%s' "$SESSION_JSON" | jq -er --arg s "$LAB_SESSION" \
+  '.sessions[] | select(.name == $s and .default == false) | .session_dir') \
+  || fail "the lab session storage directory is unavailable"
+TRANSCRIPT="$SCRATCH/transcript-after-close.txt"
+jq -er '.. | strings | select(contains("transcript-marker-alpha"))' \
+  "$SESSION_DIR/session-history.json" > "$TRANSCRIPT" \
+  || fail "Herdr persisted history must retain the closed pane transcript"
 if [ -n "${FM_PANE_AUTOCLOSE_ARTIFACT_DIR:-}" ]; then
   mkdir -p "$FM_PANE_AUTOCLOSE_ARTIFACT_DIR"
   cp "$TRANSCRIPT" "$FM_PANE_AUTOCLOSE_ARTIFACT_DIR/herdr-lab-transcript-survives-close.txt"
@@ -281,6 +290,33 @@ write_herdr_meta "$TASK" "$WS" "$OD_TAB" "$OD_PANE" scout
 ENDPOINT=$(wc -c < "$STATE/$TASK.status" | tr -d ' ')
 expect_keep "$TASK" "$OD_PANE" "open keyed decision" "an open keyed decision"
 pass "keeps the pane while a keyed decision is still open"
+
+TASK=ship-local-only
+TAB_AND_PANE=$(create_tab local-only)
+LO_TAB=${TAB_AND_PANE%% *}
+LO_PANE=${TAB_AND_PANE##* }
+focus_tab "$SIBLING_TAB"
+write_herdr_meta "$TASK" "$WS" "$LO_TAB" "$LO_PANE" ship
+printf 'mode=local-only\n' >> "$STATE/$TASK.meta"
+printf 'done: ready in branch fm/%s\n' "$TASK" > "$STATE/$TASK.status"
+ENDPOINT=$(wc -c < "$STATE/$TASK.status" | tr -d ' ')
+expect_keep "$TASK" "$LO_PANE" "local-only completion never autocloses" "a local-only completion"
+pass "keeps local-only completions in the guarded lab"
+
+TASK=scout-linked-hold
+TAB_AND_PANE=$(create_tab linked-hold)
+LH_TAB=${TAB_AND_PANE%% *}
+LH_PANE=${TAB_AND_PANE##* }
+focus_tab "$SIBLING_TAB"
+write_herdr_meta "$TASK" "$WS" "$LH_TAB" "$LH_PANE" scout
+FM_HOME="$FIX" bash "$ROOT/bin/fm-captain-hold.sh" hold linked-call --title "Choose corpus" \
+  --reason "scope needs captain" >/dev/null || fail "could not create the linked captain call"
+FM_HOME="$FIX" bash "$ROOT/bin/fm-captain-hold.sh" complete "$TASK" linked-call >/dev/null \
+  || fail "could not inventory the linked captain call"
+printf 'done: report ready at data/%s/report.md\n' "$TASK" > "$STATE/$TASK.status"
+ENDPOINT=$(wc -c < "$STATE/$TASK.status" | tr -d ' ')
+expect_keep "$TASK" "$LH_PANE" "linked captain-call inventory" "a linked captain-held task"
+pass "keeps the pane while a linked captain call awaits an answer"
 
 # A linked external request.
 TASK=scout-ext-link
@@ -369,6 +405,8 @@ fm_write_meta "$STATE/$TASK.meta" \
   "endpoint_task_id=$TASK" \
   "kind=scout" \
   "mode=no-mistakes" \
+  "decisions_reviewed=1" \
+  "decision_keys=" \
   "worktree=$WORK" \
   "project=$WORK" \
   "herdr_session=$LAB_SESSION" \

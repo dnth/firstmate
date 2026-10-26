@@ -26,12 +26,15 @@
 #      claim moved on either way. Nothing is closed in either case.
 #   2. That line's leading verb is `done` AND it carries the delivery artifact
 #      its kind/mode requires, judged by bin/fm-classify-lib.sh's
-#      status_done_line_has_artifact (a PR URL for PR modes, "ready in branch"
-#      for local-only, the report path for a scout). A failed:, paused:, or
+#      status_done_line_has_artifact (a PR URL for PR modes or the report path
+#      for a scout). Local-only mode never satisfies the trigger.
+#      A failed:, paused:, or
 #      unkeyed needs-decision:/blocked: receipt never closes a pane: a
 #      supervisor still needs that context.
 #   3. No follow-on work remains. In order: a still-open keyed decision or
 #      blocker in the status fold (bin/fm-classify-lib.sh status_open_decisions);
+#      an incomplete or unanswered linked captain-call inventory
+#      (bin/fm-captain-hold.sh verify --require-answered);
 #      a held or blocked backlog row (bin/fm-backlog-transition-lib.sh
 #      fm_backlog_row_probe); an open routed reply
 #      (bin/fm-pending-reply-lib.sh fm_pending_reply_task_has_open); an armed or
@@ -44,7 +47,8 @@
 #   4. A kind=secondmate record keeps its pane: a persistent home is a
 #      supervisor surface, not finished task work.
 #   5. The endpoint comes only from ordinary task metadata. A missing or
-#      ambiguous endpoint refuses loudly (exit 2) rather than guessing.
+#      ambiguous endpoint in a present record refuses loudly (exit 2). An
+#      absent metadata record means no managed endpoint exists and keeps silently.
 #   6. The close is the same guarded path teardown uses for one exact task
 #      pane: bin/backends/herdr.sh
 #      fm_backend_herdr_projection_close_pane_focus_preserving, serialized by
@@ -131,6 +135,12 @@ open_follow_on() { # <task> <kind>
   open=$(status_open_decisions "$status")
   if [ -n "$open" ]; then
     printf 'open keyed decision or blocker: %s' "$(printf '%s' "$open" | cut -f1 | tr '\n' ' ')"
+    return 1
+  fi
+
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$task" --require-answered >/dev/null 2>&1; then
+    printf 'linked captain-call inventory is incomplete or unresolved'
     return 1
   fi
 
@@ -236,6 +246,12 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   kept "$TASK" "no task endpoint metadata"
 fi
 
+META_LOCK=$(fm_meta_lock_path "$META") || refused "$TASK" "task lifecycle lock is unresolvable"
+fm_lock_acquire_wait "$META_LOCK" || refused "$TASK" "task lifecycle lock is contended"
+LOCK_HELD=0
+trap 'if [ "$LOCK_HELD" = 1 ]; then fm_lock_release "$LOCK_PATH" || true; fi; fm_lock_release "$META_LOCK" || true' EXIT
+[ -f "$META" ] && [ ! -L "$META" ] || kept "$TASK" "no task endpoint metadata"
+
 KIND=$(fm_meta_get "$META" kind)
 [ -n "$KIND" ] || KIND=ship
 [ "$KIND" != secondmate ] || kept "$TASK" "secondmate home keeps its pane"
@@ -243,33 +259,35 @@ MODE=$(fm_meta_get "$META" mode)
 [ -n "$MODE" ] || MODE=no-mistakes
 
 STATUS="$STATE/$TASK.status"
-# A receipt recorded after teardown removed the record has nothing left to
-# judge; an unsafe path is ambiguity worth refusing.
-[ ! -L "$STATUS" ] || refused "$TASK" "status path is unsafe"
-[ -f "$STATUS" ] || kept "$TASK" "no live status record"
-LIVE_IDENT=$(_fm_open_decisions_file_ident "$STATUS") || refused "$TASK" "status file identity cannot be read"
-[ "$LIVE_IDENT" = "$STATUS_IDENT" ] \
-  || kept "$TASK" "receipt status identity no longer matches this status file"
-EVENT_LINE=$(line_at_endpoint "$STATUS" "$ENDPOINT") \
-  || refused "$TASK" "status span ending at $ENDPOINT is unreadable"
-[ -n "$EVENT_LINE" ] || refused "$TASK" "no status line ends at $ENDPOINT"
+validate_completion() {
+  [ "$MODE" != local-only ] || kept "$TASK" "local-only completion never autocloses"
+  [ ! -L "$STATUS" ] || refused "$TASK" "status path is unsafe"
+  [ -f "$STATUS" ] || kept "$TASK" "no live status record"
+  LIVE_IDENT=$(_fm_open_decisions_file_ident "$STATUS") || refused "$TASK" "status file identity cannot be read"
+  [ "$LIVE_IDENT" = "$STATUS_IDENT" ] \
+    || kept "$TASK" "receipt status identity no longer matches this status file"
+  EVENT_LINE=$(line_at_endpoint "$STATUS" "$ENDPOINT") \
+    || refused "$TASK" "status span ending at $ENDPOINT is unreadable"
+  [ -n "$EVENT_LINE" ] || refused "$TASK" "no status line ends at $ENDPOINT"
 
-STANDING_LINE=$(last_status_line "$STATUS")
-[ "$STANDING_LINE" = "$EVENT_LINE" ] \
-  || kept "$TASK" "a later status event supersedes the delivered claim"
+  STANDING_LINE=$(last_status_line "$STATUS")
+  [ "$STANDING_LINE" = "$EVENT_LINE" ] \
+    || kept "$TASK" "a later status event supersedes the delivered claim"
 
-[ "$(status_line_verb "$EVENT_LINE")" = "done" ] \
-  || kept "$TASK" "delivered event is not a done: claim"
-status_done_line_has_artifact "$EVENT_LINE" "$KIND" "$MODE" "$TASK" \
-  || kept "$TASK" "done: claim carries no delivery artifact"
+  [ "$(status_line_verb "$EVENT_LINE")" = "done" ] \
+    || kept "$TASK" "delivered event is not a done: claim"
+  status_done_line_has_artifact "$EVENT_LINE" "$KIND" "$MODE" "$TASK" \
+    || kept "$TASK" "done: claim carries no delivery artifact"
 
-FOLLOW_ON=$(open_follow_on "$TASK" "$KIND")
-rc=$?
-case "$rc" in
-  0) ;;
-  1) kept "$TASK" "follow-on work remains: $FOLLOW_ON" ;;
-  *) refused "$TASK" "cannot prove follow-on state is clear: $FOLLOW_ON" ;;
-esac
+  FOLLOW_ON=$(open_follow_on "$TASK" "$KIND")
+  rc=$?
+  case "$rc" in
+    0) ;;
+    1) kept "$TASK" "follow-on work remains: $FOLLOW_ON" ;;
+    *) refused "$TASK" "cannot prove follow-on state is clear: $FOLLOW_ON" ;;
+  esac
+}
+validate_completion
 
 fm_backend_validate_task_endpoint "$META" "$TASK" || exit 2
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
@@ -315,22 +333,18 @@ if [ "$LOCK_HELD" != 1 ]; then
 fi
 VERIFIED_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$SESSION" 2>/dev/null) || VERIFIED_LOCK=
 if [ "$VERIFIED_LOCK" != "$LOCK_PATH" ]; then
-  fm_lock_release "$LOCK_PATH" || true
   refused "$TASK" "herdr session presentation lock changed while acquiring it"
 fi
 
-# Recheck the receipt's status identity immediately before the irreversible
-# step: a re-spawned task reuses its id, so a receipt recorded against the old
-# record must never close the new record's pane.
-LIVE_IDENT=$(_fm_open_decisions_file_ident "$STATUS") || LIVE_IDENT=
-if [ "$LIVE_IDENT" != "$STATUS_IDENT" ]; then
-  fm_lock_release "$LOCK_PATH" || true
-  kept "$TASK" "receipt status identity changed before the close"
-fi
+validate_completion
+fm_backend_validate_task_endpoint "$META" "$TASK" || exit 2
+[ "$FM_BACKEND_VALIDATED_BACKEND" = "$BACKEND" ] && [ "$FM_BACKEND_VALIDATED_TARGET" = "$TARGET" ] \
+  || refused "$TASK" "task endpoint changed before the close"
 
 CLOSE_RC=0
 fm_backend_herdr_projection_close_pane_focus_preserving "$SESSION" "$PANE" || CLOSE_RC=$?
 fm_lock_release "$LOCK_PATH" || true
+LOCK_HELD=0
 
 if fm_backend_herdr_endpoint_confirmed_gone "$TARGET"; then
   printf 'closed: %s pane %s:%s\n' "$TASK" "$SESSION" "$PANE"
