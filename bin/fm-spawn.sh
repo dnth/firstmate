@@ -59,6 +59,10 @@
 #   matches the loaded adapter marker. FM_OMP_LAUNCH_ERROR points the adapter at
 #   that generation's journal under the private task temp root; successful
 #   assistant messages clear obsolete errors. No resumed pane history is parsed.
+#   Every failed binding predicate and its resolution are retained in stderr
+#   and task status even when a provider error is reported first. For quota
+#   exhaustion, wait for provider headroom or use a captain-approved available
+#   provider before relaunching; never fill an empty lock to bypass startup.
 #   --allow-project-omp-extensions bypasses omp's fail-closed check for tracked
 #   project `.omp/extensions` code and `.omp/settings.json#extensions` roots.
 #   Use it only after explicit captain approval:
