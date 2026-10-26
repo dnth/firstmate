@@ -2184,6 +2184,7 @@ fm_ext_outbox_prune() {
     case "$base" in
       *.receipt.json) stem=${base%.receipt.json} ;;
       *.failed.json) stem=${base%.failed.json} ;;
+      *.noreply.json) stem=${base%.noreply.json} ;;
       *.progress.json) stem=${base%.progress.json} ;;
       *.thread.json) stem=${base%.thread.json} ;;
       *.posting) stem=${base%.posting} ;;
