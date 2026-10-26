@@ -227,6 +227,21 @@ case "$cmd" in
         printf '%s\n%s\n%s\n%s\n' "$version" "$FM_TEST_AGENT_PID" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
         : > "$FM_TEST_OMP_DOORBELL_READY"
         printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
+        # Keep all but one binding predicate valid, including a real live PID.
+        case "${FM_TEST_ACK_FAULT:-}" in
+          lock) printf '%s\n' 99999999 > "$FM_TEST_HOME/state/.lock" ;;
+          version) sed '1s/.*/sha256:wrong-version/' "$FM_TEST_HOME/state/.omp-primary-extension-loaded" > "$FM_TEST_HOME/state/marker.tmp"
+            mv "$FM_TEST_HOME/state/marker.tmp" "$FM_TEST_HOME/state/.omp-primary-extension-loaded" ;;
+          pointer) rm -f "$FM_TEST_HOME/state/.omp-session" ;;
+          quota|foreign-quota)
+            rm -f "$FM_TEST_HOME/state/.lock"
+            gen=$(sed -n 's/^spawn_gen=//p' "${FM_TEST_OMP_DOORBELL_READY%.omp-doorbell-ready}.meta")
+            journal_pid=$FM_TEST_AGENT_PID
+            [ "$FM_TEST_ACK_FAULT" != foreign-quota ] || journal_pid=99999999
+            printf '{"version":1,"pid":%s,"errorMessage":"429 Go usage limit exceeded retry-after-ms=363080000"}\n' "$journal_pid" \
+              > "/tmp/fm-$FM_TEST_TASK_ID/omp-launch-error.$gen.json"
+            ;;
+        esac
       fi
     fi
     ;;
@@ -425,6 +440,7 @@ run_spawn() { # [extra env NAME=VALUE ...] [-- <extra spawn args>]
     FM_CONFIG_OVERRIDE="$MAIN_CONFIG" \
     FM_PROJECTS_OVERRIDE="$MAIN_PROJECTS" \
     FM_BACKEND=tmux \
+    FM_TEST_TASK_ID="$TASK_ID" \
     FM_TEST_TMUX_LOG="$TMUX_LOG" \
     FM_TEST_LAUNCH_LOG="$LAUNCH_LOG" \
     FM_TEST_WINDOW_FLAG="$WINDOW_FLAG" \
@@ -1127,6 +1143,45 @@ test_slept_generation_relaunch_retires_markers() {
   pass "a slept OMP secondmate generation's relaunch retires prior runtime markers only after live-owner checks pass"
 }
 
+test_provider_failure_diagnostic() {
+  local fault out status
+  for fault in quota foreign-quota; do
+    setup_case "provider-$fault"
+    out=$(run_spawn FM_TEST_ACK_FAULT="$fault" 2>&1) && fail "provider failure accepted an unbound secondmate"
+    status=$(cat "$MAIN_STATE/$TASK_ID.status")
+    if [ "$fault" = quota ]; then
+      assert_contains "$out" 'provider/quota exhaustion' "provider rejection was hidden by a binding message"
+      assert_contains "$status" '429 Go usage limit exceeded retry-after-ms=363080000' "provider's exact error/retry window was lost"
+      assert_not_contains "$out" 'primary integration and durable session did not bind' "quota failure still blamed the lock"
+    else
+      assert_not_contains "$out" 'provider/quota exhaustion' "foreign-process error journal was trusted"
+      assert_contains "$out" 'OMP_MARKER_PID != OMP_LOCK_PID' "foreign journal bypassed strict binding refusal"
+    fi
+  done
+  pass "OMP secondmate reports process-bound provider exhaustion and exact retry window, rejecting foreign journals"
+}
+
+test_binding_predicate_diagnostics() {
+  local fault out expected unexpected status
+  for fault in lock version pointer; do
+    setup_case "binding-$fault"
+    case "$fault" in
+      lock) expected='OMP_MARKER_PID != OMP_LOCK_PID'; unexpected='OMP_MARKER_VERSION mismatch' ;;
+      version) expected='OMP_MARKER_VERSION mismatch'; unexpected='OMP_MARKER_PID != OMP_LOCK_PID' ;;
+      pointer) expected='OMP_ACK_POINTER_BYTES_OK=0'; unexpected='OMP_MARKER_PID != OMP_LOCK_PID' ;;
+    esac
+    out=$(run_spawn FM_TEST_ACK_FAULT="$fault" 2>&1) && fail "unbound OMP secondmate accepted $fault fault"
+    status=$(cat "$MAIN_STATE/$TASK_ID.status")
+    assert_contains "$out" "$expected" "$fault refusal did not name its unmet predicate on stderr"
+    assert_contains "$status" "$expected" "$fault refusal did not preserve its unmet predicate in status"
+    assert_not_contains "$out" "$unexpected" "$fault refusal falsely implicated another binding predicate"
+    assert_not_contains "$out" 'backend alive predicate failed' "$fault fixture did not preserve its live backend"
+    [ ! -f "$WINDOW_FLAG" ] || fail "$fault refusal left its owned endpoint running"
+    [ -d "$HOME_DIR/.git" ] || fail "$fault refusal removed the persistent home"
+  done
+  pass "OMP secondmate refuses wrong lock PID, version mismatch, and missing pointer with exact predicate diagnostics"
+}
+
 test_post_meta_abort_preserves_home() {
   local out
   setup_case abort
@@ -1237,4 +1292,6 @@ test_legacy_launch_rejects_empty_path_components
 test_legacy_launch_rejects_runtime_fallback
 test_duplicate_recovery_states
 test_slept_generation_relaunch_retires_markers
+test_provider_failure_diagnostic
+test_binding_predicate_diagnostics
 test_post_meta_abort_preserves_home
