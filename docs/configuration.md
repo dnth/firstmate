@@ -884,13 +884,7 @@ For ordinary replies, `pending` lists only generations that are still genuinely 
 A payload whose generation has reached a receipt or a terminal failed marker is retired on sight, so poll cost stays flat as delivered replies accumulate instead of growing with every reply ever sent.
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
-`bin/fm-ext-inbox.sh remove` is the only owner of removing `state/ext-inbox/<slug>.json`, and it clears the record only on a durable disposition:
-a `"ok": true` receipt for the request's newest generation (reply cases),
-a link recorded by `bin/fm-ext-link.sh` when `--task <task-id>` names the spawned long-running work,
-or a `--no-reply` disposition the helper records as `state/ext-outbox/<slug>.noreply.json` for a true pure acknowledgment.
-It refuses, leaving the record in place, on an unpaired posting marker for the newest generation (mid-delivery), on a receipt for it that does not carry `"ok": true`, on a terminal failed marker, and on a `--no-reply` or `--task` request whose own records do not match.
-A reply-cleared record additionally refuses when the newest generation has no receipt at all.
-A published emit is therefore never mistaken for a delivered reply, and a refused emit can no longer take the request with it.
+[bin/fm-ext-inbox.sh](../bin/fm-ext-inbox.sh) owns inbox removal; its header defines the accepted delivery dispositions, newest-generation checks across reply kinds, and refusal rules.
 
 Local bridge records and outbound media expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
 A due retention pass drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.

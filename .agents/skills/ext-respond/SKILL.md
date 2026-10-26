@@ -158,8 +158,7 @@ Screen every file yourself before it can post; emit refuses any file without you
   2. Dispatch the work through the normal lifecycle right away.
   3. Link the spawned task **before** clearing the inbox: `bin/fm-ext-link.sh <task-id> <request_id>`.
      This records `ext_request=`, not `x_request=`.
-  4. Clear the inbox record with `bin/fm-ext-inbox.sh remove --slug <slug> --task <task-id>`.
-     The task link is the durable proof that the request is handled; the helper refuses a request whose newest delivery is still mid-delivery or terminally failed.
+  4. Clear the inbox record through the task path in [Procedure](#procedure), step 2f.
   5. On genuine milestones emit `followup` with a new `--generation`.
      The terminal outcome uses `--kind final`.
      Duplicate generation is a no-op.
@@ -170,13 +169,7 @@ Every drained request sorts into one of three cases:
 
 - **Actionable instruction / request** - act through the normal lifecycle.
 - **Question** - answer from live fleet state; no follow-up.
-- **Pure acknowledgment** - emit nothing; clear the inbox record with `bin/fm-ext-inbox.sh remove --slug <slug> --no-reply --reason "pure acknowledgement"`, which records that disposition before clearing so the offer stays silent.
-
-**Clearing the inbox is its own step.** `bin/fm-ext-inbox.sh remove` is the only owner of inbox removal.
-Never chain `rm state/ext-inbox/<slug>.json` to an emit, and never treat a published payload as delivered.
-A reply-cleared request needs a `"ok": true` delivery receipt for its newest generation; a long-running request needs its task link; a true pure acknowledgment needs its recorded no-reply disposition.
-If the newest delivery is mid-delivery (posting marker, no receipt), the helper refuses and leaves the request in place: leave that generation alone and let the gateway finish or fail it, then clear on a later drain.
-When the helper refuses because the receipt has not landed yet, leave the file, do not re-emit, and retry the clear on the next drain.
+- **Pure acknowledgment** - emit nothing; use the no-reply clearing path in [Procedure](#procedure), step 2f.
 
 **For asks without the bounded confirmation described in Decisions with buttons, destructive work still escalates first.**
 Flag those destructive, irreversible, or security-sensitive asks through the normal trusted channel and emit only that it has been flagged.
@@ -215,7 +208,7 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
    b. Classify as actionable, question, or pure acknowledgment.
    c. Act on an actionable request through the normal lifecycle.
       If you ran `bin/fm-spawn.sh`, link with `bin/fm-ext-link.sh <task-id> <request_id>` before inbox cleanup.
-   d. Compose a short public-safe reply.
+   d. For a pure acknowledgment, skip directly to step 2f; otherwise compose a short public-safe reply.
    e. Submit it without inlining text into a shell command:
 
       ```sh
@@ -225,14 +218,14 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
       (`--text-file -` reading stdin is equally fine.)
       It echoes the slug and exits 0 on a published or already-present payload.
       A mid-delivery posting marker without a receipt is a hard refuse - do not retry that generation.
-   f. Clear the inbox record only through its owner, and only once the delivery is durably recorded:
-      - a reply (`ack`/`answer`/`followup`/`final`) clears on its matching `"ok": true` receipt: `bin/fm-ext-inbox.sh remove --slug <slug>`;
-      - a spawned long-running task clears on its link: `bin/fm-ext-inbox.sh remove --slug <slug> --task <task-id>`;
-      - a true pure acknowledgment clears on its recorded disposition: `bin/fm-ext-inbox.sh remove --slug <slug> --no-reply --reason "pure acknowledgement"`.
+   f. Clear the inbox record as a separate step through [bin/fm-ext-inbox.sh](../../../bin/fm-ext-inbox.sh); read its header for the authoritative disposition and refusal rules:
+      - reply: `bin/fm-ext-inbox.sh remove --slug <slug>`;
+      - spawned long-running task: `bin/fm-ext-inbox.sh remove --slug <slug> --task <task-id>`;
+      - true pure acknowledgment: `bin/fm-ext-inbox.sh remove --slug <slug> --no-reply --reason "pure acknowledgement"`.
       The durable destination context in `state/ext-context/<slug>.json` remains so delayed follow-ups still work.
       Never remove the file with `rm`, and never chain removal to the emit command.
    g. If the helper refuses, leave the inbox file, move on, and do not redo already-started work.
-      A mid-delivery refuse means that generation is still in the gateway's hands; a missing-receipt refuse means the clear happens on a later drain once delivery lands.
+      For a mid-delivery or missing-receipt refusal, leave that generation to the gateway, do not re-emit, and retry clearing on a later drain once delivery lands.
 3. **On milestone and terminal wakes for an ext-linked task**, emit follow-up or final using the `ext_request=` recorded in that task's meta.
    Increment `--generation` for each new follow-up.
    Reusing a generation is the idempotency guard.
