@@ -107,7 +107,20 @@ make_fake_tasks_axi() { # <dir> -> echoes fakebin dir
   cat > "$fb/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
+case "${1:-} ${2:-}" in
+  '--version ') printf 'tasks-axi 0.2.4\n'; exit 0 ;;
+  'update --help') printf '%s\n' '--archive-body'; exit 0 ;;
+  'mv --help') printf '%s\n' '[<id>...]'; exit 0 ;;
+esac
+if [ "${1:-}" = hold ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' '--kind captain'
+  exit 0
+fi
 if [ "${1:-}" = show ]; then
+  if [ "${2:-}" = linked-call ]; then
+    printf '%s\n' "${FM_FAKE_LINKED_ROW:?}"
+    exit 0
+  fi
   if [ -n "${FM_FAKE_BOARD_ERROR:-}" ]; then
     printf '%s\n' "$FM_FAKE_BOARD_ERROR"
     exit 1
@@ -157,6 +170,8 @@ write_herdr_meta() {
     "endpoint_task_id=$task" \
     "kind=$kind" \
     "mode=$mode" \
+    "decisions_reviewed=1" \
+    "decision_keys=" \
     "worktree=$HOME_DIR/wt" \
     "project=$HOME_DIR/proj" \
     "herdr_session=$session" \
@@ -344,6 +359,8 @@ test_ambiguous_endpoint_refuses_loudly() {
     "endpoint_task_id=demo" \
     "kind=scout" \
     "mode=no-mistakes" \
+    "decisions_reviewed=1" \
+    "decision_keys=" \
     "worktree=$HOME_DIR/wt" \
     "project=$HOME_DIR/proj" \
     "herdr_session=lab-sess" \
@@ -462,6 +479,99 @@ test_already_gone_is_idempotent() {
   pass "reports an already-closed pane without issuing another close"
 }
 
+test_local_only_keeps_pane() {
+  local out size
+  setup_home local-only
+  write_herdr_meta demo lab-sess w1 w1:t2 w1:p2 ship local-only
+  printf 'done: ready in branch fm/demo\n' > "$STATE/demo.status"
+  size=$(wc -c < "$STATE/demo.status" | tr -d ' ')
+  out=$(run_autoclose demo "$size") || fail "local-only should keep successfully: $out"
+  assert_contains "$out" "local-only completion never autocloses" "local-only is excluded"
+  pane_present w1:p2 || fail "local-only completion must keep its pane"
+  pass "keeps local-only completions"
+}
+
+test_linked_captain_call_keeps_pane() {
+  local out size
+  setup_home linked-call
+  write_herdr_meta demo lab-sess w1 w1:t2 w1:p2 scout no-mistakes
+  printf 'decision_keys=linked-call\n' >> "$STATE/demo.meta"
+  export FM_FAKE_LINKED_ROW='task:
+  id: linked-call
+  state: queued
+  held: yes
+  blocked: no
+  hold_kind: captain
+  body: waiting for a choice'
+  printf 'done: report ready at data/demo/report.md\n' > "$STATE/demo.status"
+  size=$(wc -c < "$STATE/demo.status" | tr -d ' ')
+  FM_HOME="$HOME_DIR" bash "$ROOT/bin/fm-captain-hold.sh" verify demo >/dev/null \
+    || fail "the ordinary inventory gate must accept a durably held call"
+  out=$(run_autoclose demo "$size") || fail "linked captain call should keep successfully: $out"
+  assert_contains "$out" "linked captain-call inventory" "linked held work keeps the pane"
+  pane_present w1:p2 || fail "linked captain-held work must keep its pane"
+  export FM_FAKE_LINKED_ROW='task:
+  id: linked-call
+  state: done
+  held: no
+  blocked: no
+  hold_kind: captain
+  body: Resolution recorded by fm-captain-hold. Captain decision: use the corpus'
+  out=$(run_autoclose demo "$size") || fail "answered linked call should permit closure: $out"
+  assert_contains "$out" "closed: demo" "a recorded answer clears linked work"
+  pane_present w1:p2 && fail "answered linked call should allow the pane to close"
+  pass "keeps linked held calls and closes after their recorded answer"
+}
+
+test_revalidates_after_presentation_wait() {
+  local mutation lock size runner out attempt ready
+  for mutation in working blocker; do
+    setup_home "wait-$mutation"
+    write_herdr_meta demo lab-sess w1 w1:t2 w1:p2 scout no-mistakes
+    printf 'done: report ready at data/demo/report.md\n' > "$STATE/demo.status"
+    size=$(wc -c < "$STATE/demo.status" | tr -d ' ')
+    lock=$(FM_HOME="$HOME_DIR" bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path lab-sess' _ "$ROOT") \
+      || fail "could not resolve the fixture presentation lock"
+    ready="$HOME_DIR/lock-ready"
+    (
+      . "$ROOT/bin/fm-wake-lib.sh"
+      fm_lock_try_acquire "$lock" || exit 1
+      touch "$ready"
+      while [ ! -e "$HOME_DIR/release-lock" ]; do sleep 0.02; done
+      fm_lock_release "$lock"
+    ) &
+    local holder=$!
+    for ((attempt=0; attempt<100; attempt++)); do
+      [ ! -e "$ready" ] || break
+      sleep 0.02
+    done
+    [ -e "$ready" ] || fail "presentation lock was not acquired"
+    : > "$FM_FAKE_HERDR_LOG"
+    run_autoclose demo "$size" > "$HOME_DIR/result" &
+    runner=$!
+    for ((attempt=0; attempt<150; attempt++)); do
+      [ "$(call_count session list --json)" -lt 1 ] || break
+      sleep 0.02
+    done
+    [ "$attempt" -lt 150 ] || fail "autoclose did not reach the presentation lock"
+    case "$mutation" in
+      working) printf 'working: resumed investigation\n' >> "$STATE/demo.status" ;;
+      blocker) printf 'blocked [key=scope]: need scope\ndone: report ready at data/demo/report.md\n' >> "$STATE/demo.status" ;;
+    esac
+    touch "$HOME_DIR/release-lock"
+    wait "$holder" || fail "lock holder failed"
+    wait "$runner" || fail "autoclose failed after waiting"
+    out=$(cat "$HOME_DIR/result")
+    assert_contains "$out" "kept: demo" "new $mutation state must keep the pane"
+    pane_present w1:p2 || fail "a $mutation appended during lock contention must keep its pane"
+    [ "$(pane_closed_count w1:p2)" = 0 ] || fail "no close may occur after a $mutation arrives"
+  done
+  pass "revalidates completion and keyed work after the presentation lock wait"
+}
+
+test_local_only_keeps_pane
+test_linked_captain_call_keeps_pane
+test_revalidates_after_presentation_wait
 test_scout_done_receipt_with_row_in_flight_closes
 test_failure_receipt_keeps_pane
 test_open_decision_keeps_pane
