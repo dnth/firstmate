@@ -147,6 +147,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-promote-transaction.sh` | Execute the pinned store's recoverable scout-to-ship promotion phases              |
 | `fm-worktree-clean-lib.sh` | Own the shared fail-closed worktree cleanliness predicate                          |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
+| `fm-pane-autoclose.sh`   | Close a finished task's Herdr pane after its delivery receipt, gated on a terminal done: claim with its artifact and no remaining follow-on work |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-pi-compatible-lib.sh` | Shared membership predicate for the verified Pi-compatible harness family            |
 | `fm-pi-compatible-runtimes` | The tracked single owner of that closed family allowlist                          |

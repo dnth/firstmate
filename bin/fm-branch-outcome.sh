@@ -119,6 +119,12 @@
 #     undelivered obligation event at or before it and refuses unless the
 #     live status file still has the named identity. Idempotent: an already
 #     delivered endpoint is reported, never duplicated.
+#     After recording at least one new receipt it hands the newest covered
+#     endpoint to bin/fm-pane-autoclose.sh, which owns the pane-closure gate
+#     (a terminal done: claim with its delivery artifact and no remaining
+#     follow-on work) and the same guarded exact-pane close teardown uses.
+#     That answer never changes this command's success: the receipt is already
+#     durable.
 #   fm-branch-outcome.sh reconcile --seq <seq>
 #     Print "current" when the seq's advisory is still deliverable, or
 #     "suppressed" when current durable state provably supersedes it. Missing
@@ -820,6 +826,7 @@ EOF
 $DELIVERED
 EOF
     MARKED=0
+    MARKED_LAST=0
     if [ -n "$THROUGH" ]; then
       # --through marks every undelivered obligation event at or before it, so
       # the status file must still be the named identity and readable.
@@ -857,6 +864,7 @@ $DELIVERED_KEYS" in
         printf '{"task":"%s","statusIdent":"%s","endpoint":%s,"epoch":%s}\n' \
           "$(json_escape "$TASK")" "$(json_escape "$IDENT")" "$EV_ENDPOINT" "$(date +%s)" >> "$DELIVERIES"
         MARKED=$((MARKED + 1))
+        [ "$EV_ENDPOINT" -gt "$MARKED_LAST" ] && MARKED_LAST=$EV_ENDPOINT
       done <<EOF
 $EVENTS
 EOF
@@ -893,11 +901,19 @@ $DELIVERED_KEYS" in
           printf '{"task":"%s","statusIdent":"%s","endpoint":%s,"epoch":%s}\n' \
             "$(json_escape "$TASK")" "$(json_escape "$IDENT")" "$ENDPOINT" "$(date +%s)" >> "$DELIVERIES"
           MARKED=1
+          MARKED_LAST=$ENDPOINT
           ;;
       esac
     fi
     fm_lock_release "$LOCK"
     printf 'delivered: %s receipt(s) recorded for %s\n' "$MARKED" "$TASK"
+    # The only consumer of a recorded receipt that can end a pane's useful
+    # life: bin/fm-pane-autoclose.sh owns that gate and its guarded close.
+    # It runs after the receipt is durable and the store lock is released, and
+    # its answer never changes this command's success.
+    if [ "$MARKED" -gt 0 ] && [ "$MARKED_LAST" -gt 0 ]; then
+      "$SCRIPT_DIR/fm-pane-autoclose.sh" "$TASK" --endpoint "$MARKED_LAST" --status-ident "$IDENT" || true
+    fi
     ;;
   reconcile)
     [ "${1:-}" = --seq ] && [ "$#" -eq 2 ] || usage
