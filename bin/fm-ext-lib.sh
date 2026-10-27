@@ -2138,7 +2138,8 @@ fm_ext_remove_all() {
 }
 
 # fm_ext_outbox_prune <state>: drop the leftover markers of retired generations
-# past the retention window so state/ext-outbox stays bounded too. A generation
+# past the retention window, except while a safe inbox record pins the request's
+# markers so delivery evidence survives until inbox removal. A generation
 # whose payload is still present is pending or mid-delivery and is never touched,
 # so this can only ever remove the residue of work that already finished. A
 # request-wide thread record (<slug>.thread.json) is kept while any other JSON
@@ -2146,7 +2147,8 @@ fm_ext_remove_all() {
 # A decision post's sent, settled, and finalized markers go the same way as its
 # chunk-progress record, so its buttons expire with it.
 fm_ext_outbox_prune() {
-  local state=$1 dir now max_age line file base stem slug mtime age other
+  local state=$1 dir inbox now max_age line file base stem slug mtime age other
+  local inbox_list=''
   local -a doomed thread_doomed
   # An assigned empty array keeps ${#arr[@]} defined under set -u.
   doomed=()
@@ -2158,6 +2160,13 @@ fm_ext_outbox_prune() {
     ''|*[!0-9]*) return 0 ;;
   esac
   max_age=$(fm_ext_retention_max_age_secs)
+  inbox="$state/$FM_EXT_INBOX_DIRNAME"
+  if [ -d "$inbox" ] && [ ! -L "$inbox" ]; then
+    for file in "$inbox"/*.json; do
+      [ -e "$file" ] || continue
+      inbox_list="$inbox_list${file##*/}"$'\n'
+    done
+  fi
   # Removals are queued and applied in batches: a stat and a uname per file is
   # what made this prune take tens of seconds on a mature outbox. A thread
   # record's sibling test still sees the same files the immediate-removal walk
@@ -2184,6 +2193,7 @@ fm_ext_outbox_prune() {
     case "$base" in
       *.receipt.json) stem=${base%.receipt.json} ;;
       *.failed.json) stem=${base%.failed.json} ;;
+      *.noreply.json) stem=${base%.noreply.json} ;;
       *.progress.json) stem=${base%.progress.json} ;;
       *.thread.json) stem=${base%.thread.json} ;;
       *.posting) stem=${base%.posting} ;;
@@ -2193,6 +2203,8 @@ fm_ext_outbox_prune() {
       *.sent.json) stem=${base%.sent.json} ;;
       *) continue ;;
     esac
+    slug=${stem%%.*}
+    fm_ext_inbox_pins "$inbox" "$inbox_list" "$slug" && continue
     if [ -e "$dir/$stem.json" ]; then
       continue
     fi

@@ -1692,8 +1692,8 @@ test_27_retention_expires_local_records() {
   assert_absent "$stale_offered" "an offer record with no inbox file must expire"
   assert_absent "$invalid_ctx" "a symlinked inbox must not pin expired context"
   assert_absent "$invalid_offered" "a symlinked inbox must not pin expired offers"
-  assert_absent "$home/state/ext-outbox/${slug}.answer.8.receipt.json" \
-    "a retired generation's leftover marker must expire"
+  assert_present "$home/state/ext-outbox/${slug}.answer.8.receipt.json" \
+    "a pending inbox request must pin a retired generation's receipt"
   assert_present "$offered" \
     "an offer whose request is still unhandled in the inbox must be kept"
   assert_present "$kept_stem.receipt.json" \

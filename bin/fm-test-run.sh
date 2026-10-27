@@ -209,7 +209,7 @@ family_for_basename() {
       ;;
     fm-check-unregister.test.sh|fm-main-ci-watch.test.sh|fm-pr-check-handoff.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
     fm-landing.test.sh|fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh|fm-ext-bridge.test.sh|\
-    fm-ext-decision.test.sh|fm-ext-ask.test.sh|fm-ext-media.test.sh)
+    fm-ext-decision.test.sh|fm-ext-ask.test.sh|fm-ext-media.test.sh|fm-ext-inbox-remove.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -419,6 +419,7 @@ tests/fm-documentation-audiences.test.sh 878
 tests/fm-ext-ask.test.sh 48724
 tests/fm-ext-bridge.test.sh 82962
 tests/fm-ext-decision.test.sh 161682
+tests/fm-ext-inbox-remove.test.sh 1500
 tests/fm-ext-plugin-dest.test.sh 7190
 tests/fm-ext-thread-context.test.sh 18046
 tests/fm-ext-topic-threads.test.sh 100660

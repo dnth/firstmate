@@ -839,7 +839,7 @@ Intake runs in the gateway process and cannot wake the watcher, so each cycle th
 The wake names up to three row payloads and reports the remaining count; the drain presents the durable rows and every unanswered inbox request.
 The highest rung sequence persists in `state/.ext-doorbell-rung` to avoid replay after restart; if recording that sequence fails, a later cycle may ring again.
 Wake rows can still be hidden by a filtered read of the drain and are consumed by its acknowledgement, so every main drain also lists each unanswered request under `EXT REQUESTS AWAITING ANSWER`, folded from `state/ext-inbox/` while the bridge is active.
-A request stays on that list across drains and acknowledgements until `ext-respond` removes its inbox record.
+A request stays on that list across drains and acknowledgements until `bin/fm-ext-inbox.sh remove` clears its inbox record on a recorded delivery disposition.
 
 `state/ext-watch.check.sh` is a byte-static identity shim for `bin/fm-ext-poll.sh`; `fm_ext_watch_shim_converge` in `bin/fm-ext-lib.sh` owns arming and removing it.
 The session-start bootstrap reports its verdict as an `EXT:` line, and every watcher cycle converges it again, so a bridge switched on or off mid-session takes effect within one cycle without a restart.
@@ -884,9 +884,11 @@ For ordinary replies, `pending` lists only generations that are still genuinely 
 A payload whose generation has reached a receipt or a terminal failed marker is retired on sight, so poll cost stays flat as delivered replies accumulate instead of growing with every reply ever sent.
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
+[bin/fm-ext-inbox.sh](../bin/fm-ext-inbox.sh) owns inbox removal; its header defines the accepted delivery dispositions, newest-generation checks across reply kinds, and refusal rules.
+
 Local bridge records and outbound media expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
 A due retention pass drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.
-It drops the leftover markers of already retired outbox generations.
+It drops the leftover markers of already retired outbox generations once their request is no longer sitting unhandled in the inbox.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
 The same pass deletes [outbound media](#outbound-media) on that same window: a staged post's copies once the window has passed since the post's receipt or terminal failure (never while its payload is still pending), and screening attestations, sampled video frames, and files pulled from a remote second mate once the window has passed since they were recorded.
 The poll claims its inbox offers before it prunes, and prunes at most once per `FM_EXT_PRUNE_INTERVAL_SECS` (default 3600), so the claim runs first; a prune interrupted by the watcher's check timeout is retried on the next poll whose cadence is due.

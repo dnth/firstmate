@@ -158,7 +158,8 @@ Screen every file yourself before it can post; emit refuses any file without you
   2. Dispatch the work through the normal lifecycle right away.
   3. Link the spawned task **before** clearing the inbox: `bin/fm-ext-link.sh <task-id> <request_id>`.
      This records `ext_request=`, not `x_request=`.
-  4. On genuine milestones emit `followup` with a new `--generation`.
+  4. Clear the inbox record through the task path in [Procedure](#procedure), step 2f.
+  5. On genuine milestones emit `followup` with a new `--generation`.
      The terminal outcome uses `--kind final`.
      Duplicate generation is a no-op.
 
@@ -168,7 +169,7 @@ Every drained request sorts into one of three cases:
 
 - **Actionable instruction / request** - act through the normal lifecycle.
 - **Question** - answer from live fleet state; no follow-up.
-- **Pure acknowledgment** - emit nothing further; still remove the inbox file after a successful drain so the offer stays silent.
+- **Pure acknowledgment** - emit nothing; use the no-reply clearing path in [Procedure](#procedure), step 2f.
 
 **For asks without the bounded confirmation described in Decisions with buttons, destructive work still escalates first.**
 Flag those destructive, irreversible, or security-sensitive asks through the normal trusted channel and emit only that it has been flagged.
@@ -207,7 +208,7 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
    b. Classify as actionable, question, or pure acknowledgment.
    c. Act on an actionable request through the normal lifecycle.
       If you ran `bin/fm-spawn.sh`, link with `bin/fm-ext-link.sh <task-id> <request_id>` before inbox cleanup.
-   d. Compose a short public-safe reply.
+   d. For a pure acknowledgment, skip directly to step 2f; otherwise compose a short public-safe reply.
    e. Submit it without inlining text into a shell command:
 
       ```sh
@@ -217,8 +218,14 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
       (`--text-file -` reading stdin is equally fine.)
       It echoes the slug and exits 0 on a published or already-present payload.
       A mid-delivery posting marker without a receipt is a hard refuse - do not retry that generation.
-   f. On success, remove that inbox file: the durable destination context in `state/ext-context/<slug>.json` remains so delayed follow-ups still work.
-   g. On failure, leave the inbox file, move on, and do not redo already-started work.
+   f. Clear the inbox record as a separate step through [bin/fm-ext-inbox.sh](../../../bin/fm-ext-inbox.sh); read its header for the authoritative disposition and refusal rules:
+      - reply: `bin/fm-ext-inbox.sh remove --slug <slug>`;
+      - spawned long-running task: `bin/fm-ext-inbox.sh remove --slug <slug> --task <task-id>`;
+      - true pure acknowledgment: `bin/fm-ext-inbox.sh remove --slug <slug> --no-reply --reason "pure acknowledgement"`.
+      The durable destination context in `state/ext-context/<slug>.json` remains so delayed follow-ups still work.
+      Never remove the file with `rm`, and never chain removal to the emit command.
+   g. If the helper refuses, leave the inbox file, move on, and do not redo already-started work.
+      For a mid-delivery or missing-receipt refusal, leave that generation to the gateway, do not re-emit, and retry clearing on a later drain once delivery lands.
 3. **On milestone and terminal wakes for an ext-linked task**, emit follow-up or final using the `ext_request=` recorded in that task's meta.
    Increment `--generation` for each new follow-up.
    Reusing a generation is the idempotency guard.

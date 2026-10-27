@@ -402,6 +402,8 @@ test_5_thread_record_expires_with_retention() {
     "the reply must create the thread first"
   [ -f "$home/state/ext-outbox/$slug.thread.json" ] \
     || fail "the thread id must be recorded request-wide"
+  home_env "$home" bash "$ROOT/bin/fm-ext-inbox.sh" remove --slug "$slug" >/dev/null \
+    || fail "the delivered request must leave the inbox before retention"
   # The record survives while other files for its slug remain (delivered
   # generations retire their payload but leave posting/progress/receipt
   # markers), then expires on the same retention window once they are gone.

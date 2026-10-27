@@ -187,7 +187,7 @@ case "$cmd" in
       base=${file##*/}
       case "$base" in
         *.receipt.json|*.failed.json|*.progress.json|*.thread.json) continue ;;
-        *.settled.json|*.sent.json) continue ;;
+        *.settled.json|*.sent.json|*.noreply.json) continue ;;
         waiting-pin.*.json)
           fm_ext_private_artifact_file_valid "$OUTBOX" "$base" 600 || continue
           kind=$(jq -r '.kind // empty' "$file") || continue
