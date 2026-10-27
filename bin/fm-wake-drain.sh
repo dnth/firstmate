@@ -12,6 +12,19 @@
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 #
+# Communication Officer guard (main actor, only while the local ext-bridge is
+# active): --ack-through refuses with exit 4, acknowledging nothing and leaving
+# the queue untouched, while any request in state/ext-inbox/ has no reply
+# receipt of any kind in state/ext-outbox/. It prints one line per such request
+# (slug, thread, age), a likely cause (no reply emitted, or a reply emitted
+# with no delivery receipt, which points at the gateway poster), and the next
+# action: answer it through the ext-respond skill, or dismiss it with
+# `bin/fm-ext-inbox.sh dismiss`. Every main drain, acknowledging or not, also
+# warns under EXT REQUESTS ACKED BUT NOT ANSWERED about inbox requests whose
+# only receipts are acks and whose newest ack is older than
+# the threshold owned by fm_ext_ack_only_warn_secs in bin/fm-ext-lib.sh;
+# the warning never blocks and is printed to stderr on a successful ack.
+#
 # Machine channel: under FM_WAKE_DRAIN_DECISION_REVISIONS=1 (set only by the
 # away-mode daemon) every rendered OPEN DECISIONS row also emits one
 # "DECISION_REVISION<TAB><task><TAB><key><TAB><endpoint><TAB><ident>" line on
@@ -611,6 +624,102 @@ print_ext_requests_section() {
   done <<EOF
 $pending
 EOF
+  print_ext_ack_only_warning
+}
+
+ext_age_label() {  # <seconds>
+  local s=$1
+  case "$s" in ''|*[!0-9]*) s=0 ;; esac
+  if [ "$s" -lt 3600 ]; then
+    printf '%sm\n' "$((s / 60))"
+  elif [ "$s" -lt 86400 ]; then
+    printf '%sh%02dm\n' "$((s / 3600))" "$((s % 3600 / 60))"
+  else
+    printf '%sd%02dh\n' "$((s / 86400))" "$((s % 86400 / 3600))"
+  fi
+}
+
+# ext_request_line <slug> <now>: "<slug>  thread: <name> (<project>)  age: <age>"
+# for one inbox request, aged from the record's recorded_at (its mtime when
+# that is absent).
+ext_request_line() {
+  local slug=$1 now=$2 record recorded line
+  record=$(fm_ext_inbox_dir "$FM_HOME")/$slug.json
+  recorded=$(jq -r '.recorded_at // empty | tostring' "$record" 2>/dev/null) || recorded=''
+  case "$recorded" in ''|*[!0-9]*) recorded=$(fm_ext_file_mtime "$record") || recorded=$now ;; esac
+  case "$recorded" in ''|*[!0-9]*) recorded=$now ;; esac
+  [ "$recorded" -le "$now" ] || recorded=$now
+  line=$(jq -r '
+    def line: tostring | gsub("[\\x00-\\x1f\\x7f]"; " ") | gsub("\\s+"; " ") | .[0:200];
+    "thread: \((.thread_name // "(no name)") | line) (\((.project // "unknown") | line))"
+  ' "$record" 2>/dev/null) || line='thread: (unreadable record)'
+  printf '%s  %s  age: %s\n' "$slug" "$line" "$(ext_age_label "$((now - recorded))")"
+}
+
+# Warn, never block: list inbox requests whose only reply receipts are acks
+# and whose newest ack is older than fm_ext_ack_only_warn_secs, so a request
+# acknowledged on Discord does not silently wait hours for its real answer.
+print_ext_ack_only_warning() {
+  local pending slug state ack_at now threshold lines=''
+  [ "$ACTOR" = main ] || return 0
+  pending=$(fm_ext_pending_requests "$FM_HOME" 2>/dev/null) || return 0
+  [ -n "$pending" ] || return 0
+  now=$(date +%s)
+  threshold=$(fm_ext_ack_only_warn_secs)
+  while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    state=$(fm_ext_request_reply_state "$slug" "$FM_HOME") || continue
+    case "$state" in ack\ *) ack_at=${state#ack } ;; *) continue ;; esac
+    [ "$((now - ack_at))" -gt "$threshold" ] || continue
+    lines="${lines}  $(ext_request_line "$slug" "$now")  last ack: $(ext_age_label "$((now - ack_at))") ago
+"
+  done <<EOF
+$pending
+EOF
+  [ -n "$lines" ] || return 0
+  printf 'EXT REQUESTS ACKED BUT NOT ANSWERED (warning; only an ack was posted more than %s ago - send the real answer, follow-up, or final with the ext-respond skill):\n%s' \
+    "$(ext_age_label "$threshold")" "$lines"
+}
+
+# Refuse an acknowledgement while any Communication Officer request in the
+# inbox has no reply receipt of any kind. Runs before the queue lock, so a
+# refusal leaves every wake row, the recovery marker, and the queue untouched.
+# Inert for a branch actor, a home without an active bridge, and an empty inbox.
+refuse_ack_for_unanswered_ext_requests() {
+  local pending slug state now lines='' count=0 emitted=0
+  [ "$ACTOR" = main ] || return 0
+  pending=$(fm_ext_pending_requests "$FM_HOME" 2>/dev/null) || return 0
+  [ -n "$pending" ] || return 0
+  now=$(date +%s)
+  while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    state=$(fm_ext_request_reply_state "$slug" "$FM_HOME") || state=none
+    case "$state" in
+      none) lines="${lines}  ext-request $(ext_request_line "$slug" "$now")
+" ;;
+      emitted)
+        emitted=$((emitted + 1))
+        lines="${lines}  ext-request $(ext_request_line "$slug" "$now")  (reply emitted, no delivery receipt)
+"
+        ;;
+      *) continue ;;
+    esac
+    count=$((count + 1))
+  done <<EOF
+$pending
+EOF
+  [ "$count" -gt 0 ] || return 0
+  {
+    printf 'wake drain: refusing to acknowledge - %s Communication Officer request(s) have no reply receipt; nothing was acknowledged and the wake queue is unchanged:\n%s' "$count" "$lines"
+    if [ "$emitted" -gt 0 ]; then
+      printf 'likely cause: %s of them have a reply emitted with no delivery receipt, so the gateway poster may be down or failing; check it, and do not re-emit a generation that is mid-delivery.\n' "$emitted"
+    fi
+    if [ "$emitted" -lt "$count" ]; then
+      printf 'likely cause: %s of them have no reply emitted at all; the EXT REQUESTS AWAITING ANSWER list was probably skipped.\n' "$((count - emitted))"
+    fi
+    printf 'next: answer each with the ext-respond skill, or dismiss one that needs no reply with bin/fm-ext-inbox.sh dismiss --slug <slug> --reason "<why>"; then re-run this acknowledgement.\n'
+  } >&2
+  return 1
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
@@ -646,6 +755,10 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [ -n "$ACK_THROUGH" ]; then
+  refuse_ack_for_unanswered_ext_requests || exit 4
+fi
 
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
 DRAIN_LOCK_HELD=true
@@ -757,6 +870,7 @@ if [ -n "$ACK_THROUGH" ]; then
     printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed), but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
       "$ACK_THROUGH" "$ACK_REMOVED" >&2
   fi
+  print_ext_ack_only_warning >&2 || true
   exit 0
 fi
 

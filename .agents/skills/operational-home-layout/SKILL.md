@@ -92,7 +92,7 @@ state/               volatile runtime signals; gitignored
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (AGENTS.md section 14)
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (AGENTS.md section 14; bin/fm-x-lib.sh)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (AGENTS.md section 14)
-  ext-inbox/         generated local Communication Officer pending request payloads; ext-respond drains it when the ext-bridge is on, and only bin/fm-ext-inbox.sh remove clears a record
+  ext-inbox/         generated local Communication Officer pending request payloads; ext-respond drains it when the ext-bridge is on; bin/fm-ext-inbox.sh owns clearing dispositions in its header
   ext-context/       generated local Communication Officer destination context, thread-history sidecars, and one-wake offer markers, keyed by request slug; docs/configuration.md "Thread context (name, project, history)" owns the history contract
   ext-outbox/        generated local Communication Officer reply payloads, delivery markers, and recorded no-reply dispositions, plus dedicated waiting-pin snapshots; docs/configuration.md owns their separate delivery contracts
   public-followup/   generated private transport for promised public replies: commitment registrations, typed terminal-result inbox, accepted/rejected ledgers (AGENTS.md section 14; bin/fm-public-followup.sh)

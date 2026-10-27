@@ -839,7 +839,8 @@ Intake runs in the gateway process and cannot wake the watcher, so each cycle th
 The wake names up to three row payloads and reports the remaining count; the drain presents the durable rows and every unanswered inbox request.
 The highest rung sequence persists in `state/.ext-doorbell-rung` to avoid replay after restart; if recording that sequence fails, a later cycle may ring again.
 Wake rows can still be hidden by a filtered read of the drain and are consumed by its acknowledgement, so every main drain also lists each unanswered request under `EXT REQUESTS AWAITING ANSWER`, folded from `state/ext-inbox/` while the bridge is active.
-A request stays on that list across drains and acknowledgements until `bin/fm-ext-inbox.sh remove` clears its inbox record on a recorded delivery disposition.
+A request stays on that list across drains and acknowledgements until `bin/fm-ext-inbox.sh remove` clears its inbox record on a recorded delivery disposition, or `bin/fm-ext-inbox.sh dismiss` records why it needs no reply.
+The [`bin/fm-wake-drain.sh` header](../bin/fm-wake-drain.sh) owns the unanswered-request acknowledgement refusal and ack-only warning; [`fm_ext_ack_only_warn_secs` in `bin/fm-ext-lib.sh`](../bin/fm-ext-lib.sh) owns the warning threshold setting and default.
 
 `state/ext-watch.check.sh` is a byte-static identity shim for `bin/fm-ext-poll.sh`; `fm_ext_watch_shim_converge` in `bin/fm-ext-lib.sh` owns arming and removing it.
 The session-start bootstrap reports its verdict as an `EXT:` line, and every watcher cycle converges it again, so a bridge switched on or off mid-session takes effect within one cycle without a restart.
@@ -884,7 +885,7 @@ For ordinary replies, `pending` lists only generations that are still genuinely 
 A payload whose generation has reached a receipt or a terminal failed marker is retired on sight, so poll cost stays flat as delivered replies accumulate instead of growing with every reply ever sent.
 The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
 
-[bin/fm-ext-inbox.sh](../bin/fm-ext-inbox.sh) owns inbox removal; its header defines the accepted delivery dispositions, newest-generation checks across reply kinds, and refusal rules.
+[bin/fm-ext-inbox.sh](../bin/fm-ext-inbox.sh) owns inbox removal and dismissal; its header defines the accepted delivery dispositions, newest-generation checks across reply kinds, the reason-required dismiss path, and refusal rules.
 
 Local bridge records and outbound media expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
 A due retention pass drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.

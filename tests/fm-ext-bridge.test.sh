@@ -2084,6 +2084,15 @@ test_35_each_request_presents_its_own_wake_row() {
 # request in a section a row filter cannot remove and an
 # acknowledgement cannot consume.
 
+# ack_receipt <home> <slug>: record a delivered ack, so the acknowledgement
+# guard in bin/fm-wake-drain.sh sees the request as acknowledged on Discord.
+ack_receipt() {
+  local outbox="$1/state/ext-outbox"
+  (umask 077; mkdir -p "$outbox")
+  printf '{"ok":true}\n' > "$outbox/$2.ack.1.receipt.json"
+  chmod 600 "$outbox/$2.ack.1.receipt.json"
+}
+
 drain_ack() {  # <home> <drain-stderr>
   local home=$1 err=$2 sequence generation
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*$/\1/p' "$err")
@@ -2102,6 +2111,7 @@ test_36_unanswered_requests_survive_filtered_drains_until_answered() {
     | grep -v -E '^[0-9]{10}\s')
   assert_contains "$out" "EXT REQUESTS AWAITING ANSWER" "a row-filtered drain must still present the request section"
   assert_contains "$out" "ext-request $slug" "a row-filtered drain must still name the pending request"
+  ack_receipt "$home" "$slug"
   drain_ack "$home" "$home/drain.err"
   out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>/dev/null)
   assert_contains "$out" "ext-request $slug" "an acknowledged but unanswered request must still be presented"
@@ -2136,6 +2146,7 @@ test_37_every_pending_request_is_listed_without_limit() {
   for slug in "${slugs[@]}"; do
     printf '%s\n' "$out" | grep -Fx "ext-request $slug" >/dev/null \
       || fail "every pending request must have a plain ext-request line: $slug"
+    ack_receipt "$home" "$slug"
   done
   drain_ack "$home" "$home/drain.err"
   out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>/dev/null)

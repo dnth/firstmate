@@ -2,7 +2,8 @@
 name: ext-respond
 description: >-
   Agent-only playbook for handling local Communication Officer Discord requests.
-  Use on an "ext-request <slug>" check wake or a drain's "EXT REQUESTS AWAITING ANSWER" section to drain the local inbox, classify,
+  Use on an "ext-request <slug>" check wake, a drain's "EXT REQUESTS AWAITING ANSWER" or "EXT REQUESTS ACKED BUT NOT ANSWERED" section,
+  or a wake acknowledgement refused for unanswered requests, to drain the local inbox, classify,
   act through the normal lifecycle, emit ack/answer/follow-up/final into the
   local outbox, and link spawned work; also load before opening a Discord topic
   thread that no captain request started, and before attaching screenshots or
@@ -16,7 +17,7 @@ metadata:
 # ext-respond
 
 The local Communication Officer bridge lets a firstmate instance answer Discord requests that a dedicated Hermes Gateway plugin delivered into this home: `/fm`, a message in the dedicated channel, a reply to one of Firstmate's own posts, or a click on one of Firstmate's decision buttons.
-Load this skill for an `ext-request <slug>` check wake or the drain's `EXT REQUESTS AWAITING ANSWER` section.
+Load this skill for an `ext-request <slug>` check wake, the drain's `EXT REQUESTS AWAITING ANSWER` or `EXT REQUESTS ACKED BUT NOT ANSWERED` section, or a wake acknowledgement refused for unanswered requests.
 The full request is stashed locally; this skill acts on it and emits one or more local outbox payloads that the gateway plugin posts to the request's Discord destination.
 
 This runs only when the local ext-bridge is on (`config/ext-bridge` plus a mode-0600 secret; see AGENTS.md "Local Communication Officer bridge").
@@ -221,11 +222,15 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
    f. Clear the inbox record as a separate step through [bin/fm-ext-inbox.sh](../../../bin/fm-ext-inbox.sh); read its header for the authoritative disposition and refusal rules:
       - reply: `bin/fm-ext-inbox.sh remove --slug <slug>`;
       - spawned long-running task: `bin/fm-ext-inbox.sh remove --slug <slug> --task <task-id>`;
-      - true pure acknowledgment: `bin/fm-ext-inbox.sh remove --slug <slug> --no-reply --reason "pure acknowledgement"`.
+      - true pure acknowledgment: `bin/fm-ext-inbox.sh remove --slug <slug> --no-reply --reason "pure acknowledgement"`;
+      - no reply needed for another reason: use the reason-required dismissal documented in the inbox helper's header.
       The durable destination context in `state/ext-context/<slug>.json` remains so delayed follow-ups still work.
       Never remove the file with `rm`, and never chain removal to the emit command.
    g. If the helper refuses, leave the inbox file, move on, and do not redo already-started work.
       For a mid-delivery or missing-receipt refusal, leave that generation to the gateway, do not re-emit, and retry clearing on a later drain once delivery lands.
+   h. For wake acknowledgement refusals and ack-only warnings, consult the [drain header](../../../bin/fm-wake-drain.sh) for the guard contract.
+      On that refusal, reply to each named request, or dismiss one that truly needs no reply; when it names the gateway poster as the likely cause, report the stuck delivery to the captain rather than dismissing a request that still deserves an answer.
+      On an `EXT REQUESTS ACKED BUT NOT ANSWERED` warning, send the real answer, follow-up, or final for each listed request.
 3. **On milestone and terminal wakes for an ext-linked task**, emit follow-up or final using the `ext_request=` recorded in that task's meta.
    Increment `--generation` for each new follow-up.
    Reusing a generation is the idempotency guard.
