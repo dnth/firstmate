@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Remove one drained Communication Officer inbox record only when its delivery
-# outcome is durably recorded.
+# disposition is durably recorded.
 #
 # Usage:
 #   fm-ext-inbox.sh remove --slug <slug>
@@ -30,7 +30,7 @@
 #              exists for the slug, so a pending, failed, or already-receipted
 #              reply can never be cleared as if nothing had been sent.
 #
-# Every path refuses - leaving the inbox file in place - when:
+# `remove` refuses - leaving the inbox file in place - when:
 #   - the inbox record is missing or is not a safe mode-0600 private artifact;
 #   - a posting marker for the latest generation has no receipt (mid-delivery);
 #   - the latest generation's receipt does not carry `"ok": true`;

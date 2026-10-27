@@ -22,8 +22,8 @@
 # `bin/fm-ext-inbox.sh dismiss`. Every main drain, acknowledging or not, also
 # warns under EXT REQUESTS ACKED BUT NOT ANSWERED about inbox requests whose
 # only receipts are acks and whose newest ack is older than
-# FM_EXT_ACK_ONLY_WARN_SECS (bin/fm-ext-lib.sh, default 7200); the warning
-# never blocks.
+# the threshold owned by fm_ext_ack_only_warn_secs in bin/fm-ext-lib.sh;
+# the warning never blocks and is printed to stderr on a successful ack.
 #
 # Machine channel: under FM_WAKE_DRAIN_DECISION_REVISIONS=1 (set only by the
 # away-mode daemon) every rendered OPEN DECISIONS row also emits one

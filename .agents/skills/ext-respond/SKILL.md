@@ -223,12 +223,12 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
       - reply: `bin/fm-ext-inbox.sh remove --slug <slug>`;
       - spawned long-running task: `bin/fm-ext-inbox.sh remove --slug <slug> --task <task-id>`;
       - true pure acknowledgment: `bin/fm-ext-inbox.sh remove --slug <slug> --no-reply --reason "pure acknowledgement"`;
-      - no reply needed for another reason, such as a duplicate already answered through another request in the same thread or a malformed message: `bin/fm-ext-inbox.sh dismiss --slug <slug> --reason "<why>"`.
+      - no reply needed for another reason: use the reason-required dismissal documented in the inbox helper's header.
       The durable destination context in `state/ext-context/<slug>.json` remains so delayed follow-ups still work.
       Never remove the file with `rm`, and never chain removal to the emit command.
    g. If the helper refuses, leave the inbox file, move on, and do not redo already-started work.
       For a mid-delivery or missing-receipt refusal, leave that generation to the gateway, do not re-emit, and retry clearing on a later drain once delivery lands.
-   h. The wake acknowledgement refuses while any inbox request has no reply receipt; its [header](../../../bin/fm-wake-drain.sh) owns the refusal and the ack-only warning.
+   h. For wake acknowledgement refusals and ack-only warnings, consult the [drain header](../../../bin/fm-wake-drain.sh) for the guard contract.
       On that refusal, reply to each named request, or dismiss one that truly needs no reply; when it names the gateway poster as the likely cause, report the stuck delivery to the captain rather than dismissing a request that still deserves an answer.
       On an `EXT REQUESTS ACKED BUT NOT ANSWERED` warning, send the real answer, follow-up, or final for each listed request.
 3. **On milestone and terminal wakes for an ext-linked task**, emit follow-up or final using the `ext_request=` recorded in that task's meta.

@@ -840,7 +840,7 @@ The wake names up to three row payloads and reports the remaining count; the dra
 The highest rung sequence persists in `state/.ext-doorbell-rung` to avoid replay after restart; if recording that sequence fails, a later cycle may ring again.
 Wake rows can still be hidden by a filtered read of the drain and are consumed by its acknowledgement, so every main drain also lists each unanswered request under `EXT REQUESTS AWAITING ANSWER`, folded from `state/ext-inbox/` while the bridge is active.
 A request stays on that list across drains and acknowledgements until `bin/fm-ext-inbox.sh remove` clears its inbox record on a recorded delivery disposition, or `bin/fm-ext-inbox.sh dismiss` records why it needs no reply.
-The acknowledgement itself refuses, acknowledging nothing, while any listed request has no reply receipt of any kind, and every drain warns about a request whose only receipts are acks older than `FM_EXT_ACK_ONLY_WARN_SECS` (default 7200); the [`bin/fm-wake-drain.sh` header](../bin/fm-wake-drain.sh) owns that guard.
+The [`bin/fm-wake-drain.sh` header](../bin/fm-wake-drain.sh) owns the unanswered-request acknowledgement refusal and ack-only warning; [`fm_ext_ack_only_warn_secs` in `bin/fm-ext-lib.sh`](../bin/fm-ext-lib.sh) owns the warning threshold setting and default.
 
 `state/ext-watch.check.sh` is a byte-static identity shim for `bin/fm-ext-poll.sh`; `fm_ext_watch_shim_converge` in `bin/fm-ext-lib.sh` owns arming and removing it.
 The session-start bootstrap reports its verdict as an `EXT:` line, and every watcher cycle converges it again, so a bridge switched on or off mid-session takes effect within one cycle without a restart.
