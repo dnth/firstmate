@@ -2138,7 +2138,8 @@ fm_ext_remove_all() {
 }
 
 # fm_ext_outbox_prune <state>: drop the leftover markers of retired generations
-# past the retention window so state/ext-outbox stays bounded too. A generation
+# past the retention window, except while a safe inbox record pins the request's
+# markers so delivery evidence survives until inbox removal. A generation
 # whose payload is still present is pending or mid-delivery and is never touched,
 # so this can only ever remove the residue of work that already finished. A
 # request-wide thread record (<slug>.thread.json) is kept while any other JSON

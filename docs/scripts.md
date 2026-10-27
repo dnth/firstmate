@@ -160,5 +160,6 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-public-followup-lib.sh` | Shared relay-activation gate, O(1) presence checks, and private transport paths for promised public replies |
 | `fm-public-followup.sh`  | Reconcile typed terminal work results into a public commitment and deliver its final reply once |
 | `fm-public-followup-emit.sh` | Report one typed terminal work result into the home that owes the public reply    |
+| `fm-ext-inbox.sh`        | Clear a drained Communication Officer inbox request on a recorded disposition       |
 | `fm-ext-waiting-pin.sh`  | Refresh the pinned Discord "Waiting on you" message from board and PR records     |
 | `fm-ext-media.sh`        | Screen, stage, and verify outbound Discord media, and copy screenshots back from a remote second mate |
