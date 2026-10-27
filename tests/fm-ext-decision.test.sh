@@ -766,7 +766,7 @@ test_6_answered_anywhere_settles_posts_and_clicks_are_no_ops() {
 # --- 7. stale posts: replaced by a newer post, or expired -------------------
 
 test_7_stale_posts_are_no_ops() {
-  local home out record
+  local home out record slug
   home="$TMP_ROOT/c7"
   setup_home "$home"
   open_request "$home"
@@ -831,6 +831,10 @@ test_7_stale_posts_are_no_ops() {
   home_env "$home" "$ROOT/bin/fm-ext-decision.sh" still-open --key "key:$TASK:queued" \
     --occurrence 2 >/dev/null || fail "the new question must stay open"
 
+  slug=$(jq -r --arg message "$REQUEST_MESSAGE" 'select(.message_id == $message) | .slug' \
+    "$home"/state/ext-inbox/*.json)
+  home_env "$home" bash "$ROOT/bin/fm-ext-inbox.sh" remove --slug "$slug" >/dev/null \
+    || fail "the delivered decision request must leave the inbox before retention"
   FM_EXT_NOW_OVERRIDE=$(( $(date +%s) + 700000 )) home_env "$home" "$POLL" >/dev/null
   out=$(click "$home" "fmd:$KEY:2" "$CAPTAIN" 880000000000000053 700000000000000002)
   assert_contains "$out" "This decision post is no longer open - this click changed nothing." \

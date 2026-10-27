@@ -737,6 +737,8 @@ for n in range(2):
     assert "latest_firstmate_post_id" not in thread, thread
     assert poster.firstmate_post_for(created[-1]["id"], home)["request_id"] == record["request_id"]
     assert stat.S_IMODE(thread["path"].stat().st_mode) == 0o600
+    subprocess.run(["bash", str(root / "bin/fm-ext-inbox.sh"), "remove", "--slug", record["slug"]],
+                   env=poster._env_for(home), check=True, capture_output=True)
 thread_files = list((home / "state/ext-outbox").glob("*.thread.json"))
 assert len(thread_files) == 1, thread_files
 poster.save_thread_record(thread["path"], thread["request_id"], T, topic_name="renamed")
