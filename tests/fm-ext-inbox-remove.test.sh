@@ -346,6 +346,7 @@ for kind in ack answer followup final; do
     write_outbox "$home" "$SLUG.$kind.1.failed.json" '{"ok":false}'
     touch -t 202001010000.00 "$(outbox_dir "$home")/$SLUG.$kind.1.failed.json"
     printf 'ext_request_slug=%s\n' "$SLUG" > "$home/state/task-one.meta"
+    # shellcheck disable=SC2016 # Positional parameters expand in the child Bash.
     home_env "$home" env FM_EXT_NOW_OVERRIDE=2000000000 bash -c \
       '. "$1/bin/fm-ext-lib.sh"; fm_ext_outbox_prune "$2/state"' _ "$ROOT" "$home" \
       || fail "retention must complete"
@@ -365,12 +366,14 @@ for kind in ack answer followup final; do
   write_inbox "$home" "$SLUG" "$RID"
   write_outbox "$home" "$SLUG.$kind.1.receipt.json" '{"ok":true}'
   touch -t 202001010000.00 "$(outbox_dir "$home")/$SLUG.$kind.1.receipt.json"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child Bash.
   home_env "$home" env FM_EXT_NOW_OVERRIDE=2000000000 bash -c \
     '. "$1/bin/fm-ext-lib.sh"; fm_ext_outbox_prune "$2/state"' _ "$ROOT" "$home" \
     || fail "retention must complete"
   run_remove "$home" --slug "$SLUG" >/dev/null \
     || fail "retained $kind receipt must still allow removal"
   inbox_present "$home" "$SLUG" && fail "retained receipt must clear inbox"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child Bash.
   home_env "$home" env FM_EXT_NOW_OVERRIDE=2000000000 bash -c \
     '. "$1/bin/fm-ext-lib.sh"; fm_ext_outbox_prune "$2/state"' _ "$ROOT" "$home" \
     || fail "retention after removal must complete"
@@ -389,6 +392,7 @@ for suffix in answer.1.receipt.json answer.1.failed.json noreply.json \
     touch -t 202001010000.00 "$(outbox_dir "$home")/$slug.$suffix"
   done
 done
+# shellcheck disable=SC2016 # Positional parameters expand in the child Bash.
 home_env "$home" env FM_EXT_NOW_OVERRIDE=2000000000 bash -c \
   '. "$1/bin/fm-ext-lib.sh"; fm_ext_outbox_prune "$2/state"; fm_ext_outbox_prune "$2/state"' _ "$ROOT" "$home" \
   || fail "marker retention must complete"
