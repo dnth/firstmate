@@ -2146,7 +2146,8 @@ fm_ext_remove_all() {
 # A decision post's sent, settled, and finalized markers go the same way as its
 # chunk-progress record, so its buttons expire with it.
 fm_ext_outbox_prune() {
-  local state=$1 dir now max_age line file base stem slug mtime age other
+  local state=$1 dir inbox now max_age line file base stem slug mtime age other
+  local inbox_list=''
   local -a doomed thread_doomed
   # An assigned empty array keeps ${#arr[@]} defined under set -u.
   doomed=()
@@ -2158,6 +2159,13 @@ fm_ext_outbox_prune() {
     ''|*[!0-9]*) return 0 ;;
   esac
   max_age=$(fm_ext_retention_max_age_secs)
+  inbox="$state/$FM_EXT_INBOX_DIRNAME"
+  if [ -d "$inbox" ] && [ ! -L "$inbox" ]; then
+    for file in "$inbox"/*.json; do
+      [ -e "$file" ] || continue
+      inbox_list="$inbox_list${file##*/}"$'\n'
+    done
+  fi
   # Removals are queued and applied in batches: a stat and a uname per file is
   # what made this prune take tens of seconds on a mature outbox. A thread
   # record's sibling test still sees the same files the immediate-removal walk
@@ -2194,6 +2202,8 @@ fm_ext_outbox_prune() {
       *.sent.json) stem=${base%.sent.json} ;;
       *) continue ;;
     esac
+    slug=${stem%%.*}
+    fm_ext_inbox_pins "$inbox" "$inbox_list" "$slug" && continue
     if [ -e "$dir/$stem.json" ]; then
       continue
     fi

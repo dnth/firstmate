@@ -888,7 +888,7 @@ The terminal marker itself stays, so a duplicate emit of the same generation is 
 
 Local bridge records and outbound media expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
 A due retention pass drops `state/ext-context/` destination, thread-history, and offer records past that window, keeping all three while their request is still sitting unhandled in the inbox.
-It drops the leftover markers of already retired outbox generations.
+It drops the leftover markers of already retired outbox generations once their request is no longer sitting unhandled in the inbox.
 It removes `state/ext-attachments/<slug>/` folders whose directory modification time is past the window and whose request is no longer sitting unhandled in the inbox.
 The same pass deletes [outbound media](#outbound-media) on that same window: a staged post's copies once the window has passed since the post's receipt or terminal failure (never while its payload is still pending), and screening attestations, sampled video frames, and files pulled from a remote second mate once the window has passed since they were recorded.
 The poll claims its inbox offers before it prunes, and prunes at most once per `FM_EXT_PRUNE_INTERVAL_SECS` (default 3600), so the claim runs first; a prune interrupted by the watcher's check timeout is retried on the next poll whose cadence is due.

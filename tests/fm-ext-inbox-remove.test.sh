@@ -338,4 +338,67 @@ run_remove "$home" --slug "$SLUG" >/dev/null || fail "matching receipts must cle
 inbox_present "$home" "$SLUG" && fail "all-delivered request must be removed"
 inbox_present "$home" "$SLUG2" || fail "all-delivered removal must preserve another slug"
 
+for kind in ack answer followup final; do
+  for mode in receipt task; do
+    home="$TMP_ROOT/retained-failure-$kind-$mode"
+    setup_home "$home"
+    write_inbox "$home" "$SLUG" "$RID"
+    write_outbox "$home" "$SLUG.$kind.1.failed.json" '{"ok":false}'
+    touch -t 202001010000.00 "$(outbox_dir "$home")/$SLUG.$kind.1.failed.json"
+    printf 'ext_request_slug=%s\n' "$SLUG" > "$home/state/task-one.meta"
+    home_env "$home" env FM_EXT_NOW_OVERRIDE=2000000000 bash -c \
+      '. "$1/bin/fm-ext-lib.sh"; fm_ext_outbox_prune "$2/state"' _ "$ROOT" "$home" \
+      || fail "retention must complete"
+    [ -f "$(outbox_dir "$home")/$SLUG.$kind.1.failed.json" ] \
+      || fail "retention must preserve pending inbox failure evidence"
+    args=()
+    [ "$mode" != task ] || args=(--task task-one)
+    if out=$(run_remove "$home" --slug "$SLUG" ${args[@]+"${args[@]}"} 2>&1); then
+      fail "$mode removal must still refuse an expired $kind failure"
+    fi
+    assert_contains "$out" "terminal delivery failure" "retained failure must veto removal"
+    inbox_present "$home" "$SLUG" || fail "retained failure must preserve inbox"
+  done
+
+  home="$TMP_ROOT/retained-receipt-$kind"
+  setup_home "$home"
+  write_inbox "$home" "$SLUG" "$RID"
+  write_outbox "$home" "$SLUG.$kind.1.receipt.json" '{"ok":true}'
+  touch -t 202001010000.00 "$(outbox_dir "$home")/$SLUG.$kind.1.receipt.json"
+  home_env "$home" env FM_EXT_NOW_OVERRIDE=2000000000 bash -c \
+    '. "$1/bin/fm-ext-lib.sh"; fm_ext_outbox_prune "$2/state"' _ "$ROOT" "$home" \
+    || fail "retention must complete"
+  run_remove "$home" --slug "$SLUG" >/dev/null \
+    || fail "retained $kind receipt must still allow removal"
+  inbox_present "$home" "$SLUG" && fail "retained receipt must clear inbox"
+  home_env "$home" env FM_EXT_NOW_OVERRIDE=2000000000 bash -c \
+    '. "$1/bin/fm-ext-lib.sh"; fm_ext_outbox_prune "$2/state"' _ "$ROOT" "$home" \
+    || fail "retention after removal must complete"
+  [ ! -e "$(outbox_dir "$home")/$SLUG.$kind.1.receipt.json" ] \
+    || fail "receipt must expire after inbox removal"
+done
+
+home="$TMP_ROOT/retained-markers"
+setup_home "$home"
+write_inbox "$home" "$SLUG" "$RID"
+for suffix in answer.1.receipt.json answer.1.failed.json noreply.json \
+  answer.1.progress.json thread.json answer.1.posting answer.1.inflight \
+  answer.1.settled.json answer.1.finalized answer.1.sent.json; do
+  for slug in "$SLUG" "$SLUG2"; do
+    write_outbox "$home" "$slug.$suffix" '{}'
+    touch -t 202001010000.00 "$(outbox_dir "$home")/$slug.$suffix"
+  done
+done
+home_env "$home" env FM_EXT_NOW_OVERRIDE=2000000000 bash -c \
+  '. "$1/bin/fm-ext-lib.sh"; fm_ext_outbox_prune "$2/state"; fm_ext_outbox_prune "$2/state"' _ "$ROOT" "$home" \
+  || fail "marker retention must complete"
+for suffix in answer.1.receipt.json answer.1.failed.json noreply.json \
+  answer.1.progress.json thread.json answer.1.posting answer.1.inflight \
+  answer.1.settled.json answer.1.finalized answer.1.sent.json; do
+  [ -f "$(outbox_dir "$home")/$SLUG.$suffix" ] \
+    || fail "pending inbox must pin $suffix"
+  [ ! -e "$(outbox_dir "$home")/$SLUG2.$suffix" ] \
+    || fail "unpinned $suffix must still expire"
+done
+
 pass "ext-inbox removal clears only on a recorded delivery disposition"
