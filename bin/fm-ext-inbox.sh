@@ -5,6 +5,7 @@
 # Usage:
 #   fm-ext-inbox.sh remove --slug <slug>
 #       [--task <task-id>] [--no-reply [--reason "<text>"]]
+#   fm-ext-inbox.sh dismiss --slug <slug> --reason "<text>"
 #
 # The inbox record is `state/ext-inbox/<slug>.json`; the durable delivery
 # records live in `state/ext-outbox/`. A request is cleared only when one of
@@ -39,6 +40,17 @@
 # The receipt path additionally refuses when the latest generation has no
 # receipt at all.
 #
+# `dismiss` marks one request as needing no reply when no reply disposition
+# above fits, for example a duplicate already answered through another request
+# in the same thread, or a malformed message. `--reason` is required and must
+# be one non-empty line. It records `state/ext-outbox/<slug>.noreply.json` with
+# `"disposition": "dismissed"` and the reason, then removes the inbox record.
+# Unlike `--no-reply` it does not check delivery records: it is the explicit,
+# recorded way out when a reply is stuck mid-delivery or failed and the
+# request should no longer block `bin/fm-wake-drain.sh --ack-through`. It still
+# refuses an unsafe inbox record, or an existing no-reply record that carries
+# another disposition.
+#
 # This command is the single owner of inbox removal. Never chain a raw `rm` of
 # `state/ext-inbox/<slug>.json` to an emit: a published payload is not a
 # delivery receipt, and a refused emit must leave the request in place.
@@ -59,6 +71,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: fm-ext-inbox.sh remove --slug <slug>
          [--task <task-id>] [--no-reply [--reason "<text>"]]
+       fm-ext-inbox.sh dismiss --slug <slug> --reason "<text>"
 EOF
 }
 
@@ -74,7 +87,7 @@ refuse() {
 CMD=${1:-}
 case "$CMD" in
   --help|-h) help; exit 0 ;;
-  remove) shift ;;
+  remove|dismiss) shift ;;
   '') usage; exit 2 ;;
   *) usage; exit 2 ;;
 esac
@@ -123,11 +136,22 @@ fm_ext_slug_valid "$SLUG" || { echo "fm-ext-inbox: unsafe slug" >&2; exit 2; }
 if [ -n "$TASK" ]; then
   fm_pr_task_id_valid "$TASK" || { echo "fm-ext-inbox: unsafe task id" >&2; exit 2; }
 fi
-[ "$NO_REPLY" -eq 1 ] || [ "$REASON_SET" -eq 0 ] || {
-  echo "fm-ext-inbox: --reason needs --no-reply" >&2
-  exit 2
-}
-[ "$REASON_SET" -eq 1 ] || REASON='pure acknowledgement'
+if [ "$CMD" = dismiss ]; then
+  [ -z "$TASK" ] && [ "$NO_REPLY" -eq 0 ] || {
+    echo "fm-ext-inbox: dismiss takes only --slug and --reason" >&2
+    exit 2
+  }
+  [ "$REASON_SET" -eq 1 ] || {
+    echo "fm-ext-inbox: dismiss needs --reason \"<why no reply is needed>\"" >&2
+    exit 2
+  }
+else
+  [ "$NO_REPLY" -eq 1 ] || [ "$REASON_SET" -eq 0 ] || {
+    echo "fm-ext-inbox: --reason needs --no-reply" >&2
+    exit 2
+  }
+  [ "$REASON_SET" -eq 1 ] || REASON='pure acknowledgement'
+fi
 case "$REASON" in
   ''|*$'\n'*) echo "fm-ext-inbox: --reason must be one non-empty line" >&2; exit 2 ;;
 esac
@@ -187,6 +211,9 @@ fi
 
 latest_receipt_ok=0
 latest_pending=0
+# Dismissing is the recorded way out of a stuck or failed delivery, so the
+# latest generation's delivery state never refuses it.
+[ "$CMD" != dismiss ] || latest_records=()
 for base in ${latest_records[@]+"${latest_records[@]}"}; do
   rest=${base#"$SLUG".}
   kind=${rest%%.*}
@@ -215,7 +242,9 @@ for base in ${latest_records[@]+"${latest_records[@]}"}; do
 done
 
 disposition=''
-if [ "$NO_REPLY" -eq 1 ]; then
+if [ "$CMD" = dismiss ]; then
+  disposition='dismissed'
+elif [ "$NO_REPLY" -eq 1 ]; then
   [ "$reply_records" -eq 0 ] \
     || refuse "--no-reply is a pure acknowledgement, but delivery records exist for this request"
   disposition='no-reply'
@@ -234,9 +263,9 @@ else
   refuse "no delivery receipt for the latest generation; a published emit is not a delivery"
 fi
 
-# Record the pure-acknowledgement disposition before removing anything, so a
+# Record a no-reply or dismissed disposition before removing anything, so a
 # crash between the two steps leaves the request pending rather than lost.
-if [ "$disposition" = 'no-reply' ]; then
+if [ "$disposition" = 'no-reply' ] || [ "$disposition" = 'dismissed' ]; then
   NOW=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
   case "$NOW" in
     ''|*[!0-9]*) refuse "could not read the current time" ;;
@@ -244,11 +273,12 @@ if [ "$disposition" = 'no-reply' ]; then
   DISPOSITION_JSON=$(jq -cn \
     --arg slug "$SLUG" \
     --arg request_id "$REQUEST_ID" \
+    --arg disposition "$disposition" \
     --arg reason "$REASON" \
     --argjson recorded_at "$NOW" \
-    '{schema_version:1, slug:$slug, disposition:"no-reply", reason:$reason, recorded_at:$recorded_at}
+    '{schema_version:1, slug:$slug, disposition:$disposition, reason:$reason, recorded_at:$recorded_at}
      + if $request_id == "" then {} else {request_id:$request_id} end') \
-    || refuse "could not build the no-reply disposition"
+    || refuse "could not build the $disposition disposition"
   publish_rc=0
   printf '%s\n' "$DISPOSITION_JSON" \
     | fm_ext_private_artifact_publish_stdin_once "$OUTBOX" "$SLUG.noreply.json" 600 \
@@ -258,10 +288,10 @@ if [ "$disposition" = 'no-reply' ]; then
     1)
       # A valid disposition from an interrupted earlier attempt is the record
       # this run needs; anything else at that path is a refusal.
-      [ "$(jq -r '.disposition // empty' "$OUTBOX/$SLUG.noreply.json" 2>/dev/null)" = 'no-reply' ] \
+      [ "$(jq -r '.disposition // empty' "$OUTBOX/$SLUG.noreply.json" 2>/dev/null)" = "$disposition" ] \
         || refuse "state/ext-outbox/$SLUG.noreply.json already exists with another disposition"
       ;;
-    *) refuse "could not record the no-reply disposition" ;;
+    *) refuse "could not record the $disposition disposition" ;;
   esac
 fi
 

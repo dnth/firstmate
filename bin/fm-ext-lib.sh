@@ -2381,6 +2381,67 @@ fm_ext_pending_requests() {
   done
 }
 
+# fm_ext_request_reply_state <slug> [home]: what the outbox records about the
+# replies to one request, across every reply kind and generation. Prints one
+# word, plus the newest ack receipt's mtime for `ack`:
+#   replied        an answer, followup, or final receipt exists
+#   ack <epoch>    the only receipts are acks
+#   emitted        reply records exist, but no receipt (posting, pending, or
+#                  terminally failed delivery)
+#   none           no reply record at all
+fm_ext_request_reply_state() {
+  local slug=$1 home=${2:-${FM_HOME:?}} outbox file base rest kind remainder gen suffix
+  local have_ack=0 newest_ack=0 mtime emitted=0
+  outbox=$(fm_ext_outbox_dir "$home")
+  if [ -d "$outbox" ] && [ ! -L "$outbox" ]; then
+    for file in "$outbox/$slug".*; do
+      [ -f "$file" ] || continue
+      base=${file##*/}
+      rest=${base#"$slug".}
+      kind=${rest%%.*}
+      remainder=${rest#*.}
+      [ "$remainder" != "$rest" ] || continue
+      gen=${remainder%%.*}
+      suffix=${remainder#*.}
+      fm_ext_reply_kind_valid "$kind" || continue
+      fm_ext_generation_valid "$gen" || continue
+      case "$suffix" in
+        receipt.json)
+          fm_ext_private_artifact_file_valid "$outbox" "$base" 600 || continue
+          if [ "$kind" != ack ]; then
+            printf 'replied\n'
+            return 0
+          fi
+          have_ack=1
+          mtime=$(fm_ext_file_mtime "$file") || mtime=0
+          case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
+          [ "$mtime" -le "$newest_ack" ] || newest_ack=$mtime
+          ;;
+        json|posting|failed.json|progress.json) emitted=1 ;;
+      esac
+    done
+  fi
+  if [ "$have_ack" -eq 1 ]; then
+    printf 'ack %s\n' "$newest_ack"
+  elif [ "$emitted" -eq 1 ]; then
+    printf 'emitted\n'
+  else
+    printf 'none\n'
+  fi
+}
+
+# Seconds an inbox request may sit with only ack receipts before every main
+# drain warns that it still waits on a real answer: FM_EXT_ACK_ONLY_WARN_SECS,
+# default 7200 (2 hours). A non-numeric value resets to the default.
+fm_ext_ack_only_warn_secs() {
+  local raw=${FM_EXT_ACK_ONLY_WARN_SECS-}
+  case "$raw" in
+    ''|*[!0-9]*) raw=7200 ;;
+  esac
+  [ "${#raw}" -le 18 ] || raw=7200
+  printf '%s\n' "$raw"
+}
+
 # --- task meta link (not x_request=) ----------------------------------------
 
 fm_ext_meta_get() {

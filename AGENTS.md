@@ -431,7 +431,7 @@ When X mode is enabled, load `fmx-respond` on an `x-mention <request_id>`, `x-mo
 The sibling local Discord bridge ships inert until the home opts in with `config/ext-bridge` plus a mode-0600 secret file.
 That opt-in is consent for local inbox intake and Discord follow-ups through the Hermes Gateway plugin, not authority for destructive, irreversible, or security-sensitive action.
 It is also not by itself standing authority to change projects: only an author-scoped allowlist rule carries that, and a request admitted by a broader rule needs the captain's confirmation first.
-On an `ext-request <slug>` check wake or a drain's `EXT REQUESTS AWAITING ANSWER` section, before opening a topic thread no captain request started, or before attaching screenshots or a recording to a post, load `ext-respond`, which owns activation mechanics, the seam's transport boundary, media screening, and follow-ups.
+On an `ext-request <slug>` check wake, a drain's `EXT REQUESTS AWAITING ANSWER` or `EXT REQUESTS ACKED BUT NOT ANSWERED` section, or a wake acknowledgement refused for unanswered requests, before opening a topic thread no captain request started, or before attaching screenshots or a recording to a post, load `ext-respond`, which owns activation mechanics, the seam's transport boundary, media screening, and follow-ups.
 
 ## Captain instruction precedence
 
