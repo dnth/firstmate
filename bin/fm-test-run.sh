@@ -138,7 +138,7 @@ family_for_basename() {
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
-    fm-hermes-harness.test.sh|fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
+    fm-hermes-harness.test.sh|fm-hermes-sandbox.test.sh|fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-omp-fleet-hooks.test.sh|fm-omp-harness.test.sh|fm-operational-input.test.sh|\
     fm-pi-compatible-family.test.sh|fm-pi-primary-types.test.sh|fm-reflect-skill.test.sh|\
     fm-cleanup-skill.test.sh|\
@@ -437,6 +437,7 @@ tests/fm-guard-stale-banner.test.sh 5898
 tests/fm-herdr-session-cleanup.test.sh 6849
 tests/fm-herdr-submit-confirm-live-e2e.test.sh 22
 tests/fm-hermes-harness.test.sh 151616
+tests/fm-hermes-sandbox.test.sh 3000
 tests/fm-hermes-live-e2e.test.sh 44
 tests/fm-idle-sleep-watch.test.sh 4560
 tests/fm-idle-sleep.test.sh 13959
@@ -1018,6 +1019,9 @@ families_for_changed_path() {
     bin/fm-classify-lib.sh)
       printf '%s\n' watcher-wake-lock
       printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-hermes-sandbox.sh)
+      printf '%s\n' "__script__:fm-hermes-sandbox.test.sh"
       ;;
     bin/fm-inbox.sh|bin/fm-inbox-result*|bin/fm-inbox-hermes-adapter.sh)
       printf '%s\n' "__script__:fm-inbox.test.sh"

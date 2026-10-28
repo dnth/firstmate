@@ -16,6 +16,11 @@ Enable it in that profile's Hermes `config.yaml` `plugins.enabled` list.
 Do not add this plugin to a crewmate profile that Firstmate's Hermes turn-end hook manages.
 The gateway process is `hermes gateway`, not `hermes chat --tui`.
 
+## Testing a gateway
+
+Gateway validation, tests, and ad-hoc checks must use foreground `hermes gateway run` through `bin/fm-hermes-sandbox.sh`, whose header owns the sandbox contract; `tests/fm-hermes-sandbox.test.sh` proves confinement.
+Never use gateway service-control subcommands (install, start, restart, stop, or uninstall) for checks; the sandbox disconnects the real user manager.
+
 ## Local Firstmate bridge
 
 Point the gateway at the Firstmate home with `FM_HOME` in the gateway environment.
