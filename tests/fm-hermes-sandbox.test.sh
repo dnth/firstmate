@@ -167,6 +167,13 @@ for destination in home hermes config data cache state home/.config home/.config
 done
 pass "the guard refuses escaping symlinks at every sandbox destination"
 
+cat > "$TMP_ROOT/run-gateway" <<'SH'
+#!/usr/bin/env bash
+touch "$1"
+exec "$2" gateway run
+SH
+chmod +x "$TMP_ROOT/run-gateway"
+
 for entry in hermes-gateway.service hermes-gateway-fmcomms.service nested/other.service linked/other.service; do
   root="$TMP_ROOT/unit-link-${entry//\//-}"
   sandbox_units="$root/home/.config/systemd/user"
@@ -181,7 +188,7 @@ for entry in hermes-gateway.service hermes-gateway-fmcomms.service nested/other.
   marker="$root/command-ran"
   rc=0
   HOME="$FAKE_HOME" "$GUARD" --root "$root" -- \
-    bash -c 'touch "$1"; exec "$2" gateway run' _ "$marker" "$STUB" >/dev/null 2>&1 || rc=$?
+    "$TMP_ROOT/run-gateway" "$marker" "$STUB" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 78 ] || fail "the guard accepted an escaping unit-tree entry $entry (exit $rc)"
   [ ! -e "$marker" ] || fail "the guard ran the command with an escaping unit-tree entry $entry"
   cmp -s "$TMP_ROOT/original.service" "$UNIT" || fail "unit-tree refusal changed the fake-real unit"
