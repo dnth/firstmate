@@ -166,6 +166,40 @@ for destination in home hermes config data cache state home/.config home/.config
 done
 pass "the guard refuses escaping symlinks at every sandbox destination"
 
+for entry in hermes-gateway.service hermes-gateway-fmcomms.service nested/other.service linked/other.service; do
+  root="$TMP_ROOT/unit-link-${entry//\//-}"
+  sandbox_units="$root/home/.config/systemd/user"
+  mkdir -p "$sandbox_units"
+  if [ "$entry" = linked/other.service ]; then
+    mkdir -p "$root/unit-targets"
+    ln -s "$root/unit-targets" "$sandbox_units/linked"
+  else
+    mkdir -p "$sandbox_units/$(dirname "$entry")"
+  fi
+  ln -s "$UNIT" "$sandbox_units/$entry"
+  marker="$root/command-ran"
+  rc=0
+  HOME="$FAKE_HOME" "$GUARD" --root "$root" -- \
+    bash -c 'touch "$1"; exec "$2" gateway run' _ "$marker" "$STUB" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 78 ] || fail "the guard accepted an escaping unit-tree entry $entry (exit $rc)"
+  [ ! -e "$marker" ] || fail "the guard ran the command with an escaping unit-tree entry $entry"
+  cmp -s "$TMP_ROOT/original.service" "$UNIT" || fail "unit-tree refusal changed the fake-real unit"
+done
+pass "the guard refuses escaping default, profile, nested, and directory-linked unit entries"
+
+root="$TMP_ROOT/confined-unit-link"
+sandbox_units="$root/home/.config/systemd/user"
+mkdir -p "$sandbox_units" "$root/unit-targets"
+printf 'stale\n' > "$root/unit-targets/gateway.service"
+ln -s "$root/unit-targets/gateway.service" "$sandbox_units/hermes-gateway.service"
+ln -s "$sandbox_units" "$sandbox_units/loop"
+HOME="$FAKE_HOME" "$GUARD" --root "$root" -- "$STUB" gateway run >/dev/null 2>&1 ||
+  fail "the guard refused confined unit-tree symlinks"
+grep -Fq "HERMES_HOME=$root/hermes" "$root/unit-targets/gateway.service" ||
+  fail "the confined unit symlink did not receive the sandbox rewrite"
+cmp -s "$TMP_ROOT/original.service" "$UNIT" || fail "the confined unit rewrite changed the fake-real unit"
+pass "the guard accepts confined unit symlinks and terminates directory cycles"
+
 root="$TMP_ROOT/internal-link"
 mkdir -p "$root/physical-home"
 ln -s "$root/physical-home" "$root/home"

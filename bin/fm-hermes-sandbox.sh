@@ -183,18 +183,32 @@ S_HERMES=$ROOT_REAL/hermes
 command -v python3 >/dev/null 2>&1 || refuse "python3 is required to resolve sandbox paths"
 
 resolve_destination() {
-  python3 - "$ROOT_REAL" "$1" "${REAL_HOMES[@]+"${REAL_HOMES[@]}"}" <<'PYTHON'
+  python3 - "$ROOT_REAL" "$1" "${2:-}" "${REAL_HOMES[@]+"${REAL_HOMES[@]}"}" <<'PYTHON'
 import pathlib
 import sys
 
-root, target, *homes = map(pathlib.Path, sys.argv[1:])
-target = target.resolve()
-if root not in target.parents:
-    sys.exit("sandbox destination escapes root: " + str(target))
-for home in homes:
-    units = (home / ".config/systemd/user").resolve()
-    if target == home or target in home.parents or target == units or units in target.parents:
-        sys.exit("sandbox destination overlaps real home or unit directory: " + str(target))
+root, target = map(pathlib.Path, sys.argv[1:3])
+homes = list(map(pathlib.Path, sys.argv[4:]))
+
+def validate(path):
+    path = path.resolve()
+    if root not in path.parents:
+        sys.exit("sandbox destination escapes root: " + str(path))
+    for home in homes:
+        units = (home / ".config/systemd/user").resolve()
+        if path == home or path in home.parents or path == units or units in path.parents:
+            sys.exit("sandbox destination overlaps real home or unit directory: " + str(path))
+    return path
+
+target = validate(target)
+if sys.argv[3] == "tree":
+    pending = [target]
+    visited = set()
+    while pending:
+        entry = validate(pending.pop())
+        if entry.is_dir() and entry not in visited:
+            visited.add(entry)
+            pending.extend(entry.iterdir())
 print(target)
 PYTHON
 }
@@ -205,7 +219,7 @@ S_DATA=$(resolve_destination "$S_DATA") || refuse "unsafe XDG_DATA_HOME"
 S_CACHE=$(resolve_destination "$S_CACHE") || refuse "unsafe XDG_CACHE_HOME"
 S_STATE=$(resolve_destination "$S_STATE") || refuse "unsafe XDG_STATE_HOME"
 S_HERMES=$(resolve_destination "$S_HERMES") || refuse "unsafe HERMES_HOME"
-S_UNITS=$(resolve_destination "$S_HOME/.config/systemd/user") || refuse "unsafe user unit directory"
+S_UNITS=$(resolve_destination "$S_HOME/.config/systemd/user" tree) || refuse "unsafe user unit directory"
 
 mkdir -p "$S_HOME" "$S_CONFIG" "$S_DATA" "$S_CACHE" "$S_STATE" "$S_HERMES" "$S_UNITS" ||
   die "cannot create the sandbox layout under $ROOT_REAL"
