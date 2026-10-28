@@ -372,7 +372,8 @@ See   data/dup-task-alpha/notes.md for context." "Guide renders the connect step
 
   out=$(run_spawn "$home" "$fakebin" dup-task-bravo "$proj" claude --mode no-mistakes --yolo off \
     --allow-duplicate-brief dup-task-charlie)
-  [ $? -ne 0 ] || fail "an override naming a different task allowed the duplicate"
+  status=$?
+  [ "$status" -ne 0 ] || fail "an override naming a different task allowed the duplicate"
   assert_contains "$out" "same Task section as task dup-task-alpha" "a wrong-task override hid the duplicate"
 
   out=$(run_spawn "$home" "$fakebin" dup-task-bravo "$proj" claude --mode no-mistakes --yolo off \
@@ -383,7 +384,8 @@ See   data/dup-task-alpha/notes.md for context." "Guide renders the connect step
   # The full acceptance-criteria block is compared on its own.
   write_shared_brief "$home" dup-task-delta "A different task entirely." "Guide renders the connect steps."
   out=$(run_spawn "$home" "$fakebin" dup-task-delta "$proj" claude --mode no-mistakes --yolo off)
-  [ $? -ne 0 ] || fail "spawn accepted a brief carrying another task's acceptance criteria"
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a brief carrying another task's acceptance criteria"
   assert_contains "$out" "same acceptance criteria as task dup-task-alpha" "criteria duplicate was not refused"
 
   # A distinct brief passes the guard.
@@ -395,14 +397,15 @@ See   data/dup-task-alpha/notes.md for context." "Guide renders the connect step
   write_shared_brief "$home" dup-scout-foxtrot "Fix the connect guide. See the notes for context." "Unused."
   sed -i.bak 's/^See   .*/See the notes for context./' "$home/data/dup-task-alpha/brief.md"
   out=$(run_spawn "$home" "$fakebin" dup-scout-foxtrot "$proj" claude --scout)
-  [ $? -ne 0 ] || fail "scout spawn accepted a duplicate Task section"
+  status=$?
+  [ "$status" -ne 0 ] || fail "scout spawn accepted a duplicate Task section"
   assert_contains "$out" "scout brief for dup-scout-foxtrot has the same Task section as task dup-task-alpha" \
     "scout duplicate was not refused"
   pass "fm-spawn: a fresh spawn refuses another task's Task section or criteria unless that task is named"
 }
 
 test_batch_spawn_forwards_duplicate_brief_override() {
-  local kind syntax rec home proj fakebin out
+  local kind syntax rec home proj fakebin out status
   local spawn_args=() override_args=()
   for kind in ship scout; do
     for syntax in separate equals; do
@@ -419,7 +422,8 @@ EOF
         spawn_args+=(--mode no-mistakes --yolo off)
       fi
       out=$(run_spawn "$home" "$fakebin" "batch-bravo=$proj" "${spawn_args[@]}")
-      [ $? -ne 0 ] || fail "batch $kind accepted a duplicate without an override"
+      status=$?
+      [ "$status" -ne 0 ] || fail "batch $kind accepted a duplicate without an override"
       assert_contains "$out" "same Task section as task batch-alpha" "batch $kind did not reach the duplicate guard"
 
       if [ "$syntax" = separate ]; then
@@ -432,7 +436,8 @@ EOF
       assert_not_contains "$out" "same Task section" "batch $kind refused the named duplicate"
 
       out=$(run_spawn "$home" "$fakebin" "batch-bravo=$proj" "${spawn_args[@]}" --allow-duplicate-brief batch-charlie)
-      [ $? -ne 0 ] || fail "batch $kind accepted an override naming another task"
+      status=$?
+      [ "$status" -ne 0 ] || fail "batch $kind accepted an override naming another task"
       assert_contains "$out" "same Task section as task batch-alpha" "batch $kind bypassed the guard for an unnamed task"
       assert_absent "$home/state/batch-bravo.meta" "batch fixture unexpectedly published task metadata"
     done
@@ -441,7 +446,7 @@ EOF
 }
 
 test_spawn_duplicate_brief_scope() {
-  local rec home proj fakebin out
+  local rec home proj fakebin out status
   rec=$(make_home duplicate-scope)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -458,11 +463,13 @@ EOF
   assert_contains "$out" "same Task section as task dup-old-golf" "a live task's old brief was not compared"
 
   out=$(run_spawn "$home" "$fakebin" dup-new-hotel --relaunch --allow-duplicate-brief dup-old-golf)
-  [ $? -ne 0 ] || fail "--relaunch accepted --allow-duplicate-brief"
+  status=$?
+  [ "$status" -ne 0 ] || fail "--relaunch accepted --allow-duplicate-brief"
   assert_contains "$out" "--allow-duplicate-brief applies only to fresh ship and scout spawns" \
     "--relaunch did not refuse the override flag"
   out=$(run_spawn "$home" "$fakebin" dup-new-hotel "$proj" claude --mode no-mistakes --yolo off --allow-duplicate-brief)
-  [ $? -ne 0 ] || fail "--allow-duplicate-brief accepted no task id"
+  status=$?
+  [ "$status" -ne 0 ] || fail "--allow-duplicate-brief accepted no task id"
   assert_contains "$out" "--allow-duplicate-brief requires a value" "a bare override flag was accepted"
   pass "fm-spawn: the duplicate-brief guard covers live and recent briefs only, and fresh spawns only"
 }
