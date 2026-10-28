@@ -38,12 +38,13 @@
 #   with one cd before refusing, zellij and cmux refuse a live endpoint because
 #   probing its cwd would inject into the harness, and orca always refuses.
 #   A fresh ship or scout spawn refuses a brief that reuses another task's
-#   content: its normalized "# Task" section, or its full acceptance-criteria
-#   block, exactly matching that of another task in this home that is live
+#   content: its normalized "# Task" section, or all "- AC<number>:" lines under
+#   "# Acceptance criteria", exactly matching that of another task in this home that is live
 #   (state/<other>.meta exists) or whose data/<other>/brief.md changed in the
 #   last 7 days. Normalization collapses whitespace and drops every word that
-#   contains the brief's own task id (the id, its branch, its paths), so scaffold
-#   boilerplate never matches. The check is plain text over those briefs only.
+#   contains the brief's own task id (including its branch and paths).
+#   Empty normalized sections never match.
+#   The check is plain text over those briefs only, before endpoint creation.
 #   --allow-duplicate-brief <other-task-id> permits deliberate reuse of exactly
 #   that task's content; a match against any other task still refuses. A
 #   relaunch reuses its own brief by design and skips the check, so the flag is
