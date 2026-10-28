@@ -1546,6 +1546,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   [ -z "$ACCEPTED_LOCAL_BASE" ] || shared_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
   [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ] || shared_args+=(--allow-project-omp-extensions)
+  [ "$ALLOW_DUPLICATE_BRIEF_SET" -eq 0 ] || shared_args+=(--allow-duplicate-brief "$ALLOW_DUPLICATE_BRIEF")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.

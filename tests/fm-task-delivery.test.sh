@@ -401,6 +401,45 @@ See   data/dup-task-alpha/notes.md for context." "Guide renders the connect step
   pass "fm-spawn: a fresh spawn refuses another task's Task section or criteria unless that task is named"
 }
 
+test_batch_spawn_forwards_duplicate_brief_override() {
+  local kind syntax rec home proj fakebin out
+  local spawn_args=() override_args=()
+  for kind in ship scout; do
+    for syntax in separate equals; do
+      rec=$(make_home "batch-duplicate-$kind-$syntax")
+      IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+      write_shared_brief "$home" batch-alpha "Repair the connect guide." "Guide steps render."
+      write_shared_brief "$home" batch-bravo "Repair the connect guide." "Links resolve."
+      spawn_args=(--harness claude)
+      if [ "$kind" = scout ]; then
+        spawn_args+=(--scout)
+      else
+        spawn_args+=(--mode no-mistakes --yolo off)
+      fi
+      out=$(run_spawn "$home" "$fakebin" "batch-bravo=$proj" "${spawn_args[@]}")
+      [ $? -ne 0 ] || fail "batch $kind accepted a duplicate without an override"
+      assert_contains "$out" "same Task section as task batch-alpha" "batch $kind did not reach the duplicate guard"
+
+      if [ "$syntax" = separate ]; then
+        override_args=(--allow-duplicate-brief batch-alpha)
+      else
+        override_args=(--allow-duplicate-brief=batch-alpha)
+      fi
+      out=$(run_spawn "$home" "$fakebin" "batch-bravo=$proj" "${spawn_args[@]}" "${override_args[@]}")
+      assert_contains "$out" "reuses the Task section of task batch-alpha" "batch $kind lost the $syntax override"
+      assert_not_contains "$out" "same Task section" "batch $kind refused the named duplicate"
+
+      out=$(run_spawn "$home" "$fakebin" "batch-bravo=$proj" "${spawn_args[@]}" --allow-duplicate-brief batch-charlie)
+      [ $? -ne 0 ] || fail "batch $kind accepted an override naming another task"
+      assert_contains "$out" "same Task section as task batch-alpha" "batch $kind bypassed the guard for an unnamed task"
+      assert_absent "$home/state/batch-bravo.meta" "batch fixture unexpectedly published task metadata"
+    done
+  done
+  pass "fm-spawn: ship and scout batches forward the specific duplicate-brief override"
+}
+
 test_spawn_duplicate_brief_scope() {
   local rec home proj fakebin out
   rec=$(make_home duplicate-scope)
@@ -1064,6 +1103,7 @@ test_remote_secondmate_refuses_placeholder_before_endpoint_access
 test_scout_relaunch_validates_brief_and_pending_note
 test_spawn_allows_legacy_brief_until_completion_gate
 test_spawn_refuses_a_duplicate_brief
+test_batch_spawn_forwards_duplicate_brief_override
 test_spawn_duplicate_brief_scope
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
