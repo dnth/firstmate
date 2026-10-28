@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-hermes-sandbox.sh - run a Hermes command with its home variables confined
-# to a throwaway directory, so nothing it starts can rewrite the real user
-# systemd units.
+# to a throwaway directory and disconnect user service-manager access.
+# Gateway checks must use foreground `gateway run`, never service control.
 #
 # Why this exists: on a gateway start Hermes rewrites
 # `Path.home()/.config/systemd/user/hermes-gateway*.service` when the generated
@@ -16,12 +16,11 @@
 # cannot prove that.
 #
 # Usage:
-#   fm-hermes-sandbox.sh [--root <dir>] [--keep] -- <command> [args...]
+#   fm-hermes-sandbox.sh [--root <dir>] -- <command> [args...]
 #
 #   --root <dir>   Sandbox root to use. Created if missing, never removed by
 #                  this script. Default: a fresh mktemp -d under ${TMPDIR:-/tmp}
-#                  removed on exit unless --keep is given.
-#   --keep         Keep the default throwaway root and print its path on stderr.
+#                  removed on exit.
 #   -h, --help     print this header.
 #
 # Environment inside the command:
@@ -29,14 +28,16 @@
 #   XDG_CONFIG_HOME=<root>/config
 #   XDG_DATA_HOME, XDG_CACHE_HOME, XDG_STATE_HOME also resolve under <root>.
 #   Every inherited value of those variables is replaced, never merged.
-#   `PATH`, `TMPDIR`, `XDG_RUNTIME_DIR`, and the working directory are unchanged.
+#   XDG_RUNTIME_DIR is unset and DBUS_SESSION_BUS_ADDRESS points to /dev/null,
+#   disconnecting commands from the real user service manager.
+#   `PATH`, `TMPDIR`, and the working directory are unchanged.
+#   python3 is required to resolve filesystem destinations before creating them.
 #
 # Refusals (exit 78):
-#   - <root> is, contains, or sits inside the caller's real home, the account's
-#     passwd home, or either home's `.config/systemd/user` directory.
+#   - <root> is or contains the caller's real home or the account's passwd
+#     home, or sits inside either home's `.config/systemd/user` directory.
 #   - any sandbox variable fails to resolve inside <root>.
-#   - the `Path.home()` probe escapes the sandbox home (skipped when python3 is
-#     unavailable).
+#   - python3 is unavailable or the `Path.home()` probe escapes the sandbox home.
 #
 # Exit status:
 #   the command's own status, or 64 for a usage error, 78 for a refusal, and 70
@@ -51,7 +52,7 @@
 #
 # Typical use:
 #   bin/fm-hermes-sandbox.sh -- hermes gateway run
-#   bin/fm-hermes-sandbox.sh --root /tmp/fm-gw -- hermes gateway install
+#   bin/fm-hermes-sandbox.sh --root /tmp/fm-gw -- hermes gateway run
 set -u
 
 PROG=fm-hermes-sandbox
@@ -72,7 +73,6 @@ die() {
 
 ROOT=
 ROOT_GIVEN=0
-KEEP=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --root)
@@ -80,15 +80,6 @@ while [ "$#" -gt 0 ]; do
       ROOT=$2
       ROOT_GIVEN=1
       shift 2
-      ;;
-    --root=*)
-      ROOT=${1#--root=}
-      ROOT_GIVEN=1
-      shift
-      ;;
-    --keep)
-      KEEP=1
-      shift
       ;;
     -h|--help)
       usage
@@ -109,7 +100,7 @@ done
 CLEANUP=
 if [ "$ROOT_GIVEN" -eq 0 ]; then
   ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-hermes-sandbox.XXXXXX") || die "cannot create a sandbox root"
-  [ "$KEEP" -eq 1 ] || CLEANUP=$ROOT
+  CLEANUP=$ROOT
 fi
 mkdir -p "$ROOT" || die "cannot create sandbox root $ROOT"
 
@@ -189,29 +180,43 @@ S_CACHE=$ROOT_REAL/cache
 S_STATE=$ROOT_REAL/state
 S_HERMES=$ROOT_REAL/hermes
 
-mkdir -p "$S_HOME" "$S_CONFIG" "$S_DATA" "$S_CACHE" "$S_STATE" "$S_HERMES" ||
+command -v python3 >/dev/null 2>&1 || refuse "python3 is required to resolve sandbox paths"
+
+resolve_destination() {
+  python3 - "$ROOT_REAL" "$1" "${REAL_HOMES[@]+"${REAL_HOMES[@]}"}" <<'PYTHON'
+import pathlib
+import sys
+
+root, target, *homes = map(pathlib.Path, sys.argv[1:])
+target = target.resolve()
+if root not in target.parents:
+    sys.exit("sandbox destination escapes root: " + str(target))
+for home in homes:
+    units = (home / ".config/systemd/user").resolve()
+    if target == home or target in home.parents or target == units or units in target.parents:
+        sys.exit("sandbox destination overlaps real home or unit directory: " + str(target))
+print(target)
+PYTHON
+}
+
+S_HOME=$(resolve_destination "$S_HOME") || refuse "unsafe HOME"
+S_CONFIG=$(resolve_destination "$S_CONFIG") || refuse "unsafe XDG_CONFIG_HOME"
+S_DATA=$(resolve_destination "$S_DATA") || refuse "unsafe XDG_DATA_HOME"
+S_CACHE=$(resolve_destination "$S_CACHE") || refuse "unsafe XDG_CACHE_HOME"
+S_STATE=$(resolve_destination "$S_STATE") || refuse "unsafe XDG_STATE_HOME"
+S_HERMES=$(resolve_destination "$S_HERMES") || refuse "unsafe HERMES_HOME"
+S_UNITS=$(resolve_destination "$S_HOME/.config/systemd/user") || refuse "unsafe user unit directory"
+
+mkdir -p "$S_HOME" "$S_CONFIG" "$S_DATA" "$S_CACHE" "$S_STATE" "$S_HERMES" "$S_UNITS" ||
   die "cannot create the sandbox layout under $ROOT_REAL"
 if [ "$ROOT_GIVEN" -eq 0 ]; then
   chmod 700 "$ROOT_REAL" 2>/dev/null || true
 fi
 
-for pair in "HOME=$S_HOME" "XDG_CONFIG_HOME=$S_CONFIG" "XDG_DATA_HOME=$S_DATA" \
-  "XDG_CACHE_HOME=$S_CACHE" "XDG_STATE_HOME=$S_STATE" "HERMES_HOME=$S_HERMES"; do
-  value=${pair#*=}
-  [ -n "$value" ] || refuse "$pair resolved to an empty path"
-  case "$value/" in
-    "$ROOT_REAL"/*) ;;
-    *) refuse "$pair resolved outside the sandbox root" ;;
-  esac
-done
-
-if command -v python3 >/dev/null 2>&1; then
-  probe=$(HOME="$S_HOME" XDG_CONFIG_HOME="$S_CONFIG" HERMES_HOME="$S_HERMES" \
-    python3 -c 'import pathlib; print(pathlib.Path.home())' 2>/dev/null) ||
-    refuse "the Path.home() probe could not run, so confinement is unproven"
-  [ "$probe" = "$S_HOME" ] ||
-    refuse "Path.home() resolved to $probe outside the sandbox home $S_HOME"
-fi
+probe=$(HOME="$S_HOME" python3 -c 'import pathlib; print(pathlib.Path.home().resolve())' 2>/dev/null) ||
+  refuse "the Path.home() probe could not run, so confinement is unproven"
+[ "$probe" = "$S_HOME" ] ||
+  refuse "Path.home() resolved to $probe outside the sandbox home $S_HOME"
 
 HASH_CMD=()
 if command -v sha256sum >/dev/null 2>&1; then
@@ -247,6 +252,8 @@ printf '%s: HOME=%s HERMES_HOME=%s\n' "$PROG" "$S_HOME" "$S_HERMES" >&2
   export XDG_CACHE_HOME="$S_CACHE"
   export XDG_STATE_HOME="$S_STATE"
   export HERMES_HOME="$S_HERMES"
+  unset XDG_RUNTIME_DIR
+  export DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null
   exec "$@"
 )
 status=$?
@@ -257,10 +264,6 @@ if [ "$before" != "$after" ]; then
   printf '%s\n' "$before" >&2
   printf '%s\n' "$after" >&2
   exit 70
-fi
-
-if [ "$KEEP" -eq 1 ] && [ "$ROOT_GIVEN" -eq 0 ]; then
-  printf '%s: kept sandbox root %s\n' "$PROG" "$ROOT_REAL" >&2
 fi
 
 exit "$status"

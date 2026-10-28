@@ -18,8 +18,8 @@ The gateway process is `hermes gateway`, not `hermes chat --tui`.
 
 ## Testing a gateway
 
-Never start or install a gateway from a validation run, test, or ad-hoc check against the real `$HOME` or the real `HERMES_HOME`.
-Run it through `bin/fm-hermes-sandbox.sh`, whose header owns the sandbox contract, the subcommands that rewrite the user unit, and the refusal cases; `tests/fm-hermes-sandbox.test.sh` is the regression that keeps it honest.
+Gateway validation, tests, and ad-hoc checks must use foreground `hermes gateway run` through `bin/fm-hermes-sandbox.sh`, whose header owns the sandbox contract; `tests/fm-hermes-sandbox.test.sh` proves confinement.
+Never use gateway service-control subcommands (install, start, restart, stop, or uninstall) for checks; the sandbox disconnects the real user manager.
 
 ## Local Firstmate bridge
 

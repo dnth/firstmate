@@ -98,11 +98,16 @@ env_out=$(
 ) || fail "the guard refused a valid sandbox root"
 OVERRIDE_REAL=$(cd "$OVERRIDE" && pwd -P)
 for pair in "HOME=$OVERRIDE_REAL/home" "HERMES_HOME=$OVERRIDE_REAL/hermes" \
-  "XDG_CONFIG_HOME=$OVERRIDE_REAL/config" "XDG_DATA_HOME=$OVERRIDE_REAL/data"; do
+  "XDG_CONFIG_HOME=$OVERRIDE_REAL/config" "XDG_DATA_HOME=$OVERRIDE_REAL/data" \
+  "XDG_CACHE_HOME=$OVERRIDE_REAL/cache" "XDG_STATE_HOME=$OVERRIDE_REAL/state" \
+  "DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null"; do
   printf '%s\n' "$env_out" | grep -Fxq "$pair" ||
     fail "the guard did not set $pair"
 done
-pass "the guard replaces every inherited home variable"
+if printf '%s\n' "$env_out" | grep -q '^XDG_RUNTIME_DIR='; then
+  fail "the guard inherited the user runtime directory"
+fi
+pass "the guard replaces every inherited home variable and disconnects the user manager"
 
 # 4. Roots that could still reach the real units are refused before anything
 #    runs.
@@ -135,28 +140,64 @@ FM_HERMES_SANDBOX_WATCH_HOMES="$FAKE_HOME" \
 reset_unit
 pass "the guard tripwire fails when a watched real unit changes"
 
-# 7. A default root is cleaned up; --keep leaves it for inspection.
-kept_line=$("$GUARD" --keep -- env 2>&1 >/dev/null | grep -F 'kept sandbox root' || true)
-kept_root=${kept_line##*kept sandbox root }
-[ -n "$kept_root" ] || fail "the guard did not report a kept default root"
-[ -d "$kept_root" ] || fail "the guard did not keep the requested default root"
-rm -rf "$kept_root"
+# 7. A default root is cleaned up; explicit roots are retained.
 tmp_home=$("$GUARD" -- env 2>/dev/null | sed -n 's/^HOME=//p') ||
   fail "the guard failed a default-root run"
 [ -n "$tmp_home" ] || fail "the guard printed no sandbox HOME"
 [ ! -d "$tmp_home" ] || fail "the guard left its default sandbox root behind"
-pass "the guard cleans a default root and keeps one on request"
+[ -d "$SANDBOX" ] || fail "the guard removed an explicit sandbox root"
+for option in --keep "--root=$TMP_ROOT/alias"; do
+  rc=0
+  "$GUARD" "$option" -- touch "$TMP_ROOT/unsupported-ran" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 64 ] || fail "the guard accepted unsupported option $option"
+  [ ! -e "$TMP_ROOT/unsupported-ran" ] || fail "an unsupported option ran the command"
+done
+pass "the guard cleans default roots and supports only explicit --root retention"
+
+for destination in home hermes config data cache state home/.config home/.config/systemd home/.config/systemd/user; do
+  root="$TMP_ROOT/symlink-${destination//\//-}"
+  mkdir -p "$root/$(dirname "$destination")"
+  ln -s "$FAKE_HOME" "$root/$destination"
+  rc=0
+  HOME="$FAKE_HOME" "$GUARD" --root "$root" -- touch "$TMP_ROOT/escaped" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 78 ] || fail "the guard accepted an escaping $destination symlink"
+  [ ! -e "$TMP_ROOT/escaped" ] || fail "the guard executed through an escaping $destination symlink"
+  cmp -s "$TMP_ROOT/original.service" "$UNIT" || fail "symlink refusal changed the fake-real unit"
+done
+pass "the guard refuses escaping symlinks at every sandbox destination"
+
+root="$TMP_ROOT/internal-link"
+mkdir -p "$root/physical-home"
+ln -s "$root/physical-home" "$root/home"
+HOME="$FAKE_HOME" "$GUARD" --root "$root" -- "$STUB" gateway run >/dev/null 2>&1 ||
+  fail "the guard refused a confined physical HOME"
+[ -f "$root/physical-home/.config/systemd/user/hermes-gateway.service" ] ||
+  fail "the confined physical HOME did not receive the unit"
+pass "the guard supports physical destinations inside the sandbox"
+
+if command -v systemctl >/dev/null 2>&1; then
+  rc=0
+  XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
+    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" \
+    "$GUARD" --root "$TMP_ROOT/manager" -- systemctl --user show-environment >"$TMP_ROOT/manager.out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the sandbox reached a user service manager"
+  pass "real systemctl cannot reach the user manager through the sandbox"
+fi
 
 # 8. The installed Hermes resolves its unit inside the sandbox when it is
 #    available; without it, an explicit skip names what is missing.
 HERMES_RUNTIME=${FM_TEST_HERMES_PYTHON:-$HOME/.hermes/hermes-agent/venv/bin/python}
 REAL_UNITS_BEFORE_REAL=$(hash_dir "$REAL_UNITS")
 if [ -x "$HERMES_RUNTIME" ] && "$HERMES_RUNTIME" -c 'import hermes_cli.gateway' >/dev/null 2>&1; then
-  python_out=$("$GUARD" --root "$TMP_ROOT/real-hermes" -- "$HERMES_RUNTIME" -c '
+  reset_unit
+  python_out=$(HOME="$FAKE_HOME" "$GUARD" --root "$TMP_ROOT/real-hermes" -- "$HERMES_RUNTIME" -c '
 import pathlib
 from hermes_cli.gateway import get_systemd_unit_path, refresh_systemd_unit_if_needed
-print(pathlib.Path.home())
-print(get_systemd_unit_path())
+unit = get_systemd_unit_path()
+unit.parent.mkdir(parents=True, exist_ok=True)
+unit.write_text("[Service]\nEnvironment=HERMES_HOME=/obsolete-validation-home\nExecStart=/obsolete-hermes gateway run\n")
+print(pathlib.Path.home(), flush=True)
+print(unit, flush=True)
 print(refresh_systemd_unit_if_needed())
 ' 2>/dev/null) || fail "the guard could not run the installed Hermes probe"
   sandbox_real=$(cd "$TMP_ROOT/real-hermes" && pwd -P)
@@ -170,11 +211,12 @@ print(refresh_systemd_unit_if_needed())
     "$sandbox_real"/*) ;;
     *) fail "installed Hermes resolved its unit outside the sandbox: $real_unit" ;;
   esac
-  printf '%s\n' "$python_out" | grep -Fxq 'False' ||
-    fail "installed Hermes reported a unit rewrite inside the sandbox"
+  [ -f "$real_unit" ] || fail "the installed Hermes stale-unit fixture disappeared"
+  cmp -s "$TMP_ROOT/original.service" "$UNIT" ||
+    fail "the installed Hermes probe changed the fake-real unit"
   [ "$REAL_UNITS_BEFORE_REAL" = "$(hash_dir "$REAL_UNITS")" ] ||
     fail "the installed Hermes probe changed the real user unit directory"
-  pass "installed Hermes resolves its unit inside the sandbox and writes nothing real"
+  pass "installed Hermes stale-unit probe leaves real and fake-real units unchanged"
 else
   echo "info - no importable Hermes runtime at $HERMES_RUNTIME; the installed-Hermes case was not run"
 fi

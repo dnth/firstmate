@@ -46,8 +46,9 @@ test:
   # owned by bin/fm-hermes-sandbox.sh's header and the gateway profile rules by
   # contrib/hermes-gateway-firstmate-comms/README.md.
   instructions: |
-    A validation step must never start or install a Hermes gateway against the
-    real HOME or the real HERMES_HOME. Run it through
-    `bin/fm-hermes-sandbox.sh`, whose header owns the sandbox contract and the
-    refusal cases; contrib/hermes-gateway-firstmate-comms/README.md owns the
-    gateway profile rules.
+    Gateway validation must use foreground `hermes gateway run` through
+    `bin/fm-hermes-sandbox.sh`, whose header owns the sandbox contract.
+    Never use gateway service-control subcommands (including install, start,
+    restart, stop, and uninstall) in validation; the real user manager is not
+    available inside the sandbox. contrib/hermes-gateway-firstmate-comms/README.md
+    owns the gateway profile rules.
