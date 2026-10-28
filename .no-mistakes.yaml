@@ -41,3 +41,13 @@ commands:
 test:
   evidence:
     store_in_repo: false
+
+  # Gate-invoked test guidance. Keep this a pointer: the sandbox contract is
+  # owned by bin/fm-hermes-sandbox.sh's header and the gateway profile rules by
+  # contrib/hermes-gateway-firstmate-comms/README.md.
+  instructions: |
+    A validation step must never start or install a Hermes gateway against the
+    real HOME or the real HERMES_HOME. Run it through
+    `bin/fm-hermes-sandbox.sh`, whose header owns the sandbox contract and the
+    refusal cases; contrib/hermes-gateway-firstmate-comms/README.md owns the
+    gateway profile rules.

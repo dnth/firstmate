@@ -752,6 +752,7 @@ $RULE1
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 8. Commit only with the repository's configured git identity: never override the author or committer via \`git -c user.name=\`/\`user.email\`, \`--author\`, \`GIT_AUTHOR_*\`/\`GIT_COMMITTER_*\` environment variables, or an agent name as author or co-author.
+9. Never start or install a Hermes gateway against the real \`$HOME\` or \`HERMES_HOME\`: run it through \`bin/fm-hermes-sandbox.sh\`, whose header owns the sandbox contract and the refusal cases.
 
 $INBOX_SECTION
 
