@@ -26,7 +26,9 @@
 # no request text to fall back to. The first message is the request's
 # answer generation 1, so later posts use bin/fm-ext-emit.sh with the printed
 # request id and --kind followup or final from generation 1, including
-# --thread-state renames. A captain reply inside the thread is an ordinary
+# --thread-state renames; without --thread-state the first message carries
+# state none, because an emitted answer always names its state. A captain
+# reply inside the thread is an ordinary
 # in-thread request. --media attaches screened media to that first message
 # exactly as bin/fm-ext-emit.sh --media does; its header owns the rules.
 #
@@ -103,15 +105,7 @@ fi
 fm_ext_active "$FM_HOME" || die "local ext-bridge is not active" 1
 command -v jq >/dev/null 2>&1 || die "jq is required" 1
 
-# The gateway plugin owns reading config/ext-channel; reusing it keeps this
-# script and the poster agreed on which channel is dedicated.
-CHANNEL=$(python3 -c '
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(sys.argv[1]) / "contrib/hermes-gateway-firstmate-comms"))
-from intake import dedicated_channel
-print(dedicated_channel(Path(sys.argv[2])))
-' "$FM_ROOT" "$FM_HOME" 2>/dev/null)
+CHANNEL=$(fm_ext_dedicated_channel)
 case "$CHANNEL" in
   ''|*[!0-9]*) die "no dedicated channel is configured; an opened thread needs exactly one id in config/ext-channel" 1 ;;
 esac
@@ -194,8 +188,7 @@ esac
 context_is_this_open || die "the recorded context for this key is not an opened thread" 1
 
 set -- --request-id "$REQUEST_ID" --kind answer --generation 1 \
-  --text-file "$TEXT_FILE" --thread-title "$TITLE"
-[ -z "$THREAD_STATE" ] || set -- "$@" --thread-state "$THREAD_STATE"
+  --text-file "$TEXT_FILE" --thread-title "$TITLE" --thread-state "${THREAD_STATE:-none}"
 [ "${#MEDIA_ARGS[@]}" -eq 0 ] || set -- "$@" "${MEDIA_ARGS[@]}"
 bash "$SCRIPT_DIR/fm-ext-emit.sh" "$@" >/dev/null || exit $?
 printf '%s\n' "$REQUEST_ID"

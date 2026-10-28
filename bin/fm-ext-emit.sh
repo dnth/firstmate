@@ -22,6 +22,14 @@
 # the decision file, numbers the options in the text, and posts through this
 # script, so text and buttons always match.
 #
+# REQUIRED THREAD FLAGS. A reply that may create its request's topic thread
+# must pass --thread-title, and every answer or final must pass an explicit
+# --thread-state needs-you|done|none; each is refused otherwise. A reply may
+# create the thread when its context is a top-level message (origin message,
+# thread id equal to channel id) in the dedicated channel and the request has
+# no recorded topic thread yet: the gateway poster's ensure_topic_thread
+# conditions. An ack or followup may omit --thread-state.
+#
 # --thread-title names the request's topic thread ("<Project> · <topic>", one
 # line, at most 60 characters, screened like reply text) on the reply that
 # creates it; once the thread exists, plain later --thread-title values are
@@ -242,6 +250,13 @@ if [ -z "$DECISION_FILE" ] && [ -z "$NO_BUTTONS_SET" ]; then
   esac
 fi
 
+# Required thread flags (see the header). Checked after the idempotency exits,
+# so re-emitting an already-published identity stays a no-op success, and
+# after the choice guard, whose refusal names the better route.
+case "$KIND:$THREAD_STATE" in
+  answer:|final:) die "an $KIND must pass --thread-state needs-you|done|none" ;;
+esac
+
 # Public safety: Discord only ever sees generic media names, so the text must
 # not name a media file's path or filename either.
 for media_path in ${MEDIA_PATHS[@]+"${MEDIA_PATHS[@]}"}; do
@@ -274,6 +289,13 @@ case "$ORIGIN" in
 esac
 [ -n "$GUILD" ] && [ -n "$CHANNEL" ] && [ -n "$THREAD" ] && [ -n "$MESSAGE" ] \
   || die "destination context is incomplete"
+if [ -z "$THREAD_TITLE" ] && [ "$ORIGIN" = message ] && [ "$THREAD" = "$CHANNEL" ] \
+  && ! jq -e --arg rid "$REQUEST_ID" \
+    '.request_id == $rid and (.topic_thread_id | type == "string" and test("^[0-9]+$"))' \
+    "$OUTBOX/$SLUG.thread.json" >/dev/null 2>&1 \
+  && [ "$CHANNEL" = "$(fm_ext_dedicated_channel)" ]; then
+  die "this reply creates the request's topic thread; pass --thread-title \"<Project> · <topic>\""
+fi
 
 NOW=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
 case "$NOW" in

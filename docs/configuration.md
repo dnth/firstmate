@@ -996,7 +996,8 @@ The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#dedicate
 
 A top-level message request in the configured dedicated channel creates a Discord thread on its message with its first reply, and every later `ack`/`answer`/`followup`/`final` for that request posts into the same thread, including work linked to it after the inbox is gone.
 Replies to Firstmate posts outside the dedicated channel keep their existing routing without creating a thread.
-Names prefer Firstmate's title from the reply that successfully creates the thread, then the request-text fallback, then a label-plus-time fallback; [`bin/fm-ext-topic.sh`](../bin/fm-ext-topic.sh) owns the exact derivation, bounds, and shared title screen.
+Names use Firstmate's title from the reply that successfully creates the thread; older queued payloads without a title retain the request-text fallback, then a label-plus-time fallback.
+[`bin/fm-ext-topic.sh`](../bin/fm-ext-topic.sh) owns the exact derivation, bounds, and shared title screen.
 The poster validates names against the stored request text, creating title, and any screened retitle before creating or renaming a thread.
 Legacy label-plus-time names remain valid for the same source message when no valid creating title takes precedence, including contexts recorded before request text was retained.
 Anything else falls back to the fresh derivation.
@@ -1006,6 +1007,7 @@ It preserves the marker Discord currently shows (`❓ `, `✅ `, or none), falli
 The [emit header and help](../bin/fm-ext-emit.sh) own the title flags and rejection warnings, the [ask header](../bin/fm-ext-ask.sh) owns their passthrough, and the [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#name-the-thread-then-mark-its-state) owns when Firstmate retitles.
 A retitle shares a marker's eligibility and is equally best effort: it only ever reaches a thread this home created in the dedicated channel, and a refused, unusable, or ineligible one is ignored with the reply text still posted.
 A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
+Emit requires a title on any reply that may create the thread and an explicit state on every `answer` and `final`; the [emit header](../bin/fm-ext-emit.sh) owns both refusals.
 The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name to match the requested state.
 Before trusting a stored name that already matches, the poster reads the name Discord shows, so a manual rename never wedges a later marker; when that name cannot be read it renames anyway.
 Both the request that created the thread and a later request of any origin that arrived inside it - a typed message, a decision-button click, or a `/fm` command - may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.

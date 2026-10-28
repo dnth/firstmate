@@ -59,7 +59,7 @@ emit_text() {
   local home=$1 generation=$2 text=$3
   shift 3
   printf '%s' "$text" > "$home/post.txt"
-  OUT=$(home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation "$generation" \
+  OUT=$(home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation "$generation" --thread-state none \
     --text-file "$home/post.txt" "$@" 2>&1)
   RC=$?
 }
@@ -469,7 +469,7 @@ test_11_bold_headings_allow_colons_inside_or_outside() {
             fail "refused heading choice published a payload"
           fi
           out=$(home_env "$home" "$EMIT" --request-id "$RID" --kind "$kind" --generation "$generation" \
-            --text-file "$home/post.txt" --no-buttons 'deliberate plain choice list' 2>&1)
+            --thread-state none --text-file "$home/post.txt" --no-buttons 'deliberate plain choice list' 2>&1)
           rc=$?
           [ "$rc" -eq 0 ] || fail "--no-buttons refused $title: $out"
           jq -e '.no_buttons_reason == "deliberate plain choice list"' \

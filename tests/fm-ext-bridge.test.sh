@@ -261,7 +261,7 @@ test_7_unsent_outbox_receipt_once() {
   setup_home "$home"
   slug=$(intake_ok "$home" "status please")
   write_text "$home/ans.txt" "calm seas"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   sent="$home/sent.log"
   : > "$sent"
@@ -328,7 +328,7 @@ test_9_mid_send_refuse_and_cas_receipt() {
   setup_home "$home"
   slug=$(intake_ok "$home" "ping")
   write_text "$home/ans.txt" "pong"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null
   err="$home/mid.err"
@@ -336,7 +336,7 @@ test_9_mid_send_refuse_and_cas_receipt() {
     >/dev/null 2>"$err"; rc=$?
   expect_code 3 "$rc" "second begin while posting"
   assert_grep "mid-delivery" "$err" "mid-send must refuse"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null 2>"$err"; rc=$?
   expect_code 1 "$rc" "emit during mid-delivery"
   write_text "$home/receipt.json" '{"ok":true,"discord_message_id":"9"}'
@@ -404,7 +404,7 @@ test_13_transient_http_clears_posting_and_retries() {
   setup_home "$home"
   slug=$(intake_ok "$home" "retry after discord blip")
   write_text "$home/ans.txt" "retryable answer"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   posting="$home/state/ext-outbox/${slug}.answer.1.posting"
   receipt="$home/state/ext-outbox/${slug}.answer.1.receipt.json"
@@ -448,7 +448,7 @@ PY
   assert_present "$receipt" "successful retry must write a receipt"
 
   write_text "$home/ans2.txt" "rate limited then retry"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 2 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 2 --thread-state none \
     --text-file "$home/ans2.txt" >/dev/null
   posting="$home/state/ext-outbox/${slug}.answer.2.posting"
   receipt="$home/state/ext-outbox/${slug}.answer.2.receipt.json"
@@ -499,7 +499,7 @@ test_14_mid_delivery_refuses_plugin_repost() {
   setup_home "$home"
   slug=$(intake_ok "$home" "do not double post")
   write_text "$home/ans.txt" "ambiguous answer"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null
   posting="$home/state/ext-outbox/${slug}.answer.1.posting"
@@ -561,7 +561,7 @@ test_16_ambiguous_urlerror_keeps_mid_delivery() {
   setup_home "$home"
   slug=$(intake_ok "$home" "maybe it landed")
   write_text "$home/ans.txt" "ambiguous timeout"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   posting="$home/state/ext-outbox/${slug}.answer.1.posting"
   receipt="$home/state/ext-outbox/${slug}.answer.1.receipt.json"
@@ -616,7 +616,7 @@ test_17_permanent_4xx_is_terminal_failed() {
   setup_home "$home"
   slug=$(intake_ok "$home" "too long for discord")
   write_text "$home/ans.txt" "permanent client error"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   posting="$home/state/ext-outbox/${slug}.answer.1.posting"
   receipt="$home/state/ext-outbox/${slug}.answer.1.receipt.json"
@@ -679,7 +679,7 @@ test_18_under_limit_is_one_post() {
   setup_home "$home"
   slug=$(intake_ok "$home" "short reply")
   write_text "$home/ans.txt" "Aye, all shipshape."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   sent="$home/sent.log"
   : > "$sent"
@@ -714,7 +714,7 @@ test_19_over_limit_posts_chunks_in_order_without_fmx_token() {
   slug=$(intake_ok "$home" "long reply")
   write_text "$home/ans.txt" \
     "The captain has me on a sign-in redirect fix, a docs tidy, and keeping the build green while other jobs run in the background today."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   sent="$home/sent.log"
   : > "$sent"
@@ -764,7 +764,7 @@ test_20_later_chunk_transient_resumes_without_repost() {
   slug=$(intake_ok "$home" "resume split")
   write_text "$home/ans.txt" \
     "The captain has me on a sign-in redirect fix, a docs tidy, and keeping the build green while other jobs run in the background today."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   sent1="$home/sent1.log"
   sent2="$home/sent2.log"
@@ -833,7 +833,7 @@ test_20_state_override_preserves_resume_progress() {
   slug=$(intake_ok "$home" "state override resume")
   write_text "$home/ans.txt" \
     "The captain has me on a sign-in redirect fix, a docs tidy, and keeping the build green while other jobs run today."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   mkdir -p "$state"
   cp -a "$home/state/ext-outbox" "$state/"
@@ -889,7 +889,7 @@ _test_21_setup_resumable() {
   slug=$(intake_ok "$home" "concurrent resume")
   write_text "$home/ans.txt" \
     "The captain has me on a sign-in redirect fix, a docs tidy, and keeping the build green while other jobs run in the background today."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   sent="$home/setup-sent.log"
   posting="$home/state/ext-outbox/${slug}.answer.1.posting"
@@ -1409,7 +1409,7 @@ test_24_stuck_middelivery_recovers() {
   setup_home "$home"
   slug=$(intake_ok "$home" "recover me")
   write_text "$home/ans.txt" "ambiguous then delivered"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   posting="$home/state/ext-outbox/${slug}.answer.1.posting"
   receipt="$home/state/ext-outbox/${slug}.answer.1.receipt.json"
@@ -1491,7 +1491,7 @@ test_25_stuck_middelivery_surfaces_when_budget_spent() {
   setup_home "$home"
   slug=$(intake_ok "$home" "never resolves")
   write_text "$home/ans.txt" "permanently ambiguous"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   posting="$home/state/ext-outbox/${slug}.answer.1.posting"
   failed="$home/state/ext-outbox/${slug}.answer.1.failed.json"
@@ -1539,7 +1539,7 @@ test_26_presend_crash_without_progress_recovers() {
   setup_home "$home"
   slug=$(intake_ok "$home" "recover before first send")
   write_text "$home/ans.txt" "one clean chunk"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   posting="$home/state/ext-outbox/${slug}.answer.1.posting"
   inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
@@ -1616,7 +1616,7 @@ test_26_pending_stays_flat_as_delivered_grows() {
   setup_home "$home"
   slug=$(intake_ok "$home" "measure me")
   write_text "$home/ans.txt" "still pending"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
 
   seed_delivered_outbox "$home" "$slug" 5
@@ -2000,7 +2000,7 @@ test_34_real_sender_passes_discord_edge_user_agent_rule() {
   setup_home "$home"
   slug=$(intake_ok "$home" "real sender")
   write_text "$home/ans.txt" "Aye, all shipshape."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   out=$(home_env "$home" env DISCORD_BOT_TOKEN=test-bot-token PYTHONPATH="$PLUGIN" \
     "$PYTHON_BIN" - "$home" <<'PY'
@@ -2177,11 +2177,11 @@ test_38_delivery_reactions_follow_the_reply_outcome() {
   write_text "$home/ans.txt" "All shipshape."
   home_env "$home" "$EMIT" --request-id "$RID" --kind ack --generation 1 \
     --text-file "$home/ack.txt" >/dev/null
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
-  home_env "$home" "$EMIT" --request-id "$rid2" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$rid2" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
-  home_env "$home" "$EMIT" --request-id "$rid3" --kind final --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$rid3" --kind final --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
 import io, os, sys, urllib.error
@@ -2221,7 +2221,7 @@ test_39_reaction_failure_never_blocks_or_repeats_a_reply() {
   setup_home "$home"
   slug=$(intake_ok "$home" "status please" "$MESSAGE" message)
   write_text "$home/ans.txt" "All shipshape."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   sent="$home/sent.log"
   : > "$sent"
@@ -2259,7 +2259,7 @@ test_40_recovery_exhausted_reply_warns() {
   setup_home "$home"
   intake_ok "$home" "never resolves" "$MESSAGE" message >/dev/null
   write_text "$home/ans.txt" "permanently ambiguous"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
 import os, sys, time, urllib.error
@@ -2298,7 +2298,7 @@ test_41_real_reaction_uses_discord_rest_edge() {
   setup_home "$home"
   intake_ok "$home" "real reaction" "$MESSAGE" message >/dev/null
   write_text "$home/ans.txt" "All shipshape."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   out=$(home_env "$home" env DISCORD_BOT_TOKEN=test-bot-token PYTHONPATH="$PLUGIN" \
     "$PYTHON_BIN" - "$home" <<'PY'
@@ -2974,7 +2974,7 @@ test_49_split_plan_survives_restart() {
     setup_home "$home"
     slug=$(intake_ok "$home" "resume original split plan")
     "$PYTHON_BIN" -c 'print("0123456789" * 200, end="")' > "$home/ans.txt"
-    home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
       --text-file "$home/ans.txt" >/dev/null
     home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$mode" <<'PYTEST' \
       || fail "resume must preserve the $mode split plan"
@@ -3290,7 +3290,7 @@ test_51_delivery_survives_a_long_sweep() {
   setup_home "$home"
   slug=$(intake_ok "$home" "reply while the sweep runs")
   write_text "$home/ans.txt" "queued mid-sweep"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   stem="$slug.answer.1"
   # Stage the payload outside the outbox so it is queued only once the sweep
@@ -3571,7 +3571,7 @@ test_53_delivery_receipt_carries_queue_times() {
   setup_home "$home"
   slug=$(intake_ok "$home" "time my pickup")
   write_text "$home/ans.txt" "delivered with timing"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   stem="$slug.answer.1"
   recorded=$(jq -r '.recorded_at' "$home/state/ext-outbox/$stem.json")
@@ -3611,7 +3611,7 @@ test_54_pending_skips_terminal_markers() {
   setup_home "$home"
   slug=$(intake_ok "$home" "list me")
   write_text "$home/ans.txt" "pending payload"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   write_text "$home/two.txt" "second pending payload"
   home_env "$home" "$EMIT" --request-id "$RID" --kind followup --generation 1 \

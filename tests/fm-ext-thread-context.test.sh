@@ -726,7 +726,7 @@ for n in range(2):
     answer.write_text("answer " + "x" * 3000)
     subprocess.run(["bash", str(root / "bin/fm-ext-emit.sh"),
                     "--request-id", record["request_id"], "--kind", "answer", "--generation", "1",
-                    "--text-file", str(answer)], env=poster._env_for(home), check=True, capture_output=True)
+                    "--thread-state", "none", "--text-file", str(answer)], env=poster._env_for(home), check=True, capture_output=True)
     payload = home / "state/ext-outbox" / (record["slug"] + ".answer.1.json")
     def send(chunk):
         message_id = str(base + 10 + len(created))

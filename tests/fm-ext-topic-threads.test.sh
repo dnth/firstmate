@@ -83,6 +83,32 @@ slug_of() {
     || printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
 }
 
+# Emit refuses a thread-creating reply without a title, but the poster still
+# names a thread from the request text for a queued payload that carries none,
+# as payloads queued before that refusal do. These tests exercise the poster,
+# so an untitled emit publishes that legacy shape: it passes a stand-in title
+# and strips it from the published payload.
+LEGACY_TITLE="Legacy · untitled"
+emit_reply() {
+  local home=$1 arg payload tmp titled=
+  shift
+  for arg in "$@"; do
+    [ "$arg" != --thread-title ] || titled=1
+  done
+  if [ -n "$titled" ]; then
+    home_env "$home" "$EMIT" "$@"
+    return
+  fi
+  home_env "$home" "$EMIT" "$@" --thread-title "$LEGACY_TITLE" || return
+  for payload in "$home"/state/ext-outbox/*.json; do
+    jq -e --arg t "$LEGACY_TITLE" '.thread_title == $t' "$payload" >/dev/null 2>&1 || continue
+    tmp="$payload.legacy"
+    if ! { jq -c 'del(.thread_title)' "$payload" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$payload"; }; then
+      fail "could not strip the stand-in title from $payload"
+    fi
+  done
+}
+
 emit_as() {
   local home=$1 rid=$2 kind=$3 generation=$4 text=$5 title=${6:-} state=${7:-} retitle=${8:-} textfile
   local args=()
@@ -90,9 +116,11 @@ emit_as() {
   write_text "$textfile" "$text"
   args=(--request-id "$rid" --kind "$kind" --generation "$generation" --text-file "$textfile")
   [ -z "$title" ] || args+=(--thread-title "$title")
+  # Emit requires an explicit state on every answer and final.
+  case "$state:$kind" in :answer|:final) state=none ;; esac
   [ -z "$state" ] || args+=(--thread-state "$state")
   [ -z "$retitle" ] || args+=(--thread-retitle "$retitle")
-  home_env "$home" "$EMIT" "${args[@]}"
+  emit_reply "$home" "${args[@]}"
 }
 
 # The stand-in Discord edge for renames. An extra {"kind":"actual",
@@ -202,11 +230,11 @@ emit_decision_post() {
     > "$home/decision-$generation.json"
   write_text "$home/post-$generation.txt" "Which way should it go? 1. North 2. South"
   if [ -n "$state" ]; then
-    home_env "$home" "$EMIT" --request-id "$rid" --kind followup --generation "$generation" \
+    emit_reply "$home" --request-id "$rid" --kind followup --generation "$generation" \
       --text-file "$home/post-$generation.txt" --decision-file "$home/decision-$generation.json" \
       --thread-state "$state" >/dev/null
   else
-    home_env "$home" "$EMIT" --request-id "$rid" --kind followup --generation "$generation" \
+    emit_reply "$home" --request-id "$rid" --kind followup --generation "$generation" \
       --text-file "$home/post-$generation.txt" --decision-file "$home/decision-$generation.json" >/dev/null
   fi || fail "emit refused the decision post for $key"
 }
@@ -230,13 +258,13 @@ test_1_top_level_replies_share_one_thread() {
   write_text "$home/ans.txt" "All shipshape."
   write_text "$home/fol.txt" "Halfway there."
   write_text "$home/fin.txt" "Landed."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind ack --generation 1 \
+  emit_reply "$home" --request-id "$RID" --kind ack --generation 1 \
     --text-file "$home/ack.txt" >/dev/null
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  emit_reply "$home" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
-  home_env "$home" "$EMIT" --request-id "$RID" --kind followup --generation 1 \
+  emit_reply "$home" --request-id "$RID" --kind followup --generation 1 \
     --text-file "$home/fol.txt" >/dev/null
-  home_env "$home" "$EMIT" --request-id "$RID" --kind final --generation 1 \
+  emit_reply "$home" --request-id "$RID" --kind final --generation 1 --thread-state none \
     --text-file "$home/fin.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
   assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/ship the login fix" \
@@ -250,7 +278,7 @@ test_1_top_level_replies_share_one_thread() {
   fm_write_meta "$home/state/ship-login.meta" "window=firstmate:fm-ship-login" "harness=echo" "kind=ship"
   home_env "$home" "$LINK" ship-login "$RID" >/dev/null
   write_text "$home/fol2.txt" "Linked followup."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind followup --generation 2 \
+  emit_reply "$home" --request-id "$RID" --kind followup --generation 2 \
     --text-file "$home/fol2.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
   assert_contains "$out" "posted-to=777777777777777777 Linked followup." \
@@ -274,9 +302,9 @@ test_2_in_thread_stays_and_slash_keeps_working() {
   [ "$(jq -r 'has("topic")' "$home/state/ext-context/$slug.json")" = false ] \
     || fail "an in-thread request records no topic name"
   write_text "$home/ans.txt" "Noted."
-  home_env "$home" "$EMIT" \
+  emit_reply "$home" \
     --request-id "discord:${GUILD}:${CHANNEL}:${THREAD}:555555555555555555" \
-    --kind answer --generation 1 --text-file "$home/ans.txt" >/dev/null
+    --kind answer --generation 1 --thread-state none --text-file "$home/ans.txt" >/dev/null
   out=$(deliver "$home")
   assert_contains "$out" "posted-to=$THREAD Noted." \
     "an in-thread request must be answered in that thread"
@@ -287,7 +315,7 @@ test_2_in_thread_stays_and_slash_keeps_working() {
   [ "$(jq -r 'has("topic")' "$home/state/ext-context/$slug2.json")" = false ] \
     || fail "a slash request records no topic name"
   write_text "$home/slash.txt" "Aye, all shipshape."
-  home_env "$home" "$EMIT" --request-id "$rid2" --kind answer --generation 1 \
+  emit_reply "$home" --request-id "$rid2" --kind answer --generation 1 --thread-state none \
     --text-file "$home/slash.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$rid2"'","thread_id":"888888888888888888"}')
   assert_contains "$out" "posted-to=$CHANNEL Aye, all shipshape." \
@@ -310,13 +338,13 @@ test_3_thread_failure_falls_back_without_loss() {
   slug=$(intake_as "$home" "ship the docs fix" "$MESSAGE" "$CHANNEL" message)
   write_text "$home/ans.txt" "Docs are up."
   write_text "$home/fin.txt" "Done for real."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  emit_reply "$home" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","fail":true}')
   assert_contains "$out" "results=sent" "a failed thread create must still deliver the reply"
   assert_contains "$out" "posted-to=$CHANNEL Docs are up." \
     "the fallback must post in place without losing the reply"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind final --generation 1 \
+  emit_reply "$home" --request-id "$RID" --kind final --generation 1 --thread-state none \
     --text-file "$home/fin.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
   assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/ship the docs fix" \
@@ -395,7 +423,7 @@ test_5_thread_record_expires_with_retention() {
   setup_home "$home"
   slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
   write_text "$home/ans.txt" "On it."
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  emit_reply "$home" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   out=$(deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}')
   assert_contains "$out" "thread-create=$CHANNEL/$MESSAGE/ship the login fix" \
@@ -438,8 +466,8 @@ test_6_tampered_names_fall_back_and_titles_are_screened() {
     [ "$(jq -r '.topic' "$home/state/ext-context/$slug.json")" = "$text" ] \
       || fail "the request text must name the thread"
     write_text "$home/ans.txt" "Noted."
-    home_env "$home" "$EMIT" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${message}" \
-      --kind answer --generation 1 --text-file "$home/ans.txt" >/dev/null
+    emit_reply "$home" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${message}" \
+      --kind answer --generation 1 --thread-state none --text-file "$home/ans.txt" >/dev/null
     out=$(deliver "$home")
     assert_contains "$out" "thread-create=$CHANNEL/$message/$text" \
       "the request text must reach the creator"
@@ -470,13 +498,13 @@ fi
   slug=$(intake_as "$home" "ship the login fix" "$message" "$CHANNEL" message)
   write_text "$home/ans.txt" "Noted."
   for bad in "fix fm-ship-login now" "see host.example.com here" "check /home/u/x now"; do
-    if home_env "$home" "$EMIT" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${message}" \
-      --kind answer --generation 9 --text-file "$home/ans.txt" --thread-title "$bad" >/dev/null 2>&1; then
+    if emit_reply "$home" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${message}" \
+      --kind answer --generation 9 --thread-state none --text-file "$home/ans.txt" --thread-title "$bad" >/dev/null 2>&1; then
       fail "an unsafe title must be refused by emit: $bad"
     fi
   done
-  if home_env "$home" "$EMIT" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${message}" \
-    --kind answer --generation 9 --text-file "$home/ans.txt" \
+  if emit_reply "$home" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${message}" \
+    --kind answer --generation 9 --thread-state none --text-file "$home/ans.txt" \
     --thread-title "$(printf 'T%.0s' $(seq 1 61))" >/dev/null 2>&1; then
     fail "an over-long title must be refused by emit"
   fi
@@ -489,7 +517,7 @@ test_7_resumed_chunks_keep_their_destination() {
   setup_home "$home"
   slug=$(intake_as "$home" "fix the docs" "$MESSAGE" "$CHANNEL" message)
   write_text "$home/ans.txt" "$(printf 'word %.0s' {1..600})"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+  emit_reply "$home" --request-id "$RID" --kind answer --generation 1 --thread-state none \
     --text-file "$home/ans.txt" >/dev/null
   if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
 import errno, json, os, sys, tempfile
@@ -573,7 +601,7 @@ test_9_concurrent_generations_reuse_existing_thread() {
   slug=$(intake_as "$home" "ship login fix" "$MESSAGE" "$CHANNEL" message)
   write_text "$home/ans.txt" "Noted."
   for generation in 1 2; do
-    home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation "$generation" \
+    emit_reply "$home" --request-id "$RID" --kind answer --generation "$generation" --thread-state none \
       --text-file "$home/ans.txt" >/dev/null
   done
   if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
@@ -640,8 +668,8 @@ test_10_outside_channel_keeps_its_route() {
   [ "$(jq -r 'has("topic")' "$home/state/ext-context/$slug.json")" = false ] \
     || fail "outside-channel requests must record no topic"
   write_text "$home/ans.txt" "Noted."
-  home_env "$home" "$EMIT" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${MESSAGE}" \
-    --kind answer --generation 1 --text-file "$home/ans.txt" >/dev/null
+  emit_reply "$home" --request-id "discord:${GUILD}:${CHANNEL}:${CHANNEL}:${MESSAGE}" \
+    --kind answer --generation 1 --thread-state none --text-file "$home/ans.txt" >/dev/null
   out=$(deliver "$home")
   assert_contains "$out" "posted-to=$CHANNEL Noted." "outside-channel replies stay in place"
   [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
@@ -964,7 +992,7 @@ for generation, title in enumerate(bad_titles, 1):
     assert checked.returncode != 0 and not checked.stdout, title
     emitted = subprocess.run(["bash", str(root / "bin/fm-ext-emit.sh"),
         "--request-id", context["request_id"], "--kind", "answer", "--generation", str(generation),
-        "--text-file", str(reply), "--thread-title", title], capture_output=True, text=True)
+        "--thread-state", "none", "--text-file", str(reply), "--thread-title", title], capture_output=True, text=True)
     assert emitted.returncode != 0, title
     assert not (home / "state/ext-outbox" / f"{slug}.answer.{generation}.json").exists()
     payload = dict(context, thread_title=title)
@@ -983,7 +1011,8 @@ checked = subprocess.run(["bash", str(root / "bin/fm-ext-topic.sh"),
     "--check-title", "--title-file", "-"], input=title, capture_output=True, text=True, check=True)
 expected = checked.stdout.strip()
 subprocess.run(["bash", str(root / "bin/fm-ext-emit.sh"), "--request-id", context["request_id"],
-    "--kind", "answer", "--generation", "99", "--text-file", str(reply), "--thread-title", title],
+    "--kind", "answer", "--generation", "99", "--thread-state", "none", "--text-file", str(reply),
+    "--thread-title", title],
     capture_output=True, text=True, check=True)
 emitted = json.loads((home / "state/ext-outbox" / f"{slug}.answer.99.json").read_text())
 assert emitted["thread_title"] == expected == "Firstmate · release status"
@@ -1486,7 +1515,7 @@ PY
   write_text "$home/partial.txt" "$(printf 'word %.0s' {1..600})"
   printf '{"key":"key:route-fix:east","options":[{"label":"North"},{"label":"South"}]}' \
     > "$home/partial-decision.json"
-  home_env "$home" "$EMIT" --request-id "$RID" --kind followup --generation 4 \
+  emit_reply "$home" --request-id "$RID" --kind followup --generation 4 \
     --text-file "$home/partial.txt" --decision-file "$home/partial-decision.json" >/dev/null
   if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
 import sys
@@ -1908,7 +1937,7 @@ test_31_retitle_follows_the_conversation() {
   # An in-thread request - the captain's typed reply - may retitle the same way.
   rid2="discord:${GUILD}:${CHANNEL}:777777777777777777:999999999999999999"
   intake_as "$home" "what about the ledger import?" 999999999999999999 "777777777777777777" message >/dev/null
-  emit_as "$home" "$rid2" answer 1 "Looking at it." "" "" "InfoConnect · ledger import" >/dev/null
+  emit_as "$home" "$rid2" followup 1 "Looking at it." "" "" "InfoConnect · ledger import" >/dev/null
   out=$(deliver "$home")
   assert_contains "$out" "thread-rename=777777777777777777/❓ InfoConnect · ledger import" \
     "an in-thread reply must be able to retitle the thread it arrived in"
@@ -2098,6 +2127,68 @@ test_33_retitle_retries_and_opened_threads_follow() {
   pass "33 retitles retry and opened threads follow the conversation"
 }
 
+# --- 34. emit requires a creating title and an answer or final state --------
+#
+# The emitted payloads alone show the guard; these call emit directly, never
+# through the legacy-shape helper above.
+
+test_34_emit_requires_creating_title_and_terminal_state() {
+  local home slug out kind inthread
+  home="$TMP_ROOT/c34"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how is ingestion going?" "$MESSAGE" "$CHANNEL" message)
+  write_text "$home/reply.txt" "Looking."
+  if out=$(home_env "$home" "$EMIT" --request-id "$RID" --kind ack --generation 1 \
+    --text-file "$home/reply.txt" 2>&1); then
+    fail "an untitled thread-creating ack must be refused"
+  fi
+  assert_contains "$out" "--thread-title" "the title refusal must name the flag"
+  assert_contains "$out" "<Project> · <topic>" "the title refusal must name the format"
+  [ "$(printf '%s\n' "$out" | wc -l)" = 1 ] || fail "the title refusal must be one line: $out"
+  [ ! -e "$home/state/ext-outbox/$slug.ack.1.json" ] || fail "a refused ack must publish nothing"
+  for kind in answer final; do
+    if out=$(home_env "$home" "$EMIT" --request-id "$RID" --kind "$kind" --generation 1 \
+      --thread-title "Aceh · ingestion" --text-file "$home/reply.txt" 2>&1); then
+      fail "an $kind without a thread state must be refused"
+    fi
+    assert_contains "$out" "--thread-state needs-you|done|none" "the $kind state refusal must name the flag"
+    [ "$(printf '%s\n' "$out" | wc -l)" = 1 ] || fail "the state refusal must be one line: $out"
+    [ ! -e "$home/state/ext-outbox/$slug.$kind.1.json" ] || fail "a refused $kind must publish nothing"
+  done
+  home_env "$home" "$EMIT" --request-id "$RID" --kind ack --generation 1 \
+    --thread-title "Aceh · ingestion" --text-file "$home/reply.txt" >/dev/null \
+    || fail "a titled ack must post without a thread state"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
+    --thread-title "Aceh · ingestion" --text-file "$home/reply.txt" >/dev/null \
+    || fail "an answer with state none must post"
+  jq -e '.thread_state == "none"' "$home/state/ext-outbox/$slug.answer.1.json" >/dev/null \
+    || fail "state none must be recorded in the answer payload"
+  # Once the thread exists, later replies need no title.
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  home_env "$home" "$EMIT" --request-id "$RID" --kind followup --generation 1 \
+    --text-file "$home/reply.txt" >/dev/null \
+    || fail "an untitled followup into an existing thread must post without a state"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind final --generation 1 --thread-state "done" \
+    --text-file "$home/reply.txt" >/dev/null \
+    || fail "an untitled final into an existing thread must post"
+  # A request filed inside a thread never creates one.
+  inthread="discord:${GUILD}:${CHANNEL}:${THREAD}:444444444444444445"
+  intake_as "$home" "and the evals?" 444444444444444445 "$THREAD" message >/dev/null
+  home_env "$home" "$EMIT" --request-id "$inthread" --kind ack --generation 1 \
+    --text-file "$home/reply.txt" >/dev/null \
+    || fail "an untitled reply to an in-thread request must post"
+  # Outside the dedicated channel a top-level request keeps its route untitled.
+  home="$TMP_ROOT/c34-outside"
+  setup_home "$home"
+  intake_as "$home" "how is ingestion going?" "$MESSAGE" "$CHANNEL" message >/dev/null
+  printf '%s\n' 999999999999999999 > "$home/config/ext-channel"
+  write_text "$home/reply.txt" "Looking."
+  home_env "$home" "$EMIT" --request-id "$RID" --kind ack --generation 1 \
+    --text-file "$home/reply.txt" >/dev/null \
+    || fail "an untitled reply outside the dedicated channel must post"
+  pass "34 emit requires a creating title and an answer or final state"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -2133,5 +2224,6 @@ test_30_open_guilds_use_shared_allowlist_grammar
 test_31_retitle_follows_the_conversation
 test_32_retitles_are_screened_and_never_leave_home
 test_33_retitle_retries_and_opened_threads_follow
+test_34_emit_requires_creating_title_and_terminal_state
 
 echo "all fm-ext-topic-threads tests passed"
