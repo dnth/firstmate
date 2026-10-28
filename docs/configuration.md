@@ -996,7 +996,8 @@ The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#dedicate
 
 A top-level message request in the configured dedicated channel creates a Discord thread on its message with its first reply, and every later `ack`/`answer`/`followup`/`final` for that request posts into the same thread, including work linked to it after the inbox is gone.
 Replies to Firstmate posts outside the dedicated channel keep their existing routing without creating a thread.
-Names prefer Firstmate's title from the reply that successfully creates the thread, then the request-text fallback, then a label-plus-time fallback; [`bin/fm-ext-topic.sh`](../bin/fm-ext-topic.sh) owns the exact derivation, bounds, and shared title screen.
+Names use Firstmate's title from the reply that successfully creates the thread; older queued payloads without a title retain the request-text fallback, then a label-plus-time fallback.
+[`bin/fm-ext-topic.sh`](../bin/fm-ext-topic.sh) owns the exact derivation, bounds, and shared title screen.
 The poster validates names against the stored request text, creating title, and any screened retitle before creating or renaming a thread.
 Legacy label-plus-time names remain valid for the same source message when no valid creating title takes precedence, including contexts recorded before request text was retained.
 Anything else falls back to the fresh derivation.
