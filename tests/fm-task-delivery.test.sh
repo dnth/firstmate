@@ -42,11 +42,15 @@ make_home() {  # <name> [<registry-line>...]
   printf '%s\n' "$home|$projects/proj|$fakebin"
 }
 
+# Each fixture brief gets distinct task text so sibling fixtures in one home
+# never trip the spawn's duplicate-brief guard by accident.
+BRIEF_SEQ=0
 write_brief() {  # <home> <id> [<recorded-mode>]
   local home=$1 id=$2 mode=${3:-}
+  BRIEF_SEQ=$((BRIEF_SEQ + 1))
   mkdir -p "$home/data/$id"
   {
-    printf 'You are a crewmate.\n\n# Task\nConcrete fixture task.\n\n# Acceptance criteria\n- AC1: Fixture outcome is concrete.\n\n# Definition of done\n'
+    printf 'You are a crewmate.\n\n# Task\nConcrete fixture task %s.\n\n# Acceptance criteria\n- AC1: Fixture outcome is concrete for fixture %s.\n\n# Definition of done\n' "$BRIEF_SEQ" "$BRIEF_SEQ"
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
   } > "$home/data/$id/brief.md"
 }
@@ -327,6 +331,101 @@ EOF
   assert_not_contains "$out" "acceptance criteria are invalid" \
     "legacy ship brief was rejected before its completion gate"
   pass "fm-spawn: legacy ship briefs launch but disclose deferred evidence migration"
+}
+
+# A brief filled with another task's stale text sends a worker to the wrong
+# work, so a fresh spawn refuses an exact Task-section or acceptance-criteria
+# match against a live or recently written brief, names the other task, and
+# accepts only an override that names that same task.
+write_shared_brief() {  # <home> <id> <task-text> <criterion> [<recorded-mode>]
+  local home=$1 id=$2 task=$3 criterion=$4 mode=${5:-no-mistakes}
+  mkdir -p "$home/data/$id"
+  {
+    printf 'You are a crewmate.\n\n# Task\n%s\n\n# Acceptance criteria\n- AC1: %s\n\n' "$task" "$criterion"
+    printf '# Setup\ngit checkout -b fm/%s\necho done >> state/%s.status\n\n' "$id" "$id"
+    printf '# Definition of done\nDelivery contract: mode=%s\n' "$mode"
+  } > "$home/data/$id/brief.md"
+}
+
+test_spawn_refuses_a_duplicate_brief() {
+  local rec home proj fakebin out status
+  rec=$(make_home duplicate-brief)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  # Task A is in flight; its Task section names its own paths, which the
+  # normalization drops so the copy into task B still matches.
+  write_shared_brief "$home" dup-task-alpha \
+    "Fix the connect guide.
+See   data/dup-task-alpha/notes.md for context." "Guide renders the connect steps."
+  printf 'kind=ship\n' > "$home/state/dup-task-alpha.meta"
+
+  write_shared_brief "$home" dup-task-bravo \
+    "Fix the connect guide. See data/dup-task-bravo/notes.md for context." "Wallclock is bounded."
+  out=$(run_spawn "$home" "$fakebin" dup-task-bravo "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a brief carrying another task's Task section"
+  assert_contains "$out" "same Task section as task dup-task-alpha" "duplicate refusal did not name the other task"
+  assert_contains "$out" "--allow-duplicate-brief dup-task-alpha" "duplicate refusal did not name the override"
+  [ "$(printf '%s\n' "$out" | grep -c 'same Task section')" -eq 1 ] || fail "duplicate refusal was not one line"
+  assert_absent "$home/state/dup-task-bravo.meta" "refused duplicate spawn wrote task metadata"
+
+  out=$(run_spawn "$home" "$fakebin" dup-task-bravo "$proj" claude --mode no-mistakes --yolo off \
+    --allow-duplicate-brief dup-task-charlie)
+  [ $? -ne 0 ] || fail "an override naming a different task allowed the duplicate"
+  assert_contains "$out" "same Task section as task dup-task-alpha" "a wrong-task override hid the duplicate"
+
+  out=$(run_spawn "$home" "$fakebin" dup-task-bravo "$proj" claude --mode no-mistakes --yolo off \
+    --allow-duplicate-brief dup-task-alpha)
+  assert_not_contains "$out" "same Task section" "the named override did not allow the duplicate"
+  assert_contains "$out" "reuses the Task section of task dup-task-alpha" "the allowed reuse was silent"
+
+  # The full acceptance-criteria block is compared on its own.
+  write_shared_brief "$home" dup-task-delta "A different task entirely." "Guide renders the connect steps."
+  out=$(run_spawn "$home" "$fakebin" dup-task-delta "$proj" claude --mode no-mistakes --yolo off)
+  [ $? -ne 0 ] || fail "spawn accepted a brief carrying another task's acceptance criteria"
+  assert_contains "$out" "same acceptance criteria as task dup-task-alpha" "criteria duplicate was not refused"
+
+  # A distinct brief passes the guard.
+  write_shared_brief "$home" dup-task-echo "Ship the wallclock change." "Wallclock stays under the limit."
+  out=$(run_spawn "$home" "$fakebin" dup-task-echo "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "--allow-duplicate-brief" "a distinct brief was treated as a duplicate"
+
+  # Scouts are guarded too.
+  write_shared_brief "$home" dup-scout-foxtrot "Fix the connect guide. See the notes for context." "Unused."
+  sed -i.bak 's/^See   .*/See the notes for context./' "$home/data/dup-task-alpha/brief.md"
+  out=$(run_spawn "$home" "$fakebin" dup-scout-foxtrot "$proj" claude --scout)
+  [ $? -ne 0 ] || fail "scout spawn accepted a duplicate Task section"
+  assert_contains "$out" "scout brief for dup-scout-foxtrot has the same Task section as task dup-task-alpha" \
+    "scout duplicate was not refused"
+  pass "fm-spawn: a fresh spawn refuses another task's Task section or criteria unless that task is named"
+}
+
+test_spawn_duplicate_brief_scope() {
+  local rec home proj fakebin out
+  rec=$(make_home duplicate-scope)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  # An old brief whose task is no longer live is outside the comparison window.
+  write_shared_brief "$home" dup-old-golf "Old shared task text." "Old shared outcome."
+  touch -t 202001010000 "$home/data/dup-old-golf/brief.md"
+  write_shared_brief "$home" dup-new-hotel "Old shared task text." "Old shared outcome."
+  out=$(run_spawn "$home" "$fakebin" dup-new-hotel "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "--allow-duplicate-brief" "an old finished brief was compared"
+  # The same old brief is compared again once its task is live.
+  printf 'kind=ship\n' > "$home/state/dup-old-golf.meta"
+  out=$(run_spawn "$home" "$fakebin" dup-new-hotel "$proj" claude --mode no-mistakes --yolo off)
+  assert_contains "$out" "same Task section as task dup-old-golf" "a live task's old brief was not compared"
+
+  out=$(run_spawn "$home" "$fakebin" dup-new-hotel --relaunch --allow-duplicate-brief dup-old-golf)
+  [ $? -ne 0 ] || fail "--relaunch accepted --allow-duplicate-brief"
+  assert_contains "$out" "--allow-duplicate-brief applies only to fresh ship and scout spawns" \
+    "--relaunch did not refuse the override flag"
+  out=$(run_spawn "$home" "$fakebin" dup-new-hotel "$proj" claude --mode no-mistakes --yolo off --allow-duplicate-brief)
+  [ $? -ne 0 ] || fail "--allow-duplicate-brief accepted no task id"
+  assert_contains "$out" "--allow-duplicate-brief requires a value" "a bare override flag was accepted"
+  pass "fm-spawn: the duplicate-brief guard covers live and recent briefs only, and fresh spawns only"
 }
 
 run_spawn() {  # <home> <fakebin> <spawn-args...>
@@ -964,6 +1063,8 @@ test_secondmate_spawn_refuses_unresolved_charter_placeholder
 test_remote_secondmate_refuses_placeholder_before_endpoint_access
 test_scout_relaunch_validates_brief_and_pending_note
 test_spawn_allows_legacy_brief_until_completion_gate
+test_spawn_refuses_a_duplicate_brief
+test_spawn_duplicate_brief_scope
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
