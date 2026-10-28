@@ -122,6 +122,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-inbox-result-lib.sh`  | Own trusted-local note, target, timestamp, artifact, and terminal-result envelope validation |
 | `fm-inbox-result.sh`     | Publish immutable trusted-local result envelopes and deliver or retry them through an explicit adapter |
 | `fm-inbox-hermes-adapter.sh` | Deliver a validated inbox result through the configured Hermes `send` command |
+| `fm-hermes-sandbox.sh`   | Confine Hermes gateway checks to a throwaway home with user service-manager access disconnected |
 | `fm-classify-lib.sh`     | Shared wake and status-span classification, ship evidence gate, durable keyed-decision folds, status cursors, and unread informational status-line selection |
 | `fm-send.sh`             | Enqueue ordinary local task text durably, or type remote task text, slash commands, Codex dollar invocations, explicit targets, and keys through the recorded backend |
 | `fm-task-inbox-lib.sh`   | Own sequenced steering records, handled-file acknowledgement, the constant doorbell, and the watcher retry ladder |

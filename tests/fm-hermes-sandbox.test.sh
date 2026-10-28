@@ -5,10 +5,11 @@
 #
 # The stub repeats the installed Hermes rewrite: on `gateway run` it writes
 # `$HOME/.config/systemd/user/hermes-gateway.service` carrying `HERMES_HOME`
-# and the working directory, which is the 2026-10-12 poisoning path. Case 1
-# shows that write reaching the real home without the guard; case 2 shows the
-# guard moving it into the sandbox. Case 8 runs the installed Hermes when it is
-# present. Every case leaves the actual user unit directory byte-identical, and
+# and the working directory. Case 1 shows that write reaching the fake real
+# home without the guard; case 2 proves the guard moves it into the sandbox.
+# Case 8 probes installed Hermes with a stale sandbox unit when available,
+# checking confinement without requiring Hermes to rewrite the fixture.
+# Every case leaves the actual user unit directory byte-identical, and
 # case 9 records that before-and-after checksum as its evidence.
 set -eu
 

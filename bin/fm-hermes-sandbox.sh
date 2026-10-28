@@ -8,8 +8,7 @@
 # definition differs (hermes_cli/gateway.py `refresh_systemd_unit_if_needed`),
 # and `gateway install` writes that unit unconditionally. Hermes' own belt only
 # rejects /tmp and pytest paths, so a throwaway `HERMES_HOME` under a worktree
-# still poisoned the real unit on 2026-10-12 and left the main gateway running
-# on a test home.
+# can still rewrite the real unit to use a test home.
 # `get_systemd_unit_path()` resolves through `Path.home()` (which reads `$HOME`)
 # and ignores `XDG_CONFIG_HOME`, so sandboxing `$HOME` is the mechanism that
 # keeps that write inside the sandbox. This script refuses to run when it
@@ -37,7 +36,11 @@
 #   - <root> is or contains the caller's real home or the account's passwd
 #     home, or sits inside either home's `.config/systemd/user` directory.
 #   - any sandbox variable fails to resolve inside <root>.
+#   - HOME/.config/systemd/user or any existing entry beneath it resolves
+#     outside <root> or overlaps a real home or its user unit directory.
+#     Directory symlinks are traversed with cycle detection before execution.
 #   - python3 is unavailable or the `Path.home()` probe escapes the sandbox home.
+#   Real-home overlap checks apply to every resolved sandbox destination.
 #
 # Exit status:
 #   the command's own status, or 64 for a usage error, 78 for a refusal, and 70
@@ -53,6 +56,10 @@
 # Typical use:
 #   bin/fm-hermes-sandbox.sh -- hermes gateway run
 #   bin/fm-hermes-sandbox.sh --root /tmp/fm-gw -- hermes gateway run
+#
+# Verification: tests/fm-hermes-sandbox.test.sh proves the sandboxed rewrite
+# with a stub and checks the installed Hermes stale-unit probe, when available,
+# for confinement and unchanged real units; that probe need not rewrite a unit.
 set -u
 
 PROG=fm-hermes-sandbox
