@@ -98,11 +98,12 @@ When you settle a decision that has a button post any other way, such as a typed
 ## Name the thread, then mark its state
 
 Before composing a dedicated-channel reply, consult the [topic-thread contract](../../../docs/configuration.md#topic-threads-one-thread-per-request); the [emit header and help](../../../bin/fm-ext-emit.sh) own the title, retitle, and state flags.
+Emit refuses a reply that would create the thread without `--thread-title`, and any `answer` or `final` without an explicit `--thread-state`; its header owns both rules.
 
 - **Title the creating reply** with `<Project> · <2-5 word topic>` (for example `Aceh · ingestion status`), especially when the request is vague, long, or procedural.
 - **Retitle** (`--thread-retitle`) only when the thread's live topic has clearly moved on from its name: rename it on that reply as `<Project> · <current topic>`, not on every reply, and the contract above owns what a retitle does to later markers.
 - **Mark needs-you** when the reply asks the captain to decide.
-- **Mark done** with the terminal answer or final.
+- **Mark done** with the terminal answer or final; pass `none` on an answer that neither asks nor finishes.
 - **Clear the marker** when work resumes on an independent question, as defined by the topic-thread contract above.
 
 Titles are public: the same safety rules as reply text apply (no task ids, branch names, paths, hostnames, or secrets).
@@ -213,8 +214,11 @@ Treat `state/ext-inbox/` as the source of truth and process **every** `*.json` f
    e. Submit it without inlining text into a shell command:
 
       ```sh
-      bin/fm-ext-emit.sh --request-id <request_id> --kind ack|answer|followup|final --generation <n> --text-file <path>
+      bin/fm-ext-emit.sh --request-id <request_id> --kind ack|answer|followup|final --generation <n> --text-file <path> \
+        [--thread-title "<Project> · <topic>"] [--thread-state needs-you|done|none]
       ```
+
+      Add the title and state as [Name the thread, then mark its state](#name-the-thread-then-mark-its-state) says; emit refuses when a required one is missing.
 
       (`--text-file -` reading stdin is equally fine.)
       It echoes the slug and exits 0 on a published or already-present payload.

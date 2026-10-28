@@ -444,7 +444,7 @@ PY
   printf 'Aye, all shipshape.' > "$home/ans.txt"
   PATH="$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-ext-emit.sh" \
     --request-id "discord:${GUILD}:${CHANNEL}:777777777777777777:700000000000000001" \
-    --kind answer --generation 1 --text-file "$home/ans.txt" >/dev/null \
+    --kind answer --generation 1 --thread-state none --text-file "$home/ans.txt" >/dev/null \
     || fail "an answer to a thread request must be emitted"
   slug=$(printf '%s' "discord:${GUILD}:${CHANNEL}:777777777777777777:700000000000000001" | sha256sum | awk '{print $1}')
   target=$(jq -r '.thread_id' "$home/state/ext-outbox/${slug}.answer.1.json")
@@ -619,7 +619,7 @@ assert intake.handle_fm_command("docs status").startswith("Aye, captain")
 rid = "discord:%s:%s:%s:830000000000000001" % (G, C, C)
 Path(home, "ans.txt").write_text("Docs fix is ready. Shall I merge it?")
 subprocess.run([os.path.join(root, "bin", "fm-ext-emit.sh"), "--request-id", rid,
-                "--kind", "answer", "--generation", "1",
+                "--kind", "answer", "--generation", "1", "--thread-state", "none",
                 "--text-file", os.path.join(home, "ans.txt")], check=True, capture_output=True)
 POSTED = "830000000000000900"
 sent = outbox_poster.drain_outbox(

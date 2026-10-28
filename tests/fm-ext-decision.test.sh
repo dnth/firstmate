@@ -116,7 +116,7 @@ emit_decision() {
   printf 'Which way should the fix go?\n1. North ⭐\n2. South\nReply to this message with the number.' \
     > "$home/post.txt"
   slug=$(home_env "$home" "$EMIT" --request-id "discord:$GUILD:$CHANNEL:$thread:$REQUEST_MESSAGE" \
-    --kind followup --generation "$generation" \
+    --kind followup --generation "$generation" --thread-title "Firstmate · route fix" \
     --text-file "$home/post.txt" --decision-file "$home/decision.json") \
     || fail "emit refused a valid decision post: $decision"
   printf '%s\n' "$home/state/ext-outbox/$slug.followup.$generation.json"

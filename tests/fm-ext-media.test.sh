@@ -119,7 +119,7 @@ emit_media() {  # <home> <message> <generation> <text> <media>...
   local file
   for file in "$@"; do args+=(--media "$file"); done
   home_env "$home" "$EMIT" --request-id "$(request_id "$message")" --kind answer \
-    --generation "$generation" --text-file "$home/reply.txt" "${args[@]}"
+    --generation "$generation" --thread-state none --text-file "$home/reply.txt" "${args[@]}"
 }
 
 slug_of() {
@@ -267,7 +267,7 @@ test_1_worker_and_inactive_home_refused() {
   screen "$home" "$home/data/shots/screen.png"
   printf 'Here it is.' > "$home/reply.txt"
   out=$(env FM_TASK_ID=some-task PATH="$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$EMIT" --request-id "$(request_id 410000000000000001)" --kind answer --generation 1 \
+    "$EMIT" --request-id "$(request_id 410000000000000001)" --kind answer --generation 1 --thread-state none \
     --text-file "$home/reply.txt" --media "$home/data/shots/screen.png" 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "a task worker must not post media"
@@ -419,7 +419,7 @@ test_4_oversized_image_downscaled() {
   printf 'Big screen.' > "$home/reply.txt"
   env -u FM_TASK_ID PATH="$BASE_PATH:$MAGICK_DIR" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$EMIT" --request-id "$(request_id 440000000000000001)" \
-    --kind answer --generation 1 --text-file "$home/reply.txt" --media "$home/data/shots/large.png" >/dev/null \
+    --kind answer --generation 1 --thread-state none --text-file "$home/reply.txt" --media "$home/data/shots/large.png" >/dev/null \
     || fail "an oversized image must be downscaled, not refused"
   payload="$home/state/ext-outbox/$slug.answer.1.json"
   staged="$home/state/ext-media/staged/$(jq -r '.media.dir' "$payload")/image-1.png"

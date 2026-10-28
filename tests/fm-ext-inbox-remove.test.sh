@@ -221,12 +221,12 @@ for kind in ack answer followup final; do
   setup_home "$home"
   write_inbox "$home" "$SLUG" "$RID"
   printf 'Reply for the request.\n' > "$TMP_ROOT/refused-reply.txt"
-  home_env "$home" bash "$EMIT" --request-id "$RID" --kind "$kind" --generation 1 \
+  home_env "$home" bash "$EMIT" --request-id "$RID" --kind "$kind" --generation 1 --thread-state none \
     --text-file "$TMP_ROOT/refused-reply.txt" >/dev/null \
     || fail "$kind emit must publish before delivery starts"
   home_env "$home" bash "$OUTBOX" begin --slug "$SLUG" --kind "$kind" --generation 1 \
     >/dev/null || fail "$kind delivery must begin"
-  if out=$(home_env "$home" bash "$EMIT" --request-id "$RID" --kind "$kind" --generation 1 \
+  if out=$(home_env "$home" bash "$EMIT" --request-id "$RID" --kind "$kind" --generation 1 --thread-state none \
     --text-file "$TMP_ROOT/refused-reply.txt" 2>&1); then
     fail "$kind emit must refuse while delivery has no receipt"
   fi
@@ -245,7 +245,7 @@ home="$TMP_ROOT/j"
 setup_home "$home"
 write_inbox "$home" "$SLUG" "$RID"
 printf 'Answer for the request.\n' > "$TMP_ROOT/reply.txt"
-home_env "$home" bash "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+home_env "$home" bash "$EMIT" --request-id "$RID" --kind answer --generation 1 --thread-state none \
   --text-file "$TMP_ROOT/reply.txt" >/dev/null || fail "emit must publish the payload"
 if out=$(run_remove "$home" --slug "$SLUG" 2>&1); then
   fail "an emitted but undelivered reply must not clear the inbox"

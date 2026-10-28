@@ -308,6 +308,19 @@ fm_ext_waiting_pin_target() {
   printf '%s %s\n' "$guild" "$channel"
 }
 
+# fm_ext_dedicated_channel [home]: print the dedicated channel id, or nothing.
+# The gateway plugin's intake.dedicated_channel owns reading config/ext-channel;
+# reusing it keeps these scripts and the poster agreed on which channel it is.
+fm_ext_dedicated_channel() {
+  python3 -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent / "contrib/hermes-gateway-firstmate-comms"))
+from intake import dedicated_channel
+print(dedicated_channel(Path(sys.argv[2])))
+' "$_FM_EXT_LIB_DIR" "${1:-$FM_HOME}" 2>/dev/null
+}
+
 fm_ext_generation_valid() {
   case "$1" in
     ''|*[!0-9]*) return 1 ;;
