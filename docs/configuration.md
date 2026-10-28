@@ -338,6 +338,15 @@ The separately discovered `.omp/extensions/fm-fleet-hooks.ts` fails open while r
 It reads the active firstmate or secondmate home's own fleet state through `FM_HOME`; malformed or unreadable input, command failure, or a bounded read-only subprocess timeout suppresses that hook output instead of interrupting the OMP turn.
 [`docs/verification/runtime-backends.md`](verification/runtime-backends.md#omp-project-extension-discovery) records the deterministic coverage and the pending live OMP event-delivery check.
 
+## OMP advisor (.omp/settings.json, data/watchdog-captain.md)
+
+The OMP advisor is off by default in every Firstmate checkout, so worker copies of this repo and second mates run without one.
+The tracked `.omp/config.yml` deliberately leaves `advisor.enabled` unset, because a key set in project `config.yml` overrides project `settings.json`.
+A home opts in with an untracked, gitignored `.omp/settings.json` that sets `advisor.enabled: true` and may set `modelRoles.advisor` to pick that home's advisor model.
+The tracked repo-root `WATCHDOG.yml` is the advisor roster: it pauses OMP's legacy `default` advisor and runs one read-only `firstmate` advisor without a pinned model.
+The tracked repo-root `WATCHDOG.md` holds that advisor's review guidance and imports the home's optional private layer, `data/watchdog-captain.md`, for captain-specific review preferences.
+Confirm a home's opt-in with `omp config get advisor.enabled` and, in a fresh session, `/advisor status`.
+
 ## OMP project extensions
 
 OMP discovers native project extensions from the launch cwd's `.omp/extensions` directory and from non-empty string extension roots declared by `.omp/settings.json`, separately from its profile-scoped home extensions.

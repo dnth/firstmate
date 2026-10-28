@@ -1,0 +1,19 @@
+# Firstmate advisor roster. Tracked at the repo root; review guidance lives in WATCHDOG.md.
+# The roster only runs where advisor.enabled is true. Firstmate keeps that off in tracked
+# config, so worker copies and second mates get no advisor. A home opts in with an
+# untracked .omp/settings.json, which also picks the model through modelRoles.advisor.
+#
+# OMP reviews after every turn of the main session. It has no per-advisor setting for
+# review mode, review interval or note limit; the emission guard caps each advisor at one
+# note per review. Global settings shape the cadence: keep advisor.syncBacklog off and
+# advisor.immuneTurns at its default of 3. Run one advisor, because a second one doubles
+# both the cost and the interruptions.
+advisors:
+  # Keep the role-based legacy advisor off, so it never runs alongside this one.
+  - name: default
+    enabled: false
+  - name: firstmate
+    enabled: true
+    # No model here: each home picks its own through modelRoles.advisor.
+    # Read-only. These are the defaults, listed explicitly so nobody widens them by accident.
+    tools: [read, grep, glob]

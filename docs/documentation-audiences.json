@@ -239,7 +239,7 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".omp/WATCHDOG.md",
+      "path": "WATCHDOG.md",
       "audience": "agent-runtime"
     },
     {

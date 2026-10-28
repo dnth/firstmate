@@ -1,8 +1,6 @@
-# Enable the OMP advisor in worktrees of this Firstmate repository.
-# Project-local configuration does not enable the advisor in unrelated projects.
-# No project-local model role is set, so OMP resolves the advisor role from higher-level configuration.
-advisor:
-  enabled: true
+# The OMP advisor stays off in tracked config, so worker copies and second mates get no advisor.
+# A home opts in with an untracked .omp/settings.json, which can also set modelRoles.advisor.
+# Do not set advisor.enabled here: a key set in this file overrides settings.json.
 
 # Firstmate's todo list projects long-lived fleet work rather than one prompt's work.
 # End-of-turn reminders would start a second model turn after an answer to the captain.
