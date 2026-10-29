@@ -90,6 +90,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-public-followup-lib.sh
+. "$SCRIPT_DIR/fm-public-followup-lib.sh"
 
 usage() {
   echo "usage: fm-pane-autoclose.sh <task-id> --endpoint <status-endpoint> --status-ident <device:inode>" >&2
@@ -179,10 +181,13 @@ open_follow_on() { # <task> <kind>
 # still owed, 2 when the answer cannot be proven. A home that never opted into
 # the relay answers 0 through the script's own activation gate.
 public_followup_state() { # <task>
-  local rc
+  local task=$1 rc
   [ -x "$SCRIPT_DIR/fm-public-followup.sh" ] || return 0
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-    "$SCRIPT_DIR/fm-public-followup.sh" guard-work main "$task" >/dev/null 2>&1
+  fm_pf_resolve_work_owner "$FM_HOME" "$STATE" "$KIND" "$task"
+  [ "$PUBLIC_FOLLOWUP_PARENT_UNRESOLVED" = 0 ] || return 2
+  [ -n "$PUBLIC_FOLLOWUP_STATE" ] && [ "$PUBLIC_FOLLOWUP_RELAY_ACTIVE" = 1 ] || return 0
+  FM_HOME="$PUBLIC_FOLLOWUP_HOME" FM_STATE_OVERRIDE="$PUBLIC_FOLLOWUP_STATE" \
+    "$SCRIPT_DIR/fm-public-followup.sh" guard-work "$PUBLIC_FOLLOWUP_WORK_HOME" "$task" >/dev/null 2>&1
   rc=$?
   case "$rc" in
     0) return 0 ;;
