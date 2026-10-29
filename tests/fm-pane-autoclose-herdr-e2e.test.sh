@@ -163,7 +163,6 @@ write_herdr_meta() { # <task> <workspace> <tab> <pane> [kind] [session-override]
     "endpoint_task_id=$task" \
     "kind=$kind" \
     "mode=no-mistakes" \
-    "decisions_reviewed=1" \
     "decision_keys=" \
     "worktree=$WORK" \
     "project=$WORK" \
@@ -543,7 +542,6 @@ fm_write_meta "$STATE/$TASK.meta" \
   "endpoint_task_id=$TASK" \
   "kind=scout" \
   "mode=no-mistakes" \
-  "decisions_reviewed=1" \
   "decision_keys=" \
   "worktree=$WORK" \
   "project=$WORK" \

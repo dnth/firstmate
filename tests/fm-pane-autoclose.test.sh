@@ -172,7 +172,6 @@ write_herdr_meta() {
     "endpoint_task_id=$task" \
     "kind=$kind" \
     "mode=$mode" \
-    "decisions_reviewed=1" \
     "decision_keys=" \
     "worktree=$HOME_DIR/wt" \
     "project=$HOME_DIR/proj" \
@@ -239,6 +238,20 @@ test_scout_done_receipt_with_row_in_flight_closes() {
   [ "$(call_count session stop)" = 0 ] || fail "autoclose must never stop the Herdr session"
   assert_present "$STATE/demo.meta" "autoclose removes no durable task record"
   pass "closes the pane after a scout done: receipt while the board row is In flight"
+}
+
+test_ship_pr_receipt_without_inventory_closes() {
+  local out rc size
+  setup_home ship-pr
+  write_herdr_meta demo lab-sess w1 w1:t2 w1:p2 ship no-mistakes
+  printf 'working: implementing\n' > "$STATE/demo.status"
+  printf 'done: PR https://github.com/dnth/firstmate/pull/999\n' >> "$STATE/demo.status"
+  size=$(wc -c < "$STATE/demo.status" | tr -d ' ')
+  out=$(run_deliver demo "$size"); rc=$?
+  expect_code 0 "$rc" "deliver should succeed for a ship PR receipt"
+  assert_contains "$out" "closed: demo pane lab-sess:w1:p2" "a ship task with no captain-call inventory should close"
+  pane_present w1:p2 && fail "a ship PR completion without an inventory should close its pane"
+  pass "closes a ship PR completion's pane when no captain-call inventory exists"
 }
 
 test_failure_receipt_keeps_pane() {
@@ -361,7 +374,6 @@ test_ambiguous_endpoint_refuses_loudly() {
     "endpoint_task_id=demo" \
     "kind=scout" \
     "mode=no-mistakes" \
-    "decisions_reviewed=1" \
     "decision_keys=" \
     "worktree=$HOME_DIR/wt" \
     "project=$HOME_DIR/proj" \
@@ -497,7 +509,7 @@ test_linked_captain_call_keeps_pane() {
   local out size
   setup_home linked-call
   write_herdr_meta demo lab-sess w1 w1:t2 w1:p2 scout no-mistakes
-  printf 'decision_keys=linked-call\n' >> "$STATE/demo.meta"
+  printf 'decisions_reviewed=1\ndecision_keys=linked-call\n' >> "$STATE/demo.meta"
   export FM_FAKE_LINKED_ROW='task:
   id: linked-call
   state: queued
@@ -686,6 +698,7 @@ test_local_only_keeps_pane
 test_linked_captain_call_keeps_pane
 test_revalidates_after_presentation_wait
 test_scout_done_receipt_with_row_in_flight_closes
+test_ship_pr_receipt_without_inventory_closes
 test_failure_receipt_keeps_pane
 test_open_decision_keeps_pane
 test_later_event_keeps_pane

@@ -33,8 +33,10 @@
 #      supervisor still needs that context.
 #   3. No follow-on work remains: a still-open keyed decision or
 #      blocker in the status fold (bin/fm-classify-lib.sh status_open_decisions);
-#      an incomplete or unanswered linked captain-call inventory
-#      (bin/fm-captain-hold.sh verify --require-answered);
+#      an unanswered linked call in a recorded captain-call inventory
+#      (bin/fm-captain-hold.sh verify --require-answered, consulted only when
+#      the metadata records decisions_reviewed=1; a task with no inventory has
+#      no linked calls);
 #      a held or blocked backlog row (bin/fm-backlog-transition-lib.sh
 #      fm_backlog_row_probe); an open routed reply
 #      (bin/fm-pending-reply-lib.sh fm_pending_reply_task_has_open); an armed or
@@ -142,7 +144,8 @@ open_follow_on() { # <task> <kind>
     return 1
   fi
 
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+  if [ "$(fm_meta_get "$meta" decisions_reviewed)" = 1 ] \
+    && ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$task" --require-answered >/dev/null 2>&1; then
     printf 'linked captain-call inventory is incomplete or unresolved'
     return 1
