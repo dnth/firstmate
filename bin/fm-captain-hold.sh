@@ -178,6 +178,9 @@
 # `verify` is read-only and is called by scout teardown, so teardown cannot
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still be durable and no keyed status decision may be open.
+# `--require-answered` additionally requires a resolution for each live linked
+# task's latest hold lifecycle; archived entries remain valid. Pane autoclose
+# uses this stricter mode; scout teardown keeps the ordinary durability gate.
 # Metadata compatibility: the attestation keeps the historical
 # `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`

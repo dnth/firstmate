@@ -15,13 +15,14 @@
 #   - a completed scout's receipt-then-board sequence: the receipt lands on its
 #     done: line while the board row is still In flight, and the exact pane
 #     closes;
-#   - a failed: receipt, and each follow-on-work exclusion (open keyed decision,
-#     linked external request, open routed reply, armed check, held board row),
+#   - a failed: receipt, local-only completion, and follow-on-work exclusions
+#     (open keyed decision or blocker, blocked or held board row, linked captain
+#     call, external request, open routed reply, armed check),
 #     which all keep the pane a supervisor still needs;
 #   - the captain's active tab, which is never closed;
 #   - closure is a view operation: the session keeps running, a sibling pane
-#     still reads, the captured transcript survives, and the closed pane's
-#     process-owned file stays on disk;
+#     still reads, Herdr's persisted session history retains the transcript,
+#     and the closed pane's process-owned file stays on disk;
 #
 # FM_PANE_AUTOCLOSE_ARTIFACT_DIR, when set, receives the captured transcript for
 # a caller that needs a reviewable artifact outside this scratch root.
