@@ -373,6 +373,7 @@ fm_pf_resolve_work_owner() {
           if PUBLIC_FOLLOWUP_HOME=$(public_followup_resolve_primary_home \
               "$PRIMARY_HOME_CANDIDATE" "$FM_HOME" "$SECOND_MATE_ID"); then
             PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
+            # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
             PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
             if [ "$FORCE" != "--force" ] \
               && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME"; then
@@ -385,15 +386,18 @@ fm_pf_resolve_work_owner() {
         fi
       else
         PUBLIC_FOLLOWUP_HOME=
+        # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
         PUBLIC_FOLLOWUP_STATE=
       fi
     fi
   elif [ "$KIND" = secondmate ]; then
+    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
     PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$ID"
     if [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
       PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
     fi
   elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
+    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
     PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
   fi
   return 0
