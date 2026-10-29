@@ -2200,7 +2200,7 @@ EOF
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys entry key open resolved require_answered=0
+  local origin=${1:-} meta reviewed keys entry key open resolved body require_answered=0
   if [ "$#" -eq 2 ] && [ "$2" = --require-answered ]; then
     require_answered=1
   elif [ "$#" -ne 1 ]; then
@@ -2220,8 +2220,13 @@ command_verify() {
       resolved=$(verify_entry_durable "$origin" "$entry") || exit $?
       if [ "$require_answered" = 1 ] && [ "${resolved##* }" != archived ]; then
         task_show "${resolved%% *}" || fail "linked captain call $entry cannot be read"
-        body_has_resolution_record "$(show_field "$TASK_SHOW_OUTPUT" body)" \
+        body=$(show_field_value "$TASK_SHOW_OUTPUT" body)
+        body_has_resolution_record "$body" \
           || fail "linked captain call $entry still awaits an answer"
+        if [ -n "$(body_hold_set_timestamp "$body")" ]; then
+          decoded_body_has_current_resolution_record "$body" \
+            || fail "linked captain call $entry still awaits an answer"
+        fi
       fi
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')

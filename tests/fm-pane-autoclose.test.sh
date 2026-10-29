@@ -277,7 +277,7 @@ test_later_event_keeps_pane() {
   write_herdr_meta demo lab-sess w1 w1:t2 w1:p2 scout no-mistakes
   printf 'done: report ready at data/demo/report.md\n' > "$STATE/demo.status"
   size=$(wc -c < "$STATE/demo.status" | tr -d ' ')
-  printf 'working: follow-up check\n' >> "$STATE/demo.status"
+  printf 'working: follow-up check\ndone: report ready at data/demo/report.md\n' >> "$STATE/demo.status"
   out=$(run_autoclose demo "$size"); rc=$?
   expect_code 0 "$rc" "a superseded claim is a keep, not an error"
   assert_contains "$out" "later status event supersedes" "the keep reason should name the superseding event"
@@ -510,6 +510,30 @@ test_linked_captain_call_keeps_pane() {
   out=$(run_autoclose demo "$size") || fail "linked captain call should keep successfully: $out"
   assert_contains "$out" "linked captain-call inventory" "linked held work keeps the pane"
   pane_present w1:p2 || fail "linked captain-held work must keep its pane"
+  local body
+  body=$(printf 'Captain hold set: 2026-10-29T00:00:00Z\n\nResolution recorded by fm-captain-hold.\nHold stamp: 2026-10-29T00:00:00Z\n\nCaptain decision:\nUse the corpus.\n' | jq -Rs .)
+  export FM_FAKE_LINKED_ROW="task:
+  id: linked-call
+  state: queued
+  held: no
+  blocked: no
+  hold_kind: captain
+  body: $body"
+  FM_HOME="$HOME_DIR" bash "$ROOT/bin/fm-captain-hold.sh" verify demo --require-answered >/dev/null \
+    || fail "a current released answer must satisfy inventory verification"
+  body=$(printf 'Captain hold set: 2026-10-29T00:00:01Z\n\nResolution recorded by fm-captain-hold.\nHold stamp: 2026-10-29T00:00:00Z\n\nCaptain decision:\nUse the corpus.\n' | jq -Rs .)
+  export FM_FAKE_LINKED_ROW="task:
+  id: linked-call
+  state: queued
+  held: yes
+  blocked: no
+  hold_kind: captain
+  body: $body"
+  FM_HOME="$HOME_DIR" bash "$ROOT/bin/fm-captain-hold.sh" verify demo >/dev/null \
+    || fail "a renewed hold must remain valid for ordinary teardown inventory"
+  out=$(run_autoclose demo "$size") || fail "a renewed hold should keep successfully: $out"
+  assert_contains "$out" "linked captain-call inventory" "an old answer cannot settle a renewed hold"
+  pane_present w1:p2 || fail "a renewed unanswered hold must keep its pane"
   export FM_FAKE_LINKED_ROW='task:
   id: linked-call
   state: done
@@ -525,7 +549,7 @@ test_linked_captain_call_keeps_pane() {
 
 test_revalidates_after_presentation_wait() {
   local mutation lock size runner out attempt ready
-  for mutation in working blocker; do
+  for mutation in working blocker repeated; do
     setup_home "wait-$mutation"
     write_herdr_meta demo lab-sess w1 w1:t2 w1:p2 scout no-mistakes
     printf 'done: report ready at data/demo/report.md\n' > "$STATE/demo.status"
@@ -556,6 +580,7 @@ test_revalidates_after_presentation_wait() {
     [ "$attempt" -lt 150 ] || fail "autoclose did not reach the presentation lock"
     case "$mutation" in
       working) printf 'working: resumed investigation\n' >> "$STATE/demo.status" ;;
+      repeated) printf 'working: resumed investigation\ndone: report ready at data/demo/report.md\n' >> "$STATE/demo.status" ;;
       blocker) printf 'blocked [key=scope]: need scope\ndone: report ready at data/demo/report.md\n' >> "$STATE/demo.status" ;;
     esac
     touch "$HOME_DIR/release-lock"
@@ -569,6 +594,23 @@ test_revalidates_after_presentation_wait() {
   pass "revalidates completion and keyed work after the presentation lock wait"
 }
 
+test_standing_event_byte_boundaries() {
+  local variant size out
+  for variant in blank-tail unterminated; do
+    setup_home "byte-$variant"
+    write_herdr_meta demo lab-sess w1 w1:t2 w1:p2 scout no-mistakes
+    printf 'done: café report ready at data/demo/report.md' > "$STATE/demo.status"
+    [ "$variant" = unterminated ] || printf '\n' >> "$STATE/demo.status"
+    size=$(wc -c < "$STATE/demo.status" | tr -d ' ')
+    [ "$variant" = unterminated ] || printf ' \n\t\n' >> "$STATE/demo.status"
+    out=$(run_autoclose demo "$size") || fail "the standing event should close: $out"
+    assert_contains "$out" "closed: demo" "the $variant event byte endpoint must match"
+    pane_present w1:p2 && fail "the $variant standing event should close its pane"
+  done
+  pass "compares standing event endpoints in bytes across newline and UTF-8 boundaries"
+}
+
+test_standing_event_byte_boundaries
 test_local_only_keeps_pane
 test_linked_captain_call_keeps_pane
 test_revalidates_after_presentation_wait

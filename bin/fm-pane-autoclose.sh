@@ -108,22 +108,20 @@ refused() { # <task> <reason>
   exit 2
 }
 
-# The text of the line ending at <endpoint> in <status-file>. The endpoint is
-# the byte just past that line's newline (or the file size for an unterminated
-# final line), which is what bin/fm-branch-outcome.sh records. Prints nothing
-# when the file cannot be read over that span.
-line_at_endpoint() { # <status-file> <endpoint>
-  local f=$1 endpoint=$2 span line last=
-  span=$(mktemp "$STATE/.pane-autoclose-span.XXXXXX") || return 1
-  if ! _fm_status_read_span "$f" 0 "$endpoint" > "$span"; then
-    rm -f -- "$span"
-    return 1
-  fi
-  while IFS= read -r line || [ -n "$line" ]; do
-    last=$line
-  done < "$span"
-  rm -f -- "$span"
-  printf '%s' "$last"
+read_standing_event() {
+  local LC_ALL=C line pos=0 newline
+  STANDING_ENDPOINT=0
+  EVENT_LINE=
+  while
+    newline=1
+    IFS= read -r line || { newline=0; [ -n "$line" ]; }
+  do
+    pos=$((pos + ${#line} + newline))
+    if [[ "$line" =~ [^[:space:]] ]]; then
+      STANDING_ENDPOINT=$pos
+      EVENT_LINE=$line
+    fi
+  done < "$1"
 }
 
 # Open follow-on work, or empty when none was found. Prints one plain reason on
@@ -266,13 +264,10 @@ validate_completion() {
   LIVE_IDENT=$(_fm_open_decisions_file_ident "$STATUS") || refused "$TASK" "status file identity cannot be read"
   [ "$LIVE_IDENT" = "$STATUS_IDENT" ] \
     || kept "$TASK" "receipt status identity no longer matches this status file"
-  EVENT_LINE=$(line_at_endpoint "$STATUS" "$ENDPOINT") \
-    || refused "$TASK" "status span ending at $ENDPOINT is unreadable"
-  [ -n "$EVENT_LINE" ] || refused "$TASK" "no status line ends at $ENDPOINT"
-
-  STANDING_LINE=$(last_status_line "$STATUS")
-  [ "$STANDING_LINE" = "$EVENT_LINE" ] \
+  read_standing_event "$STATUS" || refused "$TASK" "live standing event is unreadable"
+  [ "$STANDING_ENDPOINT" = "$ENDPOINT" ] \
     || kept "$TASK" "a later status event supersedes the delivered claim"
+  [ -n "$EVENT_LINE" ] || refused "$TASK" "no status line ends at $ENDPOINT"
 
   [ "$(status_line_verb "$EVENT_LINE")" = "done" ] \
     || kept "$TASK" "delivered event is not a done: claim"
