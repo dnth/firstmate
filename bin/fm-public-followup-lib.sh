@@ -245,3 +245,156 @@ fm_pf_events_signature() {
   [ -n "$names" ] || return 1
   printf '%s' "$names" | LC_ALL=C sort | fm_pf_sha256
 }
+
+public_followup_canonical_home() {
+  local home=$1
+  case "$home" in /*) ;; *) return 1 ;; esac
+  CDPATH='' cd -- "$home" 2>/dev/null && pwd -P
+}
+public_followup_resolve_primary_home() {
+  local parent=$1 child=$2 id=$3 parent_meta registry meta_home
+  fm_pf_home_id_valid "secondmate:$id" || return 1
+  parent=$(public_followup_canonical_home "$parent") || return 1
+  child=$(public_followup_canonical_home "$child") || return 1
+  [ "$parent" != "$child" ] || return 1
+  parent_meta="$parent/state/$id.meta"
+  [ -f "$parent_meta" ] && [ ! -L "$parent_meta" ] || return 1
+  [ "$(fm_meta_get "$parent_meta" kind)" = secondmate ] || return 1
+  meta_home=$(fm_meta_get "$parent_meta" home)
+  meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || return 1
+  [ "$meta_home" = "$child" ] || return 1
+  registry="$parent/data/secondmates.md"
+  secondmate_registry_validate_bindings "$registry" secondmate_registry_path_key "$id" "$child" || return 1
+  printf '%s\n' "$parent"
+}
+
+fm_pf_resolve_work_owner() {
+  local FM_HOME=$1 STATE=$2 KIND=$3 ID=$4 FORCE=${5:-}
+  local SUB_HOME_MARKER=.fm-secondmate-home SUB_HOME_PARENT_MARKER=.fm-secondmate-parent
+  local PARENT_ROUTE_FILE PARENT_ROUTE_RECORD PARENT_ROUTE PARENT_ROUTE_HOME
+  local PRIMARY_HOME_CANDIDATE PARENT_BINDINGS_MATCH LIVE_PARENT_HOME DURABLE_PARENT_HOME HOME_ENV_TOKEN
+  # shellcheck source=bin/fm-secondmate-registry-lib.sh
+  . "$_FM_PF_LIB_DIR/fm-secondmate-registry-lib.sh"
+  # shellcheck source=bin/fm-secondmate-parent-lib.sh
+  . "$_FM_PF_LIB_DIR/fm-secondmate-parent-lib.sh"
+  SECOND_MATE_ID=
+  PUBLIC_FOLLOWUP_HOME=$FM_HOME
+  PUBLIC_FOLLOWUP_STATE=$STATE
+  PUBLIC_FOLLOWUP_WORK_HOME=main
+  PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
+  PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=0
+  PUBLIC_FOLLOWUP_RELAY_ACTIVE=0
+  if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
+    SECOND_MATE_ID=$(sed -n '1p' "$FM_HOME/$SUB_HOME_MARKER")
+    # The durable parent record (written once at seeding, next to the identity
+    # marker) names this home's route to its parent: "local" when they share a
+    # filesystem, "remote" when the parent lives on another machine. Absent for
+    # a home seeded before this record existed, which preserves today's exact
+    # env-var-only behavior for that legacy home rather than guessing its route.
+    PARENT_ROUTE_FILE="$FM_HOME/$SUB_HOME_PARENT_MARKER"
+    PARENT_ROUTE_RECORD=absent
+    PARENT_ROUTE=
+    PARENT_ROUTE_HOME=
+    if [ -e "$PARENT_ROUTE_FILE" ] || [ -L "$PARENT_ROUTE_FILE" ]; then
+      PARENT_ROUTE_RECORD=invalid
+      if fm_secondmate_parent_record_parse "$PARENT_ROUTE_FILE"; then
+        PARENT_ROUTE=$FM_SECONDMATE_PARENT_ROUTE
+        PARENT_ROUTE_HOME=$FM_SECONDMATE_PARENT_HOME
+        PARENT_ROUTE_RECORD=valid
+      fi
+    fi
+    if [ "$PARENT_ROUTE_RECORD" = invalid ]; then
+      PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
+    elif [ "$PARENT_ROUTE" = remote ]; then
+      # The entire promised-public-reply subsystem is same-filesystem by
+      # construction (bin/fm-public-followup-emit.sh header): a parent recorded
+      # on another machine can never hold a delegated promise for this child, so
+      # the delegated-parent path is out of scope and never refuses cleanup on
+      # its own. A token committed directly to THIS home's own .env is still a
+      # real, same-filesystem signal, so it is still checked - but read only
+      # from the file, never from the process environment, so an unrelated
+      # export in the remote host's own login shell cannot trigger it the way
+      # fm_pf_relay_active's environment-wins rule would.
+      if [ -f "$FM_HOME/.env" ]; then
+        HOME_ENV_TOKEN=$(fmx_env_get FMX_PAIRING_TOKEN "$FM_HOME/.env")
+        [ -z "$HOME_ENV_TOKEN" ] || PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=1
+      fi
+      if [ "$PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE" = 1 ]; then
+        PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
+      else
+        PUBLIC_FOLLOWUP_HOME=
+        PUBLIC_FOLLOWUP_STATE=
+      fi
+    elif [ "$PARENT_ROUTE" = local ]; then
+      PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
+      PRIMARY_HOME_CANDIDATE=${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-$PARENT_ROUTE_HOME}
+      PARENT_BINDINGS_MATCH=1
+      if [ -n "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" ]; then
+        LIVE_PARENT_HOME=$(public_followup_canonical_home \
+          "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME") || PARENT_BINDINGS_MATCH=0
+        DURABLE_PARENT_HOME=$(public_followup_canonical_home \
+          "$PARENT_ROUTE_HOME") || PARENT_BINDINGS_MATCH=0
+        if [ "$PARENT_BINDINGS_MATCH" = 1 ] \
+          && [ "$LIVE_PARENT_HOME" != "$DURABLE_PARENT_HOME" ]; then
+          PARENT_BINDINGS_MATCH=0
+        fi
+      fi
+      if [ "$PARENT_BINDINGS_MATCH" = 1 ] \
+        && fm_pf_home_id_valid "secondmate:$SECOND_MATE_ID"; then
+        PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$SECOND_MATE_ID"
+        if PUBLIC_FOLLOWUP_HOME=$(public_followup_resolve_primary_home \
+            "$PRIMARY_HOME_CANDIDATE" "$FM_HOME" "$SECOND_MATE_ID"); then
+          PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
+          PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
+          if [ "$FORCE" != "--force" ] \
+            && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME"; then
+            PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+          fi
+        else
+          PUBLIC_FOLLOWUP_HOME=
+          PUBLIC_FOLLOWUP_STATE=
+        fi
+      fi
+    else
+      # A home seeded before the durable record existed retains the legacy
+      # launch-time binding behavior unchanged.
+      PRIMARY_HOME_CANDIDATE=${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}
+      if [ -n "$PRIMARY_HOME_CANDIDATE" ]; then
+        if fm_pf_relay_active "$PRIMARY_HOME_CANDIDATE"; then
+          PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=1
+        fi
+      elif fm_pf_relay_active "$FM_HOME"; then
+        PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=1
+      fi
+      if [ "$PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE" = 1 ]; then
+        PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
+        if fm_pf_home_id_valid "secondmate:$SECOND_MATE_ID"; then
+          PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$SECOND_MATE_ID"
+          if PUBLIC_FOLLOWUP_HOME=$(public_followup_resolve_primary_home \
+              "$PRIMARY_HOME_CANDIDATE" "$FM_HOME" "$SECOND_MATE_ID"); then
+            PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
+            PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
+            if [ "$FORCE" != "--force" ] \
+              && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME"; then
+              PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+            fi
+          else
+            PUBLIC_FOLLOWUP_HOME=
+            PUBLIC_FOLLOWUP_STATE=
+          fi
+        fi
+      else
+        PUBLIC_FOLLOWUP_HOME=
+        PUBLIC_FOLLOWUP_STATE=
+      fi
+    fi
+  elif [ "$KIND" = secondmate ]; then
+    PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$ID"
+    if [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
+      PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+    fi
+  elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
+    PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+  fi
+  return 0
+}

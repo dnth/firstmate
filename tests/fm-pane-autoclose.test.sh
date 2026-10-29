@@ -20,6 +20,7 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
+REAL_TASKS_AXI=$(command -v tasks-axi || true)
 TMP_ROOT=$(fm_test_tmproot fm-pane-autoclose-tests)
 AUTOCLOSE="$ROOT/bin/fm-pane-autoclose.sh"
 DELIVER="$ROOT/bin/fm-branch-outcome.sh"
@@ -594,6 +595,74 @@ test_revalidates_after_presentation_wait() {
   pass "revalidates completion and keyed work after the presentation lock wait"
 }
 
+test_public_commitment_owner_keeps_pane() {
+  [ -n "$REAL_TASKS_AXI" ] || { echo "skip: tasks-axi not found for public commitment ownership coverage"; return; }
+  local route parent owner work_home size out rc
+  for route in main durable legacy; do
+    setup_home "promise-$route"
+    ln -sf "$REAL_TASKS_AXI" "$FB/tasks-axi"
+    parent="$HOME_DIR/primary"
+    owner=$HOME_DIR
+    work_home=main
+    if [ "$route" != main ]; then
+      mkdir -p "$parent/state" "$parent/data" "$parent/config"
+      cp "$HOME_DIR/.tasks.toml" "$parent/.tasks.toml"
+      printf 'alice\n' > "$HOME_DIR/.fm-secondmate-home"
+      fm_write_meta "$parent/state/alice.meta" "kind=secondmate" "home=$HOME_DIR"
+      printf -- '- alice - fixture (home: %s; scope: fixture; projects: ; added 2026-10-29)\n' \
+        "$HOME_DIR" > "$parent/data/secondmates.md"
+      if [ "$route" = durable ]; then
+        printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+          > "$HOME_DIR/.fm-secondmate-parent"
+      fi
+      owner=$parent
+      work_home=secondmate:alice
+    fi
+    printf 'FMX_PAIRING_TOKEN=fixture-token\n' > "$owner/.env"
+    jq -n '{request_id:"req-promise", platform:"x", context_binding:{version:"ctx1", value:"ctx1_req-promise"},
+      public_safe_summary:"report the scout result", received_at:"2026-10-29T00:00:00Z",
+      followup_expires_at:"2099-01-01T00:00:00Z", reservation_expires_at:"2099-01-01T00:00:00Z"}' \
+      > "$owner/request.json"
+    jq -n '{type:"report-ready", project:"firstmate", required_deliverables:["report_path"], completion_policy:"all-required"}' \
+      > "$owner/expected.json"
+    jq -n --arg home "$work_home" \
+      '{relation_id:"rel-report", work_ref:{home_id:$home, task_id:"demo"}, role:"fulfills", required:true, generation:1}' \
+      > "$owner/relation.json"
+    out=$(FM_HOME="$owner" bash "$ROOT/bin/fm-tasks-axi.sh" public-followup add promise \
+      --request-context-file "$owner/request.json" --purpose promised-final \
+      --expected-final-file "$owner/expected.json" --expires-at 2099-01-01T00:00:00Z 2>&1) \
+      || fail "could not create the $route public commitment: $out"
+    FM_HOME="$owner" bash "$ROOT/bin/fm-tasks-axi.sh" public-followup bind-work promise \
+      --relation-file "$owner/relation.json" >/dev/null || fail "could not bind the $route public commitment"
+    FM_HOME="$owner" bash "$ROOT/bin/fm-public-followup.sh" register promise \
+      --relation rel-report --work-home "$work_home" --work-id demo --generation 1 >/dev/null \
+      || fail "could not register the $route public commitment"
+    write_herdr_meta demo lab-sess w1 w1:t2 w1:p2 scout no-mistakes
+    printf 'done: report ready at data/demo/report.md\n' > "$STATE/demo.status"
+    size=$(wc -c < "$STATE/demo.status" | tr -d ' ')
+    out=$(FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" run_deliver demo "$size") \
+      || fail "the $route completion receipt should be delivered: $out"
+    assert_contains "$out" "unresolved public commitment" "the $route owner must guard its promise"
+    pane_present w1:p2 || fail "the $route public commitment must keep the pane"
+    [ "$(pane_closed_count w1:p2)" = 0 ] || fail "the $route promise must prevent a close call"
+    if [ "$route" = durable ]; then
+      printf 'home=%s\n' "$parent" >> "$parent/state/alice.meta"
+      out=$(run_autoclose demo "$size"); rc=$?
+      expect_code 2 "$rc" "an unverified primary binding must refuse closure"
+      pane_present w1:p2 || fail "an unverified primary binding must keep the pane"
+      printf 'home=%s\n' "$HOME_DIR" >> "$parent/state/alice.meta"
+    fi
+    write_herdr_meta unbound lab-sess w1 w1:t2 w1:p2 scout no-mistakes
+    printf 'done: report ready at data/unbound/report.md\n' > "$STATE/unbound.status"
+    size=$(wc -c < "$STATE/unbound.status" | tr -d ' ')
+    out=$(FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" run_deliver unbound "$size") \
+      || fail "the unrelated $route completion should be delivered: $out"
+    assert_contains "$out" "closed: unbound" "a promise must guard only its bound work"
+    pane_present w1:p2 && fail "the unbound $route task should close its pane"
+  done
+  pass "resolves main, durable, and legacy promise ownership before closing only unbound panes"
+}
+
 test_standing_event_byte_boundaries() {
   local variant size out
   for variant in blank-tail unterminated; do
@@ -610,6 +679,7 @@ test_standing_event_byte_boundaries() {
   pass "compares standing event endpoints in bytes across newline and UTF-8 boundaries"
 }
 
+test_public_commitment_owner_keeps_pane
 test_standing_event_byte_boundaries
 test_local_only_keeps_pane
 test_linked_captain_call_keeps_pane
