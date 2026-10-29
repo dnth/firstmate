@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031 # Fixture globals are assigned by setup_home in this shell; the backgrounded and substituted calls above are read-only consumers.
 # tests/fm-pane-autoclose.test.sh - behavior tests for
 # bin/fm-pane-autoclose.sh and its wiring into bin/fm-branch-outcome.sh
 # deliver, driven against a stateful fake `herdr` and a stub `tasks-axi`.
