@@ -23,9 +23,7 @@
 #   - closure is a view operation: the session keeps running, a sibling pane
 #     still reads, Herdr's persisted session history retains the transcript,
 #     and the closed pane's process-owned file stays on disk;
-#
-# FM_PANE_AUTOCLOSE_ARTIFACT_DIR, when set, receives the captured transcript for
-# a caller that needs a reviewable artifact outside this scratch root.
+#   - a ship PR completion with no captain-call inventory closes its pane;
 #   - an ambiguous endpoint refuses loudly (exit 2) and closes nothing.
 set -u
 
@@ -265,8 +263,6 @@ grep -Fq 'transcript-marker-alpha' "$HISTORY" \
   || fail "the close must not drop the closed pane's persisted text"
 grep -Fq "$SIBLING_MARKER" "$HISTORY" \
   || fail "the close must not drop the surviving pane's persisted text"
-IMMEDIATE_HISTORY="$SCRATCH/history-after-close.json"
-cp "$HISTORY" "$IMMEDIATE_HISTORY"
 # Herdr 0.9.3 rewrites this file on its next flush with the live panes only, so
 # a closed pane leaves the persisted history then. That rewrite is Herdr's own
 # behaviour, measured here, not something this close path controls; the test
@@ -291,13 +287,6 @@ grep -Fq "$SIBLING_MARKER" "$HISTORY" \
 printf '%s' "$(lab session list --json)" | jq -e --arg s "$LAB_SESSION" \
   '.sessions[] | select(.name == $s) | select(.running == true)' >/dev/null \
   || fail "the lab session must still be running after Herdr's next flush"
-if [ -n "${FM_PANE_AUTOCLOSE_ARTIFACT_DIR:-}" ]; then
-  mkdir -p "$FM_PANE_AUTOCLOSE_ARTIFACT_DIR"
-  cp "$TRANSCRIPT" "$FM_PANE_AUTOCLOSE_ARTIFACT_DIR/herdr-lab-transcript-before-close.txt"
-  cp "$IMMEDIATE_HISTORY" \
-    "$FM_PANE_AUTOCLOSE_ARTIFACT_DIR/herdr-lab-history-immediately-after-close.json"
-  cp "$HISTORY" "$FM_PANE_AUTOCLOSE_ARTIFACT_DIR/herdr-lab-history-after-next-flush.json"
-fi
 pass "closure keeps Herdr's persisted history intact; the session survives the next flush"
 
 # --- 3. a failed: receipt keeps the pane -------------------------------------
@@ -528,7 +517,24 @@ else
   pass "keeps the pane for a promise the primary home holds for a secondmate task"
 fi
 
-# --- 7. an ambiguous endpoint refuses loudly --------------------------------
+# --- 7. a ship PR completion with no inventory closes its pane -------------
+TASK=ship-pr-done
+TAB_AND_PANE=$(create_tab ship-pr)
+SHIP_TAB=${TAB_AND_PANE%% *}
+SHIP_PANE=${TAB_AND_PANE##* }
+focus_tab "$SIBLING_TAB"
+write_herdr_meta "$TASK" "$WS" "$SHIP_TAB" "$SHIP_PANE" ship
+printf 'working: implementing\n' > "$STATE/$TASK.status"
+printf 'done: PR https://github.com/dnth/firstmate/pull/999\n' >> "$STATE/$TASK.status"
+ENDPOINT=$(wc -c < "$STATE/$TASK.status" | tr -d ' ')
+add_in_flight_row "$TASK"
+OUT=$(deliver "$TASK" "$ENDPOINT") || fail "deliver failed for $TASK: $OUT"
+assert_contains "$OUT" "closed: $TASK pane $LAB_SESSION:$SHIP_PANE" "a ship PR completion should close"
+pane_present "$SHIP_PANE" && fail "a ship PR completion without an inventory should close its pane: $OUT"
+pane_present "$SIBLING_PANE" || fail "a sibling pane must survive the ship PR close"
+pass "closes a ship PR completion's pane when no captain-call inventory exists"
+
+# --- 8. an ambiguous endpoint refuses loudly --------------------------------
 TASK=scout-ambiguous
 TAB_AND_PANE=$(create_tab ambiguous)
 AMBIG_TAB=${TAB_AND_PANE%% *}
