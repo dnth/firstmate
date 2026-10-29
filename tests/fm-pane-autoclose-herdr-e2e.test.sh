@@ -17,7 +17,8 @@
 #     closes;
 #   - a failed: receipt, local-only completion, and follow-on-work exclusions
 #     (open keyed decision or blocker, blocked or held board row, linked captain
-#     call, external request, open routed reply, armed check),
+#     call, external request, open routed reply, armed check, a primary-home
+#     promise for a delegated secondmate task),
 #     which all keep the pane a supervisor still needs;
 #   - the captain's active tab, which is never closed;
 #   - closure is a view operation: the session keeps running, a sibling pane
