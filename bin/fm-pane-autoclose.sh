@@ -14,12 +14,12 @@
 # immediately after it records a receipt, passing the exact status-file byte
 # endpoint that receipt covers.
 #
-# CONTRACT (this header is the one owner of the gate, its order, and its exit
-# codes). Every condition below must hold; the first failure stops the walk.
+# CONTRACT (this header is the one owner of the gate and its exit codes).
+# Every condition below must hold before closing.
 #
 #   1. The status file still holds the identity the receipt was recorded
 #      against (--status-ident, rechecked immediately before the close), and the
-#      line ending at --endpoint is exactly the file's live standing last line.
+#      --endpoint equals the byte endpoint of the live standing nonblank event.
 #      deliver --endpoint deliberately accepts a rotated or replaced status file
 #      so an old receipt stays inert; here that same staleness must never close
 #      a replacement task's pane, and a later appending status event means the
@@ -31,7 +31,7 @@
 #      A failed:, paused:, or
 #      unkeyed needs-decision:/blocked: receipt never closes a pane: a
 #      supervisor still needs that context.
-#   3. No follow-on work remains. In order: a still-open keyed decision or
+#   3. No follow-on work remains: a still-open keyed decision or
 #      blocker in the status fold (bin/fm-classify-lib.sh status_open_decisions);
 #      an incomplete or unanswered linked captain-call inventory
 #      (bin/fm-captain-hold.sh verify --require-answered);
@@ -41,8 +41,9 @@
 #      intended custom watcher check (state/<id>.check.sh present); an
 #      ext_request= or legacy x_request= task link in the metadata; or an
 #      unresolved public commitment the myfirstmate relay still owes
-#      (bin/fm-public-followup.sh guard-work). A board row that is merely
-#      In flight does not itself keep the pane: completion recording and the
+#      (bin/fm-public-followup.sh guard-work, addressed through the verified
+#      work owner resolved by bin/fm-public-followup-lib.sh). A board row that
+#      is merely In flight does not itself keep the pane: completion recording and the
 #      board close are separate, so the row often stays open at receipt time.
 #   4. A kind=secondmate record keeps its pane: a persistent home is a
 #      supervisor surface, not finished task work.
@@ -56,6 +57,9 @@
 #      `workspace close` and refuses to touch the captain's active tab. Only
 #      the pane view closes: the Herdr session, its other panes, and every
 #      transcript stay intact, and no durable task record is removed.
+#      After acquiring the presentation lock, the status identity, standing
+#      event byte endpoint, artifact, follow-on gate, and metadata endpoint
+#      are revalidated before closing.
 #
 # Backend scope: Herdr is the backend with a focus-preserving exact-pane close
 # contract. Every other backend is left to teardown and reported as skipped,
