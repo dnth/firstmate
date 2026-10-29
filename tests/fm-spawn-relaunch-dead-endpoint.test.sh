@@ -830,6 +830,33 @@ test_tmux_gone_relaunch_recreates_in_worktree() {
   pass "fm-spawn --relaunch: proven-missing tmux endpoint recreates the window in the recorded worktree"
 }
 
+# A relaunch reuses its own brief by design, so the duplicate-brief guard never
+# runs there, even while another live task carries the very same content.
+test_relaunch_skips_duplicate_brief_guard() {
+  local rec id sibling brief
+  id=$(case_id dup-relaunch)
+  rec=$(make_case dup-relaunch "$id" pool)
+  read_case "$rec"
+  sibling="sibling-$id"
+  brief=$(printf 'Delivery contract: mode=no-mistakes\n\n# Task\nShared relaunch task text.\n\n# Acceptance criteria\n- AC1: Shared relaunch outcome.\n')
+  printf '%s\n' "$brief" > "$HOME_DIR/data/$id/brief.md"
+  mkdir -p "$HOME_DIR/data/$sibling"
+  printf '%s\n' "$brief" > "$HOME_DIR/data/$sibling/brief.md"
+  printf 'kind=ship\n' > "$HOME_DIR/state/$sibling.meta"
+  cp "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief-before"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" tmux "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  : > "$CASE_DIR/fake/tmux-state/ses-$id.windows"
+
+  run_spawn "$CASE_DIR" "$HOME_DIR" "$id"
+  expect_code 0 "$SPAWN_STATUS" "relaunch with a sibling's identical brief should succeed; got: $SPAWN_OUT"
+  assert_contains "$SPAWN_OUT" "spawned $id" "relaunch with a duplicate sibling brief did not report success"
+  assert_not_contains "$SPAWN_OUT" "--allow-duplicate-brief" "relaunch ran the duplicate-brief guard"
+  pass "fm-spawn --relaunch: a task's own unchanged brief is never refused as a duplicate"
+}
+
 test_tmux_gone_relaunch_durable_lease_ownership() {
   local rec id
   id=$(case_id tmux-lease)
@@ -1338,6 +1365,7 @@ test_relaunch_without_delivery_identity_writes_none() {
 # --- run ---------------------------------------------------------------------
 
 test_tmux_gone_relaunch_recreates_in_worktree
+test_relaunch_skips_duplicate_brief_guard
 test_relaunch_preserves_delivery_identity_mid_handoff
 test_relaunch_without_delivery_identity_writes_none
 test_tmux_gone_relaunch_durable_lease_ownership

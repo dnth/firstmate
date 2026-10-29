@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--accepted-local-base <full-commit-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--accepted-local-base <full-commit-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] [--allow-duplicate-brief <other-task-id>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] [--allow-duplicate-brief <other-task-id>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] --secondmate
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--mode <no-mistakes|direct-PR|local-only>] [--yolo <on|off>] [--prewalk-into <model-spec>] [--allow-project-omp-extensions]
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every fresh
@@ -37,6 +37,18 @@
 #   cwd is the recorded worktree, herdr returns a drifted shell to the worktree
 #   with one cd before refusing, zellij and cmux refuse a live endpoint because
 #   probing its cwd would inject into the harness, and orca always refuses.
+#   A fresh ship or scout spawn refuses a brief that reuses another task's
+#   content: its normalized "# Task" section, or all "- AC<number>:" lines under
+#   "# Acceptance criteria", exactly matching that of another task in this home that is live
+#   (state/<other>.meta exists) or whose data/<other>/brief.md changed in the
+#   last 7 days. Normalization collapses whitespace and drops every word that
+#   contains the brief's own task id (including its branch and paths).
+#   Empty normalized sections never match.
+#   The check is plain text over those briefs only, before endpoint creation.
+#   --allow-duplicate-brief <other-task-id> permits deliberate reuse of exactly
+#   that task's content; a match against any other task still refuses. A
+#   relaunch reuses its own brief by design and skips the check, so the flag is
+#   refused on --relaunch and --secondmate.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -400,6 +412,8 @@ BACKEND_SET=0
 ALLOW_PROJECT_OMP_EXTENSIONS=0
 ACCEPTED_LOCAL_BASE=
 ACCEPTED_LOCAL_BASE_SET=0
+ALLOW_DUPLICATE_BRIEF=
+ALLOW_DUPLICATE_BRIEF_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
@@ -425,6 +439,7 @@ for a in "$@"; do
         ACCEPTED_LOCAL_BASE_SET=1
         ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      allow-duplicate-brief) ALLOW_DUPLICATE_BRIEF=$a; ALLOW_DUPLICATE_BRIEF_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
@@ -468,6 +483,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --allow-duplicate-brief) want_value=allow-duplicate-brief ;;
+    --allow-duplicate-brief=*) ALLOW_DUPLICATE_BRIEF=${a#--allow-duplicate-brief=}; ALLOW_DUPLICATE_BRIEF_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -480,6 +497,11 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$ALLOW_DUPLICATE_BRIEF_SET" -eq 0 ] || [ -n "$ALLOW_DUPLICATE_BRIEF" ] || { echo "error: --allow-duplicate-brief requires the other task's id" >&2; exit 1; }
+if [ "$ALLOW_DUPLICATE_BRIEF_SET" -eq 1 ] && { [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; }; then
+  echo "error: --allow-duplicate-brief applies only to fresh ship and scout spawns; a relaunch reuses its own brief and a secondmate carries a charter" >&2
+  exit 1
+fi
 
 if [ "$RELAUNCH" -eq 1 ]; then
   # A relaunch driven by fm-control carries its transaction id so a failure
@@ -1525,6 +1547,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   [ -z "$ACCEPTED_LOCAL_BASE" ] || shared_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
   [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ] || shared_args+=(--allow-project-omp-extensions)
+  [ "$ALLOW_DUPLICATE_BRIEF_SET" -eq 0 ] || shared_args+=(--allow-duplicate-brief "$ALLOW_DUPLICATE_BRIEF")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -3366,6 +3389,61 @@ if [ "$KIND" = ship ]; then
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
+fi
+
+# Duplicate-brief guard, checked before any endpoint exists (contract in the
+# header). It catches stale fill text reused from another task's brief.
+brief_fingerprint() {  # <brief> <task-id> <task|criteria> -> normalized one line
+  awk -v id="$2" -v want="$3" '
+    /^# / {
+      sec = ""
+      if ($0 ~ /^# Task[[:space:]]*$/) sec = "task"
+      else if ($0 ~ /^# Acceptance criteria[[:space:]]*$/) sec = "criteria"
+      next
+    }
+    sec != want { next }
+    want == "criteria" && $0 !~ /^- AC[0-9]+:/ { next }
+    {
+      n = split($0, words, /[[:space:]]+/)
+      for (i = 1; i <= n; i++)
+        if (words[i] != "" && index(words[i], id) == 0) out = out (out == "" ? "" : " ") words[i]
+    }
+    END { print out }
+  ' "$1"
+}
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  OWN_TASK_PRINT=$(brief_fingerprint "$BRIEF" "$ID" task)
+  OWN_CRITERIA_PRINT=$(brief_fingerprint "$BRIEF" "$ID" criteria)
+  DUP_CANDIDATES=$(
+    {
+      find "$DATA" -mindepth 2 -maxdepth 2 -name brief.md -type f -mtime -7 2>/dev/null
+      for dup_meta in "$STATE"/*.meta; do
+        [ -f "$dup_meta" ] || continue
+        dup_id=$(basename "$dup_meta" .meta)
+        [ ! -f "$DATA/$dup_id/brief.md" ] || printf '%s\n' "$DATA/$dup_id/brief.md"
+      done
+    } | sort -u
+  )
+  while IFS= read -r dup_brief; do
+    [ -n "$dup_brief" ] || continue
+    dup_id=$(basename "$(dirname "$dup_brief")")
+    [ "$dup_id" != "$ID" ] || continue
+    dup_what=
+    if [ -n "$OWN_TASK_PRINT" ] && [ "$OWN_TASK_PRINT" = "$(brief_fingerprint "$dup_brief" "$dup_id" task)" ]; then
+      dup_what="Task section"
+    elif [ -n "$OWN_CRITERIA_PRINT" ] && [ "$OWN_CRITERIA_PRINT" = "$(brief_fingerprint "$dup_brief" "$dup_id" criteria)" ]; then
+      dup_what="acceptance criteria"
+    fi
+    [ -n "$dup_what" ] || continue
+    if [ "$dup_id" = "$ALLOW_DUPLICATE_BRIEF" ]; then
+      echo "notice: $ID reuses the $dup_what of task $dup_id, allowed by --allow-duplicate-brief $dup_id" >&2
+      continue
+    fi
+    echo "error: $KIND brief for $ID has the same $dup_what as task $dup_id ($dup_brief); refill the brief, or pass --allow-duplicate-brief $dup_id if the reuse is deliberate" >&2
+    exit 1
+  done <<DUPEOF
+$DUP_CANDIDATES
+DUPEOF
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
