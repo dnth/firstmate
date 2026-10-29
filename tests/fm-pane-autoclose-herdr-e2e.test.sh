@@ -291,6 +291,37 @@ ENDPOINT=$(wc -c < "$STATE/$TASK.status" | tr -d ' ')
 expect_keep "$TASK" "$OD_PANE" "open keyed decision" "an open keyed decision"
 pass "keeps the pane while a keyed decision is still open"
 
+TASK=scout-open-blocker
+TAB_AND_PANE=$(create_tab open-blocker)
+OB_TAB=${TAB_AND_PANE%% *}
+OB_PANE=${TAB_AND_PANE##* }
+focus_tab "$SIBLING_TAB"
+write_herdr_meta "$TASK" "$WS" "$OB_TAB" "$OB_PANE" scout
+{
+  printf 'working: scouting\n'
+  printf 'blocked [key=corpus-access]: waiting for access\n'
+  printf 'done: report ready at data/%s/report.md\n' "$TASK"
+} > "$STATE/$TASK.status"
+ENDPOINT=$(wc -c < "$STATE/$TASK.status" | tr -d ' ')
+expect_keep "$TASK" "$OB_PANE" "open keyed decision or blocker" "an open keyed blocker"
+pass "keeps the pane while a keyed blocker is still open"
+
+TASK=scout-blocked-row
+TAB_AND_PANE=$(create_tab blocked-row)
+BR_TAB=${TAB_AND_PANE%% *}
+BR_PANE=${TAB_AND_PANE##* }
+focus_tab "$SIBLING_TAB"
+write_herdr_meta "$TASK" "$WS" "$BR_TAB" "$BR_PANE" scout
+printf 'done: report ready at data/%s/report.md\n' "$TASK" > "$STATE/$TASK.status"
+ENDPOINT=$(wc -c < "$STATE/$TASK.status" | tr -d ' ')
+add_in_flight_row "$TASK"
+FM_HOME="$FIX" bash "$ROOT/bin/fm-tasks-axi.sh" add corpus-access "fixture dependency" >/dev/null 2>&1 \
+  || fail "could not add the blocking dependency"
+FM_HOME="$FIX" bash "$ROOT/bin/fm-tasks-axi.sh" block "$TASK" --by corpus-access >/dev/null 2>&1 \
+  || fail "could not block the $TASK board row"
+expect_keep "$TASK" "$BR_PANE" "blocked or held backlog row" "a blocked board row"
+pass "keeps the pane while the board row is blocked"
+
 TASK=ship-local-only
 TAB_AND_PANE=$(create_tab local-only)
 LO_TAB=${TAB_AND_PANE%% *}
