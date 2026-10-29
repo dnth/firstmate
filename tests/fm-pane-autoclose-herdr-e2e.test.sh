@@ -423,7 +423,60 @@ assert_contains "$OUT" "pane close was refused" "the keep reason should name the
 pane_present "$ACTIVE_PANE" || fail "the captain's active tab must never be closed"
 pass "never closes the captain's active tab"
 
-# --- 6. an ambiguous endpoint refuses loudly --------------------------------
+# --- 6. a delegated primary-home promise keeps the pane ---------------------
+# The promise is registered in the PARENT home for secondmate:alice/<task>, the
+# shape a secondmate home's own delivery must still honour. This runs against
+# real tasks-axi, so it is skipped when the binary is unavailable.
+REAL_TASKS_AXI=$(command -v tasks-axi || true)
+if [ -z "$REAL_TASKS_AXI" ]; then
+  echo "skip: tasks-axi not found for delegated public-commitment lab coverage"
+else
+  TASK=scout-delegated
+  TAB_AND_PANE=$(create_tab delegated)
+  DELEG_TAB=${TAB_AND_PANE%% *}
+  DELEG_PANE=${TAB_AND_PANE##* }
+  focus_tab "$SIBLING_TAB"
+  PARENT="$SCRATCH/primary"
+  mkdir -p "$PARENT/state" "$PARENT/data" "$PARENT/config"
+  cp "$FIX/.tasks.toml" "$PARENT/.tasks.toml"
+  printf -- '- [ ] fixture\n' > "$PARENT/data/backlog.md"
+  printf 'alice\n' > "$FIX/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$PARENT" \
+    > "$FIX/.fm-secondmate-parent"
+  fm_write_meta "$PARENT/state/alice.meta" "kind=secondmate" "home=$FIX"
+  printf -- '- alice - fixture (home: %s; scope: fixture; projects: ; added 2026-10-29)\n' "$FIX" \
+    > "$PARENT/data/secondmates.md"
+  printf 'FMX_PAIRING_TOKEN=fixture-token\n' > "$PARENT/.env"
+  jq -n '{request_id:"req-delegated", platform:"x", context_binding:{version:"ctx1", value:"ctx1_req-delegated"},
+    public_safe_summary:"report the delegated scout result", received_at:"2026-10-29T00:00:00Z",
+    followup_expires_at:"2099-01-01T00:00:00Z", reservation_expires_at:"2099-01-01T00:00:00Z"}' \
+    > "$SCRATCH/request.json"
+  jq -n '{type:"report-ready", project:"firstmate", required_deliverables:["report_path"], completion_policy:"all-required"}' \
+    > "$SCRATCH/expected.json"
+  jq -n '{relation_id:"rel-delegated", work_ref:{home_id:"secondmate:alice", task_id:"scout-delegated"}, role:"fulfills", required:true, generation:1}' \
+    > "$SCRATCH/relation.json"
+  FM_HOME="$PARENT" bash "$ROOT/bin/fm-tasks-axi.sh" public-followup add promise-delegated \
+    --request-context-file "$SCRATCH/request.json" --purpose promised-final \
+    --expected-final-file "$SCRATCH/expected.json" --expires-at 2099-01-01T00:00:00Z >/dev/null 2>&1 \
+    || fail "could not create the delegated public commitment"
+  FM_HOME="$PARENT" bash "$ROOT/bin/fm-tasks-axi.sh" public-followup bind-work promise-delegated \
+    --relation-file "$SCRATCH/relation.json" >/dev/null 2>&1 \
+    || fail "could not bind the delegated public commitment"
+  FM_HOME="$PARENT" bash "$ROOT/bin/fm-public-followup.sh" register promise-delegated \
+    --relation rel-delegated --work-home secondmate:alice --work-id "$TASK" --generation 1 >/dev/null 2>&1 \
+    || fail "could not register the delegated public commitment"
+  write_herdr_meta "$TASK" "$WS" "$DELEG_TAB" "$DELEG_PANE" scout
+  printf 'done: report ready at data/%s/report.md\n' "$TASK" > "$STATE/$TASK.status"
+  ENDPOINT=$(wc -c < "$STATE/$TASK.status" | tr -d ' ')
+  OUT=$(FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$PARENT" deliver "$TASK" "$ENDPOINT") \
+    || fail "deliver failed for $TASK: $OUT"
+  assert_contains "$OUT" "kept: $TASK" "a delegated promise must keep the pane"
+  assert_contains "$OUT" "unresolved public commitment" "the keep reason should name the promise"
+  pane_present "$DELEG_PANE" || fail "a promise registered in the primary home must keep this pane"
+  pass "keeps the pane for a promise the primary home holds for a secondmate task"
+fi
+
+# --- 7. an ambiguous endpoint refuses loudly --------------------------------
 TASK=scout-ambiguous
 TAB_AND_PANE=$(create_tab ambiguous)
 AMBIG_TAB=${TAB_AND_PANE%% *}
