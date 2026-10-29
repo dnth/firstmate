@@ -6,8 +6,9 @@
 # Discord) asks for work. `tasks-axi public-followup` is the sole owner of that
 # typed obligation and its state machine; state/x-context/ is the sole owner of
 # the private full request context. This library owns only the small Firstmate
-# side: the activation gate, the private per-home transport directories, and the
-# deterministic terminal-event identity.
+# side: the activation gate, the private per-home transport directories, the
+# deterministic terminal-event identity, and verified work-owner resolution
+# shared by teardown and delivery-triggered pane closure.
 #
 # Sourced, never executed. No side effects on source (it creates nothing), which
 # is what keeps a relay-disabled home free of public-followup artifacts.
