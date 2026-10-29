@@ -37,7 +37,7 @@
 #   fm-captain-hold.sh unbind <source-id>
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
-#   fm-captain-hold.sh verify <origin-id>
+#   fm-captain-hold.sh verify <origin-id> [--require-answered]
 #   fm-captain-hold.sh due
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh answered <task-id>
@@ -178,6 +178,9 @@
 # `verify` is read-only and is called by scout teardown, so teardown cannot
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still be durable and no keyed status decision may be open.
+# `--require-answered` additionally requires a resolution for each live linked
+# task's latest hold lifecycle; archived entries remain valid. Pane autoclose
+# uses this stricter mode; scout teardown keeps the ordinary durability gate.
 # Metadata compatibility: the attestation keeps the historical
 # `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
@@ -2200,8 +2203,13 @@ EOF
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys entry key open resolved
-  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  local origin=${1:-} meta reviewed keys entry key open resolved body require_answered=0
+  if [ "$#" -eq 2 ] && [ "$2" = --require-answered ]; then
+    require_answered=1
+  elif [ "$#" -ne 1 ]; then
+    usage >&2
+    exit 2
+  fi
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] || fail "origin metadata is absent: $meta"
@@ -2212,7 +2220,17 @@ command_verify() {
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      verify_entry_durable "$origin" "$entry" >/dev/null
+      resolved=$(verify_entry_durable "$origin" "$entry") || exit $?
+      if [ "$require_answered" = 1 ] && [ "${resolved##* }" != archived ]; then
+        task_show "${resolved%% *}" || fail "linked captain call $entry cannot be read"
+        body=$(show_field_value "$TASK_SHOW_OUTPUT" body)
+        body_has_resolution_record "$body" \
+          || fail "linked captain call $entry still awaits an answer"
+        if [ -n "$(body_hold_set_timestamp "$body")" ]; then
+          decoded_body_has_current_resolution_record "$body" \
+            || fail "linked captain call $entry still awaits an answer"
+        fi
+      fi
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF

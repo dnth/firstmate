@@ -163,6 +163,7 @@ A settled wake whose prompt left a granted completion `pending` - no covering ou
 The branch re-sends any still-undelivered obligation once per generation after a settled wake, batched into one turn; main's consumption events (`before_agent_start`, the first `turn_start` after an idle-main send, or a matching `message_start` with the wake's custom role and type) retire the in-flight marker so a consumed send is not re-sent, while the durable receipt is what actually discharges the obligation.
 The main-side backstop is the other consumer: `bin/fm-wake-drain.sh`'s STATUS OUTCOME BACKSTOP section re-surfaces every undelivered obligation on each drain until main records the printed `bin/fm-branch-outcome.sh deliver` receipt, and the per-task manifest field it feeds back is the delivered frontier that bounds the next scan, never a presentation marker.
 Delivery is at-least-once by design: a lost send is replayed by the next wake or the backstop, and a repeated notification for the same completion identity is deduplicated by its receipt, while a newly reported completion outcome may still open a new main turn.
+For delivery-triggered pane closure, `bin/fm-branch-outcome.sh deliver` delegates to [`bin/fm-pane-autoclose.sh`](../bin/fm-pane-autoclose.sh), the authoritative owner of that gate.
 
 ## Advisory freshness at delivery
 
