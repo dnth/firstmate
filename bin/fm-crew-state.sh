@@ -11,12 +11,12 @@
 # it reads the authoritative source (a no-mistakes run-step attributed under
 # bin/fm-nm-run-lib.sh's contract, else the pane busy-signature) and reconciles
 # the possibly-stale log against it. State selection is deterministic and
-# read-only apart from the one-time local-only accepted-head record below.
+# read-only apart from local-only accepted-head recording below.
 # A ship `done` is accepted only through the delivery gate in emit(): a clean
 # worktree, complete acceptance evidence (bin/fm-receipt-check.sh), pr= recorded
 # by bin/fm-pr-check.sh for the PR modes or a clean checked-out fm/<id> branch
 # for local-only. For a local-only ready report, this helper records the branch's
-# full commit id in task metadata once; landing rechecks that exact head.
+# full commit id in task metadata; landing rechecks that exact head.
 # For no-mistakes, it also applies the ask-user decision audit owned by
 # bin/fm-nm-run-lib.sh when a recorded or attributed full run is available;
 # absence of that identity does not itself refuse done. PR-ready registration
@@ -174,8 +174,6 @@ meta_value() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
-# Pin the first fully-gated local-only ready report under the task metadata lock.
-# An existing pin is immutable; a moved branch remains parked for new approval.
 pin_local_done_head() (
   local project current control lock tmp count recorded captured
   project=$(meta_value project)
@@ -183,15 +181,6 @@ pin_local_done_head() (
   captured=$(cat "$META") || { printf 'task metadata could not be read'; return 1; }
   [ "$LOG_LINE" = "$(log_last_line)" ] \
     || { printf 'local-only ready report changed before its head was recorded'; return 1; }
-  current=$(git -C "$project" rev-parse --verify --quiet "refs/heads/fm/$ID^{commit}" 2>/dev/null) \
-    || { printf 'local-only task branch fm/%s is missing from the project' "$ID"; return 1; }
-  count=$(awk -F= '$1 == "local_done_head" { n++ } END { print n+0 }' "$META")
-  recorded=$(grep '^local_done_head=' "$META" | cut -d= -f2- || true)
-  if [ "$count" -gt 0 ]; then
-    [ "$count" -eq 1 ] && [ "$recorded" = "$current" ] \
-      || { printf 'branch fm/%s differs from the recorded local done head; task must report ready again' "$ID"; return 1; }
-    return 0
-  fi
   control="$STATE/.control-$ID.lock"
   lock=$(fm_meta_lock_path "$META") || { printf 'task metadata lock path is invalid'; return 1; }
   fm_lock_acquire_wait "$control" || { printf 'task control lock could not be acquired'; return 1; }
@@ -212,18 +201,23 @@ pin_local_done_head() (
     || { printf 'local-only task branch fm/%s is missing from the project' "$ID"; return 1; }
   count=$(awk -F= '$1 == "local_done_head" { n++ } END { print n+0 }' "$META")
   recorded=$(grep '^local_done_head=' "$META" | cut -d= -f2- || true)
-  if [ "$count" -gt 0 ]; then
-    [ "$count" -eq 1 ] && [ "$recorded" = "$current" ] \
-      || { printf 'branch fm/%s differs from the recorded local done head; task must report ready again' "$ID"; return 1; }
-    return 0
-  fi
+  case "$LOG_LINE" in
+    *' [accepted local_done_head='*']')
+      [ "$count" -eq 1 ] && [ "$recorded" = "$current" ] \
+        && [ "${LOG_LINE##* [accepted local_done_head=}" = "$recorded]" ] \
+        || { printf 'branch fm/%s differs from the recorded local done head; task must report ready again' "$ID"; return 1; }
+      return 0
+      ;;
+  esac
   tmp=$(mktemp "$STATE/.local-done-$ID.XXXXXX") \
     || { printf 'local done head could not be written to task metadata'; return 1; }
-  { cat "$META" && printf '\nlocal_done_head=%s\n' "$current"; } > "$tmp" \
+  { sed '/^local_done_head=/d' "$META" && printf '\nlocal_done_head=%s\n' "$current"; } > "$tmp" \
     || { printf 'local done head could not be written to task metadata'; return 1; }
   mv -f -- "$tmp" "$META" \
     || { printf 'local done head could not be saved to task metadata'; return 1; }
   tmp=
+  printf '%s [accepted local_done_head=%s]\n' "$LOG_LINE" "$current" >> "$LOG" \
+    || { printf 'local done head acceptance could not be recorded in the status log'; return 1; }
 )
 
 WT=$(meta_value worktree)
