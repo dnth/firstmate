@@ -28,7 +28,8 @@ make_case() {
   git -C "$project" branch -f fm/task-l1 HEAD
   git -C "$project" reset -q --hard HEAD~1
   fm_write_meta "$case_dir/state/task-l1.meta" \
-    "project=$project" "kind=ship" "mode=local-only" "yolo=on"
+    "project=$project" "kind=ship" "mode=local-only" "yolo=on" \
+    "local_done_head=$(git -C "$project" rev-parse refs/heads/fm/task-l1)"
   printf '# Task\nFixture.\n\n# Acceptance criteria\n- AC1: Fixture works.\n\n# Definition of done\nDelivery contract: mode=local-only\n' \
     > "$case_dir/data/task-l1/brief.md"
   if [ "$outcome" = accepted-blocked ]; then
@@ -155,10 +156,44 @@ test_evidenced_task_lands_unchanged() {
 
   expect_code 0 "$rc" "evidenced: a fully evidenced task was refused"
   assert_grep 'merged fm/task-l1 into local main' "$case_dir/stdout" "evidenced: the landing was not reported"
+  [ "$(main_sha "$case_dir")" = "$(git -C "$case_dir/project" rev-parse fm/task-l1)" ] \
+    || fail "evidenced: landing did not reach the accepted branch head"
   assert_absent "$case_dir/data/task-l1/captain-merge-instructions.jsonl" \
     "evidenced: an ordinary landing wrote an override record"
   pass "fm-merge-local lands a fully evidenced task with no override"
 }
+test_done_head_mismatch_refuses() {
+  local case_dir before rc approved later
+  case_dir=$(make_case advanced success)
+  before=$(main_sha "$case_dir")
+  approved=$(git -C "$case_dir/project" rev-parse fm/task-l1)
+  later=$(printf 'unapproved follow-up\n' | git -C "$case_dir/project" commit-tree "$approved^{tree}" -p "$approved")
+  git -C "$case_dir/project" update-ref refs/heads/fm/task-l1 "$later"
+  run_merge_local "$case_dir" task-l1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "${rc:-0}" -ne 0 ] || fail "advanced: landing accepted a branch beyond the done head; stdout=$(cat "$case_dir/stdout") stderr=$(cat "$case_dir/stderr")"
+  assert_grep 'differs from the recorded local done head' "$case_dir/stderr" \
+    "advanced: refusal did not require a new ready report: $(cat "$case_dir/stderr")"
+  [ "$(main_sha "$case_dir")" = "$before" ] || fail "advanced: main moved despite the refusal"
+  pass "fm-merge-local refuses a branch advanced after the accepted done head"
+}
+
+test_missing_done_head_refuses() {
+  local case_dir before rc=0
+  case_dir=$(make_case missing-head success)
+  before=$(main_sha "$case_dir")
+  grep -v '^local_done_head=' "$case_dir/state/task-l1.meta" > "$case_dir/state/task-l1.meta.tmp"
+  mv "$case_dir/state/task-l1.meta.tmp" "$case_dir/state/task-l1.meta"
+  run_merge_local "$case_dir" task-l1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "missing head: local landing did not refuse"
+  assert_grep 'task must report ready again before approval' "$case_dir/stderr" \
+    "missing head: refusal did not tell firstmate to request a fresh ready report: $(cat "$case_dir/stderr")"
+  [ "$(main_sha "$case_dir")" = "$before" ] || fail "missing head: main moved despite the refusal"
+  pass "fm-merge-local refuses tasks without an accepted done head"
+}
+
+test_done_head_mismatch_refuses
+test_missing_done_head_refuses
+
 
 test_accepted_blocked_task_is_refused
 test_accepted_blocked_task_lands_under_captain_instruction

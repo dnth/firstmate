@@ -1707,11 +1707,12 @@ test_pr_modes_done_requires_registered_pr() {
 
 test_local_only_done_requires_clean_task_branch() {
   reset_fakes
-  local d out id=delivery-gate-local
+  local d out id=delivery-gate-local accepted revised base rc
   d=$(new_case "$id")
   make_repo_on_branch "$d/wt" other-branch
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=local-only"
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "harness=claude" "mode=local-only"
   printf 'done: ready in branch fm/%s\n' "$id" > "$d/state/$id.status"
   FM_FAKE_AXI_STATUS=
   FM_FAKE_RUNS_LIST=
@@ -1721,10 +1722,47 @@ test_local_only_done_requires_clean_task_branch() {
   assert_contains "$out" "state: parked" "local-only done on another branch was accepted"
   assert_contains "$out" "source: delivery-gate" "local-only branch gate did not name itself"
   assert_contains "$out" "branch fm/$id is not checked out" "local-only branch gate did not say what is missing"
+  git -C "$d/wt" branch -f main HEAD
+  base=$(git -C "$d/wt" rev-parse main)
   git -C "$d/wt" checkout -q -b "fm/$id"
+  git -C "$d/wt" commit -q --allow-empty -m approved
   out=$(run_crew_state "$d" "$id")
   assert_contains "$out" "state: done" "local-only done on the clean task branch was refused"
-  pass "local-only done requires the clean fm/<id> branch and no PR"
+  accepted=$(git -C "$d/wt" rev-parse HEAD)
+  assert_grep "local_done_head=$accepted" "$d/state/$id.meta" \
+    "accepted local-only ready report did not persist its full branch head"
+  git -C "$d/wt" commit -q --allow-empty -m unapproved
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: parked" "a post-report commit did not invalidate the accepted head"
+  assert_contains "$out" "must report ready again" "a moved branch did not require a fresh ready report"
+  assert_grep "local_done_head=$accepted" "$d/state/$id.meta" \
+    "ordinary state reads replaced the accepted head"
+  revised=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q main
+  rc=0
+  env -u FM_TASK_ID FM_HOME="$d" bash "$ROOT/bin/fm-merge-local.sh" "$id" \
+    > "$d/merge-output" 2>&1 || rc=$?
+  expect_code 1 "$rc" "post-report commit was allowed to land"
+  assert_grep 'must report ready again' "$d/merge-output" "merge did not request a fresh report"
+  [ "$(git -C "$d/wt" rev-parse main)" = "$base" ] || fail "refusal moved main"
+  git -C "$d/wt" checkout -q "fm/$id"
+  printf 'done: implemented\n' >> "$d/state/$id.status"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: parked" "invalid fresh report was accepted"
+  assert_grep "local_done_head=$accepted" "$d/state/$id.meta" "invalid report replaced the pin"
+  printf 'done: ready in branch fm/%s\n' "$id" >> "$d/state/$id.status"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: done" "fresh ready report could not replace the pin"
+  assert_grep "local_done_head=$revised" "$d/state/$id.meta" "fresh report did not pin B"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: done" "repeated read rejected the accepted report"
+  git -C "$d/wt" checkout -q main
+  rc=0
+  env -u FM_TASK_ID FM_HOME="$d" bash "$ROOT/bin/fm-merge-local.sh" "$id" \
+    > "$d/merge-output" 2>&1 || rc=$?
+  expect_code 0 "$rc" "freshly accepted head could not land: $(cat "$d/merge-output")"
+  [ "$(git -C "$d/wt" rev-parse main)" = "$revised" ] || fail "landing did not reach B"
+  pass "local-only done freezes each accepted head until a fresh valid ready report"
 }
 
 test_done_time_ask_user_audit_uses_recorded_run() {

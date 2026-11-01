@@ -2,7 +2,7 @@
 # Shared no-mistakes axi run attribution primitives.
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
-# fm-crew-state.sh (read-only current-state reporting and the done-time
+# fm-crew-state.sh (current-state reporting and the done-time
 # ask-user decision audit), fm-teardown.sh (pre-teardown run abort, see its
 # "Fix 1" header comment), and fm-pr-check.sh (PR-ready run identity and the
 # decision-evidence audit). Teardown uses only strict branch-and-head identity;
