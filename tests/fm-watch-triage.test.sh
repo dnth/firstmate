@@ -1167,7 +1167,7 @@ test_wedge_worker_decision_deferral_is_opt_in() {
 }
 
 test_open_decision_reminders_use_persisted_backoff() {
-  local dir state home config statusf count total
+  local dir state home config statusf count total mode now=5000 expected=6
   dir=$(make_case open-decision-reminders)
   state="$dir/state"; home="$dir/home"; config="$home/config"
   mkdir -p "$home/data" "$home/state" "$config"
@@ -1236,7 +1236,97 @@ EOF
   run_tick 4050 || fail "reused task first reminder tick failed"
   count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
   [ "$count" = 6 ] || fail "reused task inherited its previous reminder lifecycle"
+  for mode in paused captain-held; do
+    printf '%s: unrelated task wait\n' "$mode" >> "$statusf"
+    run_tick "$now" || fail "$mode reminder tick failed"
+    count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
+    [ "$count" = "$expected" ] || fail "$mode task received a reminder"
+    [ -n "$(status_open_decisions "$statusf")" ] || fail "$mode closed the unrelated decision"
+    printf 'working: wait ended\n' >> "$statusf"
+    run_tick "$((now + 1))" || fail "resumed reminder tick failed"
+    expected=$((expected + 1))
+    count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
+    [ "$count" = "$expected" ] || fail "reminders did not resume after $mode"
+    now=$((now + 1000))
+  done
+  printf '## In flight\n- [ ] remind - Waiting for captain (kind: ship)\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$config" "$ROOT/bin/fm-captain-hold.sh" hold remind \
+    --reason 'captain must decide' >/dev/null || fail "could not create the reminder captain hold"
+  run_tick "$now" || fail "captain hold reminder tick failed"
+  count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
+  [ "$count" = "$expected" ] || fail "backlog captain-held task received a reminder"
   pass "keyed reminders exclude reserved keys and reset age and backoff on reopening and retirement"
+}
+
+test_open_decision_reminders_serialize_retirement() {
+  local dir state home config retire_pid tick_pid i waiting count task
+  dir=$(make_case reminder-retirement-lock)
+  state="$dir/state"; home="$dir/home"; config="$home/config"
+  mkdir -p "$home/data" "$home/state" "$config"
+  : > "$config/open-decision-reminders"
+  for task in retired neighbor; do
+    printf 'kind=ship\n' > "$state/$task.meta"
+    printf 'needs-decision [key=choice] [at=100]: choose\n' > "$state/$task.status"
+    printf '%s\tchoice\t100\t200\t50\n' "$task" >> "$state/.open-decision-reminders"
+  done
+  mkfifo "$dir/release-retirement"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    bash -c '
+      . "$1"
+      export RETIRE_RELEASE="$2"
+      mv() {
+        if [ "${3:-}" = "$STATE/.open-decision-reminders" ]; then
+          : > "$STATE/retirement-read"
+          read -r release < "$RETIRE_RELEASE"
+        fi
+        command mv "$@"
+      }
+      status_retire_presentation_task "$STATE" retired
+    ' _ "$WATCH" "$dir/release-retirement" > "$dir/retire.out" 2>&1 &
+  retire_pid=$!
+  i=0
+  while [ ! -e "$state/retirement-read" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1; i=$((i + 1))
+  done
+  [ -e "$state/retirement-read" ] || { stop_pid "$retire_pid"; reap "$retire_pid"; fail "retirement did not reach its ledger replacement"; }
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    FM_DATA_OVERRIDE="$home/data" FM_OPEN_DECISION_OVERDUE_SECS=50 \
+    FM_OPEN_DECISION_BACKOFF_MAX_SECS=200 bash -c '
+      . "$1"
+      sleep() { : > "$STATE/tick-waiting"; command sleep "$@"; }
+      open_decision_reminder_tick 300
+      rc=$?
+      : > "$STATE/tick-finished"
+      exit "$rc"
+    ' _ "$WATCH" > "$dir/tick.out" 2>&1 &
+  tick_pid=$!
+  i=0
+  while [ ! -e "$state/tick-waiting" ] && [ ! -e "$state/tick-finished" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1; i=$((i + 1))
+  done
+  waiting=0
+  if [ -e "$state/tick-waiting" ] && [ ! -e "$state/tick-finished" ] \
+    && [ ! -e "$state/.neighbor.open-decisions-cursor.timed" ]; then waiting=1; fi
+  printf 'release\n' > "$dir/release-retirement"
+  wait "$retire_pid" || { stop_pid "$tick_pid"; reap "$tick_pid"; fail "concurrent retirement failed: $(cat "$dir/retire.out")"; }
+  wait "$tick_pid" || fail "concurrent reminder failed: $(cat "$dir/tick.out")"
+  [ "$waiting" = 1 ] || fail "reminder scan crossed the retirement transaction"
+  [ "$(cat "$state/.open-decision-reminders")" = $'neighbor\tchoice\t100\t300\t100' ] \
+    || fail "retirement lost the neighboring reminder backoff"
+  [ ! -e "$state/.retired.open-decisions-cursor.timed" ] || fail "reminder recreated a retired cursor"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    FM_DATA_OVERRIDE="$home/data" FM_OPEN_DECISION_OVERDUE_SECS=50 \
+    FM_OPEN_DECISION_BACKOFF_MAX_SECS=200 bash -c '
+      . "$1"
+      open_decision_reminder_tick 399 || exit 1
+      fm_wake_append() { return 1; }
+      if open_decision_reminder_tick 400; then exit 1; fi
+      [ ! -e "$STATE/.status-presentation-lock" ] && [ ! -L "$STATE/.status-presentation-lock" ]
+    ' _ "$WATCH" || fail "reminder failure did not release the presentation lock"
+  count=$(grep -Fc $'\tcheck\topen-decision:neighbor:choice\t' "$state/.wake-queue" || true)
+  [ "$count" = 1 ] || fail "concurrent retirement caused a premature duplicate reminder"
+  pass "reminders and retirement serialize ledger and cursor changes and release locks on failure"
 }
 
 test_wedge_backlog_captain_hold_defers_escalation() {
@@ -4098,7 +4188,7 @@ test_remote_stale_age_and_inconclusive_bound_escalate() {
 case "${FM_WATCH_TRIAGE_TEST:-}" in
   '')
     ;;
-  test_stale_terminal_status_overridden_by_active_run|test_wedge_worker_decision_deferral_is_opt_in|test_open_decision_reminders_use_persisted_backoff|test_wedge_backlog_captain_hold_defers_escalation)
+  test_stale_terminal_status_overridden_by_active_run|test_wedge_worker_decision_deferral_is_opt_in|test_open_decision_reminders_use_persisted_backoff|test_open_decision_reminders_serialize_retirement|test_wedge_backlog_captain_hold_defers_escalation)
     "$FM_WATCH_TRIAGE_TEST"
     exit
     ;;
@@ -4137,6 +4227,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_timer_expiry_absorbs_run_step_done
 test_wedge_worker_decision_deferral_is_opt_in
 test_open_decision_reminders_use_persisted_backoff
+test_open_decision_reminders_serialize_retirement
 test_wedge_backlog_captain_hold_defers_escalation
 
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

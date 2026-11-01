@@ -1793,12 +1793,20 @@ event_wait_or_sleep() {
 # supervision signal fold. The timed incremental fold preserves opened-at ages;
 # this ledger bounds repeated wakes across watcher restarts.
 open_decision_reminder_tick() {
+  local lock="$STATE/.status-presentation-lock" rc=0
+  OPEN_DECISION_REMINDER=
+  [ -e "$CONFIG/open-decision-reminders" ] || return 0
+  fm_lock_acquire_wait "$lock" || return 1
+  _open_decision_reminder_tick_locked "$@" || rc=$?
+  fm_lock_release "$lock" || rc=1
+  return "$rc"
+}
+
+_open_decision_reminder_tick_locked() {
   local now=${1:-$(date +%s)} threshold=${FM_OPEN_DECISION_OVERDUE_SECS:-1800}
   local cap=${FM_OPEN_DECISION_BACKOFF_MAX_SECS:-14400} value f task kind open key verb opened note
   local ledger old='' rows='' old_task old_key old_opened old_last old_delay last delay
   local due_task='' due_key='' due_opened='' due_delay='' tmp reason exclude
-  OPEN_DECISION_REMINDER=
-  [ -e "$CONFIG/open-decision-reminders" ] || return 0
   for value in "$threshold" "$cap"; do
     case "$value" in ''|0*|*[!0-9]*) return 1 ;; esac
     [ "${#value}" -le 9 ] || return 1
