@@ -1637,11 +1637,12 @@ test_pr_modes_done_requires_registered_pr() {
 
 test_local_only_done_requires_clean_task_branch() {
   reset_fakes
-  local d out id=delivery-gate-local
+  local d out id=delivery-gate-local accepted
   d=$(new_case "$id")
   make_repo_on_branch "$d/wt" other-branch
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=local-only"
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "harness=claude" "mode=local-only"
   printf 'done: ready in branch fm/%s\n' "$id" > "$d/state/$id.status"
   FM_FAKE_AXI_STATUS=
   FM_FAKE_RUNS_LIST=
@@ -1654,7 +1655,14 @@ test_local_only_done_requires_clean_task_branch() {
   git -C "$d/wt" checkout -q -b "fm/$id"
   out=$(run_crew_state "$d" "$id")
   assert_contains "$out" "state: done" "local-only done on the clean task branch was refused"
-  pass "local-only done requires the clean fm/<id> branch and no PR"
+  accepted=$(git -C "$d/wt" rev-parse HEAD)
+  assert_grep "local_done_head=$accepted" "$d/state/$id.meta" \
+    "accepted local-only ready report did not persist its full branch head"
+  git -C "$d/wt" commit -q --allow-empty -m unapproved
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: parked" "a post-report commit did not invalidate the accepted head"
+  assert_contains "$out" "must report ready again" "a moved branch did not require a fresh ready report"
+  pass "local-only done requires the clean fm/<id> branch and pins the accepted head"
 }
 
 test_done_time_ask_user_audit_uses_recorded_run() {

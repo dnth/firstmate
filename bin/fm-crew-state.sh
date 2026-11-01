@@ -8,16 +8,19 @@
 # or blocker, fm-send appends a resolved event at answer time, but that event
 # still does not describe the crew's current state as it resumes, fixes, or
 # re-validates. This helper never infers the current state from a tail of the log:
-# it reads the authoritative source (a
-# no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, else
-# the pane busy-signature) and reconciles the possibly-stale log against it.
+# it reads the authoritative source (a no-mistakes run-step attributed under
+# bin/fm-nm-run-lib.sh's contract, else the pane busy-signature) and reconciles
+# the possibly-stale log against it. State selection is deterministic and
+# read-only apart from the one-time local-only accepted-head record below.
 # A ship `done` is accepted only through the delivery gate in emit(): a clean
 # worktree, complete acceptance evidence (bin/fm-receipt-check.sh), pr= recorded
 # by bin/fm-pr-check.sh for the PR modes or a clean checked-out fm/<id> branch
-# for local-only. For no-mistakes, it also applies the ask-user decision audit
-# owned by bin/fm-nm-run-lib.sh when a recorded or attributed full run is
-# available; absence of that identity does not itself refuse done. PR-ready
-# registration owns the required audit before recording the PR.
+# for local-only. For a local-only ready report, this helper records the branch's
+# full commit id in task metadata once; landing rechecks that exact head.
+# For no-mistakes, it also applies the ask-user decision audit owned by
+# bin/fm-nm-run-lib.sh when a recorded or attributed full run is available;
+# absence of that identity does not itself refuse done. PR-ready registration
+# owns the required audit before recording the PR.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -48,8 +51,8 @@
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
-# Read-only and side-effect free. Always exits 0 on a successful read regardless
-# of state; exit 2 only on a usage error (no id).
+# Always exits 0 on a successful read regardless of state; exit 2 only on a
+# usage error (no id). A valid local-only ready report may pin its branch head.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -122,6 +125,20 @@ emit() {  # <state> <source> [detail]
         ;;
     esac
   fi
+  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ] && [ "$mode" = local-only ] \
+    && [ "$(status_line_verb "${LOG_LINE:-}")" = 'done' ]; then
+    if ! status_done_line_has_artifact "$LOG_LINE" ship local-only "$ID"; then
+      state=parked
+      source=delivery-gate
+      detail='local-only done report must say ready in branch'
+    else
+      gate_detail=$(pin_local_done_head) || {
+        state=parked
+        source=delivery-gate
+        detail=$gate_detail
+      }
+    fi
+  fi
   # The done-time ask-user decision audit: the same predicate PR-ready applies,
   # against the recorded nm_run_id or, before registration, the attributed run.
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ] && [ "$mode" = no-mistakes ]; then
@@ -157,6 +174,58 @@ meta_value() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+# Pin the first fully-gated local-only ready report under the task metadata lock.
+# An existing pin is immutable; a moved branch remains parked for new approval.
+pin_local_done_head() (
+  local project current control lock tmp count recorded captured
+  project=$(meta_value project)
+  [ -n "$project" ] || { printf 'local-only project is missing from task metadata'; return 1; }
+  captured=$(cat "$META") || { printf 'task metadata could not be read'; return 1; }
+  [ "$LOG_LINE" = "$(log_last_line)" ] \
+    || { printf 'local-only ready report changed before its head was recorded'; return 1; }
+  current=$(git -C "$project" rev-parse --verify --quiet "refs/heads/fm/$ID^{commit}" 2>/dev/null) \
+    || { printf 'local-only task branch fm/%s is missing from the project' "$ID"; return 1; }
+  count=$(awk -F= '$1 == "local_done_head" { n++ } END { print n+0 }' "$META")
+  recorded=$(grep '^local_done_head=' "$META" | cut -d= -f2- || true)
+  if [ "$count" -gt 0 ]; then
+    [ "$count" -eq 1 ] && [ "$recorded" = "$current" ] \
+      || { printf 'branch fm/%s differs from the recorded local done head; task must report ready again' "$ID"; return 1; }
+    return 0
+  fi
+  control="$STATE/.control-$ID.lock"
+  lock=$(fm_meta_lock_path "$META") || { printf 'task metadata lock path is invalid'; return 1; }
+  fm_lock_acquire_wait "$control" || { printf 'task control lock could not be acquired'; return 1; }
+  fm_lock_acquire_wait "$lock" || {
+    fm_lock_release "$control" || true
+    printf 'task metadata lock could not be acquired'
+    return 1
+  }
+  tmp=
+  trap '[ -z "$tmp" ] || rm -f -- "$tmp"; fm_lock_release "$lock" || true; fm_lock_release "$control" || true' EXIT
+  [ -f "$META" ] && [ ! -L "$META" ] && [ "$(cat "$META")" = "$captured" ] \
+    || { printf 'task metadata changed before the local done head was recorded'; return 1; }
+  [ "$(grep '^project=' "$META" | cut -d= -f2-)" = "$project" ] \
+    || { printf 'task project changed before the local done head was recorded'; return 1; }
+  [ "$LOG_LINE" = "$(log_last_line)" ] \
+    || { printf 'local-only ready report changed before its head was recorded'; return 1; }
+  current=$(git -C "$project" rev-parse --verify --quiet "refs/heads/fm/$ID^{commit}" 2>/dev/null) \
+    || { printf 'local-only task branch fm/%s is missing from the project' "$ID"; return 1; }
+  count=$(awk -F= '$1 == "local_done_head" { n++ } END { print n+0 }' "$META")
+  recorded=$(grep '^local_done_head=' "$META" | cut -d= -f2- || true)
+  if [ "$count" -gt 0 ]; then
+    [ "$count" -eq 1 ] && [ "$recorded" = "$current" ] \
+      || { printf 'branch fm/%s differs from the recorded local done head; task must report ready again' "$ID"; return 1; }
+    return 0
+  fi
+  tmp=$(mktemp "$STATE/.local-done-$ID.XXXXXX") \
+    || { printf 'local done head could not be written to task metadata'; return 1; }
+  { cat "$META" && printf '\nlocal_done_head=%s\n' "$current"; } > "$tmp" \
+    || { printf 'local done head could not be written to task metadata'; return 1; }
+  mv -f -- "$tmp" "$META" \
+    || { printf 'local done head could not be saved to task metadata'; return 1; }
+  tmp=
+)
+
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
@@ -176,6 +245,10 @@ fi
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
   emit unknown none "worktree gone (torn down?)"
+fi
+if [ "$KIND" = ship ] && [ "$MODE" = local-only ]; then
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
 fi
 
 # --- status log ------------------------------------------------------------
