@@ -37,7 +37,9 @@
 #                          because files appearing there are liveness the pane and
 #                          the run step cannot show; that deferral still
 #                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
-#                          that writes nothing keeps the unchanged schedule.
+#                          that writes nothing keeps the unchanged schedule
+#                          subject to the decision and captain-hold deferrals
+#                          owned by docs/configuration.md.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -988,7 +990,7 @@ task_captain_call_open() {  # <task>
     >/dev/null 2>&1
 }
 
-# Defer a wedge while the worker's own latest keyed decision or blocker remains
+# Defer a wedge while the worker's own latest decision or blocker remains
 # open, or while its task is held for the captain. Both use the bounded pause
 # recheck; neither advances or resets the escalation count.
 wedge_defer_wait() {  # <window> <since-file> <label> <idle-age> <kind> <action>
