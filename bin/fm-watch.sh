@@ -2045,7 +2045,7 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
-  open_decision_reminder_tick || {
+  open_decision_reminder_tick '' || {
     echo 'watcher: open-decision reminder check failed' >&2
     exit 1
   }
