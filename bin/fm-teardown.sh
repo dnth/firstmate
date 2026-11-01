@@ -32,14 +32,12 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Containment proofs are byte-exact, never approximate: the landed-patch comparison
-# uses `git patch-id --verbatim` (Git 2.41 or newer), because `--stable` ignores
-# whitespace and would accept a re-indented local edit as the landed patch.
-# A proof Git cannot run is reported as unavailable and teardown refuses, naming the
-# missing capability, rather than silently falling back to a weaker comparison.
-# Uncommitted changes are never landed. The dirty check requests all untracked files
-# explicitly, so a worktree-local status.showUntrackedFiles setting can never hide
-# unlanded work from it.
+# The landed-patch comparison preserves whitespace with `git patch-id --verbatim` (Git 2.41 or newer).
+# `--stable` ignores whitespace and would accept a re-indented local edit as the landed patch, so it is never a fallback.
+# The default-branch content proof uses `git merge-tree --write-tree` (Git 2.38 or newer).
+# If neither proof establishes containment and a required Git capability is unavailable, teardown refuses and names the unavailable proof.
+# Uncommitted changes are never landed.
+# The dirty check uses `git status --porcelain --untracked-files=all`, so status.showUntrackedFiles cannot hide untracked files, including files inside new directories.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -791,11 +789,8 @@ ensure_commit_object() {
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
-# `git patch-id --verbatim` (Git 2.41+) is the only mode that compares patches
-# byte-exactly; `--stable` ignores whitespace, so a re-indented local edit would be
-# accepted as the landed patch and destroyed. There is no weaker fallback: when the
-# capability is missing the patch-id proof is unavailable, PATCH_ID_PROOF_ERROR names
-# it, and the caller refuses rather than ignoring whitespace.
+# The header owns the whitespace-preserving proof contract.
+# Probe in the caller's shell so PATCH_ID_PROOF_ERROR survives patch-id command substitutions.
 PATCH_ID_VERBATIM_SUPPORTED=
 PATCH_ID_PROOF_ERROR=
 patch_id_verbatim_supported() {
