@@ -164,12 +164,17 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`veri
 ## Watcher decision deferrals and reminders
 
 The default-on backlog captain-hold check defers wedge escalation while the task remains held, using the bounded `FM_PAUSE_RESURFACE_SECS` cadence.
-Creating the local, gitignored `config/wedge-defer-worker-wait` presence flag also defers escalation when the worker's newest `needs-decision:` or `blocked:` status is still open; a later status event or handled inbox answer ends that deferral.
-Creating the local, gitignored `config/open-decision-reminders` presence flag enables one overdue wake per keyed worker decision at a time, with a persisted per-key backoff ledger across watcher restarts.
+Creating the local, gitignored `config/wedge-defer-worker-wait` presence flag also defers escalation when the worker's newest status event is a still-open `needs-decision` or `blocked`; a different latest status verb, resolution, or newer handled inbox answer ends that deferral.
+At the wedge threshold, the watcher checks the opt-in worker wait first, then the backlog captain hold, then the existing worktree-write evidence.
+Supervisor-reserved `pending-reply-*` keys qualify for neither worker-wait deferral nor reminders; they retain their existing visibility in the general open-decision fold.
+Creating the local, gitignored `config/open-decision-reminders` presence flag enables overdue reminders for explicitly keyed worker decisions, with at most one reminder per watcher poll and a persisted per-key backoff ledger across watcher restarts.
+Reminders are `check` wakes emitted outside supervision signal classification, keeping OMP from receiving duplicate wakes for them.
 Open keyed decisions remain eligible for reminders while the task is paused or captain-held.
 `FM_OPEN_DECISION_OVERDUE_SECS` sets the first reminder age in seconds and defaults to 1800.
 `FM_OPEN_DECISION_BACKOFF_MAX_SECS` caps the repeated reminder interval and defaults to 14400.
-When a decision has no status timestamp, its age starts at the first watcher observation and persists in the ledger.
+The first repeated reminder waits the overdue threshold again; subsequent intervals double up to that cap.
+When a decision has no status timestamp, its age starts at the first watcher observation and persists in the timed decision fold across watcher restarts.
+Resolution clears that opening's reminder state, so reopening the same key starts a fresh age and backoff; task retirement also removes its reminder state.
 
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
