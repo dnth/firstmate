@@ -64,16 +64,19 @@
 # every other bucket is failing. gh-axi conclusions pass, skip, skipping,
 # skipped, and neutral are green; pending, queued, in_progress, waiting,
 # requested, and expected are pending; every other conclusion is failing.
-# A PR with no reported checks has nothing red. Checks that cannot be read
-# refuse. The same guard set re-verifies the review manifest and body format
+# A PR that reports no checks at all refuses: nothing has verified it, which is
+# what a repository with no CI wired to its pull requests looks like, so such a
+# repository cannot merge a firstmate PR until checks exist. A read that fails
+# refuses too. The same guard set re-verifies the review manifest and body format
 # through bin/fm-review-manifest.sh immediately before merging, so a review or
 # unresolved thread that arrived after PR-ready, or a body that lost its
 # required sections, refuses here even though the PR was registered earlier;
 # bin/fm-pr-check.sh skips its own copy of that verification for this run
 # (FM_PR_CHECK_REVIEW_OVERRIDE) because this guard owns the decision, including
-# its override. Each refusal names the failing or pending checks, the unanswered
-# review or thread, the unreadable row, the missing section, or the
-# accepted-blocked criteria, plus --captain-instruction, the only override;
+# its override. Each refusal names the failing or pending checks, the missing
+# checks, the unanswered review or thread, the unreadable row, the missing
+# section, or the accepted-blocked criteria, plus --captain-instruction, the
+# only override;
 # bin/fm-merge-guard-lib.sh owns the accepted-blocked guard and the override
 # flag's validation and durable record.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--captain-instruction <words>]
@@ -495,20 +498,26 @@ github_report_unmerged_outcome() {
   github_report_queue_rules
 }
 
-# The PR's reported checks, read before anything is recorded or merged. A PR
-# with no reported checks has nothing red; a read that fails is not green.
+# The PR's reported checks, read before anything is recorded or merged. A read
+# that fails is not green, and a PR that reports no checks at all refuses: no
+# check has verified it, which is exactly the state of a repository with no CI
+# wired to its pull requests.
 FM_PR_CHECKS_FAILING=
 FM_PR_CHECKS_PENDING=
+FM_PR_CHECKS_NONE=
 github_read_checks_with_gh() {
-  local output rc=0
+  local output rc=0 count
   output=$(gh pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --json name,bucket 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
     case "$output" in
-      "no checks reported"*) return 0 ;;
+      "no checks reported"*) FM_PR_CHECKS_NONE=1; return 0 ;;
     esac
     return 1
   fi
   [ -n "$output" ] || return 0
+  count=$(printf '%s' "$output" | jq -er '
+    if type == "array" then length else error("not a check list") end' 2>/dev/null) || return 1
+  [ "$count" -ne 0 ] || FM_PR_CHECKS_NONE=1
   FM_PR_CHECKS_FAILING=$(printf '%s' "$output" | jq -er '
     if type == "array" then . else error("not a check list") end
     | map(select(.bucket != "pass" and .bucket != "skipping" and .bucket != "pending") | .name)
@@ -521,7 +530,7 @@ github_read_checks_with_gh_axi() {
   output=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null) || return 1
   [ -n "$output" ] || return 0
   case "$output" in
-    *"no CI checks configured"*) return 0 ;;
+    *"no CI checks configured"*) FM_PR_CHECKS_NONE=1; return 0 ;;
   esac
   rows=$(printf '%s\n' "$output" | awk '
     /^checks\[[0-9]+\]\{name,conclusion\}:/ { inside=1; found=1; next }
@@ -552,6 +561,7 @@ github_check_checks_green() {
     fm_merge_guard_add_reason "the checks on $URL could not be read, so a failing or pending check cannot be ruled out"
     return 0
   fi
+  [ -z "$FM_PR_CHECKS_NONE" ] || fm_merge_guard_add_reason "no checks ran on $URL, so nothing has verified the pull request; a repository with no CI wired to its pull requests stays unverified until checks exist"
   [ -z "$FM_PR_CHECKS_FAILING" ] || fm_merge_guard_add_reason "checks are failing: $FM_PR_CHECKS_FAILING"
   [ -z "$FM_PR_CHECKS_PENDING" ] || fm_merge_guard_add_reason "checks are still pending: $FM_PR_CHECKS_PENDING"
 }

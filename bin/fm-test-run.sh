@@ -147,7 +147,7 @@ family_for_basename() {
     fm-tasks-axi.test.sh|fm-todo-project.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
-    fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
+    fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|fm-nm-run-lib.test.sh|\
     fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-omp-branch-types.test.sh)
       printf '%s\n' pure-contract-unit
