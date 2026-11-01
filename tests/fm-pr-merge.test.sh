@@ -42,8 +42,10 @@
 #       verbatim words land in the task's durable override record
 #       (guard and record contract: bin/fm-merge-guard-lib.sh)
 #   (w) failing, pending, or unreadable checks refuse naming the checks and the
-#       flag; all-green and check-less PRs merge with no override record; gh-axi
-#       reads the checks when gh is absent
+#       flag; a PR that reports no checks at all refuses too, naming the missing
+#       checks, and merges only under the captain's recorded instruction;
+#       all-green PRs merge with no override record; gh-axi reads the checks
+#       when gh is absent
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1877,35 +1879,106 @@ test_red_checks_merge_under_recorded_captain_instruction() {
   pass "fm-pr-merge merges a red PR only under a recorded verbatim captain instruction"
 }
 
-test_green_or_absent_checks_merge_without_override() {
-  local case_dir rc answer code
-  for answer in green none; do
-    case_dir=$(make_case "checks-$answer")
+test_all_green_checks_merge_without_override() {
+  local case_dir rc
+  case_dir=$(make_case checks-green)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8787878787878787878787878787878787878787
+  printf '%s\n' '[{"name":"lint","bucket":"pass"},{"name":"docs","bucket":"skipping"}]' > "$case_dir/checks.out"
+  add_gh_checks_answer "$case_dir" "$case_dir/checks.out"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/87 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "checks-green: a PR with passing checks was refused"
+  grep -qxF 'pr merge 87 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "checks-green: the merge did not run"
+  assert_no_grep 'refusing' "$case_dir/stderr" "checks-green: a guard refused a green PR"
+  assert_absent "$case_dir/$OVERRIDE_LOG" "checks-green: a green merge wrote an override record"
+  pass "fm-pr-merge merges an all-green PR with no override"
+}
+
+# A PR no check ever ran against must not read as verified: gh reports it as an
+# error sentence, gh --json as an empty array, and gh-axi as "no CI checks
+# configured". All three refuse.
+test_no_checks_refuses_and_names_the_condition() {
+  local case_dir rc shape ghless_path
+  for shape in gh-sentence gh-empty-array gh-axi; do
+    case_dir=$(make_case "no-checks-$shape")
     mkdir -p "$case_dir/wt"
-    add_gh_mocks "$case_dir" 8787878787878787878787878787878787878787
-    if [ "$answer" = green ]; then
-      printf '%s\n' '[{"name":"lint","bucket":"pass"},{"name":"docs","bucket":"skipping"}]' > "$case_dir/checks.out"
-      code=0
-    else
-      printf '%s\n' "no checks reported on the 'feature' branch" > "$case_dir/checks.out"
-      code=1
-    fi
-    add_gh_checks_answer "$case_dir" "$case_dir/checks.out" "$code"
+    add_gh_mocks "$case_dir" 9090909090909090909090909090909090909090
     : > "$case_dir/gh-axi.log"
+    case "$shape" in
+      gh-sentence)
+        printf '%s\n' "no checks reported on the 'feature' branch" > "$case_dir/checks.out"
+        add_gh_checks_answer "$case_dir" "$case_dir/checks.out" 1
+        ;;
+      gh-empty-array)
+        printf '%s\n' '[]' > "$case_dir/checks.out"
+        add_gh_checks_answer "$case_dir" "$case_dir/checks.out" 0
+        ;;
+      gh-axi)
+        printf '%s\n' 'no CI checks configured for this repository' > "$case_dir/checks.out"
+        add_gh_axi_checks_answer "$case_dir" "$case_dir/checks.out" 0
+        rm -f "$case_dir/fakebin/gh"
+        ;;
+    esac
 
     set +e
-    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/87 \
-      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    if [ "$shape" = gh-axi ]; then
+      ghless_path="$case_dir/ghless"
+      mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
+      PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/90 \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    else
+      run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/90 \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    fi
     rc=$?
     set -e
 
-    expect_code 0 "$rc" "checks-$answer: a PR with nothing red was refused"
-    grep -qxF 'pr merge 87 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-      || fail "checks-$answer: the merge did not run"
-    assert_no_grep 'refusing' "$case_dir/stderr" "checks-$answer: a guard refused a green PR"
-    assert_absent "$case_dir/$OVERRIDE_LOG" "checks-$answer: a green merge wrote an override record"
+    expect_code 1 "$rc" "no-checks-$shape: a PR no check ever ran against was merged"
+    assert_grep 'no checks ran on https://github.com/example/repo/pull/90' "$case_dir/stderr" \
+      "no-checks-$shape: refusal did not say no check ran"
+    assert_grep '--captain-instruction' "$case_dir/stderr" \
+      "no-checks-$shape: refusal did not name the override flag"
+    assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+      "no-checks-$shape: the forge merge ran anyway"
+    assert_absent "$case_dir/$OVERRIDE_LOG" \
+      "no-checks-$shape: a refusal wrote an override record"
   done
-  pass "fm-pr-merge merges all-green and check-less PRs with no override"
+  pass "fm-pr-merge refuses a PR that reports no checks, from either reader"
+}
+
+test_no_checks_merges_under_recorded_captain_instruction() {
+  local case_dir rc words
+  words='Captain 2026-11-01: merge 91 now, that repo has no CI wired to PRs yet'
+  case_dir=$(make_case no-checks-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 9191919191919191919191919191919191919191
+  printf '%s\n' "no checks reported on the 'feature' branch" > "$case_dir/checks.out"
+  add_gh_checks_answer "$case_dir" "$case_dir/checks.out" 1
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    --captain-instruction "$words" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-checks-override: the captain's instruction did not authorize the merge"
+  grep -qxF 'pr merge 91 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "no-checks-override: the merge did not run"
+  jq -e --arg words "$words" \
+    'select(.captain_instruction == $words and (.overridden | length == 1
+      and (.[0] | test("no checks ran on https://github.com/example/repo/pull/91"))))' \
+    "$case_dir/$OVERRIDE_LOG" >/dev/null \
+    || fail "no-checks-override: the missing checks and verbatim words were not recorded"
+  pass "fm-pr-merge merges a zero-check PR only under a recorded verbatim captain instruction"
 }
 
 test_unreadable_checks_refuse() {
@@ -2023,7 +2096,9 @@ test_blank_captain_instruction_is_rejected
 test_failing_checks_refuse_and_name_the_checks
 test_pending_checks_refuse_and_name_the_checks
 test_red_checks_merge_under_recorded_captain_instruction
-test_green_or_absent_checks_merge_without_override
+test_all_green_checks_merge_without_override
+test_no_checks_refuses_and_names_the_condition
+test_no_checks_merges_under_recorded_captain_instruction
 test_unreadable_checks_refuse
 test_gh_axi_checks_fallback_refuses_red_checks_without_gh
 test_gh_axi_checks_fallback_accepts_skipped_checks

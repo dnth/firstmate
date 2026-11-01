@@ -51,7 +51,7 @@ case "${1:-} ${2:-}" in
       *state*) printf 'OPEN\n'; exit 0 ;;
     esac
     ;;
-  "pr checks") printf '[]\n'; exit 0 ;;
+  "pr checks") printf '[{"name":"fixture CI","bucket":"pass"}]\n'; exit 0 ;;
   "api graphql")
     if [ -n "${FM_TEST_REVIEW_TEMP_CHECK:-}" ]; then
       python3 - "$FM_TEST_REVIEW_TEMP_CHECK" <<'CHECK'

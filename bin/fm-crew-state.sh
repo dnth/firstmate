@@ -36,6 +36,9 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#      A log whose last marker reports no CI checks reads working as
+#      no-checks instead, because nothing verified the PR, and the crew's own
+#      checks-green report is not promoted over it.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -540,6 +543,8 @@ if [ "$HAVE_RUN" = 1 ]; then
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+            elif [ "$CI_LOG_STATE" = no-checks ]; then
+              RUN_DETAIL="no CI checks reported (or repository declares no CI): nothing has verified the PR (still monitoring for merge/close)"
             fi
             ;;
           fixing)
@@ -562,7 +567,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
+    if [ "$CI_LOG_STATE" != not-ready ] && [ "$CI_LOG_STATE" != no-checks ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi

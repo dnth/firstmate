@@ -175,16 +175,25 @@ fm_nm_run_is_terminal_passed() {  # <toon-output>
 # transition. The most recent recognized log marker is therefore authoritative:
 # green remains ready unless a later running, failed, issue, or re-arm marker
 # supersedes it.
+# A marker reporting no CI checks - a PR nothing has run a check against, or a
+# repository that declares no_ci - reads no-checks, never green: no check has
+# verified the PR, so it is not ready for review and a crew's own checks-green
+# report is not promoted over it. Consumers must treat no-checks as unverified
+# and still monitoring, not as a failure.
 fm_nm_ci_checks_state() {  # <worktree> <timeout-secs> <run-id>
   local wt=$1 timeout_secs=$2 run_id=$3 log_tail marker
   [ -n "$run_id" ] || { printf 'unknown'; return 0; }
   log_tail=$(fm_nm_run "$wt" "$timeout_secs" axi logs --step ci --run "$run_id")
   [ -n "$log_tail" ] || { printf 'unknown'; return 0; }
   marker=$(printf '%s\n' "$log_tail" \
-    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
+    | grep -E 'CI checks passed|repository declares no CI \(no_ci: true\)|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    # The no_ci sentence also says "treating as all checks passed", so it must
+    # be matched before the generic checks-passed marker.
+    *"repository declares no CI (no_ci: true)"*) printf 'no-checks' ;;
+    *"no CI checks reported - still monitoring"*) printf 'no-checks' ;;
+    *"checks passed"*) printf 'green' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
