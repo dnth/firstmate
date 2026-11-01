@@ -218,6 +218,7 @@ test_retired_task_id_starts_new_status_unread() {
   out="$dir/drain.out"
   printf 'note: old reused-task history\n' > "$state/reused.status"
   printf 'note: stable neighboring history\n' > "$state/neighbor.status"
+  : > "$state/.reused.open-decisions-cursor.timed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "drain failed while acknowledging pre-retirement histories"
 
@@ -226,6 +227,8 @@ test_retired_task_id_starts_new_status_unread() {
     . "$1/bin/fm-classify-lib.sh"
     status_retire_presentation_task "$STATE" reused
   ' _ "$ROOT" || fail "retiring the reused task presentation state failed"
+  [ ! -e "$state/.reused.open-decisions-cursor.timed" ] \
+    || fail "retiring the task left its timed decision cursor behind"
   printf 'note: first event from reused task id\n' > "$state/reused.status"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \

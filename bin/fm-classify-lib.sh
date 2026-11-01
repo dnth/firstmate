@@ -422,23 +422,26 @@ EOF
   printf '%s' "$out"
 }
 
+_fm_decision_key_worker_owned() {
+  case "$1" in pending-reply-*) return 1 ;; esac
+  return 0
+}
+
 _fm_decision_key_transition_allowed() {  # <key> <note> <verb> <resolve-verb>
   local key=$1 note=$2 verb=${3-} resolve=${4:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
-  case "$key" in
-    pending-reply-*)
-      case "$note" in
-        pending-reply-*:*) return 0 ;;
-        # Older pending-reply status writers emitted this exact resolved
-        # wording. Keep it as a reserved-key closure without allowing it to
-        # open a pending-reply decision or accept arbitrary prose.
-        'correlated pending reply reconciled'*)
-          [ "$verb" = "$resolve" ] || return 1
-          return 0
-          ;;
-        *) return 1 ;;
-      esac
-      ;;
-  esac
+  if ! _fm_decision_key_worker_owned "$key"; then
+    case "$note" in
+      pending-reply-*:*) return 0 ;;
+      # Older pending-reply status writers emitted this exact resolved
+      # wording. Keep it as a reserved-key closure without allowing it to
+      # open a pending-reply decision or accept arbitrary prose.
+      'correlated pending reply reconciled'*)
+        [ "$verb" = "$resolve" ] || return 1
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  fi
   return 0
 }
 
@@ -459,8 +462,11 @@ _fm_is_pending_reply_escalation() {  # <key> <note>
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
 # (status_open_decisions_incremental) below call this instead of re-deriving the
 # rule, so the two consumption strategies can never drift apart on semantics.
-_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
-  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
+_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> [timed]
+  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped timed=${5:-} epoch unstamped source_line row rest
+  source_line=$line
+  _fm_status_untimed "$line" unstamped
+  line=$unstamped
   stripped=${line//[[:space:]]/}
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
   verb=$(status_line_verb "$line")
@@ -473,6 +479,27 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   esac
   case "$verb" in
     needs-decision|blocked)
+      if [ "$timed" = timed ]; then
+        epoch=unkeyed
+        if _fm_key_before_colon "$line" || _fm_key_at_note_head "$line" >/dev/null 2>&1; then
+          if ! _fm_status_at_epoch "$source_line" epoch; then
+            epoch=${6:-$(date +%s)}
+            while IFS= read -r row; do
+              case "$row" in
+                "$key"$'\t'*)
+                  rest=${row#*$'\t'}; rest=${rest#*$'\t'}
+                  rest=${rest%%$'\t'*}
+                  case "$rest" in ''|*[!0-9]*) ;; *) epoch=$rest ;; esac
+                  break
+                  ;;
+              esac
+            done <<EOF
+$open
+EOF
+          fi
+        fi
+        note="$epoch"$'\t'"$note"
+      fi
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
@@ -732,6 +759,29 @@ status_open_decisions() {  # <status-file-or-dash>
   _fm_status_open_decisions_stream < "$f"
 }
 
+# Return the still-open verb only when the worker's newest status line opened it.
+status_worker_wait_verb() {  # <status-file>
+  local f=$1 last verb key open rec row untimed
+  last=$(last_status_line "$f")
+  [ -n "$last" ] || return 1
+  _fm_status_untimed "$last" untimed
+  verb=$(status_line_verb "$untimed")
+  case "$verb" in blocked|needs-decision) ;; *) return 1 ;; esac
+  key=$(_fm_decision_key "$untimed") || return 1
+  _fm_decision_key_worker_owned "$key" || return 1
+  open=$(status_open_decisions "$f")
+  while IFS= read -r row; do
+    case "$row" in "$key"$'\t'"$verb"$'\t'*) break ;; *) row= ;; esac
+  done <<EOF
+$open
+EOF
+  [ -n "$row" ] || return 1
+  for rec in "${f%.status}.inbox/handled"/*.msg; do
+    [ -e "$rec" ] && [ "$rec" -nt "$f" ] && return 1
+  done
+  printf '%s' "$verb"
+}
+
 # Fleet-wide wrapper around status_open_decisions: scans every task's status
 # log under <state> and prefixes each still-open decision with its owning task
 # id, so a per-wake or per-session surface can print the consolidated open set
@@ -949,7 +999,7 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
   fi
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=6
+FM_OPEN_DECISIONS_FOLD_VERSION=7
 
 _fm_status_file_size() {  # <status-file>
   local f=$1
@@ -1295,12 +1345,19 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # completions scan and feeds it back through the commit below; it bounds the
 # next scan and is never a presentation marker.
 
-status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
-  local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
+status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [timed]
+  local f=$1 captured_end=${2:-} timed=${3:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
-  local target_cursor
+  local target_cursor fold_version observed_at=${4:-}
+  case "$timed" in ''|timed) ;; *) return 2 ;; esac
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
+  fold_version=$FM_OPEN_DECISIONS_FOLD_VERSION
+  if [ "$timed" = timed ]; then
+    cf="$cf.timed"
+    fold_version="$fold_version:timed:2"
+    [ -n "$observed_at" ] || observed_at=$(date +%s)
+  fi
   offset=0
   ident=''
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
@@ -1311,7 +1368,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     case "$first" in
       version=*)
         version=${first#version=}
-        [ "$version" = "$FM_OPEN_DECISIONS_FOLD_VERSION" ] || version=''
+        [ "$version" = "$fold_version" ] || version=''
         rest=${cursor_data#*$'\n'}
         offset_line=${rest%%$'\n'*}
         case "$offset_line" in
@@ -1389,7 +1446,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
-      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$timed" "$observed_at")
     done < "$chunk_file"
     rm -f "$chunk_file"
     offset=$size
@@ -1398,7 +1455,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   if [ "$cursor_dirty" -eq 1 ]; then
     target_cursor="$cf.tmp.$$"
     {
-      printf 'version=%s\n' "$FM_OPEN_DECISIONS_FOLD_VERSION"
+      printf 'version=%s\n' "$fold_version"
       printf 'offset=%s\n' "$size"
       printf 'ident=%s\n' "$cur_ident"
       if [ -n "$open" ]; then printf '%s' "$open"; fi
@@ -1518,7 +1575,8 @@ EOF
 }
 
 status_retire_presentation_task() {  # <state> <task-id>
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0 ledger
+  ledger="$state/.open-decision-reminders"
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
   tmp="$manifest.tmp.$$"
@@ -1530,7 +1588,10 @@ status_retire_presentation_task() {  # <state> <task-id>
   # durable proof that there is nothing to retire.
   if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ] \
     && [ ! -e "$state/.$task.open-decisions-cursor" ] \
-    && [ ! -L "$state/.$task.open-decisions-cursor" ]; then
+    && [ ! -L "$state/.$task.open-decisions-cursor" ] \
+    && [ ! -e "$state/.$task.open-decisions-cursor.timed" ] \
+    && [ ! -L "$state/.$task.open-decisions-cursor.timed" ] \
+    && [ ! -e "$ledger" ] && [ ! -L "$ledger" ]; then
     if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
       return 0
     fi
@@ -1575,8 +1636,22 @@ EOF
       [ "$rc" -eq 0 ] || rm -f "$tmp"
     fi
   fi
+  if [ "$rc" -eq 0 ] && { [ -e "$ledger" ] || [ -L "$ledger" ]; }; then
+    if [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ] \
+      && data=$(LC_ALL=C command cat "$ledger" 2>/dev/null); then
+      if _fm_decision_drop "$data" "$task" > "$tmp"; then
+        mv -f "$tmp" "$ledger" || rc=1
+      else
+        rc=1
+      fi
+      rm -f "$tmp"
+    else
+      rc=1
+    fi
+  fi
   if [ "$rc" -eq 0 ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
+      "$state/.$task.open-decisions-cursor.timed" \
       "$state/.seen-$(printf '%s.status' "$task" | tr '.' '_').offset" || rc=1
   fi
   fm_lock_release "$lock" || rc=1
