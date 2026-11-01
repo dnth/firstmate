@@ -1009,9 +1009,10 @@ wedge_defer_wait() {  # <window> <since-file> <label> <idle-age> <kind> <action>
 # Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
 # the bounded re-surface cadence is measured from the CURRENT quiet stretch and a
 # long-finished one cannot make the next deferral resurface immediately.
-clear_write_tracking() {  # <window-key>
+clear_wedge_deferral_tracking() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
+  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key" \
+    "$STATE/.wait-since-$key" "$STATE/.wait-resurfaced-$key"
 }
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
@@ -1031,7 +1032,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   case "$since" in
     ''|*[!0-9]*)
       date +%s > "$since_file"
-      clear_write_tracking "$(window_key "$win")"
+      clear_wedge_deferral_tracking "$(window_key "$win")"
       triage_log "absorbed $label timer reset: $win"
       ;;
     *)
@@ -1042,7 +1043,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # state instead of escalating an idle-by-definition pane.
         if ! afk_present && crew_is_run_step_done "$task"; then
           rm -f "$since_file" "$escalation_file"
-          clear_write_tracking "$(window_key "$win")"
+          clear_wedge_deferral_tracking "$(window_key "$win")"
           triage_log "absorbed $label timer expiry (run-step done, awaiting merge/landing): $win"
           return 0
         fi
@@ -1076,7 +1077,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
-        clear_write_tracking "$(window_key "$win")"
+        clear_wedge_deferral_tracking "$(window_key "$win")"
         wake "$reason"
       fi
       ;;
@@ -1200,7 +1201,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-  clear_write_tracking "$key"
+  clear_wedge_deferral_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -1249,7 +1250,7 @@ handle_compute_dormant_stale() {  # <window> <task>
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-  clear_write_tracking "$key"
+  clear_wedge_deferral_tracking "$key"
   mtime=$(stat_mtime "$record")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
@@ -1275,7 +1276,7 @@ clear_pause_state() {  # <window-key>
 # recheck, and re-surface throttle - can still reset the per-hash half alone.
 clear_stale_hash_tracking() {  # <window-key>
   local key=$1
-  clear_write_tracking "$key"
+  clear_wedge_deferral_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
     "$STATE/.remote-inconclusive-$key"
 }
@@ -1360,7 +1361,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   if ! afk_present && crew_is_run_step_done "$task"; then
     printf '%s' "$h" > "$STATE/.stale-$key"
     rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-    clear_write_tracking "$key"
+    clear_wedge_deferral_tracking "$key"
     triage_log "absorbed non-terminal stale (run-step done, awaiting merge/landing): $win"
     return 0
   fi
@@ -1378,7 +1379,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
-  clear_write_tracking "$key"
+  clear_wedge_deferral_tracking "$key"
   if [ "$declared" -eq 0 ]; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
@@ -1818,25 +1819,11 @@ open_decision_reminder_tick() {
     [ "$f" != "$exclude" ] || continue
     kind=$(_fm_status_kind "$f")
     case "$kind" in ship|scout|secondmate) ;; *) continue ;; esac
-    open=$(status_open_decisions_incremental "$f" '' timed) || return 1
+    open=$(status_open_decisions_incremental "$f" '' timed "$now") || return 1
     [ -n "$open" ] || continue
     while IFS=$'\t' read -r key verb opened note; do
-      case "$opened" in
-        unkeyed) continue ;;
-        ''|unknown) opened='' ;;
-        *[!0-9]*) continue ;;
-      esac
-      if [ -z "$opened" ]; then
-        while IFS=$'\t' read -r old_task old_key old_opened old_last old_delay; do
-          [ "$old_task" = "$task" ] && [ "$old_key" = "$key" ] || continue
-          case "$old_opened" in ''|*[!0-9]*) continue ;; esac
-          opened=$old_opened
-          break
-        done <<EOF
-$old
-EOF
-        [ -n "$opened" ] || opened=$now
-      fi
+      _fm_decision_key_worker_owned "$key" || continue
+      case "$opened" in ''|*[!0-9]*) continue ;; esac
       last=0; delay=$threshold
       while IFS=$'\t' read -r old_task old_key old_opened old_last old_delay; do
         [ "$old_task" = "$task" ] && [ "$old_key" = "$key" ] \
@@ -2474,18 +2461,18 @@ EOF
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
-              clear_write_tracking "$key"
+              clear_wedge_deferral_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             elif ! afk_present && crew_is_run_step_done "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               rm -f "$ssf" "$ewf"
-              clear_write_tracking "$key"
+              clear_wedge_deferral_tracking "$key"
               triage_log "absorbed stale (run-step done, completion already reported): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
-              clear_write_tracking "$key"
+              clear_wedge_deferral_tracking "$key"
               mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
               wake "stale: $w"
             fi
@@ -2556,7 +2543,7 @@ EOF
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
         else
           rm -f "$ssf" "$ewf"
-          clear_write_tracking "$key"
+          clear_wedge_deferral_tracking "$key"
         fi
         # A busy pane normally means real work resumed, so stale pause bookkeeping
         # is cleared - but not in the same poll the declared-pause cadence just
@@ -2573,7 +2560,7 @@ EOF
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
       else
         rm -f "$ssf" "$ewf"
-        clear_write_tracking "$key"
+        clear_wedge_deferral_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then

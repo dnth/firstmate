@@ -1094,14 +1094,22 @@ test_wedge_timer_expiry_absorbs_run_step_done() {
 }
 
 test_wedge_worker_decision_deferral_is_opt_in() {
-  local dir state fakebin out capture window key pane_hash sig pid home config
-  for mode in enabled disabled; do
+  local dir state fakebin out capture window key pane_hash sig pid home config verb
+  for mode in enabled disabled reserved-decision reserved-blocked; do
     dir=$(make_case "wedge-worker-decision-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
     home="$dir/home"; config="$home/config"; mkdir -p "$config" "$home/data" "$home/state"
     out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-decision-$mode"
     printf 'idle waiting for answer\n' > "$capture"
     printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$dir/worktree" > "$state/decision.meta"
     printf 'working: preparing\nneeds-decision: [key=choice] choose A or B\n' > "$state/decision.status"
+    case "$mode" in
+      reserved-*)
+        verb=needs-decision
+        [ "$mode" != reserved-blocked ] || verb=blocked
+        printf '%s [key=pending-reply-corr]: pending-reply-missed: reply failed\n' "$verb" > "$state/decision.status"
+        [ -n "$(status_open_decisions "$state/decision.status")" ] || fail "reserved decision disappeared from the general fold"
+        ;;
+    esac
     sig=$(seen_sig "$state/decision.status"); printf '%s' "$sig" > "$state/.seen-decision_status"
     key=$(printf '%s' "$window" | tr ':/.' '___')
     pane_hash=$(hash_text "idle waiting for answer")
@@ -1109,7 +1117,7 @@ test_wedge_worker_decision_deferral_is_opt_in() {
     printf '%s' "$pane_hash" > "$state/.stale-$key"
     printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
     printf '1\n' > "$state/.count-$key"
-    [ "$mode" != enabled ] || : > "$config/wedge-defer-worker-wait"
+    [ "$mode" = disabled ] || : > "$config/wedge-defer-worker-wait"
     if [ "$mode" = enabled ]; then
       PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
         FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -1123,7 +1131,25 @@ test_wedge_worker_decision_deferral_is_opt_in() {
       [ -z "$(cat "$state/.wake-queue" 2>/dev/null || true)" ] \
         || { stop_pid "$pid"; reap "$pid"; fail "enabled worker decision deferral queued a wedge wake"; }
       stop_pid "$pid"; reap "$pid"
-      pass "worker-owned open decision defers wedge escalation when opted in"
+      ack_stopped_cycle "$state" || fail "could not acknowledge the stopped deferral watcher"
+      : > "$state/.wait-resurfaced-$key"
+      printf 'worker resumed with a new pane\n' > "$capture"
+      PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+        FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$config" \
+        FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+        FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+        FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+        FM_STALE_ESCALATE_SECS=240 "$WATCH" > "$out" &
+      pid=$!
+      wait_poll_cycle "$state" "$pid" || { stop_pid "$pid"; reap "$pid"; fail "resumed worker did not complete a poll"; }
+      stop_pid "$pid"; reap "$pid"
+      [ ! -e "$state/.wait-since-$key" ] && [ ! -e "$state/.wait-resurfaced-$key" ] \
+        || fail "resumed pane retained the previous wait age or throttle"
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+        bash -c '. "$1"; : > "$STATE/.wait-since-reset"; : > "$STATE/.wait-resurfaced-reset"; clear_stale_hash_tracking reset; [ ! -e "$STATE/.wait-since-reset" ] && [ ! -e "$STATE/.wait-resurfaced-reset" ]' _ "$WATCH" \
+        || fail "stale hash reset retained wait tracking"
+      pass "worker-owned open decision defers wedges and resumed activity clears wait tracking"
     else
       PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
         FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -1135,7 +1161,7 @@ test_wedge_worker_decision_deferral_is_opt_in() {
       pid=$!
       wait_for_exit "$pid" 40 || { stop_pid "$pid"; reap "$pid"; fail "decision without opt-in did not preserve the existing wedge escalation"; }
       grep -F 'possible wedge' "$out" >/dev/null || fail "decision without opt-in did not escalate"
-      pass "worker-owned open decision leaves wedge escalation unchanged without the flag"
+      pass "worker decision mode $mode preserves wedge escalation"
     fi
   done
 }
@@ -1158,6 +1184,8 @@ EOF
   printf 'needs-decision [key=choice] [at=100]: choose A or B\n' > "$statusf"
   printf 'window=firstmate:fm-remind-keyless\nkind=ship\n' > "$state/remind-keyless.meta"
   printf 'needs-decision [at=100]: no explicit decision key\n' > "$state/remind-keyless.status"
+  printf 'kind=secondmate\n' > "$state/reserved.meta"
+  printf 'needs-decision [key=pending-reply-corr] [at=100]: pending-reply-missed: reply failed\n' > "$state/reserved.status"
   : > "$config/open-decision-reminders"
   run_tick() {
     FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
@@ -1183,7 +1211,32 @@ EOF
   count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" 2>/dev/null || true)
   [ "$count" = 3 ] || fail "resolved decision produced another reminder: $count"
   [ ! -s "$state/.open-decision-reminders" ] || fail "resolved decision remained in the reminder ledger"
-  pass "overdue keyed decisions wake on persisted backoff steps and stop after resolution"
+  printf 'needs-decision: [key=choice] first unstamped opening\n' >> "$statusf"
+  run_tick 3000 || fail "unstamped opening tick failed"
+  run_tick 3050 || fail "unstamped overdue tick failed"
+  count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
+  [ "$count" = 4 ] || fail "unstamped opening did not receive its first reminder"
+  printf 'blocked: [key=choice] still waiting\n' >> "$statusf"
+  run_tick 3099 || fail "repeated open tick failed"
+  printf 'resolved: [key=choice] answered\nneeds-decision: [key=choice] reopened\n' >> "$statusf"
+  run_tick 3301 || fail "reopened decision tick failed"
+  count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
+  [ "$count" = 4 ] || fail "reopened decision inherited its old overdue age"
+  run_tick 3351 || fail "reopened first reminder tick failed"
+  count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
+  [ "$count" = 5 ] || fail "reopened decision inherited its old backoff"
+  printf 'neighbor\tchoice\t100\t200\t50\n' >> "$state/.open-decision-reminders"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    bash -c '. "$1"; status_retire_presentation_task "$STATE" remind' _ "$WATCH" \
+    || fail "decision task retirement failed"
+  [ "$(cat "$state/.open-decision-reminders")" = $'neighbor\tchoice\t100\t200\t50' ] \
+    || fail "task retirement did not remove only its own reminder records"
+  printf 'needs-decision: [key=choice] reused task\n' > "$statusf"
+  run_tick 4000 || fail "reused task opening tick failed"
+  run_tick 4050 || fail "reused task first reminder tick failed"
+  count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
+  [ "$count" = 6 ] || fail "reused task inherited its previous reminder lifecycle"
+  pass "keyed reminders exclude reserved keys and reset age and backoff on reopening and retirement"
 }
 
 test_wedge_backlog_captain_hold_defers_escalation() {
