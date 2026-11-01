@@ -166,7 +166,7 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`veri
 The default-on backlog captain-hold check defers wedge escalation while the task remains held, using the bounded `FM_PAUSE_RESURFACE_SECS` cadence.
 Creating the local, gitignored `config/wedge-defer-worker-wait` presence flag also defers escalation when the worker's newest `needs-decision:` or `blocked:` status is still open; a later status event or handled inbox answer ends that deferral.
 Creating the local, gitignored `config/open-decision-reminders` presence flag enables one overdue wake per keyed worker decision at a time, with a persisted per-key backoff ledger across watcher restarts.
-Open keyed decisions are not reminded while the task is paused or captain-held, matching [upstream behavior](https://github.com/kunchenguid/firstmate/blob/1973897e/bin/fm-watch.sh#L2616-L2617).
+Open keyed decisions remain eligible for reminders while the task is paused or captain-held.
 `FM_OPEN_DECISION_OVERDUE_SECS` sets the first reminder age in seconds and defaults to 1800.
 `FM_OPEN_DECISION_BACKOFF_MAX_SECS` caps the repeated reminder interval and defaults to 14400.
 When a decision has no status timestamp, its age starts at the first watcher observation and persists in the ledger.
