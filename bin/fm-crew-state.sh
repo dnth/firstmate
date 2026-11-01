@@ -16,7 +16,11 @@
 # worktree, complete acceptance evidence (bin/fm-receipt-check.sh), pr= recorded
 # by bin/fm-pr-check.sh for the PR modes or a clean checked-out fm/<id> branch
 # for local-only. For a local-only ready report, this helper records the branch's
-# full commit id in task metadata; landing rechecks that exact head.
+# full commit id as local_done_head= in task metadata and appends the ready
+# report with an [accepted local_done_head=<full commit id>] suffix to the
+# status log. Re-reading that accepted report preserves the pin and refuses a
+# moved head; a fresh valid ready report can replace the pin.
+# Landing rechecks that exact head.
 # For no-mistakes, it also applies the ask-user decision audit owned by
 # bin/fm-nm-run-lib.sh when a recorded or attributed full run is available;
 # absence of that identity does not itself refuse done. PR-ready registration
