@@ -32,7 +32,12 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# The landed-patch comparison preserves whitespace with `git patch-id --verbatim` (Git 2.41 or newer).
+# `--stable` ignores whitespace and would accept a re-indented local edit as the landed patch, so it is never a fallback.
+# The default-branch content proof uses `git merge-tree --write-tree` (Git 2.38 or newer).
+# If neither proof establishes containment and a required Git capability is unavailable, teardown refuses and names the unavailable proof.
 # Uncommitted changes are never landed.
+# The dirty check uses `git status --porcelain --untracked-files=all`, so status.showUntrackedFiles cannot hide untracked files, including files inside new directories.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -784,11 +789,33 @@ ensure_commit_object() {
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
+# The header owns the whitespace-preserving proof contract.
+# Probe in the caller's shell so PATCH_ID_PROOF_ERROR survives patch-id command substitutions.
+PATCH_ID_VERBATIM_SUPPORTED=
+PATCH_ID_PROOF_ERROR=
+patch_id_verbatim_supported() {
+  if [ -z "$PATCH_ID_VERBATIM_SUPPORTED" ]; then
+    if printf '' | git patch-id --verbatim >/dev/null 2>&1; then
+      PATCH_ID_VERBATIM_SUPPORTED=yes
+    else
+      PATCH_ID_VERBATIM_SUPPORTED=no
+    fi
+  fi
+  if [ "$PATCH_ID_VERBATIM_SUPPORTED" = yes ]; then
+    return 0
+  fi
+  PATCH_ID_PROOF_ERROR='git patch-id --verbatim was rejected (Git 2.41 or newer required)'
+  return 1
+}
+
 patch_id_for_commit() {
-  local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
+  local commit=$1 patch_id
+  patch_id_verbatim_supported || return 1
+  patch_id=$(git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
+    | git patch-id --verbatim 2>/dev/null \
+    | awk 'NR == 1 { print $1 }')
+  [ -n "$patch_id" ] || return 1
+  printf '%s\n' "$patch_id"
 }
 
 unpushed_patches_are_in_pr_head() {
@@ -829,6 +856,9 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
+  # Only a resolved PR target needs the patch-id proof; recording its capability
+  # here keeps an unavailable-proof refusal scoped to work that actually needed it.
+  patch_id_verbatim_supported || :
   view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   head=${view#*$'\t'}
@@ -849,10 +879,15 @@ pr_is_merged() {
 # the default branch does not already contain (e.g. its change landed via squash) the
 # merged tree equals the default branch's tree. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# "added". Returns non-zero when the content is not contained, or when the proof is
+# inconclusive (no default ref, a merge conflict, or a Git error), so the caller
+# refuses rather than guesses. A merge-tree option or execution failure sets
+# CONTENT_LANDED_PROOF_ERROR, which names the unavailable proof separately from a
+# genuine conflict or a differing tree.
+CONTENT_LANDED_PROOF_ERROR=
 content_in_default() {
-  local name ref default_tree merged_tree
+  local name ref default_tree merged_tree merge_status
+  CONTENT_LANDED_PROOF_ERROR=
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -864,7 +899,15 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || {
+    merge_status=$?
+    case "$merge_status" in
+      1) ;; # Git completed the merge and found conflicts.
+      129) CONTENT_LANDED_PROOF_ERROR='git merge-tree --write-tree was rejected (Git 2.38 or newer required)' ;;
+      *) CONTENT_LANDED_PROOF_ERROR="git merge-tree --write-tree failed (Git exit $merge_status)" ;;
+    esac
+    return 1
+  }
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }
@@ -873,7 +916,9 @@ content_in_default() {
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# when neither proof establishes that the work landed. A containment proof Git
+# cannot run sets its own *_PROOF_ERROR in the caller's shell, so the refusal can
+# name the missing proof instead of calling landed work unlanded.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
@@ -1264,14 +1309,14 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch proof_error
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -1324,7 +1369,16 @@ validate_worktree_teardown_safety() {
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
-      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+      proof_error=${CONTENT_LANDED_PROOF_ERROR:-}
+      if [ -n "$PATCH_ID_PROOF_ERROR" ]; then
+        proof_error=${proof_error:+$proof_error; }$PATCH_ID_PROOF_ERROR
+      fi
+      if [ -n "$proof_error" ]; then
+        echo "REFUSED: content-landed proof unavailable for worktree $WT: $proof_error." >&2
+        echo "Restore or upgrade Git and retry the content check." >&2
+      else
+        echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+      fi
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1

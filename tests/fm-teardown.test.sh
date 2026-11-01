@@ -38,6 +38,9 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (aa) no-mistakes + hidden untracked work (status config)   -> REFUSE (all untracked)
+#   (ab) no-mistakes + merged PR, replay differs by whitespace -> REFUSE (verbatim ids)
+#   (ac) no-mistakes + containment proof Git cannot run        -> REFUSE (names proof)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -864,6 +867,163 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
   pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
+}
+
+# AC1: a worktree-local status.showUntrackedFiles=no must not hide unlanded work.
+# The committed work is pushed, so nothing but the hidden untracked file stands
+# between this worktree and a successful teardown.
+test_hidden_untracked_work_refuses() {
+  local case_dir rc
+  case_dir=$(make_case hidden-untracked)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/wt" config status.showUntrackedFiles no
+  mkdir -p "$case_dir/wt/new-dir"
+  printf '%s\n' "unlanded scratch" > "$case_dir/wt/new-dir/notes.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "hidden-untracked: teardown must refuse work hidden by status.showUntrackedFiles=no"
+  assert_grep REFUSED "$case_dir/stderr" "hidden-untracked: no REFUSED line in stderr"
+  assert_grep "uncommitted changes" "$case_dir/stderr" "hidden-untracked: refusal did not cite uncommitted changes"
+  assert_present "$case_dir/state/task-x1.meta" "hidden-untracked: refusal dropped the task record"
+  assert_present "$case_dir/wt/new-dir/notes.txt" "hidden-untracked: hidden work was discarded"
+  pass "AC1: teardown refuses untracked work hidden by status.showUntrackedFiles=no"
+}
+
+# AC2: the landed-patch proof compares patches byte-exactly. An exact replay is
+# still landed; a local commit that differs only by indentation is not, because
+# `git patch-id --stable` would have collapsed the whitespace and accepted it.
+test_patch_id_proof_preserves_whitespace() {
+  local mode case_dir rc pr_head local_head
+  for mode in exact amended; do
+    case_dir=$(make_case "patch-whitespace-$mode")
+    write_meta "$case_dir" no-mistakes ship
+    # A pushed parent makes the YAML commit the only unpushed one, while giving
+    # the local replay a different parent from the recorded PR head, so the two
+    # commits can never coincide.
+    wt_commit_file "$case_dir" local-parent.txt parent "local parent"
+    git -C "$case_dir/wt" push -q origin HEAD:refs/heads/fm/task-x1
+    git -C "$case_dir/project" fetch -q origin fm/task-x1
+    wt_commit_file "$case_dir" config.yml $'a:\n  b: 1' "add YAML"
+    append_pr_meta_url "$case_dir"
+    pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head config.yml $'a:\n  b: 1' "add YAML")
+    printf 'pr_head=%s\n' "$pr_head" >> "$case_dir/state/task-x1.meta"
+    add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+    if [ "$mode" = amended ]; then
+      printf 'a:\nb: 1\n' > "$case_dir/wt/config.yml"
+      git -C "$case_dir/wt" add -- config.yml
+      git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q --amend --no-edit
+    fi
+    local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    [ "$local_head" != "$pr_head" ] || fail "patch-whitespace-$mode: fixture did not diverge"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    if [ "$mode" = exact ]; then
+      expect_code 0 "$rc" "patch-whitespace-exact: an exact replay is landed"$'\n'"$(cat "$case_dir/stderr")"
+      assert_absent "$case_dir/state/task-x1.meta" "patch-whitespace-exact: landed replay retained the task record"
+    else
+      expect_code 1 "$rc" "patch-whitespace-amended: a whitespace-only divergence must refuse"
+      assert_grep REFUSED "$case_dir/stderr" "patch-whitespace-amended: no REFUSED line in stderr"
+      assert_present "$case_dir/state/task-x1.meta" "patch-whitespace-amended: refusal dropped the task record"
+      [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$local_head" ] \
+        || fail "patch-whitespace-amended: refusal moved the local HEAD"
+    fi
+  done
+  pass "AC2: landed-patch matching is whitespace-exact; a re-indented local edit refuses"
+}
+
+# AC3: a containment proof Git cannot run is named and refused, never silently
+# replaced by a weaker comparison or reported as genuinely unlanded work.
+test_unavailable_containment_proofs_are_named() {
+  local mode case_dir rc pr_head
+  for mode in patch-id merge-tree; do
+    case_dir=$(make_case "proof-unavailable-$mode")
+    write_meta "$case_dir" no-mistakes ship
+    # A pushed parent leaves the YAML commit as the only unpushed one, and gives
+    # the local replay a different parent from any recorded PR head.
+    wt_commit_file "$case_dir" local-parent.txt parent "local parent"
+    git -C "$case_dir/wt" push -q origin HEAD:refs/heads/fm/task-x1
+    git -C "$case_dir/project" fetch -q origin fm/task-x1
+    wt_commit_file "$case_dir" config.yml $'a:\n  b: 1' "add YAML"
+    case "$mode" in
+      patch-id)
+        # The replayed patch is identical, so only the patch-id proof can establish
+        # containment; Git 2.41's --verbatim is simulated as rejected.
+        append_pr_meta_url "$case_dir"
+        pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head config.yml $'a:\n  b: 1' "add YAML")
+        printf 'pr_head=%s\n' "$pr_head" >> "$case_dir/state/task-x1.meta"
+        add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+        cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_PROOF_LOG:?}"
+if [ "${1:-}" = patch-id ] && [ "${2:-}" = --verbatim ]; then
+  echo 'error: unknown option `verbatim`' >&2
+  exit 129
+fi
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+        ;;
+      merge-tree)
+        # No PR is recorded or discoverable, so the content proof is the only one
+        # left; Git 2.38's merge-tree --write-tree is simulated as rejected.
+        cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+args=("$@")
+if [ "${1:-}" = -C ]; then shift 2; fi
+if [ "${1:-}" = merge-tree ]; then
+  echo 'error: unknown option `write-tree`' >&2
+  exit 129
+fi
+exec "$REAL_GIT_FOR_TEST" "${args[@]}"
+SH
+        ;;
+    esac
+    chmod +x "$case_dir/fakebin/git"
+
+    export FM_PROOF_LOG="$case_dir/proof.log"
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    unset FM_PROOF_LOG
+
+    expect_code 1 "$rc" "proof-unavailable-$mode: teardown must refuse when its containment proof cannot run"
+    assert_grep 'content-landed proof unavailable' "$case_dir/stderr" \
+      "proof-unavailable-$mode: the missing proof was not named"
+    assert_grep REFUSED "$case_dir/stderr" "proof-unavailable-$mode: no REFUSED line in stderr"
+    assert_no_grep 'not landed' "$case_dir/stderr" \
+      "proof-unavailable-$mode: unavailable proof was reported as unlanded work"
+    assert_present "$case_dir/state/task-x1.meta" "proof-unavailable-$mode: refusal dropped the task record"
+    case "$mode" in
+      patch-id)
+        assert_grep 'patch-id --verbatim' "$case_dir/stderr" \
+          "proof-unavailable-patch-id: the rejected capability was not named"
+        assert_grep 'Git 2.41' "$case_dir/stderr" \
+          "proof-unavailable-patch-id: the required Git version was not named"
+        assert_grep 'patch-id --verbatim' "$case_dir/proof.log" \
+          "proof-unavailable-patch-id: the capability was never exercised"
+        assert_no_grep '--stable' "$case_dir/proof.log" \
+          "proof-unavailable-patch-id: fell back to whitespace-insensitive matching"
+        ;;
+      merge-tree)
+        assert_grep 'merge-tree --write-tree' "$case_dir/stderr" \
+          "proof-unavailable-merge-tree: the rejected capability was not named"
+        assert_grep 'Git 2.38' "$case_dir/stderr" \
+          "proof-unavailable-merge-tree: the required Git version was not named"
+        ;;
+    esac
+  done
+  pass "AC3: teardown names an unavailable containment proof and refuses instead of weakening it"
 }
 
 test_merged_pr_with_later_local_commit_refuses() {
@@ -3752,6 +3912,9 @@ test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
+test_hidden_untracked_work_refuses
+test_patch_id_proof_preserves_whitespace
+test_unavailable_containment_proofs_are_named
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
