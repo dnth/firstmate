@@ -65,6 +65,9 @@
 #                          no-host lifecycle is dormant instead and uses the long
 #                          pause cadence without probing its absent endpoint.
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: open decision overdue: <task> key=<key> age=<seconds>s
+#                          opt-in config/open-decision-reminders backstop;
+#                          open_decision_reminder_tick owns persisted backoff
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -121,6 +124,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
@@ -161,6 +165,9 @@ mkdir -p "$STATE"
 # cheap when no records exist and never scrapes secondmate conversation.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# Reminder scanning must not treat the secondmate's parent reply channel as its own work.
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-compute-lib.sh
@@ -973,6 +980,32 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
 }
 
+# Decide whether this task currently has a captain hold using the backlog's
+# authoritative reader; unreadable backlog state is not treated as a hold.
+task_captain_call_open() {  # <task>
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" open "$1" \
+    >/dev/null 2>&1
+}
+
+# Defer a wedge while the worker's own latest keyed decision or blocker remains
+# open, or while its task is held for the captain. Both use the bounded pause
+# recheck; neither advances or resets the escalation count.
+wedge_defer_wait() {  # <window> <since-file> <label> <idle-age> <kind> <action>
+  local win=$1 since_file=$2 label=$3 age=$4 kind=$5 action=$6 key marker agefile wait_age
+  key=$(window_key "$win")
+  marker="$STATE/.wait-resurfaced-$key"
+  agefile="$STATE/.wait-since-$key"
+  [ -e "$agefile" ] || date +%s > "$agefile"
+  wait_age=$(age_of "$agefile")
+  date +%s > "$since_file"
+  if ! afk_present; then
+    resurface_absorbed "$win" "$marker" "$wait_age" \
+      "stale: $win (idle ${age}s, $kind remains open for ${wait_age}s; $action)"
+  fi
+  triage_log "absorbed $label ($kind, awaiting $action, idle ${age}s): $win"
+}
+
 # Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
 # the bounded re-surface cadence is measured from the CURRENT quiet stretch and a
 # long-finished one cannot make the next deferral resurface immediately.
@@ -993,7 +1026,7 @@ clear_write_tracking() {  # <window-key>
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason wait_key
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1013,6 +1046,24 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           triage_log "absorbed $label timer expiry (run-step done, awaiting merge/landing): $win"
           return 0
         fi
+        if [ -e "$CONFIG/wedge-defer-worker-wait" ] \
+          && verb=$(status_worker_wait_verb "$STATE/$task.status"); then
+          if [ "$verb" = blocked ]; then
+            wedge_defer_wait "$win" "$since_file" "$label" "$age" \
+              'worker blocker' 'firstmate to clear and resolve the blocker'
+          else
+            wedge_defer_wait "$win" "$since_file" "$label" "$age" \
+              'worker decision' 'firstmate to answer the decision'
+          fi
+          return 0
+        fi
+        if [ -n "$task" ] && task_captain_call_open "$task"; then
+          wedge_defer_wait "$win" "$since_file" "$label" "$age" \
+            'backlog captain hold' 'captain to answer or release the hold'
+          return 0
+        fi
+        wait_key=$(window_key "$win")
+        rm -f "$STATE/.wait-since-$wait_key" "$STATE/.wait-resurfaced-$wait_key"
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
@@ -1737,6 +1788,106 @@ event_wait_or_sleep() {
   esac
 }
 
+# Remind firstmate of overdue worker-owned keyed decisions independently of the
+# supervision signal fold. The timed incremental fold preserves opened-at ages;
+# this ledger bounds repeated wakes across watcher restarts.
+open_decision_reminder_tick() {
+  local now=${1:-$(date +%s)} threshold=${FM_OPEN_DECISION_OVERDUE_SECS:-1800}
+  local cap=${FM_OPEN_DECISION_BACKOFF_MAX_SECS:-14400} value f task kind open key verb opened note
+  local ledger old='' rows='' old_task old_key old_opened old_last old_delay last delay
+  local due_task='' due_key='' due_opened='' due_delay='' tmp reason exclude
+  OPEN_DECISION_REMINDER=
+  [ -e "$CONFIG/open-decision-reminders" ] || return 0
+  for value in "$threshold" "$cap"; do
+    case "$value" in ''|0*|*[!0-9]*) return 1 ;; esac
+    [ "${#value}" -le 9 ] || return 1
+  done
+  [ "$cap" -ge "$threshold" ] || return 1
+  ledger="$STATE/.open-decision-reminders"
+  exclude=''
+  if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+    exclude=$(fm_parent_channel_destination "$FM_HOME" "$STATE") || return 1
+  fi
+  if [ -e "$ledger" ] || [ -L "$ledger" ]; then
+    [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ] || return 1
+    old=$(cat "$ledger") || return 1
+  fi
+  for f in "$STATE"/*.status; do
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    task=${f##*/}; task=${task%.status}
+    [ "$f" != "$exclude" ] || continue
+    kind=$(_fm_status_kind "$f")
+    case "$kind" in ship|scout|secondmate) ;; *) continue ;; esac
+    open=$(status_open_decisions_incremental "$f" '' timed) || return 1
+    [ -n "$open" ] || continue
+    while IFS=$'\t' read -r key verb opened note; do
+      case "$opened" in
+        unkeyed) continue ;;
+        ''|unknown) opened='' ;;
+        *[!0-9]*) continue ;;
+      esac
+      if [ -z "$opened" ]; then
+        while IFS=$'\t' read -r old_task old_key old_opened old_last old_delay; do
+          [ "$old_task" = "$task" ] && [ "$old_key" = "$key" ] || continue
+          case "$old_opened" in ''|*[!0-9]*) continue ;; esac
+          opened=$old_opened
+          break
+        done <<EOF
+$old
+EOF
+        [ -n "$opened" ] || opened=$now
+      fi
+      last=0; delay=$threshold
+      while IFS=$'\t' read -r old_task old_key old_opened old_last old_delay; do
+        [ "$old_task" = "$task" ] && [ "$old_key" = "$key" ] \
+          && [ "$old_opened" = "$opened" ] || continue
+        case "$old_last:$old_delay" in *[!0-9:]*) continue ;; esac
+        [ -n "$old_last" ] && [ "${#old_last}" -le 12 ] \
+          && [ -n "$old_delay" ] && [ "${#old_delay}" -le 9 ] || continue
+        last=$((10#$old_last)); delay=$((10#$old_delay))
+        [ "$delay" -ge "$threshold" ] || delay=$threshold
+        [ "$delay" -le "$cap" ] || delay=$cap
+        break
+      done <<EOF
+$old
+EOF
+      rows="$rows$task"$'\t'"$key"$'\t'"$opened"$'\t'"$last"$'\t'"$delay"$'\n'
+      [ "$now" -ge "$opened" ] && [ "$((now - opened))" -ge "$threshold" ] || continue
+      [ "$last" -eq 0 ] || [ "$((now - last))" -ge "$delay" ] || continue
+      status_is_paused_or_captain_held "$(last_status_line "$f")" && continue
+      task_captain_call_open "$task" && continue
+      if [ -z "$due_opened" ] || [ "$opened" -lt "$due_opened" ]; then
+        due_task=$task; due_key=$key; due_opened=$opened; due_delay=$delay
+        if [ "$last" -ne 0 ]; then
+          due_delay=$((delay * 2))
+          [ "$due_delay" -le "$cap" ] || due_delay=$cap
+        fi
+      fi
+    done <<EOF
+$open
+EOF
+  done
+  if [ -n "$due_task" ]; then
+    reason="check: open decision overdue: $due_task key=$due_key age=$((now - due_opened))s"
+    fm_wake_append check "open-decision:$due_task:$due_key" "$reason" || return 1
+    old=''
+    while IFS=$'\t' read -r old_task old_key old_opened old_last old_delay; do
+      [ -n "$old_task" ] || continue
+      [ "$old_task" = "$due_task" ] && [ "$old_key" = "$due_key" ] \
+        && [ "$old_opened" = "$due_opened" ] && continue
+      old="$old$old_task"$'\t'"$old_key"$'\t'"$old_opened"$'\t'"$old_last"$'\t'"$old_delay"$'\n'
+    done <<EOF
+$rows
+EOF
+    rows="$old$due_task"$'\t'"$due_key"$'\t'"$due_opened"$'\t'"$now"$'\t'"$due_delay"$'\n'
+    OPEN_DECISION_REMINDER=$reason
+  fi
+  tmp=$(mktemp "$STATE/.open-decision-reminders.XXXXXX") || return 1
+  if ! printf '%s' "$rows" > "$tmp" || ! mv -f "$tmp" "$ledger"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -1880,6 +2031,7 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -1900,6 +2052,11 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+  open_decision_reminder_tick || {
+    echo 'watcher: open-decision reminder check failed' >&2
+    exit 1
+  }
+  [ -z "$OPEN_DECISION_REMINDER" ] || wake "$OPEN_DECISION_REMINDER"
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes

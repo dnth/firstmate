@@ -161,6 +161,15 @@ The same channels also carry the watcher's undelivered main-wake alarm (`FM_MAIN
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Watcher decision deferrals and reminders
+
+The default-on backlog captain-hold check defers wedge escalation while the task remains held, using the bounded `FM_PAUSE_RESURFACE_SECS` cadence.
+Creating the local, gitignored `config/wedge-defer-worker-wait` presence flag also defers escalation when the worker's newest `needs-decision:` or `blocked:` status is still open; a later status event or handled inbox answer ends that deferral.
+Creating the local, gitignored `config/open-decision-reminders` presence flag enables one overdue wake per keyed worker decision at a time, with a persisted per-key backoff ledger across watcher restarts.
+`FM_OPEN_DECISION_OVERDUE_SECS` sets the first reminder age in seconds and defaults to 1800.
+`FM_OPEN_DECISION_BACKOFF_MAX_SECS` caps the repeated reminder interval and defaults to 14400.
+When a decision has no status timestamp, its age starts at the first watcher observation and persists in the ledger.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.

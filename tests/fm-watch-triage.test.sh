@@ -22,7 +22,7 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
 
-WATCH="$ROOT/bin/fm-watch.sh"
+WATCH="${FM_WATCH_BIN:-$ROOT/bin/fm-watch.sh}"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
@@ -963,8 +963,8 @@ test_stale_terminal_status_overridden_by_active_run() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited for a stale terminal-looking status the run-step overrides (should absorb): $(cat "$out")"
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher did not complete the stale-status absorb cycle: $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "the overridden stale terminal status printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "the overridden stale terminal status enqueued a wake during absorb"
@@ -1093,6 +1093,141 @@ test_wedge_timer_expiry_absorbs_run_step_done() {
   pass "an expired wedge timer on run-step done absorbs instead of escalating"
 }
 
+test_wedge_worker_decision_deferral_is_opt_in() {
+  local dir state fakebin out capture window key pane_hash sig pid home config
+  for mode in enabled disabled; do
+    dir=$(make_case "wedge-worker-decision-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
+    home="$dir/home"; config="$home/config"; mkdir -p "$config" "$home/data" "$home/state"
+    out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-decision-$mode"
+    printf 'idle waiting for answer\n' > "$capture"
+    printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$dir/worktree" > "$state/decision.meta"
+    printf 'working: preparing\nneeds-decision: [key=choice] choose A or B\n' > "$state/decision.status"
+    sig=$(seen_sig "$state/decision.status"); printf '%s' "$sig" > "$state/.seen-decision_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "idle waiting for answer")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '%s' "$pane_hash" > "$state/.stale-$key"
+    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+    printf '1\n' > "$state/.count-$key"
+    [ "$mode" != enabled ] || : > "$config/wedge-defer-worker-wait"
+    if [ "$mode" = enabled ]; then
+      PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+        FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$config" \
+        FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+        FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+        FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+        FM_STALE_ESCALATE_SECS=240 "$WATCH" > "$out" &
+      pid=$!
+      wait_poll_cycle "$state" "$pid" || { stop_pid "$pid"; reap "$pid"; fail "decision-deferral watcher did not complete a poll: $(cat "$out")"; }
+      [ -z "$(cat "$state/.wake-queue" 2>/dev/null || true)" ] \
+        || { stop_pid "$pid"; reap "$pid"; fail "enabled worker decision deferral queued a wedge wake"; }
+      stop_pid "$pid"; reap "$pid"
+      pass "worker-owned open decision defers wedge escalation when opted in"
+    else
+      PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+        FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$config" \
+        FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+        FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+        FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+        FM_STALE_ESCALATE_SECS=240 "$WATCH" > "$out" &
+      pid=$!
+      wait_for_exit "$pid" 40 || { stop_pid "$pid"; reap "$pid"; fail "decision without opt-in did not preserve the existing wedge escalation"; }
+      grep -F 'possible wedge' "$out" >/dev/null || fail "decision without opt-in did not escalate"
+      pass "worker-owned open decision leaves wedge escalation unchanged without the flag"
+    fi
+  done
+}
+
+test_open_decision_reminders_use_persisted_backoff() {
+  local dir state home config statusf count total
+  dir=$(make_case open-decision-reminders)
+  state="$dir/state"; home="$dir/home"; config="$home/config"
+  mkdir -p "$home/data" "$home/state" "$config"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  statusf="$state/remind.status"
+  printf 'window=firstmate:fm-remind\nkind=ship\n' > "$state/remind.meta"
+  printf 'needs-decision [key=choice] [at=100]: choose A or B\n' > "$statusf"
+  printf 'window=firstmate:fm-remind-keyless\nkind=ship\n' > "$state/remind-keyless.meta"
+  printf 'needs-decision [at=100]: no explicit decision key\n' > "$state/remind-keyless.status"
+  : > "$config/open-decision-reminders"
+  run_tick() {
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$config" FM_OPEN_DECISION_OVERDUE_SECS=50 \
+      FM_OPEN_DECISION_BACKOFF_MAX_SECS=200 \
+      bash -c '. "$1"; open_decision_reminder_tick "$2"' _ "$WATCH" "$1"
+  }
+  run_tick 200 || fail "initial overdue decision reminder tick failed"
+  run_tick 249 || fail "pre-backoff decision reminder tick failed"
+  count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" 2>/dev/null || true)
+  [ "$count" = 1 ] || fail "first reminder/backoff boundary was wrong: expected 1 wake, got $count"
+  total=$(grep -Fc $'\tcheck\topen-decision:' "$state/.wake-queue" 2>/dev/null || true)
+  [ "$total" = 1 ] || fail "a keyless decision received a reminder: expected 1 total wake, got $total"
+  run_tick 250 || fail "second decision reminder tick failed"
+  run_tick 349 || fail "pre-doubled-backoff decision reminder tick failed"
+  run_tick 350 || fail "third decision reminder tick failed"
+  count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" 2>/dev/null || true)
+  [ "$count" = 3 ] || fail "persisted backoff did not produce exactly three scheduled reminders: $count"
+  total=$(grep -Fc $'\tcheck\topen-decision:' "$state/.wake-queue" 2>/dev/null || true)
+  [ "$total" = 3 ] || fail "the reminder tick queued a keyless or duplicate wake: expected 3 total wakes, got $total: $(cat "$state/.wake-queue")"
+  printf 'resolved [key=choice]: selected A\n' >> "$statusf"
+  run_tick 2000 || fail "resolved-decision reminder tick failed"
+  count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" 2>/dev/null || true)
+  [ "$count" = 3 ] || fail "resolved decision produced another reminder: $count"
+  [ ! -s "$state/.open-decision-reminders" ] || fail "resolved decision remained in the reminder ledger"
+  pass "overdue keyed decisions wake on persisted backoff steps and stop after resolution"
+}
+
+test_wedge_backlog_captain_hold_defers_escalation() {
+  local dir state fakebin out capture window key pane_hash sig pid home
+  dir=$(make_case wedge-captain-hold); state="$dir/state"; fakebin="$dir/fakebin"
+  home="$dir/home"; mkdir -p "$home/data" "$home/state" "$home/config"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] held-task - Wait for captain decision (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  PATH="$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold held-task --reason 'captain must decide' \
+    >/dev/null || fail "could not create the active backlog captain hold"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-held-task"
+  printf 'idle while held for captain\n' > "$capture"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$dir/worktree" > "$state/held-task.meta"
+  printf 'working: waiting for captain\n' > "$state/held-task.status"
+  sig=$(seen_sig "$state/held-task.status"); printf '%s' "$sig" > "$state/.seen-held-task_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle while held for captain")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_STALE_ESCALATE_SECS=240 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { stop_pid "$pid"; reap "$pid"; fail "captain-held watcher did not complete a poll"; }
+  [ -z "$(cat "$state/.wake-queue" 2>/dev/null || true)" ] \
+    || { stop_pid "$pid"; reap "$pid"; fail "active backlog captain hold did not defer wedge escalation"; }
+  stop_pid "$pid"; reap "$pid"
+  pass "active backlog captain hold defers wedge escalation by default"
+}
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -3907,6 +4042,18 @@ test_remote_stale_age_and_inconclusive_bound_escalate() {
   pass "a conclusive stale age escalates, and 3 consecutive inconclusive probes escalate at the bound"
 }
 
+case "${FM_WATCH_TRIAGE_TEST:-}" in
+  '')
+    ;;
+  test_stale_terminal_status_overridden_by_active_run|test_wedge_worker_decision_deferral_is_opt_in|test_open_decision_reminders_use_persisted_backoff|test_wedge_backlog_captain_hold_defers_escalation)
+    "$FM_WATCH_TRIAGE_TEST"
+    exit
+    ;;
+  *)
+    fail "unknown FM_WATCH_TRIAGE_TEST: $FM_WATCH_TRIAGE_TEST"
+    ;;
+esac
+
 test_stop_pid_ends_a_term_immune_child
 test_signal_reason_is_actionable_classifier
 test_done_artifact_requires_exact_markers
@@ -3935,6 +4082,10 @@ test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_timer_expiry_absorbs_run_step_done
+test_wedge_worker_decision_deferral_is_opt_in
+test_open_decision_reminders_use_persisted_backoff
+test_wedge_backlog_captain_hold_defers_escalation
+
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
