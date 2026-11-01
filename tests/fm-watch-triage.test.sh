@@ -1236,19 +1236,19 @@ EOF
   run_tick 4050 || fail "reused task first reminder tick failed"
   count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
   [ "$count" = 6 ] || fail "reused task inherited its previous reminder lifecycle"
-  # An unrelated pause or captain hold leaves this keyed decision open, so the
-  # reminder contract still requires a check wake at its next backoff boundary.
+  # Open decisions remain open during waits, but reminder eligibility follows the
+  # upstream pause and captain-hold exclusions.
   for mode in paused captain-held; do
     printf '%s: unrelated task wait\n' "$mode" >> "$statusf"
     run_tick "$now" || fail "$mode reminder tick failed"
-    expected=$((expected + 1))
     count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
-    [ "$count" = "$expected" ] || fail "$mode suppressed an open decision reminder"
+    [ "$count" = "$expected" ] || fail "$mode did not suppress its reminder"
     [ -n "$(status_open_decisions "$statusf")" ] || fail "$mode closed the unrelated decision"
     printf 'working: wait ended\n' >> "$statusf"
     run_tick "$((now + 1))" || fail "resumed reminder tick failed"
+    expected=$((expected + 1))
     count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
-    [ "$count" = "$expected" ] || fail "resuming after $mode bypassed reminder backoff"
+    [ "$count" = "$expected" ] || fail "decision did not remind after $mode ended"
     now=$((now + 1000))
   done
   printf '## In flight\n- [ ] remind - Waiting for captain (kind: ship)\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
@@ -1256,10 +1256,10 @@ EOF
     FM_CONFIG_OVERRIDE="$config" "$ROOT/bin/fm-captain-hold.sh" hold remind \
     --reason 'captain must decide' >/dev/null || fail "could not create the reminder captain hold"
   run_tick "$now" || fail "captain hold reminder tick failed"
-  expected=$((expected + 1))
   count=$(grep -Fc $'\tcheck\topen-decision:remind:choice\t' "$state/.wake-queue" || true)
-  [ "$count" = "$expected" ] || fail "backlog captain hold suppressed an open decision reminder"
-  pass "keyed reminders exclude reserved keys and reset age and backoff on reopening and retirement"
+  [ "$count" = "$expected" ] || fail "backlog captain hold did not suppress its reminder"
+  [ -n "$(status_open_decisions "$statusf")" ] || fail "backlog captain hold closed the open decision"
+  pass "keyed reminders exclude reserved keys, honor paused and captain-hold suppression, and reset age and backoff on reopening and retirement"
 }
 
 test_open_decision_reminders_serialize_retirement() {

@@ -169,7 +169,7 @@ At the wedge threshold, the watcher checks the opt-in worker wait first, then th
 Supervisor-reserved `pending-reply-*` keys qualify for neither worker-wait deferral nor reminders; they retain their existing visibility in the general open-decision fold.
 Creating the local, gitignored `config/open-decision-reminders` presence flag enables overdue reminders for explicitly keyed worker decisions, with at most one reminder per watcher poll and a persisted per-key backoff ledger across watcher restarts.
 Reminders are `check` wakes emitted outside supervision signal classification, keeping OMP from receiving duplicate wakes for them.
-Open keyed decisions remain eligible for reminders while the task is paused or captain-held.
+Open keyed decisions are not reminded while the task is paused or captain-held; this matches upstream `1973897e`.
 `FM_OPEN_DECISION_OVERDUE_SECS` sets the first reminder age in seconds and defaults to 1800.
 `FM_OPEN_DECISION_BACKOFF_MAX_SECS` caps the repeated reminder interval and defaults to 14400.
 The first repeated reminder waits the overdue threshold again; subsequent intervals double up to that cap.

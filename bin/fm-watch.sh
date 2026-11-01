@@ -1849,6 +1849,8 @@ EOF
       rows="$rows$task"$'\t'"$key"$'\t'"$opened"$'\t'"$last"$'\t'"$delay"$'\n'
       [ "$now" -ge "$opened" ] && [ "$((now - opened))" -ge "$threshold" ] || continue
       [ "$last" -eq 0 ] || [ "$((now - last))" -ge "$delay" ] || continue
+      status_is_paused_or_captain_held "$(last_status_line "$f")" && continue
+      task_captain_call_open "$task" && continue
       if [ -z "$due_opened" ] || [ "$opened" -lt "$due_opened" ]; then
         due_task=$task; due_key=$key; due_opened=$opened; due_delay=$delay
         if [ "$last" -ne 0 ]; then
