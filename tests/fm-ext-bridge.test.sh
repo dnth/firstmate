@@ -2563,27 +2563,27 @@ SH
   done
   home="$TMP_ROOT/c59-negative"
   setup_home "$home"
-  slug=$(intake_ok "$home" "negative settings use defaults" 590000000000000002)
+  slug=$(intake_ok "$home" "negative settings use the floor" 590000000000000002)
+  backdate_request "$home" "$slug" 30
+  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home" 2>> "$home/negative-warnings")
+  [ -z "$out" ] || fail "negative threshold must wait for the 60 second floor"
   backdate_request "$home" "$slug" 120
-  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home")
-  [ -z "$out" ] || fail "negative threshold must retain the 300 second default"
-  backdate_request "$home" "$slug" 400
-  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home")
-  assert_contains "$out" "ext-request-overdue $slug age=" "negative threshold must fire past its default"
+  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home" 2>> "$home/negative-warnings")
+  assert_contains "$out" "ext-request-overdue $slug age=" "negative threshold must fire past its floor"
   "$PYTHON_BIN" - "$home/state/.ext-overdue.$slug" <<'PYTEST'
 import os, sys, time
-at = time.time() - 400
+at = time.time() - 30
 os.utime(sys.argv[1], (at, at))
 PYTEST
-  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home")
-  [ -z "$out" ] || fail "negative cadence must retain the 600 second default"
+  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home" 2>> "$home/negative-warnings")
+  [ -z "$out" ] || fail "negative cadence must retain the 60 second floor"
   "$PYTHON_BIN" - "$home/state/.ext-overdue.$slug" <<'PYTEST'
 import os, sys, time
-at = time.time() - 700
+at = time.time() - 90
 os.utime(sys.argv[1], (at, at))
 PYTEST
-  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home")
-  assert_contains "$out" "ext-request-overdue $slug age=" "negative cadence must remind after its default window"
+  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home" 2>> "$home/negative-warnings")
+  assert_contains "$out" "ext-request-overdue $slug age=" "negative cadence must remind after its floor window"
   home_env "$home" env FM_EXT_OVERDUE_SECS=300 FM_EXT_OVERDUE_REMIND_SECS=0 bash -c '
     . "$1/bin/fm-ext-lib.sh"
     fm_ext_overdue_remind_secs
@@ -2604,12 +2604,22 @@ test_60_truncated_ext_closes_consult_the_entire_inbox() {
   since=$(date +%s)
   rm -f "$home/state/ext-inbox/$first.json" "$home/state/ext-inbox/$second.json"
   for payload in "ext-request $first; ext-request $second; +1 more (see EXT REQUESTS AWAITING ANSWER in the drain)" \
-    "$home/state/poll.check.sh: ext-request $first"; do
+    "$home/state/poll.check.sh: ext-request $first" \
+    "ext-request:$first" "ext-request-overdue:$first" \
+    "ext-request-overdue $first age=10m"; do
     home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "an omitted unpresented request must release a truncated close"
   done
   if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "poll.check.sh: PR merged" "$2"' _ "$ROOT" "$since"; then
     fail "a waiting ext request must not release an unrelated check"
   fi
+  for payload in "state/fm-ext-request-redeliver.check.sh: merged" \
+    "state/ext-request.check.sh: merged" "other-ext-request $first" \
+    "ext-request-not-an-event $first"; do
+    if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
+      fail "request text in a script path or another token must keep the covered path"
+    fi
+  done
+  payload="ext-request $first"
   home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_note_presented "$2"' _ "$ROOT" "$omitted"
   if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
     fail "an inbox whose remaining request was presented must be covered"

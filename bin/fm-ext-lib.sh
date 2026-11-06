@@ -2432,7 +2432,8 @@ fm_ext_clear_presented() {
 
 fm_ext_check_still_pending() {
   local payload=$1 since=$2 home=${3:-${FM_HOME:?}} slug note presented
-  case "$payload" in *ext-request*) ;; *) return 1 ;; esac
+  local request_event='(^|[[:space:];])ext-request(-overdue)?(:|[[:space:]]+)[0-9a-f]{64}([[:space:];]|$)'
+  [[ "$payload" =~ $request_event ]] || return 1
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
   while IFS= read -r slug; do
     [ -n "$slug" ] || continue
@@ -2451,6 +2452,7 @@ fm_ext_check_still_pending() {
 # FM_EXT_OVERDUE_SECS, default 300. A non-numeric value resets to the default.
 fm_ext_overdue_secs() {
   local raw=${FM_EXT_OVERDUE_SECS-}
+  [[ "$raw" =~ ^-[0-9]+$ ]] && raw=0
   case "$raw" in
     ''|*[!0-9]*) raw=300 ;;
   esac
@@ -2471,6 +2473,7 @@ fm_ext_overdue_secs() {
 # misconfiguration cannot turn the reminder into a tight loop.
 fm_ext_overdue_remind_secs() {
   local raw=${FM_EXT_OVERDUE_REMIND_SECS-} floor
+  [[ "$raw" =~ ^-[0-9]+$ ]] && raw=0
   case "$raw" in
     ''|*[!0-9]*) raw=600 ;;
   esac

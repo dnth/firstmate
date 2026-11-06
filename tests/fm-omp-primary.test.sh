@@ -2455,6 +2455,25 @@ for (const [index, payload] of [
   rmSync(`${inbox}/${omitted}.json`);
 }
 
+{
+  const pending = "9".repeat(64);
+  pendingRequest(pending);
+  const before = wakes.length;
+  appendRow("signal", "path-check.turn-ended");
+  await closeNow("signal: path-check-episode");
+  await waitFor(() => wakes.length === before + 1, "path-check handling episode");
+  consumeWake(wakes[before]);
+  appendRow("check", "pr-merged");
+  await closeNow("check: state/fm-ext-request-redeliver.check.sh: merged");
+  await sleep(300);
+  if (wakes.length !== before + 1) throw new Error("path check preempted the episode");
+  ackThrough(999);
+  await handlers.get("turn_end")({});
+  await sleep(500);
+  if (wakes.length !== before + 1) throw new Error("script path caused request redelivery");
+  rmSync(`${inbox}/${pending}.json`);
+}
+
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
 console.log("omp-check-release-ok");
