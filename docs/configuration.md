@@ -874,8 +874,9 @@ While a request waits unanswered, the boundary that closes that episode releases
 
 A request can still outlive every close that reached main, for example when a long main turn keeps the queue from draining.
 Each watcher cycle then re-surfaces one request that has waited past `FM_EXT_OVERDUE_SECS` (default 300) as `check: ext-request-overdue <slug> age=<n>m`, appends its own durable row keyed `ext-request-overdue:<slug>`, and rings.
-`FM_EXT_OVERDUE_REMIND_SECS` (default 600) bounds the repeats for one request, `state/.ext-overdue.<slug>` records the last ring, and that marker disappears with the record, so a reminder stops as soon as ext-respond answers or dismisses the request.
-A request whose only reply is an `ack` stays quiet while a task linked to it is still live - `ext_request_slug` in that task's `state/<task>.meta` with a non-terminal last status line - and earns the same reminder once that task is not.
+`FM_EXT_OVERDUE_REMIND_SECS` (default 600) bounds the repeats for one request, `state/.ext-overdue.<slug>` records the last eligibility check, and that marker disappears with the record, so a reminder stops as soon as ext-respond answers or dismisses the request.
+A request whose only reply is an `ack` stays quiet while a task linked to it is still live - `ext_request_slug` in that task's `state/<task>.meta` with a current `bin/fm-crew-state.sh` verdict of `working`, `parked`, or `paused` - and earns the same reminder once that task is not.
+Task reconciliation runs only after the age and cadence gates, with the cadence window claimed before checking liveness.
 [`bin/fm-ext-overdue-lib.sh`](../bin/fm-ext-overdue-lib.sh) owns which request is due and the cadence.
 
 `state/ext-watch.check.sh` is a byte-static identity shim for `bin/fm-ext-poll.sh`; `fm_ext_watch_shim_converge` in `bin/fm-ext-lib.sh` owns arming and removing it.

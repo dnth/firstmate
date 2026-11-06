@@ -2391,6 +2391,27 @@ await handlers.get("turn_end")({});
 await sleep(300);
 if (wakes.length !== 3) throw new Error(`an already answered request was re-delivered: ${wakes.length} wakes`);
 
+for (const [index, payload] of [
+  `ext-request ${slugAnswered}; ext-request ${slugReplay}; +2 more (see EXT REQUESTS AWAITING ANSWER in the drain)`,
+  `${state}/poll.check.sh: ext-request ${slugAnswered}; ext-request-overdue ${slugReplay} age=10m`,
+].entries()) {
+  const before = wakes.length;
+  appendRow("signal", `shape-${index}.turn-ended`);
+  await closeNow(`signal: shape-${index}`);
+  await waitFor(() => wakes.length === before + 1, "producer-shape handling episode");
+  consumeWake(wakes[before]);
+  appendRow("check", `ext-request:${slugReplay}`);
+  await closeNow(`check: ${payload}`);
+  await sleep(300);
+  if (wakes.length !== before + 1) throw new Error("producer shape preempted the episode");
+  ackThrough(999);
+  await handlers.get("turn_end")({});
+  await waitFor(() => wakes.length === before + 2, "producer-shape episode release");
+  if (!wakes[before + 1].includes(payload)) throw new Error("wrong producer shape released");
+  consumeWake(wakes[before + 1]);
+  await handlers.get("turn_end")({});
+}
+
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
 console.log("omp-check-release-ok");

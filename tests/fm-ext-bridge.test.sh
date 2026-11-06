@@ -2455,7 +2455,7 @@ link_meta() {  # <home> <task> <slug>
 }
 
 test_57_ack_only_request_waits_for_a_live_linked_task() {
-  local home slug out
+  local home slug out verdict
   home="$TMP_ROOT/c57"
   setup_home "$home"
   slug=$(intake_ok "$home" "run the eval please" 570000000000000001)
@@ -2463,12 +2463,67 @@ test_57_ack_only_request_waits_for_a_live_linked_task() {
   backdate_request "$home" "$slug" 600
   link_meta "$home" task-live "$slug"
   printf 'working: running the eval\n' > "$home/state/task-live.status"
+  cat > "$home/crew-state" <<'SH'
+#!/usr/bin/env bash
+printf 'read\n' >> "$FM_HOME/reconciliations"
+cat "$FM_HOME/verdict"
+SH
+  chmod +x "$home/crew-state"
+  export FM_CREW_STATE_BIN="$home/crew-state"
+  for verdict in working parked paused; do
+    rm -f "$home/state/.ext-overdue.$slug"
+    printf 'state: %s · source: pane · current\n' "$verdict" > "$home/verdict"
+    out=$(overdue_ring "$home")
+    [ -z "$out" ] || fail "an acknowledged request with a $verdict task must stay quiet: $out"
+  done
+  : > "$home/reconciliations"
+  printf 'state: failed · source: none · crashed\n' > "$home/verdict"
   out=$(overdue_ring "$home")
-  [ -z "$out" ] || fail "an acknowledged request with a live task must stay quiet: $out"
-  printf 'done: eval finished\n' > "$home/state/task-live.status"
+  [ -z "$out" ] || fail "a live-task check must claim the cadence window"
+  [ ! -s "$home/reconciliations" ] || fail "reconciliation repeated within the cadence window"
+  for verdict in failed unknown done blocked unreadable; do
+    rm -f "$home/state/.ext-overdue.$slug"
+    [ "$verdict" != unknown ] || rm -f "$home/state/task-live.status"
+    printf 'state: %s · source: none · unavailable\n' "$verdict" > "$home/verdict"
+    out=$(overdue_ring "$home")
+    assert_contains "$out" "ext-request-overdue $slug age=" "a $verdict linked task must not suppress the reminder"
+  done
+  rm -f "$home/state/.ext-overdue.$slug" "$home/state/task-live.meta"
   out=$(overdue_ring "$home")
-  assert_contains "$out" "ext-request-overdue $slug age=" "an acknowledged request whose task finished must be surfaced"
-  pass "57 an acknowledged request is silent while its linked task is live and surfaces once it is not"
+  assert_contains "$out" "ext-request-overdue $slug age=" "an ack with no linked task must remind"
+  unset FM_CREW_STATE_BIN
+  pass "57 only reconciled live tasks suppress reminders within a bounded cadence"
+}
+
+test_58_check_payloads_preserve_every_pending_request() {
+  local home first second payload out since
+  home="$TMP_ROOT/c58"
+  setup_home "$home"
+  first=$(intake_ok "$home" "first request" 580000000000000001)
+  second=$(intake_ok "$home" "second request" 580000000000000002)
+  since=$(date +%s)
+  for payload in "ext-request $second" \
+    "ext-request $first; ext-request $second; +2 more (see EXT REQUESTS AWAITING ANSWER in the drain)" \
+    "/home/example/state/poll.check.sh: ext-request $first; ext-request-overdue $second age=10m"; do
+    out=$(home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_payload_slugs "$2"' _ "$ROOT" "$payload")
+    assert_contains "$out" "$second" "every real producer shape must expose the pending slug"
+    home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "an unanswered unpresented request must stay pending"
+  done
+  rm -f "$home/state/ext-inbox/$first.json"
+  payload="ext-request $first; ext-request $second; ext-request-overdue $second age=10m"
+  out=$(home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_payload_slugs "$2"' _ "$ROOT" "$payload")
+  [ "$out" = "$(printf '%s\n%s' "$first" "$second")" ] || fail "parser must return distinct slugs in occurrence order"
+  home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "pending must win over an answered sibling"
+  home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_note_presented "$2"' _ "$ROOT" "$second"
+  if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
+    fail "all answered or presented requests must finish the close"
+  fi
+  out=$(home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_payload_slugs "poll.check.sh: pr merged"' _ "$ROOT")
+  [ -z "$out" ] || fail "unrelated checks must yield no request slugs"
+  if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "pr merged" 0' _ "$ROOT"; then
+    fail "unrelated checks must keep the covered path"
+  fi
+  pass "58 real watcher payloads preserve any unanswered unpresented request"
 }
 
 test_1_allowlisted_intake_and_non_fm
@@ -3794,3 +3849,5 @@ test_55_retention_prune_completes_without_starving_the_claim
 test_56_overdue_request_reminds_once_per_cadence_until_removed
 test_57_ack_only_request_waits_for_a_live_linked_task
 echo "all fm-ext-bridge tests passed"
+
+test_58_check_payloads_preserve_every_pending_request

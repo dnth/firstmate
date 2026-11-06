@@ -2430,6 +2430,19 @@ fm_ext_clear_presented() {
   rm -f -- "$dir/$slug" 2>/dev/null || return 0
 }
 
+fm_ext_check_payload_slugs() {
+  local payload=$1 slug seen=' ' pattern='ext-request(-overdue)?[[:space:]]+([0-9a-f]{64})([^0-9a-f]|$)'
+  while [[ "$payload" =~ $pattern ]]; do
+    slug=${BASH_REMATCH[2]}
+    payload=${payload#*"${BASH_REMATCH[0]}"}
+    case "$seen" in
+      *" $slug "*) continue ;;
+    esac
+    printf '%s\n' "$slug"
+    seen="$seen$slug "
+  done
+}
+
 # fm_ext_check_still_pending <payload> <since-epoch> [home]: 0 while the check
 # close named by <payload> still waits on main. The inbox record is the sink, so
 # its absence means ext-respond already answered or dismissed the request. A
@@ -2438,26 +2451,20 @@ fm_ext_clear_presented() {
 # Non-request payloads are not this predicate's business.
 fm_ext_check_still_pending() {
   local payload=$1 since=$2 home=${3:-${FM_HOME:?}} slug inbox note presented
-  case "$payload" in
-    'ext-request '*) slug=${payload#ext-request } ;;
-    'ext-request-overdue '*)
-      slug=${payload#ext-request-overdue }
-      slug=${slug%% *}
-      ;;
-    *) return 1 ;;
-  esac
-  fm_ext_slug_valid "$slug" || return 1
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
   inbox=$(fm_ext_inbox_dir "$home")
   [ -d "$inbox" ] && [ ! -L "$inbox" ] || return 1
-  fm_ext_private_artifact_file_valid "$inbox" "$slug.json" 600 || return 1
-  note=$(fm_ext_presented_dir "$home")/$slug
-  if [ -f "$note" ] && [ ! -L "$note" ]; then
-    presented=$(fm_ext_file_mtime "$note") || presented=0
-    case "$presented" in ''|*[!0-9]*) presented=0 ;; esac
-    [ "$presented" -lt "$since" ] || return 1
-  fi
-  return 0
+  while IFS= read -r slug; do
+    fm_ext_private_artifact_file_valid "$inbox" "$slug.json" 600 || continue
+    note=$(fm_ext_presented_dir "$home")/$slug
+    if [ -f "$note" ] && [ ! -L "$note" ]; then
+      presented=$(fm_ext_file_mtime "$note") || presented=0
+      case "$presented" in ''|*[!0-9]*) presented=0 ;; esac
+      [ "$presented" -lt "$since" ] || continue
+    fi
+    return 0
+  done < <(fm_ext_check_payload_slugs "$payload")
+  return 1
 }
 
 # Seconds an unanswered request may sit before the watcher re-surfaces it:

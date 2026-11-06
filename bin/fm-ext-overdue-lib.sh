@@ -14,8 +14,8 @@
 # A request acknowledged on Discord while the task spawned for it is still live
 # is expected to stay unanswered, so that pair stays quiet; with no live task
 # the same reminder applies. bin/fm-ext-lib.sh owns the record, reply-state,
-# presentation, and threshold helpers; bin/fm-classify-lib.sh owns what a
-# terminal task status is.
+# presentation, and threshold helpers; bin/fm-crew-state.sh owns current-task
+# reconciliation through the bin/fm-classify-lib.sh seam.
 
 _FM_EXT_OVERDUE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_EXT_OVERDUE_LIB_DIR="."
 # shellcheck source=bin/fm-ext-lib.sh
@@ -24,16 +24,18 @@ _FM_EXT_OVERDUE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/nul
 . "$_FM_EXT_OVERDUE_LIB_DIR/fm-classify-lib.sh"
 
 # 0 when a task still linked to this request is expected to answer it: its meta
-# records ext_request_slug=<slug> and its last status line is not terminal.
+# records ext_request_slug=<slug> and reconciles to working, parked, or paused.
 fm_ext_overdue_live_task() {  # <state> <slug>
-  local state=$1 slug=$2 meta task last
+  local state=$1 slug=$2 meta task line current
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     grep -qx -- "ext_request_slug=$slug" "$meta" 2>/dev/null || continue
     task=${meta##*/}
     task=${task%.meta}
-    last=$(last_status_line "$state/$task.status")
-    status_is_terminal_verb "$last" || return 0
+    line=$(FM_STATE_OVERRIDE="$state" "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
+    case "$line" in state:\ *) ;; *) continue ;; esac
+    current=${line#state: }; current=${current%% *}
+    case "$current" in working|parked|paused) return 0 ;; esac
   done
   return 1
 }
@@ -67,10 +69,6 @@ fm_ext_overdue_ring() {
     [ "$recorded" -le "$now" ] || recorded=$now
     age=$((now - recorded))
     [ "$age" -ge "$threshold" ] || continue
-    reply=$(fm_ext_request_reply_state "$slug" "$home") || reply=none
-    case "$reply" in
-      ack\ *) fm_ext_overdue_live_task "$state" "$slug" && continue ;;
-    esac
     mark="$state/.ext-overdue.$slug"
     if [ -f "$mark" ] && [ ! -L "$mark" ]; then
       last=$(fm_ext_file_mtime "$mark") || last=0
@@ -78,6 +76,10 @@ fm_ext_overdue_ring() {
       [ "$((now - last))" -ge "$remind" ] || continue
     fi
     printf '%s\n' "$now" > "$mark" 2>/dev/null || return 1
+    reply=$(fm_ext_request_reply_state "$slug" "$home") || reply=none
+    case "$reply" in
+      ack\ *) fm_ext_overdue_live_task "$state" "$slug" && continue ;;
+    esac
     printf 'ext-request-overdue %s age=%sm\n' "$slug" "$((age / 60))"
     return 0
   done <<EOF

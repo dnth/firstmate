@@ -87,7 +87,7 @@ function publishNativeProcessIdentity(): void {
 // the only check sink this adapter can re-read, so every other check keeps the
 // covered path. bin/fm-ext-lib.sh owns the record and presentation-note rules.
 function extCheckStillPending(payload: string, sinceMs: number): boolean {
-  if (!/^ext-request(-overdue)?\s/.test(payload)) return false;
+  if (!payload.includes("ext-request")) return false;
   const result = spawnSync(
     "bash",
     [
