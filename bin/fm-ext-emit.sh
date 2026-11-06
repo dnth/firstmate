@@ -94,6 +94,8 @@
 # stored in the outbox payload as no_recommendation_reason, and it needs
 # --decision-file. bin/fm-ext-ask.sh requires either a recommended option or
 # that reason for a post of two or more options.
+# Emit only records the reason; it does not require one for an unstarred file.
+# It refuses a reason alongside an option marked recommended.
 #
 # NEEDS-YOU REPLIES. An answer, followup, or final that passes --thread-state
 # needs-you is refused unless it also carries --decision-file or

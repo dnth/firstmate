@@ -1024,7 +1024,7 @@ The [emit header and help](../bin/fm-ext-emit.sh) own the title flags and reject
 A retitle shares a marker's eligibility and is equally best effort: it only ever reaches a thread this home created in the dedicated channel, and a refused, unusable, or ineligible one is ignored with the reply text still posted.
 A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
 Emit requires a title on any reply that may create the thread and an explicit state on every `answer` and `final`; the [emit header](../bin/fm-ext-emit.sh) owns both refusals.
-A `needs-you` reply must also carry its buttons or a recorded no-buttons reason, as [Decision buttons](#decision-buttons) states.
+The [Decision buttons](#decision-buttons) contract owns the button requirement and exemptions for `needs-you` replies.
 The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name to match the requested state.
 Before trusting a stored name that already matches, the poster reads the name Discord shows, so a manual rename never wedges a later marker; when that name cannot be read it renames anyway.
 Both the request that created the thread and a later request of any origin that arrived inside it - a typed message, a decision-button click, or a `/fm` command - may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.

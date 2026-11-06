@@ -48,6 +48,7 @@
 # this script refuses a tie without it, and the reason (one line, at most 200
 # characters) rides to the outbox payload as no_recommendation_reason through
 # the emit header's flag of the same name. A single-option ask needs neither.
+# A reason alongside --recommended is contradictory and refused before any hold.
 # Before mutating the hold, retries with the same request, kind, and generation
 # defer to emit's existing outbox identity: a receipt is a no-op success;
 # a posting marker without a receipt is refused as mid-delivery; otherwise an
