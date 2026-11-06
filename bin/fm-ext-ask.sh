@@ -8,6 +8,7 @@
 #     (--text-file <path> | --text-file -) [--explanation-file <path>]
 #     --option <label> [--recommended] [--confirm]
 #     [--option <label> [--recommended] [--confirm]] ... (1-5 options)
+#     [--no-recommendation "<reason>"]
 #     --mode done|release [--thread-title <text>] [--thread-retitle <text>]
 #
 # This is the one way to post a choice. It does the three steps a choice post
@@ -41,6 +42,12 @@
 # only in the button ids, and this script refuses such text before holding
 # anything. bin/fm-ext-emit.sh header owns the decision file format, the
 # buttons contract, and the choice guard that sends choice-shaped text here.
+# A post of two or more options must mark one --recommended, because the
+# captain's standing rule is a starred recommendation on every decision.
+# --no-recommendation "<reason>" is the deliberate exception for a real tie:
+# this script refuses a tie without it, and the reason (one line, at most 200
+# characters) rides to the outbox payload as no_recommendation_reason through
+# the emit header's flag of the same name. A single-option ask needs neither.
 # Before mutating the hold, retries with the same request, kind, and generation
 # defer to emit's existing outbox identity: a receipt is a no-op success;
 # a posting marker without a receipt is refused as mid-delivery; otherwise an
@@ -63,6 +70,7 @@ usage: fm-ext-ask.sh --request-id discord:<guild>:<channel>:<thread>:<message>
          --task <task-id> [--title <title>] [--repo <repo>] --reason <reason>
          (--text-file <path> | --text-file -) [--explanation-file <path>]
          --option <label> [--recommended] [--confirm] [--option <label> ...]
+         [--no-recommendation "<reason>"]
          --mode done|release [--thread-title <text>] [--thread-retitle <text>]
 EOF
 }
@@ -86,6 +94,8 @@ MODE=
 THREAD_TITLE=
 THREAD_RETITLE=
 OPTIONS_JSON='[]'
+NO_RECOMMENDATION=
+NO_RECOMMENDATION_SET=
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
   '') usage; exit 2 ;;
@@ -106,6 +116,7 @@ while [ "$#" -gt 0 ]; do
     --mode) shift; MODE=${1:-} ;;
     --thread-title) shift; THREAD_TITLE=${1:-} ;;
     --thread-retitle) shift; THREAD_RETITLE=${1:-} ;;
+    --no-recommendation) shift; NO_RECOMMENDATION=${1:-}; NO_RECOMMENDATION_SET=1 ;;
     --option)
       shift
       OPTIONS_JSON=$(jq -c --arg lbl "${1:-}" '. + [{"label": $lbl}]' <<<"$OPTIONS_JSON") \
@@ -151,6 +162,25 @@ jq -e --argjson max "$FM_EXT_DECISION_MAX_OPTIONS" --argjson label_max "$FM_EXT_
 ' <<<"$OPTIONS_JSON" >/dev/null 2>&1 \
   || die "give 1-$FM_EXT_DECISION_MAX_OPTIONS distinct --option labels of 1-$FM_EXT_DECISION_LABEL_MAX characters, at most one --recommended"
 
+# The captain's standing rule: a choice of two or more options carries one
+# starred recommendation, and a real tie says why in the recorded reason.
+if [ -n "$NO_RECOMMENDATION_SET" ]; then
+  [ -n "$NO_RECOMMENDATION" ] || die "--no-recommendation needs a reason"
+  case "$NO_RECOMMENDATION" in
+    *$'\n'*|*$'\r'*) die "--no-recommendation reason must be one line" ;;
+  esac
+  [ "${#NO_RECOMMENDATION}" -le 200 ] || die "--no-recommendation reason must be at most 200 characters"
+fi
+OPTION_COUNT=$(jq 'length' <<<"$OPTIONS_JSON") || die "could not count the options" 1
+if [ -n "$NO_RECOMMENDATION_SET" ] \
+  && jq -e 'any(.[]; .recommended // false)' <<<"$OPTIONS_JSON" >/dev/null 2>&1; then
+  die "--no-recommendation cannot accompany a --recommended option"
+fi
+if [ "$OPTION_COUNT" -ge 2 ] && [ -z "$NO_RECOMMENDATION_SET" ]; then
+  jq -e 'any(.[]; .recommended // false)' <<<"$OPTIONS_JSON" >/dev/null 2>&1 \
+    || die "a post of $OPTION_COUNT options must mark one --recommended, or pass --no-recommendation \"<reason>\" when no option is genuinely better"
+fi
+
 KEY="hold:$TASK"
 if [ "$TEXT_FILE" = '-' ]; then
   TEXT=$(cat)
@@ -195,6 +225,7 @@ emit=("$SCRIPT_DIR/fm-ext-emit.sh" --request-id "$REQUEST_ID" --kind "$KIND"
   --thread-state needs-you)
 [ -z "$THREAD_TITLE" ] || emit+=(--thread-title "$THREAD_TITLE")
 [ -z "$THREAD_RETITLE" ] || emit+=(--thread-retitle "$THREAD_RETITLE")
+[ -z "$NO_RECOMMENDATION_SET" ] || emit+=(--no-recommendation "$NO_RECOMMENDATION")
 
 SLUG=$(fm_ext_request_slug "$REQUEST_ID") || die "could not derive request slug" 1
 OUTBOX=$(fm_ext_outbox_dir)

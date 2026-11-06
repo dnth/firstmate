@@ -90,11 +90,20 @@ slug_of() {
 # and strips it from the published payload.
 LEGACY_TITLE="Legacy · untitled"
 emit_reply() {
-  local home=$1 arg payload tmp titled=
+  local home=$1 arg payload tmp titled='' prev='' needs_you='' decision='' nobuttons=''
   shift
   for arg in "$@"; do
     [ "$arg" != --thread-title ] || titled=1
+    [ "$arg" != --decision-file ] || decision=1
+    [ "$arg" != --no-buttons ] || nobuttons=1
+    [ "$prev" != --thread-state ] || [ "$arg" != needs-you ] || needs_you=1
+    prev=$arg
   done
+  # These tests post plain status and reminders, never a choice, so a
+  # needs-you post carries emit's recorded no-buttons reason.
+  if [ -n "$needs_you" ] && [ -z "$decision" ] && [ -z "$nobuttons" ]; then
+    set -- "$@" --no-buttons 'plain status post, no choice'
+  fi
   if [ -n "$titled" ]; then
     home_env "$home" "$EMIT" "$@"
     return

@@ -1024,6 +1024,7 @@ The [emit header and help](../bin/fm-ext-emit.sh) own the title flags and reject
 A retitle shares a marker's eligibility and is equally best effort: it only ever reaches a thread this home created in the dedicated channel, and a refused, unusable, or ineligible one is ignored with the reply text still posted.
 A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
 Emit requires a title on any reply that may create the thread and an explicit state on every `answer` and `final`; the [emit header](../bin/fm-ext-emit.sh) owns both refusals.
+A `needs-you` reply must also carry its buttons or a recorded no-buttons reason, as [Decision buttons](#decision-buttons) states.
 The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name to match the requested state.
 Before trusting a stored name that already matches, the poster reads the name Discord shows, so a manual rename never wedges a later marker; when that name cannot be read it renames anyway.
 Both the request that created the thread and a later request of any origin that arrived inside it - a typed message, a decision-button click, or a `/fm` command - may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.
@@ -1107,10 +1108,13 @@ Each decision post is bound to exactly one decision Firstmate already tracks, na
 Its `--text-file` is the question, optional `--explanation-file` is the explanation, and it records those sections separately from the numbered option list and reply cue for safe chunking and later edits.
 The gateway reserves room for the outcome header on the final button-carrying chunk and keeps the numbered options together there; its header and the [emit header](../bin/fm-ext-emit.sh) own the section format and flags.
 Its `--mode done|release` is required and never inferred: `done` closes a question and `release` lifts the hold so held work proceeds.
+Its `--recommended` marks the option Firstmate advises, and a post of two or more options is refused without one unless `--no-recommendation "<reason>"` records why the call is a genuine tie; the reason travels to the outbox payload as `no_recommendation_reason`, and a single-option ask needs neither.
+The [ask header](../bin/fm-ext-ask.sh) owns that refusal.
 For a worker's existing keyed status decision, use `bin/fm-ext-emit.sh --decision-file` directly; its [header](../bin/fm-ext-emit.sh) owns the file format and validation.
 If its file omits `sections`, the whole post is treated as protected question text.
 The [emit header's choice guard](../bin/fm-ext-emit.sh) owns the matching rules, including digit-selection cues and standalone choice headings followed by at least two option lines, and routes refused plain-text choices to `bin/fm-ext-ask.sh`.
 `--no-buttons "<reason>"` posts a deliberate plain list anyway and records the reason in the outbox payload as `no_buttons_reason`; the emit header owns the exact detection rule.
+An `answer`, `followup`, or `final` marked `needs-you` must therefore carry `--decision-file` or `--no-buttons "<reason>"`, so a thread that asks the captain to act always carries the buttons for its choice or the recorded reason it asks none; an `ack` is exempt, and [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh) passes both flags through for a thread it opens.
 Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every decision post also carries a Discuss button, `fmd:<key>:d`.
 Channel members can read a `custom_id` through the Discord API, so the key is never written into a label or the post text, and emit refuses a post that names the key or its task id.
 A decision post goes where every reply to its request goes: into the request's topic thread or Discord thread when it has one, otherwise its channel.

@@ -5,7 +5,8 @@
 #   fm-ext-emit.sh --request-id discord:<guild>:<channel>:<thread>:<message>
 #     --kind ack|answer|followup|final --generation <n>
 #     (--text-file <path> | --text-file -) [--decision-file <path>]
-#     [--no-buttons "<reason>"] [--media <path>]...
+#     [--no-buttons "<reason>"] [--no-recommendation "<reason>"]
+#     [--media <path>]...
 #     [--thread-title <text>] [--thread-retitle <text>]
 #     [--thread-state needs-you|done|none]
 #
@@ -88,6 +89,21 @@
 # (fm_ext_decision_key_occurrence in bin/fm-ext-lib.sh), so a post can only ever
 # answer that lifecycle.
 #
+# --no-recommendation "<reason>" records why a decision post of two or more
+# options stars none of them: the reason (one line, at most 200 characters) is
+# stored in the outbox payload as no_recommendation_reason, and it needs
+# --decision-file. bin/fm-ext-ask.sh requires either a recommended option or
+# that reason for a post of two or more options.
+#
+# NEEDS-YOU REPLIES. An answer, followup, or final that passes --thread-state
+# needs-you is refused unless it also carries --decision-file or
+# --no-buttons "<reason>". A needs-you thread asks the captain to act, so the
+# reply that marks it must carry the buttons for that choice or say why it asks
+# none, and an ack is exempt. Use bin/fm-ext-ask.sh to ask a choice;
+# --no-buttons is for a thread that needs the captain without a choice, such as
+# a status reminder. bin/fm-ext-open.sh passes both flags through for the first
+# message of a thread it opens.
+#
 # CHOICE GUARD. An answer, followup, or final whose text has the shape of a choice is refused unless --decision-file is given, so a choice cannot go out as plain text by mistake.
 # Detection is case-insensitive, cues match within one line, and it uses these rules:
 #   option line - a line, after optional indent and a "-", "*", or bullet marker, that starts with a 1-2 digit number ended by ".", ")", or ":" and optionally prefixed by "(" ("1." / "2)" / "(3)"), or a code of one letter plus 1-2 digits with an optional ".", ")", or ":" ("A1." / "B2:" / "B2 text"); the token must be followed by whitespace and non-whitespace text, or immediately by the end of the line.
@@ -117,7 +133,8 @@ usage() {
 usage: fm-ext-emit.sh --request-id discord:<guild>:<channel>:<thread>:<message>
          --kind ack|answer|followup|final --generation <n>
          (--text-file <path> | --text-file -) [--decision-file <path>]
-         [--no-buttons "<reason>"] [--media <path>]...
+         [--no-buttons "<reason>"] [--no-recommendation "<reason>"]
+         [--media <path>]...
          [--thread-title <text>] [--thread-retitle <text>]
          [--thread-state needs-you|done|none]
 EOF
@@ -136,6 +153,8 @@ TEXT_FILE=
 DECISION_FILE=
 NO_BUTTONS=
 NO_BUTTONS_SET=
+NO_RECOMMENDATION=
+NO_RECOMMENDATION_SET=
 THREAD_TITLE=
 THREAD_RETITLE=
 THREAD_STATE=
@@ -154,6 +173,7 @@ while [ "$#" -gt 0 ]; do
     --text-file) shift; TEXT_FILE=${1:-} ;;
     --decision-file) shift; DECISION_FILE=${1:-} ;;
     --no-buttons) shift; NO_BUTTONS=${1:-}; NO_BUTTONS_SET=1 ;;
+    --no-recommendation) shift; NO_RECOMMENDATION=${1:-}; NO_RECOMMENDATION_SET=1 ;;
     --thread-title) shift; THREAD_TITLE=${1:-} ;;
     --thread-retitle) shift; THREAD_RETITLE=${1:-} ;;
     --thread-state) shift; THREAD_STATE=${1:-} ;;
@@ -208,6 +228,14 @@ if [ -n "$NO_BUTTONS_SET" ]; then
   esac
   [ "${#NO_BUTTONS}" -le 200 ] || die "--no-buttons reason must be at most 200 characters"
 fi
+if [ -n "$NO_RECOMMENDATION_SET" ]; then
+  [ -n "$NO_RECOMMENDATION" ] || die "--no-recommendation needs a reason"
+  [ -n "$DECISION_FILE" ] || die "--no-recommendation only applies to a decision post"
+  case "$NO_RECOMMENDATION" in
+    *$'\n'*|*$'\r'*) die "--no-recommendation reason must be one line" ;;
+  esac
+  [ "${#NO_RECOMMENDATION}" -le 200 ] || die "--no-recommendation reason must be at most 200 characters"
+fi
 fm_ext_active "$FM_HOME" || die "local ext-bridge is not active" 1
 command -v jq >/dev/null 2>&1 || die "jq is required" 1
 
@@ -255,6 +283,17 @@ fi
 # after the choice guard, whose refusal names the better route.
 case "$KIND:$THREAD_STATE" in
   answer:|final:) die "an $KIND must pass --thread-state needs-you|done|none" ;;
+esac
+
+# Needs-you replies (see the header): asking the captain for action means
+# carrying the buttons for it, or saying why it carries none. Checked in the
+# same place as the required thread flags, before anything is published.
+case "$KIND:$THREAD_STATE" in
+  answer:needs-you|followup:needs-you|final:needs-you)
+    if [ -z "$DECISION_FILE" ] && [ -z "$NO_BUTTONS_SET" ]; then
+      die "a needs-you $KIND must carry decision buttons; post the choice with bin/fm-ext-ask.sh (or --decision-file), or pass --no-buttons \"<reason>\" when it asks no choice"
+    fi
+    ;;
 esac
 
 # Public safety: Discord only ever sees generic media names, so the text must
@@ -334,6 +373,10 @@ if [ -n "$DECISION_FILE" ]; then
       else true end)
   ' "$DECISION_FILE" >/dev/null 2>&1 \
     || die "decision file must hold {key, mode, options:[{label, confirm, recommended}], sections?} with 1-$FM_EXT_DECISION_MAX_OPTIONS distinct labels of 1-$FM_EXT_DECISION_LABEL_MAX characters and at most one recommended option"
+  if [ -n "$NO_RECOMMENDATION_SET" ] \
+    && jq -e '[.options[] | select(.recommended // false)] | length > 0' "$DECISION_FILE" >/dev/null 2>&1; then
+    die "--no-recommendation cannot accompany a decision that marks a recommended option"
+  fi
   DECISION_KEY=$(jq -r '.key' "$DECISION_FILE")
   DECISION_MODE=$(jq -r '.mode // "done"' "$DECISION_FILE")
   DECISION_TASK=$(fm_ext_decision_key_task "$DECISION_KEY") \
@@ -421,6 +464,7 @@ OUTBOX_JSON=$(jq -cn \
   --arg thread_retitle "$THREAD_RETITLE" \
   --arg thread_state "$THREAD_STATE" \
   --arg no_buttons "$NO_BUTTONS" \
+  --arg no_recommendation "$NO_RECOMMENDATION" \
   --argjson decision "$DECISION_JSON" \
   --argjson media "$MEDIA_JSON" \
   --argjson recorded_at "$NOW" \
@@ -433,6 +477,7 @@ OUTBOX_JSON=$(jq -cn \
    + if $thread_retitle == "" then {} else {thread_retitle:$thread_retitle} end
    + if $thread_state == "" then {} else {thread_state:$thread_state} end
    + if $no_buttons == "" then {} else {no_buttons_reason:$no_buttons} end
+   + if $no_recommendation == "" then {} else {no_recommendation_reason:$no_recommendation} end
    + if $decision == null then {} else {decision:$decision} end
    + if $media == null then {} else {media:$media} end') \
   || die "could not build the outbox payload" 1
