@@ -921,6 +921,7 @@ ext_doorbell_tick() {
 # this cycle appends the durable row and rings it.
 ext_overdue_tick() {
   local payload slug
+  fm_ext_overdue_remind_secs > /dev/null
   payload=$(fm_ext_overdue_ring "$FM_HOME" "$STATE") || return 0
   [ -n "$payload" ] || return 0
   slug=${payload#ext-request-overdue }

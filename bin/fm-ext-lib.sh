@@ -2475,7 +2475,14 @@ fm_ext_overdue_secs() {
     ''|*[!0-9]*) raw=300 ;;
   esac
   [ "${#raw}" -le 18 ] || raw=300
-  printf '%s\n' "$raw"
+  if [ "$raw" -lt 60 ]; then
+    if [ "${_FM_EXT_OVERDUE_SECS_WARNED:-0}" != 1 ]; then
+      printf '%s\n' 'warning: FM_EXT_OVERDUE_SECS below 60; raised to 60 seconds' >&2
+      _FM_EXT_OVERDUE_SECS_WARNED=1
+    fi
+    raw=60
+  fi
+  if [ -n "${1:-}" ]; then printf -v "$1" '%s' "$raw"; else printf '%s\n' "$raw"; fi
 }
 
 # How often one overdue request may be re-surfaced again:
@@ -2488,9 +2495,15 @@ fm_ext_overdue_remind_secs() {
     ''|*[!0-9]*) raw=600 ;;
   esac
   [ "${#raw}" -le 18 ] || raw=600
-  floor=$(fm_ext_overdue_secs)
-  [ "$raw" -ge "$floor" ] || raw=$floor
-  printf '%s\n' "$raw"
+  fm_ext_overdue_secs floor
+  if [ "$raw" -lt "$floor" ]; then
+    if [ "${_FM_EXT_OVERDUE_REMIND_SECS_WARNED:-0}" != 1 ]; then
+      printf 'warning: FM_EXT_OVERDUE_REMIND_SECS below %s; raised to %s seconds\n' "$floor" "$floor" >&2
+      _FM_EXT_OVERDUE_REMIND_SECS_WARNED=1
+    fi
+    raw=$floor
+  fi
+  if [ -n "${1:-}" ]; then printf -v "$1" '%s' "$raw"; else printf '%s\n' "$raw"; fi
 }
 
 # fm_ext_request_reply_state <slug> [home]: what the outbox records about the

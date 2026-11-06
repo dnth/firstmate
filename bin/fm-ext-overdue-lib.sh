@@ -50,8 +50,8 @@ fm_ext_overdue_ring() {
   [ -n "$state" ] || return 1
   pending=$(fm_ext_pending_requests "$home" 2>/dev/null) || return 0
   now=$(date +%s)
-  threshold=$(fm_ext_overdue_secs)
-  remind=$(fm_ext_overdue_remind_secs)
+  fm_ext_overdue_secs threshold
+  fm_ext_overdue_remind_secs remind
   # Forget the marker of every request that is no longer unanswered, so a
   # answered request cannot keep a leftover file and a later one cannot inherit
   # an old cadence.

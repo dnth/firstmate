@@ -1331,8 +1331,8 @@ FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context re
 FM_EXT_HISTORY_MAX_CHARS=8000   # characters of message text kept in a request's thread-history sidecar; the replied-to message and Firstmate's latest recognised post are kept past it
 FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes; the delivery pass runs on its own thread, independent of the decision sweeps
 FM_EXT_PRUNE_INTERVAL_SECS=3600   # minimum seconds between retention prunes in the inbox poll; the poll claims offers before pruning, so this only bounds prune frequency
-FM_EXT_OVERDUE_SECS=300   # seconds an unanswered local-bridge request may sit before the watcher surfaces one `ext-request-overdue <slug> age=<n>m` wake for it; non-numeric values use 300 (docs/configuration.md "Local Communication Officer bridge")
-FM_EXT_OVERDUE_REMIND_SECS=600   # seconds between repeats of that reminder for one request; a value below FM_EXT_OVERDUE_SECS is raised to it, so a misconfiguration cannot become a tight loop
+FM_EXT_OVERDUE_SECS=300   # seconds an unanswered local-bridge request may sit before the watcher surfaces one `ext-request-overdue <slug> age=<n>m` wake for it; non-numeric values use 300; minimum 60, clamping warns once per setting per watcher process on stderr (docs/configuration.md "Local Communication Officer bridge")
+FM_EXT_OVERDUE_REMIND_SECS=600   # seconds between repeats of that reminder for one request; non-numeric values use 600; minimum 60 and never below FM_EXT_OVERDUE_SECS, clamping warns once per setting per watcher process on stderr
 FM_EXT_WAITING_PIN_MIN_SECS=60   # minimum seconds between waiting-pin snapshot publications; see bin/fm-ext-waiting-pin.sh --help for bypass and skip behavior
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
