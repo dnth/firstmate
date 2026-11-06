@@ -2443,19 +2443,12 @@ fm_ext_check_payload_slugs() {
   done
 }
 
-# fm_ext_check_still_pending <payload> <since-epoch> [home]: 0 while the check
-# close named by <payload> still waits on main. The inbox record is the sink, so
-# its absence means ext-respond already answered or dismissed the request. A
-# presentation note newer than <since-epoch> means a drain after the suppression
-# already showed it, and repeating it would only duplicate that presentation.
-# Non-request payloads are not this predicate's business.
 fm_ext_check_still_pending() {
-  local payload=$1 since=$2 home=${3:-${FM_HOME:?}} slug inbox note presented
+  local payload=$1 since=$2 home=${3:-${FM_HOME:?}} slug note presented
+  case "$payload" in *ext-request*) ;; *) return 1 ;; esac
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
-  inbox=$(fm_ext_inbox_dir "$home")
-  [ -d "$inbox" ] && [ ! -L "$inbox" ] || return 1
   while IFS= read -r slug; do
-    fm_ext_private_artifact_file_valid "$inbox" "$slug.json" 600 || continue
+    [ -n "$slug" ] || continue
     note=$(fm_ext_presented_dir "$home")/$slug
     if [ -f "$note" ] && [ ! -L "$note" ]; then
       presented=$(fm_ext_file_mtime "$note") || presented=0
@@ -2463,7 +2456,7 @@ fm_ext_check_still_pending() {
       [ "$presented" -lt "$since" ] || continue
     fi
     return 0
-  done < <(fm_ext_check_payload_slugs "$payload")
+  done < <(fm_ext_pending_requests "$home" | LC_ALL=C sort)
   return 1
 }
 

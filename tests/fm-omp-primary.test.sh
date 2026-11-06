@@ -2259,6 +2259,9 @@ JS
 test_native_omp_suppressed_check_redelivers_at_episode_close() {
   local fixture out status=0
   fixture=$(make_omp_queue_fixture native-check-release)
+  : > "$fixture/config/ext-bridge"
+  printf 'test-secret\n' > "$fixture/config/ext-secret"
+  chmod 600 "$fixture/config/ext-secret"
   cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 state=${FM_STATE_OVERRIDE:?}
@@ -2333,7 +2336,7 @@ const pendingRequest = (slug) => writeFileSync(
 const slugReplay = "a".repeat(64);
 const slugPresented = "b".repeat(64);
 const slugAnswered = "c".repeat(64);
-for (const slug of [slugReplay, slugPresented, slugAnswered]) pendingRequest(slug);
+pendingRequest(slugReplay);
 
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
 process.argv[1] = process.env.EXTENSION;
@@ -2363,14 +2366,17 @@ await handlers.get("turn_end")({});
 await waitFor(() => wakes.length === 2, "re-delivery after the covering episode closed");
 if (!wakes[1].includes(`check: ext-request ${slugReplay}`)) throw new Error(`re-delivered the wrong close: ${wakes[1]}`);
 consumeWake(wakes[1]);
+mkdirSync(`${state}/.ext-presented`, { recursive: true, mode: 0o700 });
+writeFileSync(`${state}/.ext-presented/${slugReplay}`, "");
 
 // A request whose drain already presented it is finished, not repeated.
+pendingRequest(slugPresented);
 appendRow("check", `ext-request:${slugPresented}`);
 await closeNow(`check: ext-request ${slugPresented}`);
 await sleep(300);
 if (wakes.length !== 2) throw new Error(`the presented request preempted the episode: ${wakes.length} wakes`);
 mkdirSync(`${state}/.ext-presented`, { recursive: true, mode: 0o700 });
-writeFileSync(`${state}/.ext-presented/${slugPresented}`, "");
+for (const slug of [slugReplay, slugPresented]) writeFileSync(`${state}/.ext-presented/${slug}`, "");
 ackThrough(999);
 await handlers.get("turn_end")({});
 await sleep(300);
@@ -2381,11 +2387,13 @@ appendRow("signal", "crew-two.turn-ended");
 await closeNow("signal: fallback-close-two");
 await waitFor(() => wakes.length === 3, "second handling episode");
 consumeWake(wakes[2]);
+pendingRequest(slugAnswered);
 appendRow("check", `ext-request:${slugAnswered}`);
 await closeNow(`check: ext-request ${slugAnswered}`);
 await sleep(300);
 if (wakes.length !== 3) throw new Error(`the answered request preempted the episode: ${wakes.length} wakes`);
 rmSync(`${inbox}/${slugAnswered}.json`);
+for (const slug of [slugReplay, slugPresented]) writeFileSync(`${state}/.ext-presented/${slug}`, "");
 ackThrough(999);
 await handlers.get("turn_end")({});
 await sleep(300);
@@ -2395,6 +2403,7 @@ for (const [index, payload] of [
   `ext-request ${slugAnswered}; ext-request ${slugReplay}; +2 more (see EXT REQUESTS AWAITING ANSWER in the drain)`,
   `${state}/poll.check.sh: ext-request ${slugAnswered}; ext-request-overdue ${slugReplay} age=10m`,
 ].entries()) {
+  rmSync(`${state}/.ext-presented/${slugReplay}`, { force: true });
   const before = wakes.length;
   appendRow("signal", `shape-${index}.turn-ended`);
   await closeNow(`signal: shape-${index}`);
@@ -2409,7 +2418,41 @@ for (const [index, payload] of [
   await waitFor(() => wakes.length === before + 2, "producer-shape episode release");
   if (!wakes[before + 1].includes(payload)) throw new Error("wrong producer shape released");
   consumeWake(wakes[before + 1]);
+  for (const slug of [slugReplay, slugPresented]) writeFileSync(`${state}/.ext-presented/${slug}`, "");
   await handlers.get("turn_end")({});
+}
+
+for (const [index, payload] of [
+  `ext-request ${"d".repeat(64)}; ext-request ${"e".repeat(64)}; +1 more (see EXT REQUESTS AWAITING ANSWER in the drain)`,
+  `${state}/poll.check.sh: ext-request ${"d".repeat(64)}\ncheck: ${state}/poll.check.sh: ext-request ${"f".repeat(64)}`,
+].entries()) {
+  const retained = ["d".repeat(64), "e".repeat(64)];
+  const omitted = "f".repeat(64);
+  for (const slug of [...retained, omitted]) pendingRequest(slug);
+  rmSync(`${state}/.ext-presented/${omitted}`, { force: true });
+  const before = wakes.length;
+  appendRow("signal", `truncated-${index}.turn-ended`);
+  await closeNow(`signal: truncated-${index}`);
+  await waitFor(() => wakes.length === before + 1, "truncated handling episode");
+  consumeWake(wakes[before]);
+  appendRow("check", `ext-request:${omitted}`);
+  await closeNow(`check: ${payload}`);
+  await closeNow("check: unrelated PR poll");
+  for (const slug of retained) rmSync(`${inbox}/${slug}.json`);
+  await sleep(300);
+  if (wakes.length !== before + 1) throw new Error("truncated payload preempted the episode");
+  ackThrough(999);
+  await handlers.get("turn_end")({});
+  await waitFor(() => wakes.length === before + 2, "omitted request release");
+  await sleep(300);
+  if (wakes.length !== before + 2) throw new Error("boundary delivered more than one wake");
+  if (!wakes[before + 1].includes(payload.split("\n")[0])) throw new Error("wrong truncated close released");
+  consumeWake(wakes[before + 1]);
+  for (const slug of [slugReplay, slugPresented, omitted]) writeFileSync(`${state}/.ext-presented/${slug}`, "");
+  await handlers.get("turn_end")({});
+  await sleep(300);
+  if (wakes.length !== before + 2) throw new Error("unrelated check released for an ext request");
+  rmSync(`${inbox}/${omitted}.json`);
 }
 
 writeFileSync(`${state}/watch-stop`, "stop\n");

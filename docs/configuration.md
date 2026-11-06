@@ -868,7 +868,7 @@ A request stays on that list across drains and acknowledgements until `bin/fm-ex
 The [`bin/fm-wake-drain.sh` header](../bin/fm-wake-drain.sh) owns the unanswered-request acknowledgement refusal and ack-only warning; [`fm_ext_ack_only_warn_secs` in `bin/fm-ext-lib.sh`](../bin/fm-ext-lib.sh) owns the warning threshold setting and default.
 
 A request's `check: ext-request <slug>` close asks a question about live state rather than reporting a one-shot event, so it is never finished as merely covered by the main handling episode it was coalesced into.
-While a request waits unanswered, the boundary that closes that episode releases the close for delivery instead of dropping it, unless the episode's own drain already listed it or `bin/fm-ext-inbox.sh` removed the record.
+The boundary that closes that episode releases the close for delivery whenever the home has an unanswered request the drain has not presented since suppression, scanning the inbox in slug order rather than relying on IDs retained in a possibly truncated close payload.
 `state/.ext-presented/<slug>` is the presentation note the drain writes when it lists a request, and it is what tells the core a repeat would only duplicate that listing.
 [`docs/omp-supervision-branch.md`](omp-supervision-branch.md) "Main-fallback re-entry coalescing" owns that boundary contract.
 

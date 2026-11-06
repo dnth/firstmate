@@ -2600,6 +2600,33 @@ PYTEST
   pass "59 zero and negative settings preserve bounded reminder timing"
 }
 
+test_60_truncated_ext_closes_consult_the_entire_inbox() {
+  local home first second omitted payload since
+  home="$TMP_ROOT/c60"
+  setup_home "$home"
+  first=$(intake_ok "$home" "retained first" 600000000000000001)
+  second=$(intake_ok "$home" "retained second" 600000000000000002)
+  omitted=$(intake_ok "$home" "omitted request" 600000000000000003)
+  since=$(date +%s)
+  rm -f "$home/state/ext-inbox/$first.json" "$home/state/ext-inbox/$second.json"
+  for payload in "ext-request $first; ext-request $second; +1 more (see EXT REQUESTS AWAITING ANSWER in the drain)" \
+    "$home/state/poll.check.sh: ext-request $first"; do
+    home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "an omitted unpresented request must release a truncated close"
+  done
+  if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "poll.check.sh: PR merged" "$2"' _ "$ROOT" "$since"; then
+    fail "a waiting ext request must not release an unrelated check"
+  fi
+  home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_note_presented "$2"' _ "$ROOT" "$omitted"
+  if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
+    fail "an inbox whose remaining request was presented must be covered"
+  fi
+  rm -f "$home/state/ext-inbox/$omitted.json"
+  if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
+    fail "an empty inbox must be covered"
+  fi
+  pass "60 truncated ext closes release omitted requests without releasing unrelated checks"
+}
+
 test_1_allowlisted_intake_and_non_fm
 test_2_correlation_persists
 test_3_immediate_ack
@@ -3927,3 +3954,5 @@ echo "all fm-ext-bridge tests passed"
 test_58_check_payloads_preserve_every_pending_request
 
 test_59_overdue_settings_cannot_disable_throttling
+
+test_60_truncated_ext_closes_consult_the_entire_inbox
