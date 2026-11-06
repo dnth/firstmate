@@ -2496,7 +2496,7 @@ SH
 }
 
 test_58_check_payloads_preserve_every_pending_request() {
-  local home first second payload out since
+  local home first second payload since
   home="$TMP_ROOT/c58"
   setup_home "$home"
   first=$(intake_ok "$home" "first request" 580000000000000001)
@@ -2505,21 +2505,15 @@ test_58_check_payloads_preserve_every_pending_request() {
   for payload in "ext-request $second" \
     "ext-request $first; ext-request $second; +2 more (see EXT REQUESTS AWAITING ANSWER in the drain)" \
     "/home/example/state/poll.check.sh: ext-request $first; ext-request-overdue $second age=10m"; do
-    out=$(home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_payload_slugs "$2"' _ "$ROOT" "$payload")
-    assert_contains "$out" "$second" "every real producer shape must expose the pending slug"
     home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "an unanswered unpresented request must stay pending"
   done
   rm -f "$home/state/ext-inbox/$first.json"
   payload="ext-request $first; ext-request $second; ext-request-overdue $second age=10m"
-  out=$(home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_payload_slugs "$2"' _ "$ROOT" "$payload")
-  [ "$out" = "$(printf '%s\n%s' "$first" "$second")" ] || fail "parser must return distinct slugs in occurrence order"
   home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "pending must win over an answered sibling"
   home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_note_presented "$2"' _ "$ROOT" "$second"
   if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
     fail "all answered or presented requests must finish the close"
   fi
-  out=$(home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_payload_slugs "poll.check.sh: pr merged"' _ "$ROOT")
-  [ -z "$out" ] || fail "unrelated checks must yield no request slugs"
   if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "pr merged" 0' _ "$ROOT"; then
     fail "unrelated checks must keep the covered path"
   fi

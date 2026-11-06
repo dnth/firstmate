@@ -2430,19 +2430,6 @@ fm_ext_clear_presented() {
   rm -f -- "$dir/$slug" 2>/dev/null || return 0
 }
 
-fm_ext_check_payload_slugs() {
-  local payload=$1 slug seen=' ' pattern='ext-request(-overdue)?[[:space:]]+([0-9a-f]{64})([^0-9a-f]|$)'
-  while [[ "$payload" =~ $pattern ]]; do
-    slug=${BASH_REMATCH[2]}
-    payload=${payload#*"${BASH_REMATCH[0]}"}
-    case "$seen" in
-      *" $slug "*) continue ;;
-    esac
-    printf '%s\n' "$slug"
-    seen="$seen$slug "
-  done
-}
-
 fm_ext_check_still_pending() {
   local payload=$1 since=$2 home=${3:-${FM_HOME:?}} slug note presented
   case "$payload" in *ext-request*) ;; *) return 1 ;; esac
