@@ -297,5 +297,6 @@ fi
 
 fm_ext_private_artifact_remove "$INBOX" "$INBOX_RECORD" 600 \
   || refuse "could not remove state/ext-inbox/$INBOX_RECORD"
+fm_ext_clear_presented "$SLUG" "$FM_HOME" || true
 
 printf 'removed %s (%s)\n' "$SLUG" "$disposition"

@@ -2407,6 +2407,70 @@ test_42_intake_records_origin_and_bounded_reply_context() {
   pass "42 intake records origin and a bounded reply context"
 }
 
+# --- 56. overdue unanswered requests earn one bounded reminder --------------
+#
+# A request whose check close was coalesced behind a handling episode can sit
+# unanswered with nobody draining. The watcher's overdue scan re-surfaces it:
+# one reminder per cadence window, nothing at all once ext-respond answers or
+# dismisses the record, and nothing before the age threshold.
+
+backdate_request() {  # <home> <slug> <age-secs>
+  local file=$1/state/ext-inbox/$2.json tmp
+  tmp="$file.tmp"
+  jq --argjson at "$(($(date +%s) - $3))" '.recorded_at = $at' "$file" > "$tmp"
+  chmod 600 "$tmp"
+  mv -f -- "$tmp" "$file"
+}
+
+overdue_ring() {  # <home>
+  home_env "$1" bash -c '. "$1/bin/fm-ext-overdue-lib.sh"; fm_ext_overdue_ring "$2" "$3"' \
+    _ "$ROOT" "$1" "$1/state"
+}
+
+test_56_overdue_request_reminds_once_per_cadence_until_removed() {
+  local home slug out
+  home="$TMP_ROOT/c56"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "still waiting on you" 560000000000000001)
+  out=$(overdue_ring "$home")
+  [ -z "$out" ] || fail "a fresh request must not be surfaced as overdue"
+  backdate_request "$home" "$slug" 600
+  out=$(overdue_ring "$home")
+  assert_contains "$out" "ext-request-overdue $slug age=" "an old unanswered request must surface once"
+  out=$(overdue_ring "$home")
+  [ -z "$out" ] || fail "a second scan inside the cadence window must stay silent: $out"
+  # Removal is the stop signal: ext-respond answered or dismissed the request.
+  rm -f -- "$home/state/ext-inbox/$slug.json"
+  out=$(overdue_ring "$home")
+  [ -z "$out" ] || fail "an answered request must not be surfaced: $out"
+  assert_absent "$home/state/.ext-overdue.$slug" "an answered request must drop its cadence marker"
+  pass "56 an overdue request is reminded once per cadence window and stops when removed"
+}
+
+# --- 57. an acknowledged request stays quiet while its task is live ---------
+
+link_meta() {  # <home> <task> <slug>
+  printf 'kind=ship\next_request_slug=%s\n' "$3" > "$1/state/$2.meta"
+  printf 'ext_request_slug=%s\n' "$3" >> "$1/state/$2.meta"
+}
+
+test_57_ack_only_request_waits_for_a_live_linked_task() {
+  local home slug out
+  home="$TMP_ROOT/c57"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "run the eval please" 570000000000000001)
+  ack_receipt "$home" "$slug"
+  backdate_request "$home" "$slug" 600
+  link_meta "$home" task-live "$slug"
+  printf 'working: running the eval\n' > "$home/state/task-live.status"
+  out=$(overdue_ring "$home")
+  [ -z "$out" ] || fail "an acknowledged request with a live task must stay quiet: $out"
+  printf 'done: eval finished\n' > "$home/state/task-live.status"
+  out=$(overdue_ring "$home")
+  assert_contains "$out" "ext-request-overdue $slug age=" "an acknowledged request whose task finished must be surfaced"
+  pass "57 an acknowledged request is silent while its linked task is live and surfaces once it is not"
+}
+
 test_1_allowlisted_intake_and_non_fm
 test_2_correlation_persists
 test_3_immediate_ack
@@ -3727,4 +3791,6 @@ test_52_thread_record_writes_are_serialized
 test_53_delivery_receipt_carries_queue_times
 test_54_pending_skips_terminal_markers
 test_55_retention_prune_completes_without_starving_the_claim
+test_56_overdue_request_reminds_once_per_cadence_until_removed
+test_57_ack_only_request_waits_for_a_live_linked_task
 echo "all fm-ext-bridge tests passed"

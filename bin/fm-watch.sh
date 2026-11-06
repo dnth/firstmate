@@ -155,6 +155,10 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-ext-lib.sh
 . "$SCRIPT_DIR/fm-ext-lib.sh"
+# Unanswered Communication Officer requests that no drain reached: which request
+# is overdue, the reminder cadence, and the ack-only-with-live-task exemption.
+# shellcheck source=bin/fm-ext-overdue-lib.sh
+. "$SCRIPT_DIR/fm-ext-overdue-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 # No-Mistakes run attribution primitives (bounded axi calls, TOON field reads),
@@ -908,6 +912,22 @@ ext_doorbell_tick() {
   [ "$count" -le 3 ] || reason="$reason; +$((count - 3)) more (see EXT REQUESTS AWAITING ANSWER in the drain)"
   ext_doorbell_mark "$rows" || triage_log "ext doorbell: could not record the rung sequence; a later cycle may ring again"
   wake "$reason"
+}
+
+# Unanswered-request backstop. Every drain presents an unanswered request, so one
+# still waiting past FM_EXT_OVERDUE_SECS means no drain reached main since it
+# arrived - typically because its check close was coalesced behind a handling
+# episode. bin/fm-ext-overdue-lib.sh owns which request is due and the cadence;
+# this cycle appends the durable row and rings it.
+ext_overdue_tick() {
+  local payload slug
+  payload=$(fm_ext_overdue_ring "$FM_HOME" "$STATE") || return 0
+  [ -n "$payload" ] || return 0
+  slug=${payload#ext-request-overdue }
+  slug=${slug%% *}
+  fm_wake_append check "ext-request-overdue:$slug" "$payload" || return 1
+  triage_log "ext overdue: $slug re-surfaced"
+  wake "check: $payload"
 }
 
 # Converge state/ext-watch.check.sh with config/ext-bridge every cycle, so a
@@ -2078,6 +2098,9 @@ while :; do
   # then ring once for any bridge row the gateway recorded since the last ring.
   ext_bridge_converge_tick || true
   ext_doorbell_tick
+  # An unanswered request whose close was coalesced away earns a bounded
+  # reminder rather than waiting for some unrelated wake.
+  ext_overdue_tick
 
   # Process-to-event liveness repair. Remote-reply routes converge first:
   # ensure-armed registers any live route that lost its source (without SSH),

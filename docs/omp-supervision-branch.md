@@ -112,7 +112,9 @@ Only OMP opts in (`coalesceMainFallbackWakes`), because the boundary that retire
 
 The episode is evaluated at each main turn boundary, where the core counts unread MAIN-owned rows with `fm_wake_actor_pending_count main` from `bin/fm-wake-lib.sh`, the same per-actor count the drain and guard share.
 An empty count closes the episode and finishes every coalesced close record with no successor, because the acknowledgement that drained the queue already covered them.
-A nonzero count grants exactly one successor injection that delivers the newest still-undelivered close; older coalesced records stay covered by that same drain.
+A check close is the exception: an acknowledgement can retire a row nobody ever presented, so while the adapter's `checkStillPending` sink predicate still reports that condition pending, the closing boundary releases the record for delivery instead of finishing it as covered and ledgers a `released` row.
+That predicate is what tells a live request (`check: ext-request <slug>`, `check: ext-request-overdue <slug>`) apart from an event that was already handled, and it stays silent for every other close, so only the local Communication Officer path changes (see [configuration.md](configuration.md) "Local Communication Officer bridge").
+A nonzero count grants exactly one successor injection that delivers the close a live check names when one waits, otherwise the newest still-undelivered close; older coalesced records stay covered by that same drain.
 Consuming a granted successor releases its grant, and the next boundary grants again only after every row unread at that grant has been retired, so a row that lands while the successor's own turn runs earns exactly one further successor instead of waiting for a boundary that finds the queue empty.
 Rows that outlive every close record earn a synthetic successor under the same grant and baseline rule.
 A boundary that arrives while a delivery run is mid-flight is replayed when the run settles, so a close cannot slip between the row count and the suppression check.

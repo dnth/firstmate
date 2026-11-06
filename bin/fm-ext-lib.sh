@@ -28,6 +28,8 @@ FM_EXT_CONTEXT_DIRNAME='ext-context'
 FM_EXT_OUTBOX_DIRNAME='ext-outbox'
 FM_EXT_ATTACHMENTS_DIRNAME='ext-attachments'
 FM_EXT_MEDIA_DIRNAME='ext-media'
+# One empty note per presented request, mtime = the last drain that showed it.
+FM_EXT_PRESENTED_DIRNAME='.ext-presented'
 # The only names a staged outbound file can carry; Discord sees these names,
 # never a source path or filename.
 FM_EXT_MEDIA_NAME_RE='^(image-[1-4]\.(png|jpg|gif|webp)|video-1\.(mp4|webm))$'
@@ -361,6 +363,7 @@ fm_ext_context_dir(){ printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_CONTEX
 fm_ext_outbox_dir() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_OUTBOX_DIRNAME"; }
 fm_ext_attachments_dir() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_ATTACHMENTS_DIRNAME"; }
 fm_ext_media_dir() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_MEDIA_DIRNAME"; }
+fm_ext_presented_dir() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_PRESENTED_DIRNAME"; }
 fm_ext_watch_shim_path() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_WATCH_SHIM"; }
 
 # --- activation and secret --------------------------------------------------
@@ -2393,6 +2396,94 @@ fm_ext_pending_requests() {
     fm_ext_private_artifact_file_valid "$inbox" "$base" 600 || continue
     printf '%s\n' "$slug"
   done
+}
+
+# fm_ext_note_presented <slug> [home]: best-effort record that a drain showed
+# this request to main. Its mtime is the presentation evidence
+# fm_ext_check_still_pending ages against, so a suppressed close whose episode
+# drain already carried the request is finished instead of re-delivered.
+fm_ext_note_presented() {
+  local slug=$1 home=${2:-${FM_HOME:?}} dir note
+  fm_ext_slug_valid "$slug" || return 1
+  dir=$(fm_ext_presented_dir "$home")
+  if [ -e "$dir" ]; then
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  else
+    mkdir -m 700 -- "$dir" 2>/dev/null || return 1
+  fi
+  note=$dir/$slug
+  if [ -e "$note" ]; then
+    [ -f "$note" ] && [ ! -L "$note" ] || return 1
+  fi
+  : > "$note" 2>/dev/null || return 1
+  chmod 600 -- "$note" 2>/dev/null
+}
+
+# fm_ext_clear_presented <slug> [home]: forget a presentation note whose record
+# is gone, so the state directory does not accumulate one file per answered
+# request.
+fm_ext_clear_presented() {
+  local slug=$1 home=${2:-${FM_HOME:?}} dir
+  fm_ext_slug_valid "$slug" || return 0
+  dir=$(fm_ext_presented_dir "$home")
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  rm -f -- "$dir/$slug" 2>/dev/null || return 0
+}
+
+# fm_ext_check_still_pending <payload> <since-epoch> [home]: 0 while the check
+# close named by <payload> still waits on main. The inbox record is the sink, so
+# its absence means ext-respond already answered or dismissed the request. A
+# presentation note newer than <since-epoch> means a drain after the suppression
+# already showed it, and repeating it would only duplicate that presentation.
+# Non-request payloads are not this predicate's business.
+fm_ext_check_still_pending() {
+  local payload=$1 since=$2 home=${3:-${FM_HOME:?}} slug inbox note presented
+  case "$payload" in
+    'ext-request '*) slug=${payload#ext-request } ;;
+    'ext-request-overdue '*)
+      slug=${payload#ext-request-overdue }
+      slug=${slug%% *}
+      ;;
+    *) return 1 ;;
+  esac
+  fm_ext_slug_valid "$slug" || return 1
+  case "$since" in ''|*[!0-9]*) since=0 ;; esac
+  inbox=$(fm_ext_inbox_dir "$home")
+  [ -d "$inbox" ] && [ ! -L "$inbox" ] || return 1
+  fm_ext_private_artifact_file_valid "$inbox" "$slug.json" 600 || return 1
+  note=$(fm_ext_presented_dir "$home")/$slug
+  if [ -f "$note" ] && [ ! -L "$note" ]; then
+    presented=$(fm_ext_file_mtime "$note") || presented=0
+    case "$presented" in ''|*[!0-9]*) presented=0 ;; esac
+    [ "$presented" -lt "$since" ] || return 1
+  fi
+  return 0
+}
+
+# Seconds an unanswered request may sit before the watcher re-surfaces it:
+# FM_EXT_OVERDUE_SECS, default 300. A non-numeric value resets to the default.
+fm_ext_overdue_secs() {
+  local raw=${FM_EXT_OVERDUE_SECS-}
+  case "$raw" in
+    ''|*[!0-9]*) raw=300 ;;
+  esac
+  [ "${#raw}" -le 18 ] || raw=300
+  printf '%s\n' "$raw"
+}
+
+# How often one overdue request may be re-surfaced again:
+# FM_EXT_OVERDUE_REMIND_SECS, default 600. A non-numeric value resets to the
+# default, and a value below the overdue threshold is raised to it so a
+# misconfiguration cannot turn the reminder into a tight loop.
+fm_ext_overdue_remind_secs() {
+  local raw=${FM_EXT_OVERDUE_REMIND_SECS-} floor
+  case "$raw" in
+    ''|*[!0-9]*) raw=600 ;;
+  esac
+  [ "${#raw}" -le 18 ] || raw=600
+  floor=$(fm_ext_overdue_secs)
+  [ "$raw" -ge "$floor" ] || raw=$floor
+  printf '%s\n' "$raw"
 }
 
 # fm_ext_request_reply_state <slug> [home]: what the outbox records about the
