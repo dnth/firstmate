@@ -123,16 +123,16 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
   # A repeat of the same identity is a no-op; a refresh with a new generation re-holds cleanly.
   home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
     --task "$TASK" --reason "route pending" --mode "done" --text-file "$home/body.txt" \
-    --option "North" --option "South" >/dev/null || fail "an exact repeat must succeed"
+    --option "North" --recommended --option "South" >/dev/null || fail "an exact repeat must succeed"
   home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 2 \
     --task "$TASK" --reason "still pending" --mode "done" --text-file "$home/body.txt" \
-    --option "North" --option "South" >/dev/null || fail "refreshing an active hold must succeed"
+    --option "North" --recommended --option "South" >/dev/null || fail "refreshing an active hold must succeed"
   jq -e '.decision.options | length == 2' "$(payload_of "$home" followup 2)" >/dev/null \
     || fail "the refreshed post lost its buttons"
   # A choice post may also retitle the thread it lands in.
   home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 3 \
     --task "$TASK" --reason "still pending" --mode "done" --text-file "$home/body.txt" \
-    --option "North" --option "South" --thread-retitle "InfoConnect · route decision" >/dev/null \
+    --option "North" --recommended --option "South" --thread-retitle "InfoConnect · route decision" >/dev/null \
     || fail "a retitle on a choice post must pass through to the emit"
   jq -e '.thread_retitle == "InfoConnect · route decision" and .thread_state == "needs-you"' \
     "$(payload_of "$home" followup 3)" >/dev/null || fail "the choice post lost its retitle"
@@ -145,12 +145,12 @@ test_1_ask_holds_and_posts_buttons_in_text_order() {
     esac
     home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation "$generation" \
       --task "$TASK" --reason "still pending" --mode "done" --text-file "$home/body.txt" \
-      --option "North" --option "South" --thread-retitle "$bad" \
+      --option "North" --recommended --option "South" --thread-retitle "$bad" \
       >/dev/null 2>"$home/retitle-warning" || fail "a rejected ask retitle must still queue"
     assert_contains "$(cat "$home/retitle-warning")" 'warning: thread retitle ignored' "missing ask warning"
     assert_contains "$(cat "$home/retitle-warning")" "$reason" "missing ask rejection reason"
     jq -e '(has("thread_retitle") | not) and .thread_state == "needs-you"
-      and .decision.options[0].label == "North"
+      and .decision.options[0].label == "⭐ North"
       and (.text | startswith("The fix can go two ways."))' \
       "$(payload_of "$home" followup "$generation")" >/dev/null || fail "ask lost its reply or kept a bad retitle"
     generation=$((generation + 1))
@@ -191,7 +191,7 @@ test_2_mode_is_required_and_pre_hold_refusals() {
 
   home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 2 \
     --task idle-call --title "Idle call" --repo sample --reason "needs a call" --mode "done" \
-    --text-file "$home/body.txt" --option "A" --option "B" >/dev/null \
+    --text-file "$home/body.txt" --option "A" --recommended --option "B" >/dev/null \
     || fail "ask refused a done-mode choice"
   jq -e '.decision.mode == "done"' "$(payload_of "$home" answer 2)" >/dev/null \
     || fail "--mode done must reach the decision block"
@@ -202,7 +202,7 @@ test_2_mode_is_required_and_pre_hold_refusals() {
   [ ! -e "$home/state/queued-ship.meta" ] || fail "fixture must have no worker metadata"
   home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 3 \
     --task queued-ship --reason "build waits on a call" --mode release \
-    --text-file "$home/body.txt" --option "North" --option "South" >/dev/null \
+    --text-file "$home/body.txt" --option "North" --recommended --option "South" >/dev/null \
     || fail "ask refused a release-mode choice on a queued ship"
   jq -e '.decision.mode == "release"' "$(payload_of "$home" answer 3)" >/dev/null \
     || fail "--mode release must reach the decision block"
@@ -219,7 +219,7 @@ test_2_mode_is_required_and_pre_hold_refusals() {
   printf 'Pick for idle-leak.' > "$home/leak.txt"
   out=$(home_env "$home" "$ASK" --request-id "$RID" --kind answer --generation 4 \
     --task idle-leak --title "Leaky" --repo sample --reason "needs a call" --mode "done" \
-    --text-file "$home/leak.txt" --option "A" --option "B" 2>&1)
+    --text-file "$home/leak.txt" --option "A" --recommended --option "B" 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "ask accepted text that names the task id"
   assert_contains "$out" "task id" "the refusal must say why"
@@ -317,7 +317,7 @@ test_7_settled_ask_retries_preserve_state() {
       task="retry-$kind-$mode"
       slug=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
         --task "$task" --title "Pick route" --repo sample --reason "needs a call" --mode "$mode" \
-        --text-file "$home/body.txt" --option "North" --option "South") || fail "initial $kind/$mode ask failed"
+        --text-file "$home/body.txt" --option "North" --recommended --option "South") || fail "initial $kind/$mode ask failed"
       payload=$(payload_of "$home" "$kind" "$generation")
       printf '%s\t%s\t%s\t%s\n' "$task" "North" "1. North" "$mode" \
         | home_env "$home" "$ROOT/bin/fm-captain-hold.sh" answers --source "test button click" >/dev/null \
@@ -326,7 +326,7 @@ test_7_settled_ask_retries_preserve_state() {
       cp "$payload" "$home/payload-before"
       out=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
         --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
-        --option "North" --option "South") || fail "payload retry of $kind/$mode failed"
+        --option "North" --recommended --option "South") || fail "payload retry of $kind/$mode failed"
       [ "$out" = "$slug" ] || fail "payload retry changed slug"
       cmp "$payload" "$home/payload-before" || fail "retry changed the existing payload"
       cmp "$home/data/backlog.md" "$home/backlog-before" || fail "payload retry mutated the settled task"
@@ -334,7 +334,7 @@ test_7_settled_ask_retries_preserve_state() {
       chmod 600 "${payload%.json}.posting"
       out=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
         --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
-        --option "North" --option "South" 2>&1)
+        --option "North" --recommended --option "South" 2>&1)
       rc=$?
       [ "$rc" -ne 0 ] || fail "mid-delivery $kind/$mode retry succeeded"
       assert_contains "$out" "mid-delivery" "retry must preserve emit's posting refusal"
@@ -342,7 +342,7 @@ test_7_settled_ask_retries_preserve_state() {
       rm "$payload"
       if out=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
         --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
-        --option "North" --option "South" 2>&1); then
+        --option "North" --recommended --option "South" 2>&1); then
         fail "posting-only $kind/$mode retry succeeded"
       fi
       assert_contains "$out" "mid-delivery" "posting-only retry must preserve emit's refusal"
@@ -351,14 +351,14 @@ test_7_settled_ask_retries_preserve_state() {
       chmod 600 "${payload%.json}.receipt.json"
       out=$(home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
         --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
-        --option "North" --option "South") || fail "receipt must beat posting for $kind/$mode"
+        --option "North" --recommended --option "South") || fail "receipt must beat posting for $kind/$mode"
       [ "$out" = "$slug" ] || fail "receipt retry changed slug"
       cmp "$home/data/backlog.md" "$home/backlog-before" || fail "receipt retry mutated the settled task"
       [ ! -e "$payload" ] || fail "receipt retry republished the ask"
       rm "${payload%.json}.posting"
       home_env "$home" "$ASK" --request-id "$RID" --kind "$kind" --generation "$generation" \
         --task "$task" --reason "retry pending" --mode "$mode" --text-file "$home/body.txt" \
-        --option "North" --option "South" >/dev/null || fail "receipt-only retry failed"
+        --option "North" --recommended --option "South" >/dev/null || fail "receipt-only retry failed"
       cmp "$home/data/backlog.md" "$home/backlog-before" || fail "receipt-only retry mutated the settled task"
     done
   done
