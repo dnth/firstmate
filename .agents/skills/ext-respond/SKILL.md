@@ -2,7 +2,7 @@
 name: ext-respond
 description: >-
   Agent-only playbook for handling local Communication Officer Discord requests.
-  Use on an "ext-request <slug>" check wake, a drain's "EXT REQUESTS AWAITING ANSWER" or "EXT REQUESTS ACKED BUT NOT ANSWERED" section,
+  Use on an "ext-request <slug>" or "ext-request-overdue <slug>" check wake, a drain's "EXT REQUESTS AWAITING ANSWER" or "EXT REQUESTS ACKED BUT NOT ANSWERED" section,
   or a wake acknowledgement refused for unanswered requests, to drain the local inbox, classify,
   act through the normal lifecycle, emit ack/answer/follow-up/final into the
   local outbox, and link spawned work; also load before opening a Discord topic
@@ -17,7 +17,8 @@ metadata:
 # ext-respond
 
 The local Communication Officer bridge lets a firstmate instance answer Discord requests that a dedicated Hermes Gateway plugin delivered into this home: `/fm`, a message in the dedicated channel, a reply to one of Firstmate's own posts, or a click on one of Firstmate's decision buttons.
-Load this skill for an `ext-request <slug>` check wake, the drain's `EXT REQUESTS AWAITING ANSWER` or `EXT REQUESTS ACKED BUT NOT ANSWERED` section, or a wake acknowledgement refused for unanswered requests.
+Load this skill for an `ext-request <slug>` or `ext-request-overdue <slug>` check wake, the drain's `EXT REQUESTS AWAITING ANSWER` or `EXT REQUESTS ACKED BUT NOT ANSWERED` section, or a wake acknowledgement refused for unanswered requests.
+An `ext-request-overdue` wake names an unanswered request past the overdue window; handle it through the same lifecycle as the original close (see [configuration.md](../../../docs/configuration.md#local-communication-officer-bridge-configext-bridge) for cadence and linked-task exemptions).
 The full request is stashed locally; this skill acts on it and emits one or more local outbox payloads that the gateway plugin posts to the request's Discord destination.
 
 This runs only when the local ext-bridge is on (`config/ext-bridge` plus a mode-0600 secret; see AGENTS.md "Local Communication Officer bridge").

@@ -24,6 +24,10 @@
 # only receipts are acks and whose newest ack is older than
 # the threshold owned by fm_ext_ack_only_warn_secs in bin/fm-ext-lib.sh;
 # the warning never blocks and is printed to stderr on a successful ack.
+# Listing a request under EXT REQUESTS AWAITING ANSWER also records its
+# presentation note in state/.ext-presented/, which is how the watcher core
+# tells "main has already seen this one" apart from a request whose close was
+# coalesced away unread.
 #
 # Machine channel: under FM_WAKE_DRAIN_DECISION_REVISIONS=1 (set only by the
 # away-mode daemon) every rendered OPEN DECISIONS row also emits one
@@ -610,6 +614,10 @@ print_ext_requests_section() {
   while IFS= read -r slug; do
     [ -n "$slug" ] || continue
     printf 'ext-request %s\n' "$slug"
+    # Presentation evidence for the watcher: a check close suppressed behind
+    # this drain's episode is finished instead of re-delivered, because main has
+    # just been shown the request.
+    fm_ext_note_presented "$slug" "$FM_HOME" || true
     record=$(fm_ext_inbox_dir "$FM_HOME")/$slug.json
     jq -r '
       def line: tostring | gsub("[\\x00-\\x1f\\x7f]"; " ") | gsub("\\s+"; " ") | .[0:200];

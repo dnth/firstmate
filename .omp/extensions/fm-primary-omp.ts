@@ -83,6 +83,30 @@ function publishNativeProcessIdentity(): void {
   process.env.FM_OMP_PROCESS_EXPECTED_BIN = ompPath;
 }
 
+// Sink predicate for check closes: the local Communication Officer's inbox is
+// the only check sink this adapter can re-read, so every other check keeps the
+// covered path. bin/fm-ext-lib.sh owns the record and presentation-note rules.
+function extCheckStillPending(payload: string, sinceMs: number): boolean {
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"',
+      "fm-ext-check-pending",
+      fmRoot,
+      payload,
+      String(Math.floor(sinceMs / 1000)),
+    ],
+    {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+      env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state },
+    },
+  );
+  return result.status === 0;
+}
+
 function publishSecondmateSession(ctx: ExtensionContext): void {
   const pointer = process.env.FM_OMP_SESSION_POINTER;
   if (!pointer || !isAbsolute(pointer)) return;
@@ -472,6 +496,7 @@ export default function (omp: ExtensionAPI) {
     // would strand a captain-held task's only notification.
     isDecisionOwnedWake: (message: string) =>
       decisionOwnedTrigger(message, scopeForUnreadWake(state, /^heartbeat($|:)/.test(message))),
+    checkStillPending: extCheckStillPending,
   });
 
   const deliverSessionstartNudge = (forceForNativeSwitch = false): void => {

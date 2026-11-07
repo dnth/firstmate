@@ -1843,6 +1843,9 @@ make_omp_queue_fixture() {  # <name>
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
   cp "$ROOT/bin/fm-wake-lib.sh" "$fixture/bin/fm-wake-lib.sh"
+  # The check-close sink predicate runs through the Communication Officer's own
+  # library, so fixture tests can seed a real inbox record.
+  cp "$ROOT/bin/fm-ext-lib.sh" "$fixture/bin/fm-ext-lib.sh"
   cat > "$fixture/bin/fm-gate-refuse-lib.sh" <<'SH'
 fm_is_gate_agent() { return 1; }
 SH
@@ -2245,6 +2248,241 @@ JS
   expect_code 0 "$status" "OMP main-fallback burst coalescing"
   assert_contains "$out" omp-fallback-coalesce-ok "OMP fallback burst was not coalesced: $out"
   pass "OMP coalesces fallback wakes into one in-flight notification per handling episode"
+}
+
+# A check close names a live condition, so unlike a one-shot signal its row can
+# be acknowledged away without anyone presenting it - exactly what happens when
+# a Communication Officer request arrives while main is inside a long handling
+# episode. The covering episode must release it at the boundary that closes the
+# episode, and must stay silent when the episode's own drain already presented
+# it or when its inbox record is gone.
+test_native_omp_suppressed_check_redelivers_at_episode_close() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-check-release)
+  : > "$fixture/config/ext-bridge"
+  printf 'test-secret\n' > "$fixture/config/ext-secret"
+  chmod 600 "$fixture/config/ext-secret"
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-stop" ]; do
+  if [ -e "$state/wake-now-$count" ]; then
+    cat "$state/close-$count" 2>/dev/null || printf 'signal: close-%s\n' "$count"
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const handlers = new Map();
+const wakes = [];
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  // No supervision branch: every ordinary actionable close falls back to main.
+  sendMessage(message) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push(String(message.content ?? ""));
+  },
+};
+const queue = `${state}/.wake-queue`;
+const seqFile = `${state}/.wake-queue.seq`;
+let seq = 0;
+const rows = new Map();
+const appendRow = (kind, key) => {
+  seq += 1;
+  const line = `0\t${seq}\t${kind}\t${key}\t${kind}: ${key}`;
+  rows.set(seq, line);
+  writeFileSync(seqFile, `${seq}\n`);
+  appendFileSync(queue, `${line}\n`);
+};
+const ackThrough = (cutoff) => {
+  for (const [s, line] of rows) if (s <= cutoff) rows.delete(s);
+  writeFileSync(queue, [...rows.values()].map((line) => `${line}\n`).join(""));
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8").trim()) : 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await sleep(10); }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const consumeWake = (content) => handlers.get("message_start")({ message: { role: "user", content } });
+// Close the cycle that is live right now with <text>, and wait for its successor.
+const closeNow = async (text) => {
+  const live = count();
+  writeFileSync(`${state}/close-${live}`, `${text}\n`);
+  writeFileSync(`${state}/wake-now-${live}`, "go\n");
+  await waitFor(() => count() > live, `successor arm after ${text}`);
+};
+const inbox = `${state}/ext-inbox`;
+mkdirSync(inbox, { recursive: true, mode: 0o700 });
+const pendingRequest = (slug) => writeFileSync(
+  `${inbox}/${slug}.json`,
+  JSON.stringify({ schema_version: 1, slug, request_id: `discord:1:2:3:${slug.slice(0, 12)}`, platform: "discord", recorded_at: 1700000000 }),
+  { mode: 0o600 },
+);
+const slugReplay = "a".repeat(64);
+const slugPresented = "b".repeat(64);
+const slugAnswered = "c".repeat(64);
+pendingRequest(slugReplay);
+
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?checks=${Date.now()}`);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+
+// One signal close falls back to main and main starts handling it; the episode
+// stays open until a turn boundary finds the queue drained.
+appendRow("signal", "crew-one.turn-ended");
+await closeNow("signal: fallback-close-one");
+await waitFor(() => wakes.length === 1, "fallback wake for the handling episode");
+consumeWake(wakes[0]);
+
+// A request close arrives mid-episode: it must not preempt the handler.
+appendRow("check", `ext-request:${slugReplay}`);
+await closeNow(`check: ext-request ${slugReplay}`);
+await sleep(300);
+if (wakes.length !== 1) throw new Error(`the request preempted the open episode: ${wakes.length} wakes`);
+
+// The unrelated acknowledgement empties the queue - the sequence that used to
+// cover the request silently. The boundary must deliver it instead.
+ackThrough(999);
+await handlers.get("turn_end")({});
+await waitFor(() => wakes.length === 2, "re-delivery after the covering episode closed");
+if (!wakes[1].includes(`check: ext-request ${slugReplay}`)) throw new Error(`re-delivered the wrong close: ${wakes[1]}`);
+consumeWake(wakes[1]);
+mkdirSync(`${state}/.ext-presented`, { recursive: true, mode: 0o700 });
+writeFileSync(`${state}/.ext-presented/${slugReplay}`, "");
+
+// A request whose drain already presented it is finished, not repeated.
+pendingRequest(slugPresented);
+appendRow("check", `ext-request:${slugPresented}`);
+await closeNow(`check: ext-request ${slugPresented}`);
+await sleep(300);
+if (wakes.length !== 2) throw new Error(`the presented request preempted the episode: ${wakes.length} wakes`);
+mkdirSync(`${state}/.ext-presented`, { recursive: true, mode: 0o700 });
+for (const slug of [slugReplay, slugPresented]) writeFileSync(`${state}/.ext-presented/${slug}`, "");
+ackThrough(999);
+await handlers.get("turn_end")({});
+await sleep(300);
+if (wakes.length !== 2) throw new Error(`a request already presented by the drain was repeated: ${wakes.length} wakes`);
+
+// A request answered while it was suppressed is also finished, not repeated.
+appendRow("signal", "crew-two.turn-ended");
+await closeNow("signal: fallback-close-two");
+await waitFor(() => wakes.length === 3, "second handling episode");
+consumeWake(wakes[2]);
+pendingRequest(slugAnswered);
+appendRow("check", `ext-request:${slugAnswered}`);
+await closeNow(`check: ext-request ${slugAnswered}`);
+await sleep(300);
+if (wakes.length !== 3) throw new Error(`the answered request preempted the episode: ${wakes.length} wakes`);
+rmSync(`${inbox}/${slugAnswered}.json`);
+for (const slug of [slugReplay, slugPresented]) writeFileSync(`${state}/.ext-presented/${slug}`, "");
+ackThrough(999);
+await handlers.get("turn_end")({});
+await sleep(300);
+if (wakes.length !== 3) throw new Error(`an already answered request was re-delivered: ${wakes.length} wakes`);
+
+for (const [index, payload] of [
+  `ext-request ${slugAnswered}; ext-request ${slugReplay}; +2 more (see EXT REQUESTS AWAITING ANSWER in the drain)`,
+  `${state}/poll.check.sh: ext-request ${slugAnswered}; ext-request-overdue ${slugReplay} age=10m`,
+].entries()) {
+  rmSync(`${state}/.ext-presented/${slugReplay}`, { force: true });
+  const before = wakes.length;
+  appendRow("signal", `shape-${index}.turn-ended`);
+  await closeNow(`signal: shape-${index}`);
+  await waitFor(() => wakes.length === before + 1, "producer-shape handling episode");
+  consumeWake(wakes[before]);
+  appendRow("check", `ext-request:${slugReplay}`);
+  await closeNow(`check: ${payload}`);
+  await sleep(300);
+  if (wakes.length !== before + 1) throw new Error("producer shape preempted the episode");
+  ackThrough(999);
+  await handlers.get("turn_end")({});
+  await waitFor(() => wakes.length === before + 2, "producer-shape episode release");
+  if (!wakes[before + 1].includes(payload)) throw new Error("wrong producer shape released");
+  consumeWake(wakes[before + 1]);
+  for (const slug of [slugReplay, slugPresented]) writeFileSync(`${state}/.ext-presented/${slug}`, "");
+  await handlers.get("turn_end")({});
+}
+
+for (const [index, payload] of [
+  `ext-request ${"d".repeat(64)}; ext-request ${"e".repeat(64)}; +1 more (see EXT REQUESTS AWAITING ANSWER in the drain)`,
+  `${state}/poll.check.sh: ext-request ${"d".repeat(64)}\ncheck: ${state}/poll.check.sh: ext-request ${"f".repeat(64)}`,
+].entries()) {
+  const retained = ["d".repeat(64), "e".repeat(64)];
+  const omitted = "f".repeat(64);
+  for (const slug of [...retained, omitted]) pendingRequest(slug);
+  rmSync(`${state}/.ext-presented/${omitted}`, { force: true });
+  const before = wakes.length;
+  appendRow("signal", `truncated-${index}.turn-ended`);
+  await closeNow(`signal: truncated-${index}`);
+  await waitFor(() => wakes.length === before + 1, "truncated handling episode");
+  consumeWake(wakes[before]);
+  appendRow("check", `ext-request:${omitted}`);
+  await closeNow(`check: ${payload}`);
+  await closeNow("check: unrelated PR poll");
+  for (const slug of retained) rmSync(`${inbox}/${slug}.json`);
+  await sleep(300);
+  if (wakes.length !== before + 1) throw new Error("truncated payload preempted the episode");
+  ackThrough(999);
+  await handlers.get("turn_end")({});
+  await waitFor(() => wakes.length === before + 2, "omitted request release");
+  await sleep(300);
+  if (wakes.length !== before + 2) throw new Error("boundary delivered more than one wake");
+  if (!wakes[before + 1].includes(payload.split("\n")[0])) throw new Error("wrong truncated close released");
+  consumeWake(wakes[before + 1]);
+  for (const slug of [slugReplay, slugPresented, omitted]) writeFileSync(`${state}/.ext-presented/${slug}`, "");
+  await handlers.get("turn_end")({});
+  await sleep(300);
+  if (wakes.length !== before + 2) throw new Error("unrelated check released for an ext request");
+  rmSync(`${inbox}/${omitted}.json`);
+}
+
+{
+  const pending = "9".repeat(64);
+  pendingRequest(pending);
+  const before = wakes.length;
+  appendRow("signal", "path-check.turn-ended");
+  await closeNow("signal: path-check-episode");
+  await waitFor(() => wakes.length === before + 1, "path-check handling episode");
+  consumeWake(wakes[before]);
+  appendRow("check", "pr-merged");
+  await closeNow("check: state/fm-ext-request-redeliver.check.sh: merged");
+  await sleep(300);
+  if (wakes.length !== before + 1) throw new Error("path check preempted the episode");
+  ackThrough(999);
+  await handlers.get("turn_end")({});
+  await sleep(500);
+  if (wakes.length !== before + 1) throw new Error("script path caused request redelivery");
+  rmSync(`${inbox}/${pending}.json`);
+}
+
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
+console.log("omp-check-release-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP suppressed check re-delivery at episode close"
+  assert_contains "$out" omp-check-release-ok "OMP check release failed: $out"
+  pass "OMP releases a suppressed check close when its episode closes, and only then"
 }
 
 # An idle-main injection opens an agent-initiated turn that emits no
@@ -3152,6 +3390,7 @@ test_native_omp_unowned_lock_preserves_startup_and_queue
 test_native_omp_empty_queue_suppresses_session_notifications
 test_native_omp_core_handoff_suppresses_queue_notification
 test_native_omp_main_fallback_coalesces_burst
+test_native_omp_suppressed_check_redelivers_at_episode_close
 test_native_omp_idle_main_wake_consumption_and_stale_bound
 test_native_omp_unconsumed_inflight_wake_forces_turn_after_bound
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification

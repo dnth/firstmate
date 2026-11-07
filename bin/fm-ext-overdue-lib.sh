@@ -1,0 +1,88 @@
+# shellcheck shell=bash
+# Overdue-request policy for the sibling local-bridge Communication Officer.
+#
+# Sourced, never executed. Caller: bin/fm-watch.sh's ext_overdue_tick, which
+# appends the durable wake row and rings. This owner decides WHICH request earns
+# the next reminder and records that it rang.
+#
+# Presentation does not resolve a request: an unanswered record remains eligible
+# for reminders even after a drain showed it. One reminder per request per
+# FM_EXT_OVERDUE_REMIND_SECS bounds the nagging, and record removal stops further
+# reminders at the next cycle.
+#
+# A request acknowledged on Discord while the task spawned for it is still live
+# is expected to stay unanswered, so that pair stays quiet; with no live task
+# the same reminder applies. bin/fm-ext-lib.sh owns the record, reply-state,
+# presentation, and threshold helpers; bin/fm-crew-state.sh owns current-task
+# reconciliation through the bin/fm-classify-lib.sh seam.
+
+_FM_EXT_OVERDUE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_EXT_OVERDUE_LIB_DIR="."
+# shellcheck source=bin/fm-ext-lib.sh
+. "$_FM_EXT_OVERDUE_LIB_DIR/fm-ext-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$_FM_EXT_OVERDUE_LIB_DIR/fm-classify-lib.sh"
+
+# 0 when a task still linked to this request is expected to answer it: its meta
+# records ext_request_slug=<slug> and reconciles to working, parked, or paused.
+fm_ext_overdue_live_task() {  # <state> <slug>
+  local state=$1 slug=$2 meta task line current
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    grep -qx -- "ext_request_slug=$slug" "$meta" 2>/dev/null || continue
+    task=${meta##*/}
+    task=${task%.meta}
+    line=$(FM_STATE_OVERRIDE="$state" "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
+    case "$line" in state:\ *) ;; *) continue ;; esac
+    current=${line#state: }; current=${current%% *}
+    case "$current" in working|parked|paused) return 0 ;; esac
+  done
+  return 1
+}
+
+# fm_ext_overdue_ring <home> <state>: print the wake payload of the next
+# overdue request, or nothing when none is due. Records the ring in its marker
+# so the next call inside the cadence window stays silent. The caller owns the
+# durable row and the wake itself.
+fm_ext_overdue_ring() {
+  local home=${1:-${FM_HOME:?}} state=${2:-} pending slug record recorded age now threshold remind
+  local mark reply last
+  [ -n "$state" ] || return 1
+  pending=$(fm_ext_pending_requests "$home" 2>/dev/null) || return 0
+  now=$(date +%s)
+  fm_ext_overdue_secs threshold
+  fm_ext_overdue_remind_secs remind
+  # Forget the marker of every request that is no longer unanswered, so a
+  # answered request cannot keep a leftover file and a later one cannot inherit
+  # an old cadence.
+  for mark in "$state"/.ext-overdue.*; do
+    [ -e "$mark" ] || continue
+    slug=${mark##*/.ext-overdue.}
+    printf '%s\n' "$pending" | grep -Fx -- "$slug" >/dev/null 2>&1 || rm -f -- "$mark" 2>/dev/null || true
+  done
+  while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    record=$(fm_ext_inbox_dir "$home")/$slug.json
+    recorded=$(jq -r '.recorded_at // empty | tostring' "$record" 2>/dev/null) || recorded=''
+    case "$recorded" in ''|*[!0-9]*) recorded=$(fm_ext_file_mtime "$record") || recorded=$now ;; esac
+    case "$recorded" in ''|*[!0-9]*) recorded=$now ;; esac
+    [ "$recorded" -le "$now" ] || recorded=$now
+    age=$((now - recorded))
+    [ "$age" -ge "$threshold" ] || continue
+    mark="$state/.ext-overdue.$slug"
+    if [ -f "$mark" ] && [ ! -L "$mark" ]; then
+      last=$(fm_ext_file_mtime "$mark") || last=0
+      case "$last" in ''|*[!0-9]*) last=0 ;; esac
+      [ "$((now - last))" -ge "$remind" ] || continue
+    fi
+    printf '%s\n' "$now" > "$mark" 2>/dev/null || return 1
+    reply=$(fm_ext_request_reply_state "$slug" "$home") || reply=none
+    case "$reply" in
+      ack\ *) fm_ext_overdue_live_task "$state" "$slug" && continue ;;
+    esac
+    printf 'ext-request-overdue %s age=%sm\n' "$slug" "$((age / 60))"
+    return 0
+  done <<EOF
+$pending
+EOF
+  return 0
+}

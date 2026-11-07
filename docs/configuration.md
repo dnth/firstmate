@@ -867,6 +867,16 @@ Wake rows can still be hidden by a filtered read of the drain and are consumed b
 A request stays on that list across drains and acknowledgements until `bin/fm-ext-inbox.sh remove` clears its inbox record on a recorded delivery disposition, or `bin/fm-ext-inbox.sh dismiss` records why it needs no reply.
 The [`bin/fm-wake-drain.sh` header](../bin/fm-wake-drain.sh) owns the unanswered-request acknowledgement refusal and ack-only warning; [`fm_ext_ack_only_warn_secs` in `bin/fm-ext-lib.sh`](../bin/fm-ext-lib.sh) owns the warning threshold setting and default.
 
+`state/.ext-presented/<slug>` records the last drain presentation by its mtime and is cleared when `bin/fm-ext-inbox.sh` removes the request.
+The [OMP main-fallback boundary contract](omp-supervision-branch.md#main-fallback-re-entry-coalescing) owns how that evidence governs suppressed request closes.
+
+A request can still outlive every close that reached main, for example when a long main turn keeps the queue from draining.
+Each watcher cycle then re-surfaces one request that has waited past `FM_EXT_OVERDUE_SECS` (default 300) as `check: ext-request-overdue <slug> age=<n>m`, appends its own durable row keyed `ext-request-overdue:<slug>`, and rings.
+`FM_EXT_OVERDUE_REMIND_SECS` (default 600) bounds the repeats for one request, `state/.ext-overdue.<slug>` records the last eligibility check, and the next watcher cycle prunes it after the record is removed, stopping reminders once ext-respond answers or dismisses the request.
+A request whose only reply is an `ack` stays quiet while a task linked to it is still live - `ext_request_slug` in that task's `state/<task>.meta` with a current `bin/fm-crew-state.sh` verdict of `working`, `parked`, or `paused` - and earns the same reminder once that task is not.
+Task reconciliation runs only after the age and cadence gates, with the cadence window claimed before checking liveness.
+[`bin/fm-ext-overdue-lib.sh`](../bin/fm-ext-overdue-lib.sh) owns which request is due and the cadence.
+
 `state/ext-watch.check.sh` is a byte-static identity shim for `bin/fm-ext-poll.sh`; `fm_ext_watch_shim_converge` in `bin/fm-ext-lib.sh` owns arming and removing it.
 The session-start bootstrap reports its verdict as an `EXT:` line, and every watcher cycle converges it again, so a bridge switched on or off mid-session takes effect within one cycle without a restart.
 The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script.
@@ -1319,6 +1329,8 @@ FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context re
 FM_EXT_HISTORY_MAX_CHARS=8000   # characters of message text kept in a request's thread-history sidecar; the replied-to message and Firstmate's latest recognised post are kept past it
 FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes; the delivery pass runs on its own thread, independent of the decision sweeps
 FM_EXT_PRUNE_INTERVAL_SECS=3600   # minimum seconds between retention prunes in the inbox poll; the poll claims offers before pruning, so this only bounds prune frequency
+FM_EXT_OVERDUE_SECS=300   # seconds an unanswered local-bridge request may sit before the watcher surfaces one `ext-request-overdue <slug> age=<n>m` wake for it; non-numeric values use 300; values below 60 (including negatives) clamp to 60, clamping warns once per setting per watcher process on stderr (docs/configuration.md "Local Communication Officer bridge")
+FM_EXT_OVERDUE_REMIND_SECS=600   # seconds between repeats of that reminder for one request; non-numeric values use 600; values below 60 (including negatives) clamp to 60 and never below FM_EXT_OVERDUE_SECS, clamping warns once per setting per watcher process on stderr
 FM_EXT_WAITING_PIN_MIN_SECS=60   # minimum seconds between waiting-pin snapshot publications; see bin/fm-ext-waiting-pin.sh --help for bypass and skip behavior
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace

@@ -1140,9 +1140,10 @@ PY
   assert_present "$inflight" "abort-order probe must start with a claimed inflight"
   order="$home/abort-order.log"
   (
-    # shellcheck source=bin/fm-ext-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-ext-lib.sh"
     eval "$(declare -f fm_ext_private_artifact_remove | sed '1s/fm_ext_private_artifact_remove/_orig_remove/')"
+    # shellcheck disable=SC2329 # Invoked by the imported outbox abort function.
     fm_ext_private_artifact_remove() {
       printf '%s\n' "$2" >> "$order"
       _orig_remove "$@"
@@ -1277,8 +1278,9 @@ test_23_stale_inflight_ttl_and_dead_pid_steal() {
   lockbase="probe.answer.1.inflight.lock"
   mkdir "$home/state/ext-outbox/$lockbase"
   (
-    # shellcheck source=bin/fm-ext-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-ext-lib.sh"
+    # shellcheck disable=SC2034 # Read by the imported inflight TTL helper.
     FM_EXT_INFLIGHT_TTL_SECS=0
     FM_EXT_NOW_OVERRIDE=$(fm_ext_file_mtime "$home/state/ext-outbox/$lockbase") \
       || fail "could not read the steal-lock fixture mtime"
@@ -2405,6 +2407,243 @@ test_42_intake_records_origin_and_bounded_reply_context() {
   [ "$(jq -r '.origin' "$home/state/ext-context/$slug.json")" = slash ] \
     || fail "the destination context must carry the origin for the poster"
   pass "42 intake records origin and a bounded reply context"
+}
+
+# --- 56. overdue unanswered requests earn one bounded reminder --------------
+#
+# A request whose check close was coalesced behind a handling episode can sit
+# unanswered with nobody draining. The watcher's overdue scan re-surfaces it:
+# one reminder per cadence window, nothing at all once ext-respond answers or
+# dismisses the record, and nothing before the age threshold.
+
+backdate_request() {  # <home> <slug> <age-secs>
+  local file=$1/state/ext-inbox/$2.json tmp
+  tmp="$file.tmp"
+  jq --argjson at "$(($(date +%s) - $3))" '.recorded_at = $at' "$file" > "$tmp"
+  chmod 600 "$tmp"
+  mv -f -- "$tmp" "$file"
+}
+
+overdue_ring() {  # <home>
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+  home_env "$1" bash -c '. "$1/bin/fm-ext-overdue-lib.sh"; fm_ext_overdue_ring "$2" "$3"' \
+    _ "$ROOT" "$1" "$1/state"
+}
+
+test_56_overdue_request_reminds_once_per_cadence_until_removed() {
+  local home slug out
+  home="$TMP_ROOT/c56"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "still waiting on you" 560000000000000001)
+  out=$(overdue_ring "$home")
+  [ -z "$out" ] || fail "a fresh request must not be surfaced as overdue"
+  backdate_request "$home" "$slug" 600
+  out=$(overdue_ring "$home")
+  assert_contains "$out" "ext-request-overdue $slug age=" "an old unanswered request must surface once"
+  out=$(overdue_ring "$home")
+  [ -z "$out" ] || fail "a second scan inside the cadence window must stay silent: $out"
+  # Removal is the stop signal: ext-respond answered or dismissed the request.
+  rm -f -- "$home/state/ext-inbox/$slug.json"
+  out=$(overdue_ring "$home")
+  [ -z "$out" ] || fail "an answered request must not be surfaced: $out"
+  assert_absent "$home/state/.ext-overdue.$slug" "an answered request must drop its cadence marker"
+  pass "56 an overdue request is reminded once per cadence window and stops when removed"
+}
+
+# --- 57. an acknowledged request stays quiet while its task is live ---------
+
+link_meta() {  # <home> <task> <slug>
+  printf 'kind=ship\next_request_slug=%s\n' "$3" > "$1/state/$2.meta"
+  printf 'ext_request_slug=%s\n' "$3" >> "$1/state/$2.meta"
+}
+
+test_57_ack_only_request_waits_for_a_live_linked_task() {
+  local home slug out verdict
+  home="$TMP_ROOT/c57"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "run the eval please" 570000000000000001)
+  ack_receipt "$home" "$slug"
+  backdate_request "$home" "$slug" 600
+  link_meta "$home" task-live "$slug"
+  printf 'working: running the eval\n' > "$home/state/task-live.status"
+  cat > "$home/crew-state" <<'SH'
+#!/usr/bin/env bash
+printf 'read\n' >> "$FM_HOME/reconciliations"
+cat "$FM_HOME/verdict"
+SH
+  chmod +x "$home/crew-state"
+  export FM_CREW_STATE_BIN="$home/crew-state"
+  for verdict in working parked paused; do
+    rm -f "$home/state/.ext-overdue.$slug"
+    printf 'state: %s · source: pane · current\n' "$verdict" > "$home/verdict"
+    out=$(overdue_ring "$home")
+    [ -z "$out" ] || fail "an acknowledged request with a $verdict task must stay quiet: $out"
+  done
+  : > "$home/reconciliations"
+  printf 'state: failed · source: none · crashed\n' > "$home/verdict"
+  out=$(overdue_ring "$home")
+  [ -z "$out" ] || fail "a live-task check must claim the cadence window"
+  [ ! -s "$home/reconciliations" ] || fail "reconciliation repeated within the cadence window"
+  for verdict in failed unknown "done" blocked unreadable; do
+    rm -f "$home/state/.ext-overdue.$slug"
+    [ "$verdict" != unknown ] || rm -f "$home/state/task-live.status"
+    printf 'state: %s · source: none · unavailable\n' "$verdict" > "$home/verdict"
+    out=$(overdue_ring "$home")
+    assert_contains "$out" "ext-request-overdue $slug age=" "a $verdict linked task must not suppress the reminder"
+  done
+  rm -f "$home/state/.ext-overdue.$slug" "$home/state/task-live.meta"
+  out=$(overdue_ring "$home")
+  assert_contains "$out" "ext-request-overdue $slug age=" "an ack with no linked task must remind"
+  unset FM_CREW_STATE_BIN
+  pass "57 only reconciled live tasks suppress reminders within a bounded cadence"
+}
+
+test_58_check_payloads_preserve_every_pending_request() {
+  local home first second payload since
+  home="$TMP_ROOT/c58"
+  setup_home "$home"
+  first=$(intake_ok "$home" "first request" 580000000000000001)
+  second=$(intake_ok "$home" "second request" 580000000000000002)
+  since=$(date +%s)
+  for payload in "ext-request $second" \
+    "ext-request $first; ext-request $second; +2 more (see EXT REQUESTS AWAITING ANSWER in the drain)" \
+    "/home/example/state/poll.check.sh: ext-request $first; ext-request-overdue $second age=10m"; do
+    # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+    home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "an unanswered unpresented request must stay pending"
+  done
+  rm -f "$home/state/ext-inbox/$first.json"
+  payload="ext-request $first; ext-request $second; ext-request-overdue $second age=10m"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+  home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "pending must win over an answered sibling"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+  home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_note_presented "$2"' _ "$ROOT" "$second"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+  if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
+    fail "all answered or presented requests must finish the close"
+  fi
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+  if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "pr merged" 0' _ "$ROOT"; then
+    fail "unrelated checks must keep the covered path"
+  fi
+  pass "58 real watcher payloads preserve any unanswered unpresented request"
+}
+
+test_59_overdue_settings_cannot_disable_throttling() {
+  local home slug out setting
+  home="$TMP_ROOT/c59-zero"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "bounded zero settings" 590000000000000001)
+  backdate_request "$home" "$slug" 30
+  home_env "$home" env FM_EXT_OVERDUE_SECS=0 FM_EXT_OVERDUE_REMIND_SECS=0 bash -s -- "$ROOT" "$home" "$slug" <<'SH'
+. "$1/bin/fm-ext-overdue-lib.sh"
+home=$2 slug=$3
+{
+  fm_ext_overdue_ring "$home" "$home/state" > "$home/young"
+  python3 - "$home/state/ext-inbox/$slug.json" <<'PYTEST'
+import json, sys, time
+path = sys.argv[1]
+with open(path) as f:
+    record = json.load(f)
+record['recorded_at'] = int(time.time()) - 120
+with open(path, 'w') as f:
+    json.dump(record, f)
+PYTEST
+  fm_ext_overdue_ring "$home" "$home/state" > "$home/old"
+  fm_ext_overdue_ring "$home" "$home/state" > "$home/repeat"
+  for scan in 1 2; do
+    fm_ext_overdue_remind_secs > /dev/null
+    payload=$(fm_ext_overdue_ring "$home" "$home/state")
+    printf '%s' "$payload" > "$home/watcher-$scan"
+  done
+  fm_ext_overdue_secs
+  fm_ext_overdue_remind_secs
+  fm_ext_overdue_secs
+  fm_ext_overdue_remind_secs
+} > "$home/values" 2> "$home/warnings"
+SH
+  [ ! -s "$home/young" ] || fail "zero threshold must still wait at least 60 seconds"
+  assert_contains "$(cat "$home/old")" "ext-request-overdue $slug age=" "zero settings must remind after the minimum age"
+  [ ! -s "$home/repeat" ] || fail "zero settings must never ring back to back"
+  [ ! -s "$home/watcher-1" ] && [ ! -s "$home/watcher-2" ] || fail "watcher-style command substitution must retain the cadence"
+  [ "$(cat "$home/values")" = "$(printf '60\n60\n60\n60')" ] || fail "validators must print only effective numeric values"
+  for setting in FM_EXT_OVERDUE_SECS FM_EXT_OVERDUE_REMIND_SECS; do
+    [ "$(grep -c "warning: $setting " "$home/warnings")" -eq 1 ] || fail "$setting must warn exactly once per process"
+  done
+  home="$TMP_ROOT/c59-negative"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "negative settings use the floor" 590000000000000002)
+  backdate_request "$home" "$slug" 30
+  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home" 2>> "$home/negative-warnings")
+  [ -z "$out" ] || fail "negative threshold must wait for the 60 second floor"
+  backdate_request "$home" "$slug" 120
+  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home" 2>> "$home/negative-warnings")
+  assert_contains "$out" "ext-request-overdue $slug age=" "negative threshold must fire past its floor"
+  "$PYTHON_BIN" - "$home/state/.ext-overdue.$slug" <<'PYTEST'
+import os, sys, time
+at = time.time() - 30
+os.utime(sys.argv[1], (at, at))
+PYTEST
+  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home" 2>> "$home/negative-warnings")
+  [ -z "$out" ] || fail "negative cadence must retain the 60 second floor"
+  "$PYTHON_BIN" - "$home/state/.ext-overdue.$slug" <<'PYTEST'
+import os, sys, time
+at = time.time() - 90
+os.utime(sys.argv[1], (at, at))
+PYTEST
+  out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home" 2>> "$home/negative-warnings")
+  assert_contains "$out" "ext-request-overdue $slug age=" "negative cadence must remind after its floor window"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+  home_env "$home" env FM_EXT_OVERDUE_SECS=300 FM_EXT_OVERDUE_REMIND_SECS=0 bash -c '
+    . "$1/bin/fm-ext-lib.sh"
+    fm_ext_overdue_remind_secs
+    fm_ext_overdue_remind_secs
+  ' _ "$ROOT" > "$home/clamped" 2> "$home/warnings"
+  [ "$(cat "$home/clamped")" = "$(printf '300\n300')" ] || fail "reminder minimum must never fall below the overdue threshold"
+  [ "$(grep -c 'warning: FM_EXT_OVERDUE_REMIND_SECS ' "$home/warnings")" -eq 1 ] || fail "threshold clamp must warn once"
+  pass "59 zero and negative settings preserve bounded reminder timing"
+}
+
+test_60_truncated_ext_closes_consult_the_entire_inbox() {
+  local home first second omitted payload since
+  home="$TMP_ROOT/c60"
+  setup_home "$home"
+  first=$(intake_ok "$home" "retained first" 600000000000000001)
+  second=$(intake_ok "$home" "retained second" 600000000000000002)
+  omitted=$(intake_ok "$home" "omitted request" 600000000000000003)
+  since=$(date +%s)
+  rm -f "$home/state/ext-inbox/$first.json" "$home/state/ext-inbox/$second.json"
+  for payload in "ext-request $first; ext-request $second; +1 more (see EXT REQUESTS AWAITING ANSWER in the drain)" \
+    "$home/state/poll.check.sh: ext-request $first" \
+    "ext-request:$first" "ext-request-overdue:$first" \
+    "ext-request-overdue $first age=10m"; do
+    # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+    home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "an omitted unpresented request must release a truncated close"
+  done
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+  if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "poll.check.sh: PR merged" "$2"' _ "$ROOT" "$since"; then
+    fail "a waiting ext request must not release an unrelated check"
+  fi
+  for payload in "state/fm-ext-request-redeliver.check.sh: merged" \
+    "state/ext-request.check.sh: merged" "other-ext-request $first" \
+    "ext-request-not-an-event $first"; do
+    # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+    if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
+      fail "request text in a script path or another token must keep the covered path"
+    fi
+  done
+  payload="ext-request $first"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+  home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_note_presented "$2"' _ "$ROOT" "$omitted"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+  if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
+    fail "an inbox whose remaining request was presented must be covered"
+  fi
+  rm -f "$home/state/ext-inbox/$omitted.json"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+  if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
+    fail "an empty inbox must be covered"
+  fi
+  pass "60 truncated ext closes release omitted requests without releasing unrelated checks"
 }
 
 test_1_allowlisted_intake_and_non_fm
@@ -3727,4 +3966,12 @@ test_52_thread_record_writes_are_serialized
 test_53_delivery_receipt_carries_queue_times
 test_54_pending_skips_terminal_markers
 test_55_retention_prune_completes_without_starving_the_claim
+test_56_overdue_request_reminds_once_per_cadence_until_removed
+test_57_ack_only_request_waits_for_a_live_linked_task
 echo "all fm-ext-bridge tests passed"
+
+test_58_check_payloads_preserve_every_pending_request
+
+test_59_overdue_settings_cannot_disable_throttling
+
+test_60_truncated_ext_closes_consult_the_entire_inbox

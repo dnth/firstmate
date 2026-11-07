@@ -31,7 +31,11 @@
 // turn-forcing send, bounded to one forced delivery per interval, so an idle
 // or streaming main that never starts a turn for the hidden send is not deaf
 // for the rest of the session. Decision-owned wakes bypass coalescing and the
-// bound entirely. A still-unconsumed record rides the replacement handoff.
+// bound entirely. A check close is never finished as merely covered at the
+// boundary that closes its episode while the adapter's sink predicate still
+// reports it pending: it is released for delivery instead, because an
+// acknowledgement can retire the row that would otherwise have presented it. A
+// still-unconsumed record rides the replacement handoff.
 // Consuming a wake also releases the successor grant it spent, so a row that
 // lands while that wake's own turn runs earns the next boundary's successor
 // instead of waiting for a turn end that finds the queue empty. Every
@@ -82,6 +86,10 @@ type PendingActionableClose = {
   delivered?: true;
   fallbackOnly?: true;
   branchOffered?: true;
+  // Set when this close was suppressed behind an open episode. A check close
+  // states a live condition, so the episode that covered it may never have
+  // presented it; this timestamp is what the sink predicate ages against.
+  suppressedAtMs?: number;
 };
 
 type UnconsumedWake = {
@@ -212,6 +220,15 @@ export type PrimaryWatchCoreOptions = {
   // A decision-owned main wake is never coalesced behind an in-flight fallback
   // wake or an open episode; only meaningful with coalesceMainFallbackWakes.
   isDecisionOwnedWake?: (message: string) => boolean;
+  // A check close states a live condition instead of a one-shot event. When an
+  // acknowledged episode would otherwise finish one as "covered", this decides
+  // whether it still waits on main: <payload> is the close text after "check: "
+  // and <sinceMs> is when it was suppressed. Returning true hands the close back
+  // to the ordinary delivery path once the episode closes, so a request cannot
+  // be lost to the drain that covered it. Adapters omit it to keep every close
+  // on the covered path (docs/omp-supervision-branch.md "Main-fallback re-entry
+  // coalescing").
+  checkStillPending?: (payload: string, sinceMs: number) => boolean;
 };
 
 export type PrimaryWatchCore = {
@@ -409,6 +426,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     offerWakeToBranch,
     coalesceMainFallbackWakes = false,
     isDecisionOwnedWake,
+    checkStillPending,
   } = options;
   const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
   const handoffDir = `${state}/extensions/${runtime}-primary-watch`;
@@ -662,6 +680,20 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   }
 
   const closeReason = (message: string): string => message.split(/\r?\n/, 1)[0] ?? "";
+
+  // True while a close suppressed behind the acknowledged episode still waits
+  // on main: a check its sink has not handled since the suppression. An
+  // adapter without a sink predicate keeps every close on the covered path.
+  const checkWaitsOnMain = (pending: PendingActionableClose): boolean => {
+    if (!checkStillPending || !/^check:/.test(pending.message)) return false;
+    const payload = pending.message.slice("check:".length).trim();
+    if (!payload) return false;
+    try {
+      return checkStillPending(payload, pending.suppressedAtMs ?? 0);
+    } catch {
+      return false;
+    }
+  };
 
   function lockOwnership(): LockOwnership {
     let lockPid = "";
@@ -1020,6 +1052,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     }
     if (coalesceMainFallbackWakes && owner.mainFallbackWakeInFlight) {
       owner.mainFallbackEpisode = true;
+      pending.suppressedAtMs ??= Date.now();
       recordWakeEvent(owner, "suppressed", [
         ["close", pending.token],
         ["behind", "in-flight"],
@@ -1028,6 +1061,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       return "suppressed";
     }
     if (coalesceMainFallbackWakes && !forceTurn && owner.mainFallbackEpisode && !owner.mainFallbackSuccessor) {
+      pending.suppressedAtMs ??= Date.now();
       recordWakeEvent(owner, "suppressed", [
         ["close", pending.token],
         ["behind", "episode"],
@@ -1786,7 +1820,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // While an episode is open, unread main-owned rows mean the acknowledged
   // drain left work behind - grant exactly one successor injection. A fully
   // drained queue retires the episode and finishes every close it covered, so
-  // no redundant notification follows an acknowledgement that consumed them.
+  // no redundant notification follows an acknowledgement that consumed them,
+  // except a check whose sink still reports it pending: that one is released
+  // and delivered, because the drain may have retired its row unread.
   // The in-flight marker is bounded here too: if every row pending at send
   // time has been drained, or the marker has outlived a full turn boundary
   // (two consecutive turn ends without consumption), the wake is treated as
@@ -1865,11 +1901,13 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         // the run loop delivers exactly it and re-suppresses the rest. A
         // just-cleared stale marker skips the baseline early return above:
         // its notification was never read, so the rows it covered still earn
-        // one successor injection.
-        const next = owner.pendingActionables
+        // one successor injection. A check still waiting on main outranks that
+        // newest-first order, because a one-shot event stays durable in the
+        // queue while a live condition can be lost with the episode.
+        const candidates = owner.pendingActionables
           .filter((pending) =>
-            !pending.delivered && !owner.unconsumedWakes.has(pending.token) && !owner.branchInFlight.has(pending.token))
-          .pop();
+            !pending.delivered && !owner.unconsumedWakes.has(pending.token) && !owner.branchInFlight.has(pending.token));
+        const next = candidates.find(checkWaitsOnMain) ?? candidates.pop();
         if (next && !owner.mainFallbackWakeInFlight && !owner.mainFallbackSuccessorGranted) {
           owner.mainFallbackSuccessor = true;
           owner.mainFallbackSuccessorGranted = true;
@@ -1913,9 +1951,24 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       owner.mainFallbackBaselineRows = null;
       owner.mainFallbackInFlightRows = null;
       owner.mainFallbackInFlightTurnEnds = 0;
+      let releasedCheck = false;
       for (const pending of owner.pendingActionables.filter(
         (item) => !item.delivered && owner.episodeCoalesced.has(item.token),
       )) {
+        if (checkWaitsOnMain(pending)) {
+          // A check names a live condition, so the acknowledged episode that
+          // just closed never presented it: release it back to the ordinary
+          // delivery path instead of finishing it as covered, or a request
+          // whose row an acknowledgement consumed would be lost here. The
+          // delivery run started after this loop delivers one; the rest are
+          // re-coalesced behind the episode that delivery opens, so each
+          // remaining check still costs one boundary rather than a burst of
+          // injections.
+          owner.episodeCoalesced.delete(pending.token);
+          recordWakeEvent(owner, "released", [["close", pending.token], ["by", "queue-drained"]]);
+          releasedCheck = true;
+          continue;
+        }
         pending.delivered = true;
         owner.episodeCoalesced.delete(pending.token);
         recordWakeEvent(owner, "covered", [["close", pending.token], ["by", "queue-drained"]]);
@@ -1926,6 +1979,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           schedulePendingCleanup(owner);
         }
       }
+      if (releasedCheck) void processPendingActionables(owner);
     } finally {
       persistEpisodeState(owner);
     }
