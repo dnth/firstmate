@@ -2020,12 +2020,12 @@ fm_wake_status_key_map() {  # <queue-key>
     *.status)
       id=${key%.status}
       ;;
-    *.turn-ended.*)
-      id=${key%.turn-ended.*}
-      FM_WAKE_STATUS_HISTORICAL=true
-      ;;
     *.turn-ended)
       id=${key%.turn-ended}
+      FM_WAKE_STATUS_HISTORICAL=true
+      ;;
+    *.turn-ended.*)
+      id=${key%.turn-ended.*}
       FM_WAKE_STATUS_HISTORICAL=true
       ;;
     *)

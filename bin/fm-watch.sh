@@ -3,18 +3,20 @@
 # Firstmate watcher.
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
-# The no-verb signal and stale path is absorb-only-when-provably-working: a wake
-# is absorbed only when the crew shows POSITIVE evidence it is still working (an
-# actively-running no-mistakes step, or a backend busy signal), and surfaced
-# otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# The no-verb signal and stale path is absorb-only-on-positive-evidence: a wake
+# is absorbed only when the crew shows it is still working through an actively
+# running no-mistakes step or a backend busy signal. A home that opts in with
+# config/turnend-churn-absorb lets a bare turn-end also use bounded pane churn
+# since the previous poll. Every other no-verb wake surfaces, so a crew
+# that finishes (or stops and waits) is never silently swallowed. A declared
+# external-wait pause is the separate idle absorb case and re-surfaces only on its
+# long bounded cadence, although its initial no-verb status signal still surfaces
+# in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
-#                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#                          has a captain-relevant verb OR a no-verb signal lacks
+#                          positive execution evidence, unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -47,12 +49,15 @@
 #                          or the spawn record before any
 #                          turn completes). Past that bound, a declared external
 #                          wait or verified captain-held transfer uses the long
-#                          pause recheck cadence; every other pane goes through
-#                          the same wedge timer and surfaces with the identical
-#                          "stale: ..." reason, escalation count, and
-#                          demand-deep-inspection marker, for human inspection
-#                          only - never an automatic interrupt, signal, or restart
-#                          of the worker or its tool process.
+#                          pause recheck cadence, and, in a home that armed
+#                          config/wedge-defer-parked-gate, so does a validation
+#                          gate of the crew's own awaiting the supervisor's
+#                          still-unanswered decision for that run; every other
+#                          pane goes through the same wedge timer and surfaces
+#                          with the identical "stale: ..." reason, escalation
+#                          count, and demand-deep-inspection marker, for human
+#                          inspection only - never an automatic interrupt,
+#                          signal, or restart of the worker or its tool process.
 #                          The separate steering-inbox path invokes
 #                          fm-stall-recovery.sh before publishing its stale wake;
 #                          that helper owns its custody-checked, bounded relaunch
@@ -243,6 +248,9 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
+                                      # bare turn-ends may be deferred on pane-churn
+                                      # evidence alone (signal_turnend_panes_churned)
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only). OMP, like every other harness
@@ -253,16 +261,17 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
 # and ABSORBS the benign majority - it advances the suppression marker, logs to a
 # debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
-# / stale path is absorb-only-when-provably-working: such a wake is absorbed ONLY
-# while the crew shows positive evidence it is still working (an actively-running
-# no-mistakes step, or a busy pane, via crew_is_provably_working over
-# fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
-# busy pane is SURFACED, so a finish reported only through interactive pane menus
-# (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
-# signal, a no-verb signal whose crew is not provably working, any check, a stale
-# pane whose crew is not provably working, a provably-working stale past the
-# threshold, or anything unknown) is written to the durable queue and exits, which
-# is what wakes the LLM through the background-task completion. The same classifier
+# / stale path is absorb-only-on-positive-evidence. The shared proof is an actively
+# running no-mistakes step or a busy pane via crew_is_provably_working over
+# fm-crew-state.sh; where config/turnend-churn-absorb opts in, a bare turn-end alone
+# may also use bounded pane churn since the previous poll.
+# Every other crew that stopped its turn is SURFACED, so a finish reported
+# only through interactive pane menus (no done: status) is never swallowed. An
+# ACTIONABLE wake (a captain-relevant signal, a no-verb signal without either
+# eligible proof, any check, a stale pane whose crew is not provably working, a
+# provably-working stale past the threshold, or anything unknown) is written to
+# the durable queue and exits. That wakes the LLM through the background-task
+# completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
@@ -551,6 +560,207 @@ inbox_steer_check() {  # <window> <task>
       wake "$reason"
       ;;
   esac
+}
+
+# 0 (benign/absorb) if EVERY task in a no-verb "signal:" wake has positive work
+# evidence; 1 otherwise. Each task may satisfy the authoritative working proof,
+# or an eligible bare turn-end may use the opt-in pane-churn proof below.
+#
+# OFF unless the home creates config/turnend-churn-absorb. The first two proofs
+# read a verdict the harness itself vouches for; this one infers execution from
+# rendered bytes, which is weaker, so widening the absorb is a home's choice to
+# make rather than a default every fleet inherits. With the flag absent this
+# delegates to the unchanged all-tasks authoritative proof.
+#
+# It exists because the first two are unreachable for a harness whose semantic
+# busy state has no verified source: bin/fm-crew-state.sh can only answer unknown
+# for such an adapter, crew_is_provably_working is therefore never satisfiable,
+# and every worker turn boundary surfaced a wake with nothing to act on - the cost
+# scaling with the number of workers in flight. Pane churn needs no harness
+# cooperation, so it restores the absorb branch for those adapters without
+# fabricating a busy verdict any adapter has not earned.
+#
+# The evidence is the one the pane-staleness backbone below already trusts for
+# liveness: this compares a fresh capture against the .hash- marker that backbone
+# recorded on the previous poll, which is why the derivation lives here with the
+# marker format rather than in the shared classifier. Absorbing here DEFERS a wake
+# rather than swallowing it, and the deferral is BOUNDED: a task's turn-ends may
+# ride churn evidence for at most FM_TURNEND_CHURN_ABSORB_SECS, tracked per window
+# in .churn-since-, after which the wake surfaces and the window restarts. The
+# bound is what keeps churn from muting supervision outright. A pane that renders
+# continuously - a clock, a spinner, a shell heartbeat, a harness that leaves a
+# background renderer alive after its agent yields - never presents the two
+# identical consecutive hashes the staleness backbone needs either, so without the
+# bound a worker that had genuinely stopped behind such a renderer would be
+# deferred here forever with no fallback path left to surface it. Churn and
+# staleness read the same pane, so neither can be the other's only backstop.
+# Within the bound, an ordinary crew that stops renders nothing more, its pane
+# hash stops moving, and the staleness backbone surfaces it within a couple of
+# polls; any captain-relevant status verb still surfaces immediately through
+# signal_files_actionable. That is why this widens the proof instead of
+# bounding the wake rate, which would have suppressed genuinely stopped workers.
+#
+# Every negative outcome returns 1, so absence of evidence surfaces exactly as
+# before: any batch that references a secondmate, an unresolvable task, a task
+# with no uniquely attributable recorded endpoint, no previous hash to compare
+# against (nothing has been polled yet), a capture that fails or comes back empty,
+# an exhausted deferral bound, and of course an unchanged pane. Any .status file
+# also returns 1: an authored append is content the
+# supervisor may need to read, so only the mechanical turn-end marker gets the
+# fallback.
+#
+# NOT a pure read: one bounded pane capture per referenced task that lacks
+# authoritative proof. Once EVERY task passes, each churn-proven pane's prior
+# .stale- classification and wedge-escalation count are cleared because churn
+# begins a new quiet interval; retaining either would make the new interval
+# inherit the prior one. Reached only for a non-afk, no-captain-verb signal, so
+# it never runs on the ordinary per-wake path.
+signal_turnend_panes_churned() {  # <file> ...
+  [ -e "$CONFIG/turnend-churn-absorb" ] || return 1
+  local f base task meta kind w key backend label terminal prev now since now_s absorb_secs marker age
+  local rec_task task_index i j count hash_file hash_bytes created
+  local max_absorb_secs=9223372036854775807
+  local -a signal_tasks=() snapshot_tasks=() snapshot_kinds=()
+  local -a snapshot_windows=() snapshot_keys=() snapshot_backends=() snapshot_labels=()
+  local -a signal_indexes=() churn_indexes=() churned_keys=() missing_keys=() created_keys=()
+  [ "$#" -gt 0 ] || return 1
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status)      return 1 ;;
+      # Both marker generations are eligible: bare .turn-ended (legacy) and the
+      # per-incarnation .turn-ended.<spawn_gen> every publisher writes today.
+      # Missing the latter would make the whole proof unreachable in production.
+      *.turn-ended)   task=${base%.turn-ended} ;;
+      *.turn-ended.*) task=${base%.turn-ended.*} ;;
+      *)              return 1 ;;
+    esac
+    [ -n "$task" ] || return 1
+    task_index=-1
+    for ((i = 0; i < ${#signal_tasks[@]}; i++)); do
+      [ "${signal_tasks[$i]}" = "$task" ] && { task_index=$i; break; }
+    done
+    if [ "$task_index" -lt 0 ]; then
+      signal_tasks+=("$task")
+    fi
+  done
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    rec_task=${meta##*/}
+    rec_task=${rec_task%.meta}
+    kind=$(fm_meta_get "$meta" kind)
+    backend=$(fm_backend_of_meta "$meta")
+    if [ "$backend" = orca ]; then
+      terminal=$(fm_meta_get "$meta" terminal)
+      w=${terminal:-$(fm_meta_get "$meta" window)}
+    else
+      w=$(fm_meta_get "$meta" window)
+    fi
+    key=
+    [ -n "$w" ] && key=$(window_key "$w")
+    label="fm-$rec_task"
+    snapshot_tasks+=("$rec_task")
+    snapshot_kinds+=("$kind")
+    snapshot_windows+=("$w")
+    snapshot_keys+=("$key")
+    snapshot_backends+=("$backend")
+    snapshot_labels+=("$label")
+  done
+  # These linear lookups deliberately support stock macOS Bash 3.2.57, enforced
+  # by macos-stock-bash, and this repository uses no associative arrays in bin/
+  # or tests/. A batch is normally one to three tasks and captures dominate its
+  # cost; indexed lookup is the upgrade path if coalesced batches grow large.
+  for task in "${signal_tasks[@]}"; do
+    task_index=-1
+    for ((i = 0; i < ${#snapshot_tasks[@]}; i++)); do
+      [ "${snapshot_tasks[$i]}" = "$task" ] && { task_index=$i; break; }
+    done
+    [ "$task_index" -ge 0 ] || return 1
+    w=${snapshot_windows[$task_index]}
+    key=${snapshot_keys[$task_index]}
+    [ -n "$w" ] && [ -n "$key" ] || return 1
+    count=0
+    for ((j = 0; j < ${#snapshot_keys[@]}; j++)); do
+      [ "${snapshot_keys[$j]}" = "$key" ] && count=$((count + 1))
+    done
+    [ "$count" -eq 1 ] || return 1
+    signal_indexes+=("$task_index")
+  done
+  for task_index in "${signal_indexes[@]}"; do
+    [ "${snapshot_kinds[$task_index]}" != secondmate ] || return 1
+  done
+  for ((i = 0; i < ${#signal_tasks[@]}; i++)); do
+    task=${signal_tasks[$i]}
+    crew_is_provably_working "$task" && continue
+    task_index=${signal_indexes[$i]}
+    churn_indexes+=("$task_index")
+  done
+  [ "${#churn_indexes[@]}" -gt 0 ] || return 0
+  [[ $TURNEND_CHURN_ABSORB_SECS =~ ^[1-9][0-9]*$ ]] || return 1
+  if [ "${#TURNEND_CHURN_ABSORB_SECS}" -gt "${#max_absorb_secs}" ] \
+    || { [ "${#TURNEND_CHURN_ABSORB_SECS}" -eq "${#max_absorb_secs}" ] \
+      && [[ $TURNEND_CHURN_ABSORB_SECS -gt $max_absorb_secs ]]; }; then
+    return 1
+  fi
+  absorb_secs=$((10#$TURNEND_CHURN_ABSORB_SECS))
+  for task_index in "${churn_indexes[@]}"; do
+    w=${snapshot_windows[$task_index]}
+    key=${snapshot_keys[$task_index]}
+    backend=${snapshot_backends[$task_index]}
+    label=${snapshot_labels[$task_index]}
+    hash_file="$STATE/.hash-$key"
+    hash_bytes=$(LC_ALL=C wc -c 2>/dev/null < "$hash_file") || return 1
+    hash_bytes=${hash_bytes//[[:space:]]/}
+    [ "$hash_bytes" = 32 ] || return 1
+    prev=$(cat "$hash_file" 2>/dev/null) || return 1
+    [[ $prev =~ ^[0-9a-f]{32}$ ]] || return 1
+    now=$(fm_backend_capture "$backend" "$w" 40 "$label" 2>/dev/null) || return 1
+    [ -n "$now" ] || return 1
+    [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1
+    churned_keys+=("$key")
+  done
+  # Enforce the deferral bound BEFORE any .stale- state is touched, so a wake that
+  # surfaces here leaves the staleness backbone's own classification alone.
+  now_s=$(date +%s)
+  for key in "${churned_keys[@]}"; do
+    marker="$STATE/.churn-since-$key"
+    if [ ! -e "$marker" ]; then
+      [ ! -L "$marker" ] || return 1
+      missing_keys+=("$key")
+      continue
+    fi
+    since=$(cat "$marker" 2>/dev/null) || return 1
+    [[ $since =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+    if [ "${#since}" -gt "${#now_s}" ] \
+      || { [ "${#since}" -eq "${#now_s}" ] && [[ $since > $now_s ]]; }; then
+      return 1
+    fi
+    age=$((10#$now_s - 10#$since))
+    if [ "$age" -ge "$absorb_secs" ]; then
+      rm -f "$marker"
+      return 1
+    fi
+  done
+  for key in "${missing_keys[@]}"; do
+    marker="$STATE/.churn-since-$key"
+    if (set -C; printf '%s' "$now_s" > "$marker") 2>/dev/null; then
+      created_keys+=("$key")
+      continue
+    fi
+    for created in "${created_keys[@]}"; do
+      rm -f "$STATE/.churn-since-$created"
+    done
+    return 1
+  done
+  for key in "${churned_keys[@]}"; do
+    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key"; then
+      for created in "${created_keys[@]}"; do
+        rm -f "$STATE/.churn-since-$created"
+      done
+      return 1
+    fi
+  done
+  return 0
 }
 
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
@@ -962,12 +1172,15 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # declared-pause absorb and the worktree-write deferral so the two cadences cannot
 # drift apart; each caller owns its own marker and reason.
 # Returns without waking while either the absorb or the throttle is inside the
-# window; wake() itself exits the cycle, exactly as it does inline.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope]
-  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-}
+# window; wake() itself exits the cycle, exactly as it does inline. [min-age]
+# lowers the first re-surface threshold for a wait with no written start (a
+# parked gate), whose first threshold should recheck once rather than wait out a
+# cadence that has no honest starting point; the throttle still bounds repeats.
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age]
+  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS}
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
-    [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
+    [ "$age" -ge "$min_age" ] || return 0
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
@@ -1009,22 +1222,225 @@ task_captain_call_open() {  # <task>
     >/dev/null 2>&1
 }
 
-# Defer a wedge while the worker's own latest decision or blocker remains
-# open, or while its task is held for the captain. Both use the bounded pause
-# recheck; neither advances or resets the escalation count.
-wedge_defer_wait() {  # <window> <since-file> <label> <idle-age> <kind> <action>
-  local win=$1 since_file=$2 label=$3 age=$4 kind=$5 action=$6 key marker agefile wait_age
+# One wait record, carrying every field a recheck needs to be correct. Emitting
+# them together is the point: a recheck that names the wrong human, or asks for
+# an action that does not clear the lane, points the reader away from the only
+# person who can end the wait, so a new kind of evidence must not be able to
+# reach wedge_defer_wait without deciding all of them.
+#   <kind>       what the evidence IS, as the recheck names it.
+#   <subject>    WHO the wait is on, in the recheck's own words.
+#   <whom>       `captain` when that subject is the captain, `supervisor` when
+#                it is firstmate itself, `external` otherwise; this is what
+#                applies the away-posture rule below, which only `captain` takes.
+#   <action>     the one thing that clears the lane.
+#   <age-record> the file whose mtime is when this wait started, or EMPTY when
+#                the wait has no written record. Empty is a real answer, not a
+#                degraded one: a gate the pipeline parked was never written down
+#                by the worker, so there is no honest age to publish and the
+#                deferral publishes none.
+# The fields are joined with US (\037) rather than TAB because TAB is an IFS
+# WHITESPACE character: consecutive tabs collapse under `read`, so a record with
+# an empty middle field would not fail to parse, it would SHIFT every later field
+# left into another field's position. US is not IFS whitespace, so consecutive
+# delimiters yield genuinely empty fields and the record either parses as written
+# or fails the deferral's guard.
+wait_record() {  # <kind> <subject> <whom> <action> <age-record>
+  printf '%s\037%s\037%s\037%s\037%s' "$1" "$2" "$3" "$4" "$5"
+}
+
+# The evidence that a quiet pane is a BOUNDED WAIT rather than a wedge suspect,
+# read at the one moment it decides anything: when an escalation is about to
+# fire. Two records answer it, and they are independent: the worker's own status
+# line - a declared `paused:` external wait, or a verified `captain-held`
+# transfer - and, when that line explains nothing, the crew's authoritative
+# current state.
+#
+# The generated brief promises that declaring one buys the long recheck cadence
+# instead of a wedge, and the wedge timer is reachable while that declaration
+# stands - so the declaration is consulted here too rather than trusted to have
+# been caught by the earlier classification.
+#
+# This fork's status contract has no structured clearing time on a paused line, so
+# an open `paused:` declaration is the whole record; a later status verb replaces
+# it. The records are read in this order rather than pooled because the routing
+# already guarantees it is the right one: a pane whose last line is `paused:` or
+# `captain-held:` reaches this timer only through pause_state_class answering
+# `working`, so its crew state is a running step, never a parked gate.
+#
+# The second record is OFF unless the home creates config/wedge-defer-parked-gate,
+# and that one guard is what makes an unconfigured home's behaviour identical to
+# having no second record at all: it is read before the fold, so no fold or
+# crew-state read is spent, no wait record exists to defer on, no recheck wording
+# is reachable, and the lane keeps the unchanged escalation schedule, reason and
+# demand-deep-inspection wording. Unlike the status line, which is the worker's
+# own declaration about its own silence, this record is derived from a pipeline's
+# gate state, so which lanes lose the ladder for it is a home's choice to make
+# rather than a default every fleet inherits - the same reason
+# config/turnend-churn-absorb gates its own widened absorb.
+#
+# The second record takes TWO signals, and needs both. The crew's authoritative
+# current state must be a no-mistakes gate whose answer is owed by a HUMAN
+# (crew_gate_awaits_human_decision in fm-classify-lib.sh, minted from the
+# findings table's `action` column by position), AND the task's own decision fold
+# must still hold an open `needs-decision` record whose key is `nm-<run>-<step>`
+# for the run that verdict reports. The gate's table alone says only that the
+# answer is owed by a human; the open decision bound to that run is the positive
+# evidence that firstmate was actually told about THIS gate and has not answered
+# yet, which is what makes the lane's quiet a wait rather than a suspected wedge.
+# An open decision under any other key - an unrelated question never closed - is
+# not that evidence, and neither is a verdict that names no run. The wait is owed
+# by firstmate, not the captain: ask-user findings are routed to firstmate, which
+# decides most of them itself, and one it escalates becomes a captain-held
+# transfer that the first record above already catches. Away-mode triage stays
+# daemon-owned: wedge_defer_wait suppresses watcher recheck output while .afk
+# exists, leaving the daemon to route the supervisor-owned answer.
+# The two signals come apart in both directions, and the ladder is kept in each:
+#   - the decision was ANSWERED and the crewmate has not yet relayed it with
+#     `axi respond`: the gate is still reported parked and still carries the
+#     ask-user row, but `fm-send --resolve-key` wrote the closing `resolved` line
+#     at answer time, so the fold is empty and what is outstanding is the
+#     crewmate's OWN next move;
+#   - the crewmate parked at a human-owed gate and went quiet before escalating
+#     it at all: nobody was ever told, so there is no wait to defer to.
+# A `blocked` record does not count: a blocker is not an unanswered gate decision
+# and a different action clears it. A gate awaiting the CREWMATE's own answer is
+# deliberately NOT evidence either: a crewmate that goes quiet before answering
+# its own gate is exactly the wedge this ladder exists to catch, so those keep
+# the unchanged schedule, reason and demand-deep-inspection wording.
+# Nothing here weakens detection for a pane with no wait at all - their
+# escalation schedule, reason and wording are untouched, and every way this
+# signal can come back empty (an unreadable status file, a fold with nothing
+# open, a key convention nobody followed) escalates on the unchanged schedule
+# rather than losing the ladder. The status-line and fold reads are file reads;
+# the crew-state read is the costly one (it may make a bounded no-mistakes call),
+# so it is taken only behind a first fold read that finds some open
+# `needs-decision` at all, and only in the at-threshold branch - at most once per
+# window per STALE_ESCALATE_SECS, never on an ordinary poll.
+wedge_wait_evidence() {  # <task> -> one wait_record on stdout
+  local task=$1 last statusf run
+  [ -n "$task" ] || return 1
+  statusf="$STATE/$task.status"
+  last=$(last_status_line "$statusf")
+  if status_is_captain_held "$last"; then
+    wait_record 'captain-held' 'awaiting the captain - verified hold transfer' \
+      captain 'answer the held decision or release the hold' "$statusf"
+    return 0
+  fi
+  if status_is_paused "$last"; then
+    # An active run-step outranks a stale paused line: the crew resumed after
+    # appending it, so the old declaration no longer explains the quiet. This is
+    # the same precedence pause_state_class applies before the timer.
+    local line
+    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+    case "$line" in
+      "state: working"*"source: run-step"*) return 1 ;;
+    esac
+    wait_record 'declared wait' 'awaiting external' \
+      external 'confirm the wait still holds' "$statusf"
+    return 0
+  fi
+  [ -e "$CONFIG/wedge-defer-parked-gate" ] || return 1
+  if status_has_open_needs_decision "$statusf" \
+    && run=$(crew_gate_awaits_human_decision "$task") \
+    && status_has_open_needs_decision "$statusf" "$run"; then
+    wait_record 'verified wait at a parked gate' "awaiting firstmate's ask-user decision" \
+      supervisor "decide the gate's ask-user finding and relay the decision to the crewmate" ''
+    return 0
+  fi
+  return 1
+}
+
+# Defer ONE wedge escalation for a pane whose wait record explains the quiet
+# (wedge_wait_evidence above). Deliberately the same shape as
+# wedge_defer_writing: a DEFERRAL, not a cancellation, so the idle timer restarts
+# and the next window probes the evidence again - a wait that ends is escalating
+# again within one STALE_ESCALATE_SECS, which is why the worst-case detection
+# time for a pane that stops waiting does not move.
+# Every word of the recheck that could be wrong per kind of evidence - the human
+# it names, the action it asks for, the age it publishes - is READ FROM THE
+# RECORD rather than re-derived here, so this function cannot word one kind of
+# wait as another.
+# A wait with a written record is aged from that file, which is when the worker
+# wrote the line - anchored there rather than on a per-window marker for the same
+# reason handle_paused_stale is: an idle pane churns its display (a clock, a
+# token counter), and a marker this deferral kept touching would let that churn
+# reset the cadence. A wait with NO written record publishes no age at all: the
+# quiet window is the only clock in hand and this deferral resets it on every
+# pass, so a number read from it would never grow and would tell a supervisor
+# that a day-old gate opened four minutes ago. The bounded re-surface still
+# fires, governed by its own throttle instead of by a wait age.
+# A CAPTAIN-facing wait is not rechecked at all while the away-posture record
+# exists: the one human who can answer it is away, the return brief already lists
+# it, and every other captain-facing path in this file absorbs it silently for
+# that reason (handle_paused_stale, surface_nonterminal_stale,
+# captain_call_stale_bound). That absorb arms no throttle and deliberately
+# leaves the idle timer alone. The costly parked-gate consult is owed to the
+# supervisor instead, never silenced here, and its own deferral restarts the
+# timer below.
+# The escalation counter is left alone, exactly as the write deferral leaves it:
+# this is not an escalation, and a later genuine one must keep the
+# demand-inspection history it had already earned.
+wedge_defer_wait() {  # <window> <since-file> <triage-label> <idle-age> <wait-record> [min-age]
+  local win=$1 since_file=$2 label=$3 age=$4 record=$5 min_age=${6:-$PAUSE_RESURFACE_SECS}
+  local kind subject whom action anchor key marker agefile mtime wait_age waited wage us ok
+  us=$(printf '\037')
+  IFS=$us read -r kind subject whom action anchor <<EOF
+$record
+EOF
+  # Enforce the whole of the record's own contract here, which the US delimiter
+  # now makes checkable: `kind`, `subject`, `whom` and `action` are each a field
+  # the recheck prints and must be non-empty, `whom` is exactly one of the three
+  # values the record contract names, only `anchor` may legitimately
+  # be empty, and the record holds exactly four delimiters - a surplus one is
+  # visible because `read` puts everything past the last field into `anchor`.
+  # A record that fails any of these is refused rather than deferred: deferring
+  # is what takes the ladder away, so the unparseable case must fall back to the
+  # escalation the caller was about to make.
+  ok=1
+  case "$whom" in
+    captain|supervisor|external) ;;
+    *) ok=0 ;;
+  esac
+  case "$anchor" in
+    *"$us"*) ok=0 ;;
+  esac
+  if [ -z "$kind" ] || [ -z "$subject" ] || [ -z "$action" ]; then ok=0; fi
+  if [ "$ok" -eq 0 ]; then
+    triage_log "refused a malformed wait record for $label: $win"
+    return 1
+  fi
+  if [ "$whom" = captain ] && afk_present; then
+    triage_log "absorbed $label ($kind, never rechecked while the away-posture record exists): $win"
+    return 0
+  fi
   key=$(window_key "$win")
   marker="$STATE/.wait-resurfaced-$key"
   agefile="$STATE/.wait-since-$key"
   [ -e "$agefile" ] || date +%s > "$agefile"
   wait_age=$(age_of "$agefile")
+  waited=''
+  if [ -n "$anchor" ]; then
+    mtime=$(stat_mtime "$anchor")
+    if [ -n "$mtime" ] && [ "$mtime" -gt 0 ] 2>/dev/null; then
+      wage=$(( $(date +%s) - mtime ))
+      [ "$wage" -ge 0 ] || wage=0
+      waited=", waiting ${wage}s"
+      # The wait's own written age bounds the re-surface too, so a long wait
+      # cannot be reported inside a cadence that started only after a restart.
+      [ "$wait_age" -lt "$wage" ] && wait_age=$wage
+    fi
+  fi
   date +%s > "$since_file"
   if ! afk_present; then
+    # A wait that has no written record (a parked gate) publishes no age, so its
+    # first threshold delivers one recheck immediately rather than waiting out a
+    # cadence that has no honest starting point; the throttle owns every repeat.
     resurface_absorbed "$win" "$marker" "$wait_age" \
-      "stale: $win (idle ${age}s, $kind remains open for ${wait_age}s; $action)"
+      "stale: $win (idle ${age}s${waited} - $kind, $subject, rechecked on a long cadence not a wedge; $action)" \
+      '' "$min_age"
   fi
-  triage_log "absorbed $label ($kind, awaiting $action, idle ${age}s): $win"
+  triage_log "absorbed $label ($kind, $subject, idle ${age}s): $win"
+  return 0
 }
 
 # Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
@@ -1044,11 +1460,16 @@ clear_wedge_deferral_tracking() {  # <window-key>
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-# The worktree write probe runs ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
-# never per poll.
+# The wait-evidence consult (wedge_wait_evidence), the worktree write probe, and
+# the opt-in worker-wait/captain-hold records run ONLY here, inside the
+# at-threshold branch that is about to escalate: at most one each per window per
+# STALE_ESCALATE_SECS, never on an ordinary poll. The crew-state read
+# wedge_wait_evidence may take under config/wedge-defer-parked-gate keeps that
+# same bound however long the wait lasts, because the deferral it feeds restarts
+# the idle timer like every other deferral below; an unconfigured home never
+# reaches that read at all.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason wait_key
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason wait_key evidence wait_min_age
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1068,21 +1489,36 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           triage_log "absorbed $label timer expiry (run-step done, awaiting merge/landing): $win"
           return 0
         fi
+        if evidence=$(wedge_wait_evidence "$task"); then
+          wait_min_age=$PAUSE_RESURFACE_SECS
+          # The parked-gate record is the one wait with no written starting point;
+          # its first threshold earns one immediate recheck (throttled thereafter).
+          case "$evidence" in
+            "verified wait at a parked gate"*) wait_min_age=0 ;;
+          esac
+          if wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence" "$wait_min_age"; then
+            return 0
+          fi
+        fi
         if [ -e "$CONFIG/wedge-defer-worker-wait" ] \
           && verb=$(status_worker_wait_verb "$STATE/$task.status"); then
           if [ "$verb" = blocked ]; then
-            wedge_defer_wait "$win" "$since_file" "$label" "$age" \
-              'worker blocker' 'firstmate to clear and resolve the blocker'
+            evidence=$(wait_record 'worker blocker' 'awaiting the supervisor' \
+              supervisor 'firstmate to clear and resolve the blocker' "$STATE/$task.status")
           else
-            wedge_defer_wait "$win" "$since_file" "$label" "$age" \
-              'worker decision' 'firstmate to answer the decision'
+            evidence=$(wait_record 'worker decision' 'awaiting the supervisor' \
+              supervisor 'firstmate to answer the decision' "$STATE/$task.status")
           fi
-          return 0
+          if wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
+            return 0
+          fi
         fi
         if [ -n "$task" ] && task_captain_call_open "$task"; then
-          wedge_defer_wait "$win" "$since_file" "$label" "$age" \
-            'backlog captain hold' 'captain to answer or release the hold'
-          return 0
+          evidence=$(wait_record 'backlog captain hold' 'awaiting the captain' \
+            captain 'captain to answer or release the hold' '')
+          if wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
+            return 0
+          fi
         fi
         wait_key=$(window_key "$win")
         rm -f "$STATE/.wait-since-$wait_key" "$STATE/.wait-resurfaced-$wait_key"
@@ -1531,6 +1967,494 @@ signal_files_actionable() {  # <status-file> ...
   return "$found"
 }
 
+# Deliver a classified action-worthy signal set: one durable row per file, the
+# per-file decision-owned payload retained, every .seen signature advanced, every
+# classified span endpoint committed, and the exact reason line printed once.
+# Shared by the immediate path and the batching fallback so the two can never
+# diverge on marker or payload semantics.
+deliver_pending_signals() {  # <pending-tsv> <reason>
+  local pending=$1 reason=$2 sf sig f file_reason files=''
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
+  done <<EOF
+$pending
+EOF
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    file_reason="$reason"
+    case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
+    fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
+  done <<EOF
+$pending
+EOF
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    printf '%s' "$sig" > "$sf"
+  done <<EOF
+$pending
+EOF
+  while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+    [ -n "$f" ] || continue
+    fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || true
+    mark_surfaced "$f"
+  done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
+  wake "$reason"
+}
+
+# --- Echo batching -----------------------------------------------------------
+# Eligible status-only and bare turn-end signals share a batching window; they
+# need not already have been delivered. This defers them and delivers
+# the group as ONE wake - one enqueue group, one printed reason, one supervisor
+# turn - which is the larger saving the 2026-11-06 replay measured (the
+# SIGNAL_GRACE coalescing above already merges only near-simultaneous signals).
+#
+# IMMEDIATE classes are never deferred: any `check:` wake (Discord ext-request,
+# merged-PR, process-event, usage), any `stale:` wake, a heartbeat backstop, the
+# away-mode daemon's triage (it owns classification, so this watcher must stay
+# one-shot), and any status event whose span verb is needs-decision, blocked,
+# done, or failed. Decision-owned rows are immediate for the same reason they
+# are main-only: a branch-held decision must not sit behind a batch. Anything
+# the captain types never enters this path at all. A pending batch is flushed
+# into the durable queue immediately before any other wake is delivered, so an
+# urgent wake carries the deferred rows with it instead of making the supervisor
+# wait out the window.
+#
+# The window opens at the first deferred echo, defaults to 120 s, and is tunable
+# through config/wake-echo-batch: a whole number of seconds in [60,300], or
+# `off`. An invalid value falls back to 120 and logs once per
+# watcher process. The batch is persisted at state/.echo-batch as
+# `<deferred-epoch>\t<signal-file>` lines, so a watcher restart cannot lose it;
+# an overdue batch is flushed at the top of the next cycle.
+#
+# Two drop rules, both evaluated only when the whole batch is bare turn-ended
+# markers (a status-bearing batch is always delivered), and both requiring an
+# ACTIVE rendered blocking marker - the worker is visibly blocked on a live
+# call, so its turn boundary carries nothing:
+#   answered-gate (R2 in the replay): every task is parked at a no-mistakes
+#     gate whose current run and step key has a resolved event after its latest
+#     needs-decision opening, so what is outstanding is the crewmate's own relay.
+#   no-change (R3): every task's fm-crew-state line is byte-identical to the
+#     line recorded when its last wake was delivered, the pane is actively
+#     blocked, and firstmate has not steered the task since that delivery.
+# Every near miss - unanswered gate, changed crew-state line, no recorded
+# baseline, idle pane, a steer since the last wake - delivers the batch
+# unchanged. Each deferral, flush, and drop is recorded in state/.watch-triage.log
+# with its rule name, so what was held or skipped is auditable.
+ECHO_BATCH_DEFAULT_SECS=120
+ECHO_BATCH_MIN_SECS=60
+ECHO_BATCH_MAX_SECS=300
+ECHO_BATCH_FILE="$STATE/.echo-batch"
+ECHO_BATCH_IN_FLUSH=0
+ECHO_BATCH_RESOLVED=
+
+# Resolve the window ONCE into ECHO_BATCH_RESOLVED (seconds, 0 = disabled).
+# Resolving in a command substitution would lose the one-warning guard and re-read
+# the config on every poll, so this sets the global and every caller reads it.
+# Invalid input is never silently reinterpreted as "off": it falls back to the
+# documented default and warns once, because a typo must not disable the feature
+# unnoticed.
+echo_batch_resolve() {
+  local raw valid
+  [ -n "$ECHO_BATCH_RESOLVED" ] && return 0
+  if [ -e "$CONFIG/wake-echo-batch" ] && [ ! -L "$CONFIG/wake-echo-batch" ]; then
+    raw=$(head -1 "$CONFIG/wake-echo-batch" 2>/dev/null || true)
+  else
+    ECHO_BATCH_RESOLVED=$ECHO_BATCH_DEFAULT_SECS
+    return 0
+  fi
+  raw=$(printf '%s' "$raw" | tr -d '[:space:]')
+  case "$raw" in
+    off)
+      ECHO_BATCH_RESOLVED=0
+      return 0
+      ;;
+  esac
+  valid=1
+  case "$raw" in
+    [1-9][0-9]|[1-9][0-9][0-9]) ;;
+    *) valid=0 ;;
+  esac
+  if [ "$valid" -eq 1 ] && { [ "$raw" -lt "$ECHO_BATCH_MIN_SECS" ] || [ "$raw" -gt "$ECHO_BATCH_MAX_SECS" ]; }; then
+    valid=0
+  fi
+  if [ "$valid" -eq 1 ]; then
+    ECHO_BATCH_RESOLVED=$raw
+  else
+    ECHO_BATCH_RESOLVED=$ECHO_BATCH_DEFAULT_SECS
+    triage_log "echo-batch config invalid (expected ${ECHO_BATCH_MIN_SECS}-${ECHO_BATCH_MAX_SECS} or off); using ${ECHO_BATCH_DEFAULT_SECS}s"
+  fi
+  return 0
+}
+
+echo_batch_enabled() {
+  echo_batch_resolve
+  [ "$ECHO_BATCH_RESOLVED" -gt 0 ]
+}
+
+# 0 when the newly appended span of any referenced status file carries an event
+# verb that must never wait for the window.
+signal_batch_must_deliver() {  # <file> ...
+  local f start
+  [ -z "$FM_SIGNAL_NEEDS_DECISION_FILES" ] || return 0
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || continue
+    start=$(fm_wake_signal_seen_size "$STATE" "$f")
+    status_span_has_immediate_verb "$f" "$start" && return 0
+  done
+  return 1
+}
+
+# Append one deferred entry unless that exact file is already in the window.
+# Lines are appended (not rewritten) so a crash can only duplicate an entry,
+# which the flush deduplicates by file; the window's opening epoch stays the
+# first line's, so a repeated turn boundary never extends the window.
+echo_batch_add() {  # <file> ...
+  local f now
+  now=$(date +%s)
+  for f in "$@"; do
+    [ -n "$f" ] || continue
+    [ -e "$f" ] || continue
+    if [ -f "$ECHO_BATCH_FILE" ] \
+      && awk -F '\t' -v f="$f" '$2 == f { found=1 } END { exit found ? 0 : 1 }' "$ECHO_BATCH_FILE"; then
+      continue
+    fi
+    printf '%s\t%s\n' "$now" "$f" >> "$ECHO_BATCH_FILE" || return 1
+  done
+  return 0
+}
+
+# Defer a classified action-worthy pending set instead of delivering it. Writes
+# the durable batch BEFORE advancing any marker, so a crash between the two can
+# duplicate an entry but never lose one. Advances the same .seen signatures and
+# classified span endpoints the delivery path would, so the deferred event is
+# not re-classified on the next status append, and marks its captain-relevant
+# line surfaced so the heartbeat backstop does not pre-empt the window. A marker
+# write failure returns 1 and the caller delivers immediately (safe direction);
+# a duplicated queue row later is possible only in that crash window.
+echo_batch_defer() {  # <pending-tsv>
+  local pending=$1 sf sig f status=0 window logged=''
+  echo_batch_resolve
+  window=$ECHO_BATCH_RESOLVED
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    echo_batch_add "$f" || status=1
+  done <<EOF
+$pending
+EOF
+  [ "$status" -eq 0 ] || return 1
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    printf '%s' "$sig" > "$sf" || status=1
+  done <<EOF
+$pending
+EOF
+  while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+    [ -n "$f" ] || continue
+    fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || status=1
+    mark_surfaced "$f"
+  done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    case " $logged " in *" $f "*) continue ;; esac
+    logged="$logged $f"
+    triage_log "echo-batch defer rule=window window=${window}s file=$(basename "$f")"
+  done <<EOF
+$pending
+EOF
+  return "$status"
+}
+
+# 0 when the persisted batch's window has elapsed (or batching is now disabled,
+# or the batch's opening epoch is unreadable - in every case waiting longer
+# cannot help).
+echo_batch_due() {
+  local first now
+  [ -s "$ECHO_BATCH_FILE" ] || return 1
+  [ ! -e "$STATE/.afk" ] || return 0
+  echo_batch_resolve
+  [ "$ECHO_BATCH_RESOLVED" -gt 0 ] || return 0
+  first=$(awk -F '\t' 'NF >= 2 && $1 ~ /^[0-9]+$/ { print $1; exit }' "$ECHO_BATCH_FILE")
+  case "$first" in ''|*[!0-9]*) return 0 ;; esac
+  now=$(date +%s)
+  [ "$now" -ge "$((first + ECHO_BATCH_RESOLVED))" ]
+}
+
+echo_batch_flush_due() {
+  echo_batch_due || return 0
+  echo_batch_flush due
+}
+
+# Record <task>'s delivered-wake baseline: the epoch of the wake that was just
+# delivered and the exact crew-state line at that moment. R3 compares against
+# this pair and nothing else, so it is written only on a real delivery.
+echo_batch_record_delivered() (  # <epoch> <task> ...
+  local epoch=$1 task line gen tmp
+  shift
+  fm_lock_try_acquire "$STATE/.echo-baseline.lock" || return 0
+  trap 'fm_lock_release "$STATE/.echo-baseline.lock"' EXIT
+  for task in "$@"; do
+    [ -n "$task" ] || continue
+    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null || true)
+    line=$(printf '%s' "$line" | tr '\t\r\n' '   ')
+    # The incarnation is part of the baseline: a relaunch under the same task id
+    # must never inherit its predecessor's "nothing changed" evidence.
+    gen=$(fm_meta_get "$STATE/$task.meta" spawn_gen 2>/dev/null || true)
+    gen=$(printf '%s' "$gen" | tr '\t\r\n' '   ')
+    tmp="$STATE/.last-delivered-$task.tmp.$$"
+    if printf '%s\t%s\t%s\n' "$epoch" "$gen" "$line" > "$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$STATE/.last-delivered-$task" 2>/dev/null || rm -f "$tmp"
+    else
+      rm -f "$tmp"
+    fi
+  done
+)
+
+# Map a delivered reason line back to the task baselines it covers. Called for
+# every wake, so only the two reason grammars that name task-owned files are
+# parsed; every other class records no baseline and therefore can never license
+# a drop.
+echo_batch_note_delivery() {  # <reason>
+  local reason=$1 now f task seen=''
+  now=$(date +%s)
+  case "$reason" in
+    signal:*)
+      for f in ${reason#signal:}; do
+        task=${f##*/}
+        case "$task" in
+          *.status) task=${task%.status} ;;
+          *.turn-ended) task=${task%.turn-ended} ;;
+          *.turn-ended.*) task=${task%.turn-ended.*} ;;
+          *) continue ;;
+        esac
+        case " $seen " in *" $task "*) continue ;; esac
+        seen="$seen $task"
+        echo_batch_record_delivered "$now" "$task"
+      done
+      ;;
+    stale:*)
+      # shellcheck disable=SC2086 # deliberate word split: window then detail text
+      set -- ${reason#stale: }
+      task=
+      [ -n "${1:-}" ] && task=$(window_to_task "$1" "$STATE")
+      [ -z "$task" ] || echo_batch_record_delivered "$now" "$task"
+      ;;
+  esac
+}
+
+gate_decision_recorded() {  # <status-file> <key>
+  local statusf=$1 key=$2 line untimed verb k opened=0 answered=0
+  [ -f "$statusf" ] && [ -r "$statusf" ] && [ ! -L "$statusf" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    _fm_status_untimed "$line" untimed
+    verb=$(status_line_verb "$untimed")
+    k=$(_fm_decision_key "$untimed") || continue
+    [ "$k" = "$key" ] || continue
+    case "$verb" in
+      needs-decision) opened=1; answered=0 ;;
+      resolved) [ "$opened" -eq 0 ] || answered=1 ;;
+    esac
+  done < "$statusf"
+  [ "$answered" -eq 1 ]
+}
+
+# 0 when the window's pane renders an ACTIVE blocking marker. This is a rendered
+# surface, so it is deliberately a positive-only signal: OMP renders "<glyph>
+# Blocking..." while a tool call is live, and no other supported harness is
+# claimed here. A harness that renders nothing matching simply never licenses a
+# drop, which is the safe direction; the glyph and intent are matched as two
+# independent facts on one line rather than one exact vendor string.
+pane_is_blocking() {  # <window>
+  local w=$1 tail40 recent
+  tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || return 1
+  [ -n "$tail40" ] || return 1
+  # Active means CURRENT: the rendered status line sits immediately above the
+  # footer, so only the newest non-blank rows carry the verdict. Matching the
+  # whole capture would let a scrolled-away line license a drop long after the
+  # call finished.
+  recent=$(printf '%s\n' "$tail40" | grep -v '^[[:space:]]*$' | tail -n 10)
+  [ -n "$recent" ] || return 1
+  printf '%s\n' "$recent" | grep -F '⎋' 2>/dev/null | grep -F 'Blocking' >/dev/null 2>&1
+}
+
+pane_is_blocking_for_task() {  # <task>
+  local task=$1 meta w
+  [ -n "$task" ] || return 1
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 1
+  w=$(fm_backend_target_of_meta "$meta" 2>/dev/null) || return 1
+  [ -n "$w" ] || return 1
+  pane_is_blocking "$w"
+}
+
+# R2 answered-gate drop: every task is parked at a no-mistakes gate, its gate key
+# already has a recorded firstmate decision, and its pane is actively blocked.
+echo_batch_answered_gate_drop() {  # <task> ...
+  local task statusf key line rest part run step
+  [ "$#" -gt 0 ] || return 1
+  for task in "$@"; do
+    [ -n "$task" ] || return 1
+    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
+    case "$line" in 'state: parked · source: run-step · '*) ;; *) return 1 ;; esac
+    run=; step=; rest="$line · "
+    while [ -n "$rest" ]; do
+      part=${rest%% · *}
+      rest=${rest#* · }
+      case "$part" in
+        'run: '*) run=${part#run: } ;;
+        'parked at '*) step=${part#parked at }; step=${step%%:*} ;;
+      esac
+    done
+    case "$run" in ''|*[!a-zA-Z0-9_-]*) return 1 ;; esac
+    case "$step" in ''|*[!a-zA-Z0-9_-]*) return 1 ;; esac
+    key="nm-$run-$step"
+    statusf="$STATE/$task.status"
+    gate_decision_recorded "$statusf" "$key" || return 1
+    pane_is_blocking_for_task "$task" || return 1
+  done
+  return 0
+}
+
+# R3 no-change drop: every task's crew-state line is byte-identical to the line
+# at its last delivered wake, the pane is actively blocked, and firstmate has not
+# steered it since that wake. No recorded baseline, an empty/unreadable line, or
+# an unreadable inbox all fail closed to delivery.
+echo_batch_no_change_drop() (  # <task> ...
+  local task baseline epoch gen stored line current_gen rec m
+  shopt -s nullglob
+  fm_lock_try_acquire "$STATE/.echo-baseline.lock" || return 1
+  trap 'fm_lock_release "$STATE/.echo-baseline.lock"' EXIT
+  [ "$#" -gt 0 ] || return 1
+  for task in "$@"; do
+    [ -n "$task" ] || return 1
+    baseline="$STATE/.last-delivered-$task"
+    [ -f "$baseline" ] && [ ! -L "$baseline" ] || return 1
+    epoch=$(awk -F '\t' 'NR == 1 { print $1 }' "$baseline")
+    gen=$(awk -F '\t' 'NR == 1 { print $2 }' "$baseline")
+    stored=$(awk -F '\t' 'NR == 1 { sub(/^[^\t]*\t[^\t]*\t/, ""); print }' "$baseline")
+    case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+    [ -n "$stored" ] || return 1
+    # A relaunched incarnation starts a fresh baseline, so an old "unchanged"
+    # line from its predecessor is not evidence about this one.
+    current_gen=$(fm_meta_get "$STATE/$task.meta" spawn_gen 2>/dev/null || true)
+    [ "$current_gen" = "$gen" ] || return 1
+    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
+    [ -n "$line" ] || return 1
+    [ "$line" = "$stored" ] || return 1
+    pane_is_blocking_for_task "$task" || return 1
+    for rec in "$STATE/$task.inbox"/*.msg "$STATE/$task.inbox/handled"/*.msg; do
+      [ -e "$rec" ] || return 1
+      m=$(stat_mtime "$rec") || return 1
+      case "$m" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$m" -lt "$epoch" ] || return 1
+    done
+  done
+  rm -f -- "$ECHO_BATCH_FILE"
+)
+
+# Deliver the persisted batch, applying the two drop rules first. <mode> is
+# `due` (the window elapsed; one wake is printed) or `immediate` (another wake is
+# about to print; only the queue rows are appended). Returns 0 when the batch was
+# delivered or intentionally dropped, 1 when it must stay for a retry.
+echo_batch_flush() {  # <due|immediate>
+  local mode=$1 window tmp epoch file base task reason files='' count=0 rc=0
+  local all_turnend=1 seen=''
+  local -a tasks=()
+  [ -s "$ECHO_BATCH_FILE" ] || return 0
+  echo_batch_resolve
+  window=$ECHO_BATCH_RESOLVED
+  ECHO_BATCH_IN_FLUSH=1
+  tmp="$ECHO_BATCH_FILE.tmp.$$"
+  if ! awk -F '\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { print $1 "\t" $2 }' "$ECHO_BATCH_FILE" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    ECHO_BATCH_IN_FLUSH=0
+    return 1
+  fi
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp" "$ECHO_BATCH_FILE"
+    ECHO_BATCH_IN_FLUSH=0
+    return 0
+  fi
+  while IFS=$(printf '\t') read -r epoch file; do
+    [ -n "$file" ] || continue
+    base=${file##*/}
+    case "$base" in
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *.turn-ended.*) task=${base%.turn-ended.*} ;;
+      *) all_turnend=0; continue ;;
+    esac
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+    tasks+=("$task")
+  done < "$tmp"
+  if [ ! -e "$STATE/.afk" ] && [ "$all_turnend" -eq 1 ] && [ "${#tasks[@]}" -gt 0 ] && [ "$window" -gt 0 ]; then
+    if echo_batch_answered_gate_drop "${tasks[@]}"; then
+      while IFS=$(printf '\t') read -r epoch file; do
+        [ -n "$file" ] || continue
+        triage_log "echo-batch drop rule=answered-gate file=$(basename "$file")"
+      done < "$tmp"
+      rm -f "$tmp" "$ECHO_BATCH_FILE"
+      ECHO_BATCH_IN_FLUSH=0
+      return 0
+    fi
+    if echo_batch_no_change_drop "${tasks[@]}"; then
+      while IFS=$(printf '\t') read -r epoch file; do
+        [ -n "$file" ] || continue
+        triage_log "echo-batch drop rule=no-change file=$(basename "$file")"
+      done < "$tmp"
+      rm -f "$tmp"
+      ECHO_BATCH_IN_FLUSH=0
+      return 0
+    fi
+  fi
+  while IFS=$(printf '\t') read -r epoch file; do
+    [ -n "$file" ] || continue
+    files="$files $file"
+    count=$((count + 1))
+  done < "$tmp"
+  reason="signal:$files"
+  while IFS=$(printf '\t') read -r epoch file; do
+    [ -n "$file" ] || continue
+    if ! fm_wake_append signal "${file##*/}" "$reason"; then
+      rc=1
+      break
+    fi
+  done < "$tmp"
+  if [ "$rc" -eq 0 ]; then
+    echo_batch_record_delivered "$(date +%s)" ${tasks[@]+"${tasks[@]}"}
+    rm -f "$tmp" "$ECHO_BATCH_FILE"
+    if [ "$mode" = due ]; then
+      triage_log "echo-batch flush rule=window entries=$count reason=signal"
+    else
+      triage_log "echo-batch flush rule=immediate-flush entries=$count reason=signal"
+    fi
+  else
+    rm -f "$tmp"
+    triage_log "echo-batch flush failed; batch retained for retry"
+  fi
+  ECHO_BATCH_IN_FLUSH=0
+  if [ "$rc" -eq 0 ] && [ "$mode" = due ]; then
+    wake "$reason"
+  fi
+  return "$rc"
+}
+
+# The pre-wake hook (FM_WAKE_PRE_OUTPUT_ACTION): record this delivery's task
+# baselines and flush a pending batch into the queue, so no deferred row waits
+# out its window behind an urgent wake. Recursion is impossible: the batch file
+# is cleared before the due flush calls wake.
+echo_batch_before_wake() {  # <reason>
+  echo_batch_note_delivery "$1"
+  [ "${ECHO_BATCH_IN_FLUSH:-0}" -eq 0 ] || return 0
+  [ -s "$ECHO_BATCH_FILE" ] || return 0
+  echo_batch_flush immediate || true
+}
+
 # Consumer-side incarnation gate. Turn-end markers are per generation
 # (state/<id>.turn-ended.<spawn_gen>), written by bin/fm-turnend-signal.sh; a
 # torn-down or relaunched id can leave stale-gen markers behind. Fire only the
@@ -1545,20 +2469,20 @@ filter_stale_turnend_markers() {  # <pending-tsv>
   while IFS=$(printf '\t') read -r sf sig f; do
     [ -n "$sf" ] || continue
     case "$f" in
+      *.turn-ended)
+        base=$(basename "$f")
+        id=${base%.turn-ended}
+        if fm_wake_turnend_bare_marker_is_stale "$STATE" "$id"; then
+          printf '%s' "$sig" > "$sf"
+          continue
+        fi
+        ;;
       *.turn-ended.*)
         base=$(basename "$f")
         id=${base%.turn-ended.*}
         rest=${base#"$id".turn-ended.}
         gen=$rest
         if fm_wake_turnend_marker_is_stale "$STATE" "$id" "$gen"; then
-          printf '%s' "$sig" > "$sf"
-          continue
-        fi
-        ;;
-      *.turn-ended)
-        base=$(basename "$f")
-        id=${base%.turn-ended}
-        if fm_wake_turnend_bare_marker_is_stale "$STATE" "$id"; then
           printf '%s' "$sig" > "$sf"
           continue
         fi
@@ -1604,16 +2528,22 @@ procevent_surface_queued() {
   local key reason
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  while IFS= read -r key; do
-    case "$key" in procevent:*) ;; *) continue ;; esac
-    [ -e "$(procevent_surfaced_marker "$key")" ] && continue
-    PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
-  done < <(fm_wake_queued_keys_locked check)
-  if [ -z "$PROCEVENT_SURFACED" ]; then
+  while :; do
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+    PROCEVENT_SURFACED=
+    while IFS= read -r key; do
+      case "$key" in procevent:*) ;; *) continue ;; esac
+      [ -e "$(procevent_surfaced_marker "$key")" ] && continue
+      PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
+    done < <(fm_wake_queued_keys_locked check)
+    if [ -z "$PROCEVENT_SURFACED" ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
+    [ -s "$ECHO_BATCH_FILE" ] || break
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-    return 0
-  fi
+    echo_batch_flush immediate || return 1
+  done
   reason="check: process-event result captured:$PROCEVENT_SURFACED"
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output
@@ -1988,6 +2918,11 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+# Echo batching's delivery hook lives in the shared transition owner's wake():
+# it records task baselines and flushes a pending batch into the queue before any
+# other wake is printed, so an urgent wake never waits behind the window.
+# shellcheck disable=SC2034 # Read by wake() in the separately linted transition owner.
+FM_WAKE_PRE_OUTPUT_ACTION=echo_batch_before_wake
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -2062,6 +2997,11 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # A persisted echo batch whose window elapsed - including one inherited from a
+  # watcher that restarted mid-window - is delivered before any other cycle work,
+  # so it can never be held past its window by a quiet fleet or a restart.
+  echo_batch_flush_due || true
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
@@ -2301,16 +3241,25 @@ EOF
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file gained a captain-relevant event since its last
     #     classified byte, even when a later routine line is now the latest;
-    #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
-    #     NOT provably working - the crew stopped its turn with no actively-running
-    #     pipeline and no busy pane, so it may be done (even via an interactive menu
-    #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
-    #     such a turn-end is exactly the swallowed-finish this change guards against.
+    #   - or it is a no-verb wake (a bare turn-end, a working: note) with no
+    #     positive evidence the crew is still executing - the crew stopped its turn
+    #     with no actively-running pipeline and no busy pane, so it may be done
+    #     (even via an interactive menu that wrote no done: status), waiting on a
+    #     decision, or wedged. Absorbing such a turn-end is exactly the
+    #     swallowed-finish this change guards against.
+    # Positive evidence is either an authoritative provably-working verdict or, in a
+    # home that opts in with config/turnend-churn-absorb and for a BARE turn-end
+    # alone, a pane that rendered something since the previous poll
+    # (signal_turnend_panes_churned) - the only proof available to a harness whose
+    # busy state has no verified semantic source, bounded so it cannot defer that
+    # task's turn-ends forever. Absorb stays evidence-driven: with neither proof the
+    # wake surfaces exactly as before.
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew IS provably working) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. The provably-working
-    # check is the only costly one (it may run a bounded no-mistakes call), so the ||
-    # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    # whose crew is still executing) in always-on mode -> advance the markers so it
+    # will not re-fire, log, and keep blocking without enqueuing. Both evidence
+    # checks are costly (a bounded no-mistakes call, then a pane capture), so the ||
+    # ordering evaluates them ONLY for a non-afk signal with no captain-relevant
+    # status span, and the capture only once the authoritative verdict comes up short.
     # shellcheck disable=SC2086 # files is the deliberate space-separated status-path list.
     signal_files_actionable $files
     signal_actionable=$?
@@ -2322,30 +3271,22 @@ EOF
     # dispatcher reads to keep a decision-owned row off the branch
     # (fm-branch-dispatch.ts, fm-primary-omp.ts). Every other harness and
     # script keeps seeing the exact same "signal:$files" wake it always has.
+    # An action-worthy signal still may be an echo: when batching is enabled and
+    # this batch carries no immediate class (check/stale never reach here; a
+    # needs-decision/blocked/done/failed span or a decision-owned row forces
+    # delivery), it joins the persisted window instead of waking the supervisor
+    # now. Everything about the deferral - markers, span endpoints, surfaced
+    # line, audit - is the delivery path's own bookkeeping, so the event can
+    # neither re-fire nor be lost, and a failed deferral falls through to the
+    # immediate delivery below.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || [ "$signal_actionable" -eq 0 ] || ! signal_crew_provably_working $files; then
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        file_reason="$reason"
-        case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
-        fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
-      done <<EOF
-$pending
-EOF
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
-      done <<EOF
-$pending
-EOF
-      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
-        [ -n "$f" ] || continue
-        fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || true
-        mark_surfaced "$f"
-      done <<EOF
-$FM_SIGNAL_SURFACE_ENDPOINTS
-EOF
-      wake "$reason"
+    if afk_present || [ "$signal_actionable" -eq 0 ] \
+      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+      signal_deferred=0
+      if ! afk_present && echo_batch_enabled && ! signal_batch_must_deliver $files; then
+        echo_batch_defer "$pending" && signal_deferred=1
+      fi
+      [ "$signal_deferred" -eq 1 ] || deliver_pending_signals "$pending" "$reason"
     else
       signal_commit_error=0
       while IFS=$(printf '\t') read -r sf sig f; do

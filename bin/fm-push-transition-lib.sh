@@ -18,6 +18,12 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
+# Optional watcher-local hook run with the reason immediately before it is
+# printed, and a no-op everywhere else. bin/fm-watch.sh points it at echo
+# batching's delivery hook so deferred rows are flushed into the durable queue
+# while the supervisor is already being woken, and task baselines are recorded
+# only on a real delivery. It may not change the reason or the exit status.
+FM_WAKE_PRE_OUTPUT_ACTION=
 FM_WAKE_POST_OUTPUT_ACTION=
 # Set only after this watcher has printed a durable actionable reason. The
 # watcher's EXIT cleanup uses it to distinguish an ordinary delivered close from
@@ -93,6 +99,9 @@ wake() {
   esac
   trap '' HUP INT TERM
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
+  if [ -n "$FM_WAKE_PRE_OUTPUT_ACTION" ]; then
+    "$FM_WAKE_PRE_OUTPUT_ACTION" "$1" || true
+  fi
   if echo "$1"; then
     output_status=0
     watch_delivery_publish "$1" || true

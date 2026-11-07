@@ -161,13 +161,62 @@ The same channels also carry the watcher's undelivered main-wake alarm (`FM_MAIN
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
-## Watcher decision deferrals and reminders
+## Watcher decision deferrals, echoes, and reminders
 
 The default-on backlog captain-hold check defers wedge escalation while the task remains held, using the bounded `FM_PAUSE_RESURFACE_SECS` cadence.
 Creating the local, gitignored `config/wedge-defer-worker-wait` presence flag also defers escalation when the worker's newest status event is a still-open `needs-decision` or `blocked`; a different latest status verb, resolution, or newer handled inbox answer ends that deferral.
-At the wedge threshold, the watcher checks the opt-in worker wait first, then the backlog captain hold, then the existing worktree-write evidence.
-Supervisor-reserved `pending-reply-*` keys qualify for neither worker-wait deferral nor reminders; they retain their existing visibility in the general open-decision fold.
+At the wedge threshold, the watcher checks a wait its own record explains, then the opt-in worker wait, then the backlog captain hold, then the existing worktree-write evidence.
+
+### Turn-end pane-churn absorb (config/turnend-churn-absorb)
+
+The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
+With it present, every task referenced by a bare turn-end `signal:` wake must independently show positive work evidence, and an eligible task that lacks authoritative proof may satisfy that requirement when its pane content changed since the previous poll.
+It stays opt-in because the other proofs read a verdict the harness itself vouches for while this one infers execution from rendered bytes; with the flag absent triage behaves exactly as it did before.
+`FM_TURNEND_CHURN_ABSORB_SECS` is a positive integer number of seconds, defaults to `900`, and bounds how long one endpoint's turn-ends may ride that evidence before surfacing anyway.
+An invalid value fails closed and surfaces the wake.
+The bound is required rather than cosmetic because churn and pane staleness read the same pane.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
+`bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence, the per-window `state/.churn-since-*` tracking, and the fail-closed boundaries, and [`architecture.md`](architecture.md) owns the triage contract.
+
+### Parked-gate wait deferral (config/wedge-defer-parked-gate)
+
+The optional local, gitignored `config/wedge-defer-parked-gate` presence flag opts this home into a default-off second form of wait evidence in the watcher's wedge timer.
+With it present, a pane about to escalate is also deferred to the `FM_PAUSE_RESURFACE_SECS` recheck cadence when its crew's own current state is a validation gate whose answer is owed to the supervisor and whose decision for that run is still open, and the recheck names the supervisor and the action that clears the lane instead of reporting a suspected wedge.
+It stays opt-in because the other evidence is the worker's own declaration about its own silence, while this is derived from a pipeline's gate state, so which lanes give up the escalation ladder for it is a home's choice.
+With the flag absent the wedge timer spends no fold or current-state read for it, writes no record, and keeps the unchanged escalation schedule, reasons, and `demand-deep-inspection` wording.
+The wait must satisfy both records: the gate's findings table carries an `action` column entry of exactly `ask-user` (minted by `bin/fm-crew-state.sh` from the column by position, never from free text), and the task's own decision fold still holds an open `needs-decision` record keyed `nm-<run>-<step>` for the run the verdict reports.
+An answered gate (its closing `resolved` line already written at answer time) and a gate the crewmate itself owes keep the unchanged ladder.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which supervise their own crew and own that trade separately.
+Away mode remains daemon-owned: the watcher does not emit these bounded wait rechecks while `state/.afk` exists.
+`bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
+
+### Echo batching (config/wake-echo-batch)
+
+Eligible status-only and bare turn-ended `signal:` wakes share a batching window so the supervisor can review them in one turn.
+The watcher defers those within one bounded window and delivers the group as one wake, using the same `signal:` reason grammar and one durable queue row per distinct file.
+Batching is default-on at `120` seconds.
+The local, gitignored `config/wake-echo-batch` file holds one value: a decimal integer in `[60,300]` without leading zeros, or the literal `off`; an absent file keeps the default.
+An invalid value falls back to `120` and records one warning per watcher process rather than silently disabling the feature.
+The value is resolved once per watcher process, so a config change takes effect on the next watcher cycle chain.
+The window opens at the first deferred echo; a repeated turn boundary for a file already in the window joins it without extending the window.
+These classes are never deferred: any `check:` wake (Discord ext-request, merged-PR, process-event, usage), any `stale:` wake, a heartbeat backstop, any status span event whose verb is `needs-decision`, `blocked`, `done`, or `failed`, decision-owned rows, away-mode daemon triage, and anything the captain types.
+A pending batch is flushed into the durable queue immediately before any other wake is delivered, so an urgent wake carries the deferred rows with it.
+The batch is persisted in `state/.echo-batch` and an overdue one is flushed at the top of the next watcher cycle, so a restart cannot lose it.
+Entering away mode also makes an inherited batch due immediately, without applying either drop rule; `off` likewise flushes a pending batch without drops.
+Two drop rules run only outside away mode, with batching enabled, when a batch is entirely bare turn-ended markers and every referenced pane shows an active rendered blocking marker.
+`answered-gate` requires each task's current parked run and step to match a keyed `needs-decision` opening followed by a `resolved` event; reopening that key invalidates the earlier answer.
+`no-change` requires the same task incarnation and a crew-state line byte-identical to its last delivered-wake baseline, with no firstmate steer since.
+Task-bound `fm-send` delivery invalidates that baseline across all steering planes, with baseline publication and the no-change drop serialized against the send.
+Inbox timestamps equal to or newer than the baseline, disappearing records, and unreadable timestamps require delivery.
+The blocking-marker check currently recognizes OMP's active footer only; panes without that evidence cannot qualify for either drop.
+Every near miss delivers the batch unchanged.
+Every deferral, flush, and drop is recorded in `state/.watch-triage.log` with its rule name (`echo-batch defer rule=window`, `echo-batch flush rule=window|immediate-flush`, `echo-batch drop rule=answered-gate|no-change`), so the captain can audit what was held or skipped.
+No model or network call runs in this path; the rules are deterministic file, pane, and record reads.
+
+### Reminders
+
 Creating the local, gitignored `config/open-decision-reminders` presence flag enables overdue reminders for explicitly keyed worker decisions, with at most one reminder per watcher poll and a persisted per-key backoff ledger across watcher restarts.
+Supervisor-reserved `pending-reply-*` keys qualify for neither worker-wait deferral nor reminders; they retain their existing visibility in the general open-decision fold.
 Reminders are `check` wakes emitted outside supervision signal classification, keeping OMP from receiving duplicate wakes for them.
 Reminders are suppressed while the latest task status is paused or captain-held, or while an active backlog captain hold exists, even if the keyed decision remains open.
 `FM_OPEN_DECISION_OVERDUE_SECS` sets the first reminder age in seconds and defaults to 1800.
@@ -1355,12 +1404,13 @@ FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE if set, else the poll-
 FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3   # unacknowledged downtime announcements before an armed watcher resumes pane supervision instead of exiting on the resurface wake; invalid values use the default (docs/watcher-continuity.md "Recovery episode acknowledgement")
 FM_WATCH_RESURFACE_MAX_SECS=900   # seconds since the first unacknowledged downtime announcement after which the same bound trips; invalid values use the defaults
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
+FM_TURNEND_CHURN_ABSORB_SECS=900   # longest one endpoint's bare turn-ends may be deferred on pane-churn evidence alone; only consulted when config/turnend-churn-absorb is present
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
-FM_STALE_ESCALATE_SECS=240         # stale-pane escalation bound in seconds; absorption and declared-wait exceptions: docs/architecture.md "Event-driven supervision"
+FM_STALE_ESCALATE_SECS=240         # stale-pane escalation bound in seconds; absorption and declared-wait exceptions, including a parked validation gate awaiting the supervisor's still-open decision when config/wedge-defer-parked-gate is armed: docs/architecture.md "Event-driven supervision"
 FM_IDLE_OPEN_WORK_SECS=600         # idle-open-work probe bound in seconds after a turn-end marker or spawn record; invalid values use 600; eligibility and absorption: docs/architecture.md "Event-driven supervision"
 FM_REMOTE_STALE_RECHECK_SECS=60    # seconds between inconclusive remote stale-owner probes during away-mode recovery; invalid values use 60
-FM_BUSY_TURN_MAX_SECS=3600         # maximum age of a busy pane's live-generation state/<id>.turn-ended.<spawn_gen> marker, or its state/<id>.meta spawn record before any turn completes, before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait or verified captain-held transfer takes the FM_PAUSE_RESURFACE_SECS recheck below instead
+FM_BUSY_TURN_MAX_SECS=3600         # maximum age of a busy pane's live-generation state/<id>.turn-ended.<spawn_gen> marker, or its state/<id>.meta spawn record before any turn completes, before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait, a verified captain-held transfer, or - where config/wedge-defer-parked-gate arms it - a validation gate of the crew's own awaiting the supervisor's still-unanswered decision takes the FM_PAUSE_RESURFACE_SECS recheck below instead
 FM_PAUSE_RESURFACE_SECS=2700       # seconds between bounded rechecks of a declared external wait or verified captain-held transfer, including a live idle pane after its first inconclusive stale wake and a live busy pane past FM_BUSY_TURN_MAX_SECS; the away-mode daemon uses the same setting, ageing those waits against the crew's own latest status line rather than pane busy state; dormant compute also uses this interval (docs/runpod-secondmates.md "Waking is automatic where it matters")
 FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict, bounded by the same FM_BUSY_TURN_MAX_SECS above) never escalates whatever this interval says, declared external-wait pause rows are excluded, and zero or invalid values use 180
 FM_MAIN_WAKE_UNDELIVERED_ALARM_SECS=300   # seconds the oldest main-owned durable wake row may stay unpresented before the watcher raises one wedge alarm per oldest-row episode; read-only, skipped while afk, and zero or invalid values use 300 (docs/wedge-alarm.md)

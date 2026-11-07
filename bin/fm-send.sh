@@ -193,6 +193,7 @@ TARGET_OMP_TURNSTART_REFERENCE=
 TARGET_HERMES_START_REFERENCE=
 INBOX_META_LOCK=
 INBOX_META_LOCK_HELD=0
+ECHO_BASELINE_LOCK=
 release_compute_delivery_lock() {
   [ -n "$COMPUTE_DELIVERY_LOCK" ] || return 0
   fm_lock_release "$COMPUTE_DELIVERY_LOCK"
@@ -215,6 +216,7 @@ fm_send_cleanup() {
   if declare -F fm_lease_guard_release >/dev/null 2>&1; then
     fm_lease_guard_release || true
   fi
+  [ -z "$ECHO_BASELINE_LOCK" ] || fm_lock_release "$ECHO_BASELINE_LOCK"
 }
 trap fm_send_cleanup EXIT
 # Answer notes use the same bounded status-line shape as the OPEN DECISIONS
@@ -1000,6 +1002,18 @@ fm_send_wait_for_hermes_exit() {
 # target_ready path before sending, while zellij verifies pane labels in its
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
+
+if [ -n "$TARGET_TASK_ID" ]; then
+  if ! fm_lock_acquire_wait "$STATE/.echo-baseline.lock"; then
+    echo "error: steer not sent to $TARGET_TASK_ID: its delivered-wake baseline could not be locked" >&2
+    exit 1
+  fi
+  ECHO_BASELINE_LOCK="$STATE/.echo-baseline.lock"
+  if ! rm -f -- "$STATE/.last-delivered-$TARGET_TASK_ID"; then
+    echo "error: steer not sent to $TARGET_TASK_ID: its delivered-wake baseline could not be invalidated" >&2
+    exit 1
+  fi
+fi
 
 if [ "${1:-}" = "--key" ]; then
   case "$*" in
