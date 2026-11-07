@@ -113,6 +113,7 @@ state/               volatile runtime signals; gitignored
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .claude-autoarm.lock .claude-autoarm-epoch .claude-autoarm-failure-notified .claude-autoarm-failure-alarmed .turnend-claude-blocks .turnend-claude-blocks.lock   Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records; never touch
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .writing-* .wait-* .churn-since-* .last-delivered-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .echo-baseline.lock  shared send/watcher serialization for delivered-wake baselines and no-change drop commits; never touch
   .echo-batch  persisted deferred echo batch (deferred-epoch<TAB>signal-file per line); flushed by bin/fm-watch.sh after config/wake-echo-batch's window, safe to delete only while no batch should be delivered
   .ext-doorbell-rung local Communication Officer doorbell sequence marker; docs/configuration.md owns its replay contract; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete

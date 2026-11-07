@@ -58,6 +58,10 @@ set -u
 case "${1:-}" in
   send-keys)
     [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1
+    if [ -n "${FM_SEND_PAUSE_READY:-}" ]; then
+      : > "$FM_SEND_PAUSE_READY"
+      while [ ! -e "$FM_SEND_PAUSE_RELEASE" ]; do /bin/sleep 0.02; done
+    fi
     shift
     literal=0
     while [ $# -gt 0 ]; do
@@ -80,7 +84,9 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
+    if [ "${FM_FAKE_TMUX_BLOCKING:-0}" = 1 ]; then
+      printf '⎋ Blocking…\n'
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
     else
       printf '╭────╮\n│    │\n╰────╯\n'
@@ -507,6 +513,78 @@ test_task_steers_invalidate_echo_baseline() {
   done
   pass "every task-bound send plane invalidates only its own echo baseline before delivery"
 }
+
+wait_echo_test_barrier() {
+  local file=$1 i=0
+  while [ "$i" -lt 200 ]; do
+    [ ! -e "$file" ] || return 0
+    sleep 0.02
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_echo_baseline_serializes_with_steering() {
+  local dir err baseline drop_pid send_pid mode
+  for mode in drop-first send-first; do
+    dir=$(setup_case "baseline-race-$mode"); err="$dir/send.err"
+    baseline="$dir/home/state/.last-delivered-t1"
+    printf '1000\t\tstate: parked · source: pane · waiting\n' > "$baseline"
+    printf '1000\t%s\n' "$dir/home/state/t1.turn-ended" > "$dir/home/state/.echo-batch"
+    cat > "$dir/crew-state" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_ECHO_TEST_READY:-}" ]; then
+  : > "$FM_ECHO_TEST_READY"
+  while [ ! -e "$FM_ECHO_TEST_RELEASE" ]; do /bin/sleep 0.02; done
+fi
+printf 'state: parked · source: pane · waiting\n'
+SH
+    chmod +x "$dir/crew-state"
+    if [ "$mode" = drop-first ]; then
+      PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+        FM_CREW_STATE_BIN="$dir/crew-state" FM_FAKE_TMUX_BLOCKING=1 \
+        FM_ECHO_TEST_READY="$dir/drop-ready" FM_ECHO_TEST_RELEASE="$dir/drop-release" \
+        bash -c '. "$1"; echo_batch_no_change_drop t1' _ "$ROOT/bin/fm-watch.sh" &
+      drop_pid=$!
+      wait_echo_test_barrier "$dir/drop-ready" || { : > "$dir/drop-release"; wait "$drop_pid"; fail "the drop did not reach its baseline read"; }
+      run_send "$dir" "$err" -- t1 /continue &
+      send_pid=$!
+      sleep 1
+      if [ -s "$dir/send.log" ] || ! kill -0 "$send_pid" 2>/dev/null; then
+        : > "$dir/drop-release"
+        wait "$drop_pid" || true
+        wait "$send_pid" || true
+        fail "a typed steer crossed an in-flight no-change drop"
+      fi
+      : > "$dir/drop-release"
+      wait "$drop_pid" || fail "the pre-steer drop did not complete"
+      wait "$send_pid" || fail "the serialized steer failed"
+      [ ! -e "$dir/home/state/.echo-batch" ] || fail "the drop was not committed before the steer"
+    else
+      run_send "$dir" "$err" FM_SEND_PAUSE_READY="$dir/send-ready" FM_SEND_PAUSE_RELEASE="$dir/send-release" -- t1 /continue &
+      send_pid=$!
+      wait_echo_test_barrier "$dir/send-ready" || { : > "$dir/send-release"; wait "$send_pid"; fail "the steer did not reach transport"; }
+      if ! PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+        FM_CREW_STATE_BIN="$dir/crew-state" FM_FAKE_TMUX_BLOCKING=1 \
+        bash -c '. "$1"; echo_batch_record_delivered 2000 t1; [ ! -e "$STATE/.last-delivered-t1" ] && ! echo_batch_no_change_drop t1' _ "$ROOT/bin/fm-watch.sh"; then
+        : > "$dir/send-release"
+        wait "$send_pid" || true
+        fail "an in-flight steer allowed replacement baseline publication or an echo drop"
+      fi
+      [ -e "$dir/home/state/.echo-batch" ] || fail "an in-flight steer lost its pending echo"
+      : > "$dir/send-release"
+      wait "$send_pid" || fail "the paused steer failed"
+    fi
+    [ ! -e "$baseline" ] || fail "$mode left pre-steer drop evidence behind"
+    [ ! -e "$dir/home/state/.echo-baseline.lock" ] || fail "$mode retained its coordination lock"
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+      FM_CREW_STATE_BIN="$dir/crew-state" bash -c '. "$1"; echo_batch_record_delivered 3000 t1' _ "$ROOT/bin/fm-watch.sh"
+    [ -f "$baseline" ] || fail "$mode prevented the next real delivery from recording a baseline"
+  done
+  pass "steering serializes with baseline publication and the committed no-change drop"
+}
+
+test_echo_baseline_serializes_with_steering
 
 test_task_steers_invalidate_echo_baseline
 

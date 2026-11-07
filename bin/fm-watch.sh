@@ -2195,9 +2195,11 @@ echo_batch_flush_due() {
 # Record <task>'s delivered-wake baseline: the epoch of the wake that was just
 # delivered and the exact crew-state line at that moment. R3 compares against
 # this pair and nothing else, so it is written only on a real delivery.
-echo_batch_record_delivered() {  # <epoch> <task> ...
+echo_batch_record_delivered() (  # <epoch> <task> ...
   local epoch=$1 task line gen tmp
   shift
+  fm_lock_try_acquire "$STATE/.echo-baseline.lock" || return 0
+  trap 'fm_lock_release "$STATE/.echo-baseline.lock"' EXIT
   for task in "$@"; do
     [ -n "$task" ] || continue
     line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null || true)
@@ -2213,7 +2215,7 @@ echo_batch_record_delivered() {  # <epoch> <task> ...
       rm -f "$tmp"
     fi
   done
-}
+)
 
 # Map a delivered reason line back to the task baselines it covers. Called for
 # every wake, so only the two reason grammars that name task-owned files are
@@ -2327,6 +2329,8 @@ echo_batch_answered_gate_drop() {  # <task> ...
 echo_batch_no_change_drop() (  # <task> ...
   local task baseline epoch gen stored line current_gen rec m
   shopt -s nullglob
+  fm_lock_try_acquire "$STATE/.echo-baseline.lock" || return 1
+  trap 'fm_lock_release "$STATE/.echo-baseline.lock"' EXIT
   [ "$#" -gt 0 ] || return 1
   for task in "$@"; do
     [ -n "$task" ] || return 1
@@ -2352,7 +2356,7 @@ echo_batch_no_change_drop() (  # <task> ...
       [ "$m" -lt "$epoch" ] || return 1
     done
   done
-  return 0
+  rm -f -- "$ECHO_BATCH_FILE"
 )
 
 # Deliver the persisted batch, applying the two drop rules first. <mode> is
@@ -2405,7 +2409,7 @@ echo_batch_flush() {  # <due|immediate>
         [ -n "$file" ] || continue
         triage_log "echo-batch drop rule=no-change file=$(basename "$file")"
       done < "$tmp"
-      rm -f "$tmp" "$ECHO_BATCH_FILE"
+      rm -f "$tmp"
       ECHO_BATCH_IN_FLUSH=0
       return 0
     fi
