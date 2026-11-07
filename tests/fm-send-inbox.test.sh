@@ -478,6 +478,38 @@ test_handoff_is_devin_only_and_secret_guarded() {
   pass "fm-send planes: /handoff is devin-only, typed, secret-guarded, and recorded"
 }
 
+test_task_steers_invalidate_echo_baseline() {
+  local variant dir err baseline
+  for variant in inbox slash codex explicit key unbound blocked; do
+    dir=$(setup_case "baseline-$variant" codex); err="$dir/send.err"
+    baseline="$dir/home/state/.last-delivered-t1"
+    printf '1000\tgen1\tstate: parked\n' > "$baseline"
+    printf 'other task\n' > "$dir/home/state/.last-delivered-other"
+    case "$variant" in
+      inbox) run_send "$dir" "$err" -- t1 'continue work' || fail "inbox steer failed" ;;
+      slash) run_send "$dir" "$err" -- t1 /continue || fail "slash steer failed" ;;
+      codex) run_send "$dir" "$err" -- t1 '$continue' || fail "Codex steer failed" ;;
+      explicit) run_send "$dir" "$err" -- sess:fm-t1 'continue work' || fail "bound endpoint steer failed" ;;
+      key) run_send "$dir" "$err" -- t1 --key Enter || fail "key steer failed" ;;
+      unbound) run_send "$dir" "$err" -- sess:win 'continue work' || fail "unbound endpoint steer failed" ;;
+      blocked)
+        rm -f "$baseline"
+        mkdir "$baseline"
+        run_send "$dir" "$err" -- t1 /continue && fail "steer delivered without invalidating its baseline"
+        [ ! -s "$dir/send.log" ] || fail "failed baseline invalidation still typed a steer"
+        ;;
+    esac
+    case "$variant" in
+      unbound|blocked) [ -e "$baseline" ] || fail "$variant unexpectedly changed a baseline" ;;
+      *) [ ! -e "$baseline" ] || fail "$variant retained stale no-change evidence" ;;
+    esac
+    [ -f "$dir/home/state/.last-delivered-other" ] || fail "$variant invalidated another task's baseline"
+  done
+  pass "every task-bound send plane invalidates only its own echo baseline before delivery"
+}
+
+test_task_steers_invalidate_echo_baseline
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence

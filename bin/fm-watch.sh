@@ -631,8 +631,8 @@ signal_turnend_panes_churned() {  # <file> ...
       # Both marker generations are eligible: bare .turn-ended (legacy) and the
       # per-incarnation .turn-ended.<spawn_gen> every publisher writes today.
       # Missing the latter would make the whole proof unreachable in production.
-      *.turn-ended.*) task=${base%%.turn-ended.*} ;;
       *.turn-ended)   task=${base%.turn-ended} ;;
+      *.turn-ended.*) task=${base%.turn-ended.*} ;;
       *)              return 1 ;;
     esac
     [ -n "$task" ] || return 1
@@ -2229,7 +2229,7 @@ echo_batch_note_delivery() {  # <reason>
         case "$task" in
           *.status) task=${task%.status} ;;
           *.turn-ended) task=${task%.turn-ended} ;;
-          *.turn-ended.*) task=${task%%.turn-ended*} ;;
+          *.turn-ended.*) task=${task%.turn-ended.*} ;;
           *) continue ;;
         esac
         case " $seen " in *" $task "*) continue ;; esac
@@ -2382,7 +2382,8 @@ echo_batch_flush() {  # <due|immediate>
     [ -n "$file" ] || continue
     base=${file##*/}
     case "$base" in
-      *.turn-ended|*.turn-ended.*) task=${base%%.turn-ended*} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *.turn-ended.*) task=${base%.turn-ended.*} ;;
       *) all_turnend=0; continue ;;
     esac
     case " $seen " in *" $task "*) continue ;; esac
@@ -2466,20 +2467,20 @@ filter_stale_turnend_markers() {  # <pending-tsv>
   while IFS=$(printf '\t') read -r sf sig f; do
     [ -n "$sf" ] || continue
     case "$f" in
+      *.turn-ended)
+        base=$(basename "$f")
+        id=${base%.turn-ended}
+        if fm_wake_turnend_bare_marker_is_stale "$STATE" "$id"; then
+          printf '%s' "$sig" > "$sf"
+          continue
+        fi
+        ;;
       *.turn-ended.*)
         base=$(basename "$f")
         id=${base%.turn-ended.*}
         rest=${base#"$id".turn-ended.}
         gen=$rest
         if fm_wake_turnend_marker_is_stale "$STATE" "$id" "$gen"; then
-          printf '%s' "$sig" > "$sf"
-          continue
-        fi
-        ;;
-      *.turn-ended)
-        base=$(basename "$f")
-        id=${base%.turn-ended}
-        if fm_wake_turnend_bare_marker_is_stale "$STATE" "$id"; then
           printf '%s' "$sig" > "$sf"
           continue
         fi

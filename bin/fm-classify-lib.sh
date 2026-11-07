@@ -2291,8 +2291,8 @@ signal_crew_provably_working() {  # <file> ...
     base=${f##*/}
     case "$base" in
       *.status)        task=${base%.status} ;;
-      *.turn-ended.*)  task=${base%.turn-ended.*} ;;
       *.turn-ended)    task=${base%.turn-ended} ;;
+      *.turn-ended.*)  task=${base%.turn-ended.*} ;;
       *)               continue ;;
     esac
     [ -n "$task" ] || continue

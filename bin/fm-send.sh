@@ -1001,6 +1001,11 @@ fm_send_wait_for_hermes_exit() {
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
+if [ -n "$TARGET_TASK_ID" ] && ! rm -f -- "$STATE/.last-delivered-$TARGET_TASK_ID"; then
+  echo "error: steer not sent to $TARGET_TASK_ID: its delivered-wake baseline could not be invalidated" >&2
+  exit 1
+fi
+
 if [ "${1:-}" = "--key" ]; then
   case "$*" in
     *--resolve-key*)

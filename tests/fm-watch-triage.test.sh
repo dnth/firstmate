@@ -5248,7 +5248,66 @@ test_echo_batch_procevent_flush_does_not_deadlock() {
   pass "a process-event wake flushes a pending echo batch without reacquiring its queue lock"
 }
 
+test_turnend_markers_preserve_full_task_identity() {
+  local form rule dir state out capture marker pid key mapped id=alpha.turn-ended.beta
+  local line='state: parked · source: pane · waiting on the supervisor'
+  for form in bare generation; do
+    for rule in churn baseline answered-gate no-change; do
+      dir=$(make_case "marker-identity-$form-$rule"); state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+      printf 'window=test:fm-alpha\nkind=ship\nharness=pi\nspawn_gen=g1\n' > "$state/alpha.meta"
+      printf 'window=test:fm-subject\nkind=ship\nharness=pi\n' > "$state/$id.meta"
+      marker="$state/$id.turn-ended"
+      if [ "$form" = generation ]; then
+        printf 'spawn_gen=g1\n' >> "$state/$id.meta"
+        marker="$marker.g1"
+      fi
+      : > "$marker"
+      record_pi_busy "$state" "$id" >/dev/null
+      blocking_capture "$capture"
+      export FM_FAKE_CREW_STATE='state: unknown · source: none · stopped task'
+      export FM_FAKE_CREW_STATE_alpha="$line"
+      case "$rule" in
+        churn)
+          FM_FAKE_CREW_STATE_alpha='state: working · source: run-step · validating'
+          : > "$dir/config/turnend-churn-absorb"
+          key=test_fm-subject
+          printf '%s' "$(hash_text "$(cat "$capture")")" > "$state/.hash-$key"
+          ;;
+        answered-gate)
+          FM_FAKE_CREW_STATE_alpha='state: parked · source: run-step · parked at review: 1 finding(s) · run: 01RUN'
+          printf '%s\n' 'needs-decision [key=nm-01RUN-review]: question' 'resolved [key=nm-01RUN-review]: answered' > "$state/alpha.status"
+          prime_turnend_seen "$state/alpha.status"
+          printf '120\n' > "$dir/config/wake-echo-batch"
+          ;;
+        no-change)
+          printf '%s\tg1\t%s\n' "$(( $(date +%s) - 100 ))" "$line" > "$state/.last-delivered-alpha"
+          printf '120\n' > "$dir/config/wake-echo-batch"
+          ;;
+      esac
+      mapped=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_status_key_map "$2" || exit; printf "%s" "$FM_WAKE_STATUS_KEY"' _ "$ROOT/bin/fm-wake-lib.sh" "${marker##*/}")
+      [ "$mapped" = "$id.status" ] || fail "$form mapped the marker to another task's status"
+      watch_bg "$state" "$dir/fakebin" "$out" FM_FAKE_TMUX_WINDOW=test:fm-subject FM_FAKE_TMUX_CAPTURE="$capture"
+      pid=$!
+      case "$rule" in
+        answered-gate|no-change)
+          wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$form/$rule did not defer the marker"; }
+          backdate_echo_batch "$state" 121
+          ;;
+      esac
+      wait_for_exit "$pid" 100 || { reap "$pid"; fail "$form/$rule suppressed the stopped task's wake"; }
+      grep -F "$marker" "$out" >/dev/null || fail "$form/$rule lost the marker in delivery"
+      [ -f "$state/.last-delivered-$id" ] || fail "$form/$rule did not record the full task's baseline"
+      if [ "$rule" != no-change ]; then
+        [ ! -e "$state/.last-delivered-alpha" ] || fail "$form/$rule recorded the baseline under the truncated task id"
+      fi
+      unset FM_FAKE_CREW_STATE FM_FAKE_CREW_STATE_alpha
+    done
+  done
+  pass "bare and generation-qualified markers preserve task IDs through classification, drops, baselines, and queue mapping"
+}
+
 test_echo_review_regressions() {
+  test_turnend_markers_preserve_full_task_identity
   test_echo_batch_procevent_flush_does_not_deadlock
   test_procevent_surface_serializes_with_drain
   test_procevent_surface_crash_boundaries
@@ -5321,6 +5380,7 @@ test_open_decision_reminders_serialize_retirement
 test_wedge_backlog_captain_hold_defers_escalation
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_is_off_until_armed
+test_turnend_markers_preserve_full_task_identity
 test_echo_batch_procevent_flush_does_not_deadlock
 test_echo_batch_groups_turnend_echoes_into_one_wake
 test_echo_batch_survives_a_watcher_restart
