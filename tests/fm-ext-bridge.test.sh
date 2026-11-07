@@ -1140,9 +1140,10 @@ PY
   assert_present "$inflight" "abort-order probe must start with a claimed inflight"
   order="$home/abort-order.log"
   (
-    # shellcheck source=bin/fm-ext-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-ext-lib.sh"
     eval "$(declare -f fm_ext_private_artifact_remove | sed '1s/fm_ext_private_artifact_remove/_orig_remove/')"
+    # shellcheck disable=SC2329 # Invoked by the imported outbox abort function.
     fm_ext_private_artifact_remove() {
       printf '%s\n' "$2" >> "$order"
       _orig_remove "$@"
@@ -1277,8 +1278,9 @@ test_23_stale_inflight_ttl_and_dead_pid_steal() {
   lockbase="probe.answer.1.inflight.lock"
   mkdir "$home/state/ext-outbox/$lockbase"
   (
-    # shellcheck source=bin/fm-ext-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-ext-lib.sh"
+    # shellcheck disable=SC2034 # Read by the imported inflight TTL helper.
     FM_EXT_INFLIGHT_TTL_SECS=0
     FM_EXT_NOW_OVERRIDE=$(fm_ext_file_mtime "$home/state/ext-outbox/$lockbase") \
       || fail "could not read the steal-lock fixture mtime"
@@ -2423,6 +2425,7 @@ backdate_request() {  # <home> <slug> <age-secs>
 }
 
 overdue_ring() {  # <home>
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   home_env "$1" bash -c '. "$1/bin/fm-ext-overdue-lib.sh"; fm_ext_overdue_ring "$2" "$3"' \
     _ "$ROOT" "$1" "$1/state"
 }
@@ -2481,7 +2484,7 @@ SH
   out=$(overdue_ring "$home")
   [ -z "$out" ] || fail "a live-task check must claim the cadence window"
   [ ! -s "$home/reconciliations" ] || fail "reconciliation repeated within the cadence window"
-  for verdict in failed unknown done blocked unreadable; do
+  for verdict in failed unknown "done" blocked unreadable; do
     rm -f "$home/state/.ext-overdue.$slug"
     [ "$verdict" != unknown ] || rm -f "$home/state/task-live.status"
     printf 'state: %s · source: none · unavailable\n' "$verdict" > "$home/verdict"
@@ -2505,15 +2508,20 @@ test_58_check_payloads_preserve_every_pending_request() {
   for payload in "ext-request $second" \
     "ext-request $first; ext-request $second; +2 more (see EXT REQUESTS AWAITING ANSWER in the drain)" \
     "/home/example/state/poll.check.sh: ext-request $first; ext-request-overdue $second age=10m"; do
+    # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
     home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "an unanswered unpresented request must stay pending"
   done
   rm -f "$home/state/ext-inbox/$first.json"
   payload="ext-request $first; ext-request $second; ext-request-overdue $second age=10m"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "pending must win over an answered sibling"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_note_presented "$2"' _ "$ROOT" "$second"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
     fail "all answered or presented requests must finish the close"
   fi
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "pr merged" 0' _ "$ROOT"; then
     fail "unrelated checks must keep the covered path"
   fi
@@ -2584,6 +2592,7 @@ os.utime(sys.argv[1], (at, at))
 PYTEST
   out=$(FM_EXT_OVERDUE_SECS=-5 FM_EXT_OVERDUE_REMIND_SECS=-5 overdue_ring "$home" 2>> "$home/negative-warnings")
   assert_contains "$out" "ext-request-overdue $slug age=" "negative cadence must remind after its floor window"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   home_env "$home" env FM_EXT_OVERDUE_SECS=300 FM_EXT_OVERDUE_REMIND_SECS=0 bash -c '
     . "$1/bin/fm-ext-lib.sh"
     fm_ext_overdue_remind_secs
@@ -2607,24 +2616,30 @@ test_60_truncated_ext_closes_consult_the_entire_inbox() {
     "$home/state/poll.check.sh: ext-request $first" \
     "ext-request:$first" "ext-request-overdue:$first" \
     "ext-request-overdue $first age=10m"; do
+    # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
     home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since" || fail "an omitted unpresented request must release a truncated close"
   done
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "poll.check.sh: PR merged" "$2"' _ "$ROOT" "$since"; then
     fail "a waiting ext request must not release an unrelated check"
   fi
   for payload in "state/fm-ext-request-redeliver.check.sh: merged" \
     "state/ext-request.check.sh: merged" "other-ext-request $first" \
     "ext-request-not-an-event $first"; do
+    # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
     if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
       fail "request text in a script path or another token must keep the covered path"
     fi
   done
   payload="ext-request $first"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_note_presented "$2"' _ "$ROOT" "$omitted"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
     fail "an inbox whose remaining request was presented must be covered"
   fi
   rm -f "$home/state/ext-inbox/$omitted.json"
+  # shellcheck disable=SC2016 # Positional arguments expand in the child shell.
   if home_env "$home" bash -c '. "$1/bin/fm-ext-lib.sh"; fm_ext_check_still_pending "$2" "$3"' _ "$ROOT" "$payload" "$since"; then
     fail "an empty inbox must be covered"
   fi
