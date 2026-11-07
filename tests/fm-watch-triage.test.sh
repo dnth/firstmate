@@ -4984,7 +4984,7 @@ test_echo_batch_status_echo_joins_window() {
 # firstmate decision, with an actively blocking pane. Any near miss delivers.
 test_echo_batch_answered_gate_drop_and_near_misses() {
   local variant dir state fakebin out capture response pid
-  for variant in drop unanswered idle-not-blocking not-parked; do
+  for variant in drop unanswered idle-not-blocking not-parked other-run other-step reopened handled-prefix afk; do
     dir=$(make_case "echo-batch-answered-gate-$variant"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture="$dir/pane.txt"
     if [ "$variant" = idle-not-blocking ]; then printf 'idle prompt\n' > "$capture"; else blocking_capture "$capture"; fi
@@ -4995,17 +4995,33 @@ test_echo_batch_answered_gate_drop_and_near_misses() {
       unanswered) response='needs-decision [key=nm-01RUN-review]: the gate raised a question' ;;
       *)          response='needs-decision [key=nm-01RUN-review]: the gate raised a question'$'\n''resolved [key=nm-01RUN-review]: answered: option A' ;;
     esac
+    case "$variant" in
+      reopened) response="$response"$'\n''needs-decision [key=nm-01RUN-review]: reopened' ;;
+      handled-prefix)
+        response='needs-decision [key=nm-01RUN-review]: unanswered'
+        mkdir -p "$state/gate.inbox/handled"
+        printf '%s\n' '--resolve-key nm-01RUN-review-other' > "$state/gate.inbox/handled/001.msg"
+        ;;
+    esac
     printf '%s\n' "$response" > "$state/gate.status"
     prime_turnend_seen "$state/gate.status"
     case "$variant" in
       not-parked) export FM_FAKE_CREW_STATE_gate='state: parked · source: pane · waiting' ;;
       *)          export FM_FAKE_CREW_STATE_gate='state: parked · source: run-step · parked at review: 1 finding(s) · ask-user: authority decision · run: 01RUN' ;;
     esac
+    case "$variant" in
+      other-run) FM_FAKE_CREW_STATE_gate=${FM_FAKE_CREW_STATE_gate/01RUN/02RUN} ;;
+      other-step) FM_FAKE_CREW_STATE_gate=${FM_FAKE_CREW_STATE_gate/at review:/at test:} ;;
+    esac
     watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120 \
       FM_FAKE_TMUX_WINDOW=test:fm-gate FM_FAKE_TMUX_CAPTURE="$capture"
     pid=$!
     wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: the gate echo was not deferred"; }
-    backdate_echo_batch "$state" 121
+    if [ "$variant" = afk ]; then
+      : > "$state/.afk"
+    else
+      backdate_echo_batch "$state" 121
+    fi
     if [ "$variant" = drop ]; then
       wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$variant: the watcher did not complete its flush poll"; }
       kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "$variant: the answered-gate echo woke the supervisor: $(cat "$out")"; }
@@ -5030,7 +5046,7 @@ test_echo_batch_answered_gate_drop_and_near_misses() {
 test_echo_batch_no_change_drop_and_near_misses() {
   local variant dir state fakebin out capture pid line epoch gen
   line='state: parked · source: pane · waiting on the supervisor'
-  for variant in drop changed-state steered idle-not-blocking no-baseline; do
+  for variant in drop changed-state steered same-second-pending same-second-handled idle-not-blocking no-baseline afk; do
     dir=$(make_case "echo-batch-no-change-$variant"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture="$dir/pane.txt"
     if [ "$variant" = idle-not-blocking ]; then printf 'idle prompt\n' > "$capture"; else blocking_capture "$capture"; fi
@@ -5050,11 +5066,28 @@ test_echo_batch_no_change_drop_and_near_misses() {
       mkdir -p "$state/steady.inbox/handled"
       printf 'answer\n' > "$state/steady.inbox/handled/001.msg"
     fi
+    case "$variant" in
+      same-second-*)
+        mkdir -p "$state/steady.inbox/handled"
+        if [ "$variant" = same-second-pending ]; then
+          printf 'answer\n' > "$state/steady.inbox/001.msg"
+          epoch=$(python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$state/steady.inbox/001.msg")
+        else
+          printf 'answer\n' > "$state/steady.inbox/handled/001.msg"
+          epoch=$(python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$state/steady.inbox/handled/001.msg")
+        fi
+        printf '%s\t%s\t%s\n' "$epoch" "$gen" "$line" > "$state/.last-delivered-steady"
+        ;;
+    esac
     watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120 \
       FM_FAKE_TMUX_WINDOW=test:fm-steady FM_FAKE_TMUX_CAPTURE="$capture"
     pid=$!
     wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: the no-change echo was not deferred"; }
-    backdate_echo_batch "$state" 121
+    if [ "$variant" = afk ]; then
+      : > "$state/.afk"
+    else
+      backdate_echo_batch "$state" 121
+    fi
     if [ "$variant" = drop ]; then
       wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$variant: the watcher did not complete its flush poll"; }
       kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "$variant: an unchanged echo woke the supervisor: $(cat "$out")"; }
@@ -5076,11 +5109,18 @@ test_echo_batch_no_change_drop_and_near_misses() {
 
 test_echo_batch_config_window_and_disable() {
   local variant dir state fakebin out pid window
-  for variant in config-off invalid-default tuned-off-by-env; do
+  for variant in config-off invalid-default leading-zero octal-invalid oversized false-alias uppercase-alias no-alias zero-alias tuned-off-by-env; do
     dir=$(make_case "echo-batch-config-$variant"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; mkdir -p "$dir/config"
     case "$variant" in
       invalid-default) window=30 ;;
+      leading-zero) window=060 ;;
+      octal-invalid) window=090 ;;
+      oversized) window=99999999999999999999999999999999999999 ;;
+      false-alias) window=false ;;
+      uppercase-alias) window=OFF ;;
+      no-alias) window=no ;;
+      zero-alias) window=0 ;;
       *)               window=240 ;;
     esac
     printf '%s\n' "$window" > "$dir/config/wake-echo-batch"
@@ -5108,7 +5148,7 @@ test_echo_batch_config_window_and_disable() {
         wait_for_exit "$pid" 40 || { reap "$pid"; fail "$variant: a disabled window still deferred: $(cat "$out")"; }
         [ ! -e "$state/.echo-batch" ] || fail "$variant: a disabled window wrote a batch"
         ;;
-      invalid-default)
+      invalid-default|leading-zero|octal-invalid|oversized|false-alias|uppercase-alias|no-alias|zero-alias)
         wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: an invalid window did not fall back to the default"; }
         wait_log_line "$state" 'echo-batch config invalid' \
           || { reap "$pid"; fail "$variant: the invalid value was not reported"; }
@@ -5126,6 +5166,12 @@ test_echo_batch_config_window_and_disable() {
     unset FM_FAKE_CREW_STATE
   done
   pass "config/wake-echo-batch selects 60-300 seconds or off, the environment override wins, and an invalid value falls back with one log line"
+}
+
+test_echo_review_regressions() {
+  test_echo_batch_answered_gate_drop_and_near_misses
+  test_echo_batch_no_change_drop_and_near_misses
+  test_echo_batch_config_window_and_disable
 }
 
 case "${FM_WATCH_TRIAGE_TEST:-}" in

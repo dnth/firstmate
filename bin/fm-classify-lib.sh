@@ -2123,24 +2123,6 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
-# 0 if crew <id>'s authoritative current state is a no-mistakes validation gate,
-# whoever owes its answer. `parked` plus `source: run-step` plus a `parked at `
-# detail is the gate's shape; whether the answer is owed by a human or by the
-# crewmate is crew_gate_awaits_human_decision's separate question. Reads one
-# fm-crew-state.sh line, with the same cost caveat as crew_absorb_class.
-crew_parked_at_gate() {  # <id>
-  local id=$1 line state src
-  [ -n "$id" ] || return 1
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) return 1 ;; esac
-  state=${line#state: }; state=${state%% *}
-  [ "$state" = parked ] || return 1
-  src=${line#*source: }; src=${src%% *}
-  [ "$src" = run-step ] || return 1
-  case "$line" in *" · parked at "*) return 0 ;; esac
-  return 1
-}
-
 # The one spelling of the verdict component that says a parked gate's answer is
 # owed by a HUMAN. bin/fm-crew-state.sh mints it (nm_gate_awaits_human_decision
 # owns the derivation: the findings table's `action` column, read by position);

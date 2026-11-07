@@ -2075,14 +2075,15 @@ echo_batch_resolve() {
   fi
   raw=$(printf '%s' "$raw" | tr -d '[:space:]')
   case "$raw" in
-    off|OFF|false|FALSE|no|NO|0)
+    off)
       ECHO_BATCH_RESOLVED=0
       return 0
       ;;
   esac
   valid=1
   case "$raw" in
-    ''|*[!0-9]*) valid=0 ;;
+    [1-9][0-9]|[1-9][0-9][0-9]) ;;
+    *) valid=0 ;;
   esac
   if [ "$valid" -eq 1 ] && { [ "$raw" -lt "$ECHO_BATCH_MIN_SECS" ] || [ "$raw" -gt "$ECHO_BATCH_MAX_SECS" ]; }; then
     valid=0
@@ -2188,6 +2189,7 @@ EOF
 echo_batch_due() {
   local first now
   [ -s "$ECHO_BATCH_FILE" ] || return 1
+  [ ! -e "$STATE/.afk" ] || return 0
   echo_batch_resolve
   [ "$ECHO_BATCH_RESOLVED" -gt 0 ] || return 0
   first=$(awk -F '\t' 'NF >= 2 && $1 ~ /^[0-9]+$/ { print $1; exit }' "$ECHO_BATCH_FILE")
@@ -2256,45 +2258,20 @@ echo_batch_note_delivery() {  # <reason>
   esac
 }
 
-# The latest needs-decision key a task ever escalated, preferring the newest
-# stated key. R2 answers "is the gate's key already decided", and the key lives
-# on that escalation line rather than on the gate verdict.
-gate_decision_key_from_status() {  # <status-file>
-  local f=$1 line untimed verb key=''
-  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+gate_decision_recorded() {  # <status-file> <key>
+  local statusf=$1 key=$2 line untimed verb k opened=0 answered=0
+  [ -f "$statusf" ] && [ -r "$statusf" ] && [ ! -L "$statusf" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     _fm_status_untimed "$line" untimed
     verb=$(status_line_verb "$untimed")
-    [ "$verb" = needs-decision ] || continue
-    key=$(_fm_decision_key "$untimed") || continue
-  done < "$f"
-  [ -n "$key" ] || return 1
-  printf '%s' "$key"
-}
-
-# 0 when <key> already has a firstmate decision recorded for <task>: the
-# worker's status log closed it with a `resolved` line, a handled inbox record
-# names it as the answer's --resolve-key, or the captain call carrying it is
-# already open. All three are records of a delivered answer, never of an
-# attempted one (bin/fm-send.sh appends the resolved line only after delivery).
-gate_decision_recorded() {  # <status-file> <task> <key>
-  local statusf=$1 task=$2 key=$3 line untimed verb k rec
-  while IFS= read -r line || [ -n "$line" ]; do
-    _fm_status_untimed "$line" untimed
-    verb=$(status_line_verb "$untimed")
-    [ "$verb" = resolved ] || continue
     k=$(_fm_decision_key "$untimed") || continue
-    [ "$k" = "$key" ] && return 0
+    [ "$k" = "$key" ] || continue
+    case "$verb" in
+      needs-decision) opened=1; answered=0 ;;
+      resolved) [ "$opened" -eq 0 ] || answered=1 ;;
+    esac
   done < "$statusf"
-  for rec in "$STATE/$task.inbox/handled"/*.msg; do
-    [ -e "$rec" ] || continue
-    grep -Fq -- "--resolve-key $key" "$rec" 2>/dev/null && return 0
-    grep -Fq -- "--resolve-key=$key" "$rec" 2>/dev/null && return 0
-    grep -Fq -- "[key=$key]" "$rec" 2>/dev/null && return 0
-  done
-  task_captain_call_open "$key" && return 0
-  task_captain_call_open "$task-decision-$key" && return 0
-  return 1
+  [ "$answered" -eq 1 ]
 }
 
 # 0 when the window's pane renders an ACTIVE blocking marker. This is a rendered
@@ -2329,14 +2306,26 @@ pane_is_blocking_for_task() {  # <task>
 # R2 answered-gate drop: every task is parked at a no-mistakes gate, its gate key
 # already has a recorded firstmate decision, and its pane is actively blocked.
 echo_batch_answered_gate_drop() {  # <task> ...
-  local task statusf key
+  local task statusf key line rest part run step
   [ "$#" -gt 0 ] || return 1
   for task in "$@"; do
     [ -n "$task" ] || return 1
-    crew_parked_at_gate "$task" || return 1
+    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
+    case "$line" in 'state: parked · source: run-step · '*) ;; *) return 1 ;; esac
+    run=; step=; rest="$line · "
+    while [ -n "$rest" ]; do
+      part=${rest%% · *}
+      rest=${rest#* · }
+      case "$part" in
+        'run: '*) run=${part#run: } ;;
+        'parked at '*) step=${part#parked at }; step=${step%%:*} ;;
+      esac
+    done
+    case "$run" in ''|*[!a-zA-Z0-9_-]*) return 1 ;; esac
+    case "$step" in ''|*[!a-zA-Z0-9_-]*) return 1 ;; esac
+    key="nm-$run-$step"
     statusf="$STATE/$task.status"
-    key=$(gate_decision_key_from_status "$statusf") || return 1
-    gate_decision_recorded "$statusf" "$task" "$key" || return 1
+    gate_decision_recorded "$statusf" "$key" || return 1
     pane_is_blocking_for_task "$task" || return 1
   done
   return 0
@@ -2369,7 +2358,7 @@ echo_batch_no_change_drop() {  # <task> ...
     for rec in "$STATE/$task.inbox"/*.msg "$STATE/$task.inbox/handled"/*.msg; do
       [ -e "$rec" ] || continue
       m=$(stat_mtime "$rec")
-      [ -n "$m" ] && [ "$m" -gt "$epoch" ] && return 1
+      [ -n "$m" ] && [ "$m" -ge "$epoch" ] && return 1
     done
   done
   return 0
@@ -2409,7 +2398,7 @@ echo_batch_flush() {  # <due|immediate>
     seen="$seen $task"
     tasks+=("$task")
   done < "$tmp"
-  if [ "$all_turnend" -eq 1 ] && [ "${#tasks[@]}" -gt 0 ] && [ "$window" -gt 0 ]; then
+  if [ ! -e "$STATE/.afk" ] && [ "$all_turnend" -eq 1 ] && [ "${#tasks[@]}" -gt 0 ] && [ "$window" -gt 0 ]; then
     if echo_batch_answered_gate_drop "${tasks[@]}"; then
       while IFS=$(printf '\t') read -r epoch file; do
         [ -n "$file" ] || continue

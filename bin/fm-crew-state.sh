@@ -420,9 +420,6 @@ nm_gate_findings_count() {
 # column must read as unsafe rather than as safe. When the table's shape is not
 # provably safe the correct answer is the noisy one - a crewmate that went quiet
 # before answering its own gate is the failure that must never be silenced.
-# Residual bound, which no unquoted positional parse of this table escapes: a
-# comma inside a whitelisted field's own value (a path with a comma in it, say)
-# still shifts the walk.
 nm_gate_awaits_human_decision() {
   local header count cols idx i name field rows row rest
   header=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*findings\[[0-9]+\]\{[^}]*\}:' | head -1)
@@ -452,6 +449,8 @@ nm_gate_awaits_human_decision() {
     rest=$row
     i=1
     while [ "$i" -lt "$idx" ]; do
+      field=${rest%%,*}
+      case "$field" in *'"'*|*"'"*) rest=''; break ;; esac
       case "$rest" in *,*) rest=${rest#*,} ;; *) rest=''; break ;; esac
       i=$((i + 1))
     done

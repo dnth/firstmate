@@ -642,6 +642,17 @@ test_parked_human_decision_comes_from_the_action_column() {
   assert_contains "$out" "state: parked" "an unbraced findings precursor still reports parked"
   assert_not_contains "$out" " · ask-user: authority decision" \
     "rows from an earlier unbraced findings block must not mint the component"
+  reset_fakes
+  d=$(new_case parked-comma-path)
+  make_repo_on_branch "$d/wt" fm/comma-path
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/comma.meta" "window=fm:fm-comma" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/comma-path)"
+  local comma_row='r2,error,"src/a,b,ask-user,c.ts",,auto-fix'
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//r2,error,b.go,,ask-user/$comma_row}
+  out=$(run_crew_state "$d" comma)
+  assert_contains "$out" "state: parked" "a quoted comma path still reports parked"
+  assert_not_contains "$out" " · ask-user: authority decision" "a comma path cannot mint a human decision"
   pass "the parked human-decision component is derived from the findings table's action column"
 }
 
