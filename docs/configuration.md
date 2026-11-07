@@ -187,21 +187,28 @@ With the flag absent the wedge timer spends no fold or current-state read for it
 The wait must satisfy both records: the gate's findings table carries an `action` column entry of exactly `ask-user` (minted by `bin/fm-crew-state.sh` from the column by position, never from free text), and the task's own decision fold still holds an open `needs-decision` record keyed `nm-<run>-<step>` for the run the verdict reports.
 An answered gate (its closing `resolved` line already written at answer time) and a gate the crewmate itself owes keep the unchanged ladder.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which supervise their own crew and own that trade separately.
+Away mode remains daemon-owned: the watcher does not emit these bounded wait rechecks while `state/.afk` exists.
 `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
 
 ### Echo batching (config/wake-echo-batch)
 
-Status-only and bare turn-ended `signal:` wakes are echoes: the delivery that carried their news already happened, and the supervisor does not need a separate turn for every following turn boundary.
+Eligible status-only and bare turn-ended `signal:` wakes share a batching window so the supervisor can review them in one turn.
 The watcher defers those within one bounded window and delivers the group as one wake, using the same `signal:` reason grammar and one durable queue row per distinct file.
 Batching is default-on at `120` seconds.
-The local, gitignored `config/wake-echo-batch` file holds one value: a whole number of seconds in `[60,300]`, or `off`; an absent file keeps the default.
+The local, gitignored `config/wake-echo-batch` file holds one value: a decimal integer in `[60,300]` without leading zeros, or the literal `off`; an absent file keeps the default.
 An invalid value falls back to `120` and records one warning per watcher process rather than silently disabling the feature.
 The value is resolved once per watcher process, so a config change takes effect on the next watcher cycle chain.
 The window opens at the first deferred echo; a repeated turn boundary for a file already in the window joins it without extending the window.
 These classes are never deferred: any `check:` wake (Discord ext-request, merged-PR, process-event, usage), any `stale:` wake, a heartbeat backstop, any status span event whose verb is `needs-decision`, `blocked`, `done`, or `failed`, decision-owned rows, away-mode daemon triage, and anything the captain types.
 A pending batch is flushed into the durable queue immediately before any other wake is delivered, so an urgent wake carries the deferred rows with it.
 The batch is persisted in `state/.echo-batch` and an overdue one is flushed at the top of the next watcher cycle, so a restart cannot lose it.
-Two drop rules run only when a batch is entirely bare turn-ended markers and requires an active rendered blocking marker on every referenced pane: `answered-gate` drops echoes whose gates already have a recorded firstmate decision, and `no-change` drops echoes whose crew-state line is byte-identical to the line recorded at the task's last delivered wake with no firstmate steer since.
+Entering away mode also makes an inherited batch due immediately, without applying either drop rule; `off` likewise flushes a pending batch without drops.
+Two drop rules run only outside away mode, with batching enabled, when a batch is entirely bare turn-ended markers and every referenced pane shows an active rendered blocking marker.
+`answered-gate` requires each task's current parked run and step to match a keyed `needs-decision` opening followed by a `resolved` event; reopening that key invalidates the earlier answer.
+`no-change` requires the same task incarnation and a crew-state line byte-identical to its last delivered-wake baseline, with no firstmate steer since.
+Task-bound `fm-send` delivery invalidates that baseline across all steering planes, with baseline publication and the no-change drop serialized against the send.
+Inbox timestamps equal to or newer than the baseline, disappearing records, and unreadable timestamps require delivery.
+The blocking-marker check currently recognizes OMP's active footer only; panes without that evidence cannot qualify for either drop.
 Every near miss delivers the batch unchanged.
 Every deferral, flush, and drop is recorded in `state/.watch-triage.log` with its rule name (`echo-batch defer rule=window`, `echo-batch flush rule=window|immediate-flush`, `echo-batch drop rule=answered-gate|no-change`), so the captain can audit what was held or skipped.
 No model or network call runs in this path; the rules are deterministic file, pane, and record reads.

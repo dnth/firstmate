@@ -1291,9 +1291,9 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # not that evidence, and neither is a verdict that names no run. The wait is owed
 # by firstmate, not the captain: ask-user findings are routed to firstmate, which
 # decides most of them itself, and one it escalates becomes a captain-held
-# transfer that the first record above already catches. So the away-posture
-# silence does not apply to it: under away posture the supervision branch is the
-# actor allowed to answer it, and it is rechecked on the long cadence throughout.
+# transfer that the first record above already catches. Away-mode triage stays
+# daemon-owned: wedge_defer_wait suppresses watcher recheck output while .afk
+# exists, leaving the daemon to route the supervisor-owned answer.
 # The two signals come apart in both directions, and the ladder is kept in each:
 #   - the decision was ANSWERED and the crewmate has not yet relayed it with
 #     `axi respond`: the gate is still reported parked and still carries the
@@ -2005,9 +2005,8 @@ EOF
 }
 
 # --- Echo batching -----------------------------------------------------------
-# Status-only and bare turn-end signals are echoes: the delivery that carried
-# their news already happened, and the following turn boundaries for the same
-# state carry nothing. This defers them inside one bounded window and delivers
+# Eligible status-only and bare turn-end signals share a batching window; they
+# need not already have been delivered. This defers them and delivers
 # the group as ONE wake - one enqueue group, one printed reason, one supervisor
 # turn - which is the larger saving the 2026-11-06 replay measured (the
 # SIGNAL_GRACE coalescing above already merges only near-simultaneous signals).
@@ -2035,9 +2034,8 @@ EOF
 # ACTIVE rendered blocking marker - the worker is visibly blocked on a live
 # call, so its turn boundary carries nothing:
 #   answered-gate (R2 in the replay): every task is parked at a no-mistakes
-#     gate whose key already has a firstmate decision recorded (a `resolved
-#     [key=...]` line, a handled inbox record naming that key, or an open
-#     captain call for it), so what is outstanding is the crewmate's own relay.
+#     gate whose current run and step key has a resolved event after its latest
+#     needs-decision opening, so what is outstanding is the crewmate's own relay.
 #   no-change (R3): every task's fm-crew-state line is byte-identical to the
 #     line recorded when its last wake was delivered, the pane is actively
 #     blocked, and firstmate has not steered the task since that delivery.
