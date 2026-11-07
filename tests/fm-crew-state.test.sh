@@ -293,6 +293,92 @@ gate: review
 EOF
 }
 
+# A gate owed the CREWMATE's own answer: every finding's `action` column is
+# auto-fix. The free-text `description` column is where this repository's own
+# review output routinely quotes finding actions, so one row spells the token out
+# the way an enumeration does - surrounded by commas, in the exact shape a
+# substring or unanchored-regex derivation would accept - and the branch name
+# carries it too. Both are the counterexample: the ONLY thing that may mint the
+# human-decision component is the `action` column read by position.
+run_parked_crewmate_gate_with_ask_user_prose() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fix_review
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[2]{id,severity,file,line,action,description}:
+    r1,warning,a.go,,auto-fix,the action field is one of no-op, auto-fix, ask-user, so pick one
+    r2,warning,b.go,,auto-fix,ignored error
+gate: review
+EOF
+}
+
+# The same gate with the findings table's columns in a different order, so the
+# derivation is proven to read the column INDEX out of the header rather than
+# assuming action is the fifth field. The last row is owed a human.
+run_parked_reordered_columns() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[2]{severity,action,id,file,line,description}:
+    warning,auto-fix,r1,a.go,,ignored error
+    error,ask-user,r2,b.go,,changes product behavior
+gate: review
+EOF
+}
+
+# The same crewmate-owed gate with `description` placed BEFORE `action` in the
+# header. Every row's real action column is auto-fix, but one description spells
+# the token out surrounded by commas at exactly the comma offset the `action`
+# index lands on, so a derivation that reads the index from the header and then
+# walks raw commas to it accepts free text as the action. The table's shape is
+# not provably safe here, so the only correct answer is to keep the noisy
+# verdict: no human-decision component.
+run_parked_free_text_before_action() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fix_review
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[1]{id,severity,file,line,description,action}:
+    r1,warning,a.go,12,the action field is one of auto-fix, ask-user,auto-fix
+gate: review
+EOF
+}
+
+# The same crewmate-owed gate preceded by an UNBRACED `findings[N]:` block from
+# an earlier, already-resolved round. The braced header that follows is the live
+# gate's table and is the one the column index is read from, so the rows walked
+# must be that table's rows too.
+run_parked_unbraced_findings_precursor() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fix_review
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[2]:
+    prior-1,warning,a.go,ask-user,an earlier already-resolved block
+    prior-2,info,b.go,ask-user,another earlier row
+  findings[1]{id,severity,file,action,description}:
+    r1,warning,a.go,auto-fix,the live gate is owed to the crewmate
+gate: review
+EOF
+}
+
 run_parked_scalar_gate_running() {  # <branch>
   cat <<EOF
 run:
@@ -467,6 +553,96 @@ test_genuine_parked_not_superseded() {
   assert_contains "$out" "ask-user" "parked surfaces ask-user finding"
   assert_not_contains "$out" "superseded" "agreeing parked+needs-decision not flagged stale"
   pass "genuine parked run is not flagged superseded"
+}
+
+# Which HUMAN owes a parked gate its answer is the distinction the watcher's
+# wedge deferral and answered-gate echo drop rest on, so the component that
+# carries it must come from the findings table's `action` column and from nothing
+# else. Both directions, plus the counterexamples a text match would accept.
+test_parked_human_decision_comes_from_the_action_column() {
+  local d out
+  reset_fakes
+  d=$(new_case parked-ask-user-action-column)
+  make_repo_on_branch "$d/wt" fm/feat-au
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-au.meta" "window=fm:fm-feat-au" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-au.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-au)"
+  out=$(run_crew_state "$d" feat-au)
+  assert_contains "$out" "state: parked" "an ask-user row still reports parked"
+  assert_contains "$out" " · ask-user: authority decision" \
+    "an action column of ask-user mints the human-decision component"
+
+  # The counterexample. Nothing here is owed a human: every action column is
+  # auto-fix. A description enumerating the action values, and a branch named
+  # after the same token, must not mint the component.
+  reset_fakes
+  d=$(new_case parked-ask-user-prose-only)
+  make_repo_on_branch "$d/wt" fm/ask-user-authority-fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ap.meta" "window=fm:fm-feat-ap" "worktree=$d/wt" "kind=ship"
+  printf 'working: validation under way\n' > "$d/state/feat-ap.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_crewmate_gate_with_ask_user_prose fm/ask-user-authority-fix)"
+  # Non-vacuity: the payload must really carry the token where a naive match
+  # accepts it.
+  assert_contains "$FM_FAKE_AXI_STATUS" ", ask-user," \
+    "the counterexample payload must carry the token where a naive match accepts it"
+  assert_contains "$FM_FAKE_AXI_STATUS" "branch: fm/ask-user-authority-fix" \
+    "the counterexample payload must also carry the token in its branch name"
+  out=$(run_crew_state "$d" feat-ap)
+  assert_contains "$out" "state: parked" "a crewmate-owed gate still reports parked"
+  assert_not_contains "$out" " · ask-user: authority decision" \
+    "free text and a branch name must not mint the human-decision component"
+
+  # Column order is read from the header, not assumed.
+  reset_fakes
+  d=$(new_case parked-ask-user-reordered)
+  make_repo_on_branch "$d/wt" fm/feat-ar
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ar.meta" "window=fm:fm-feat-ar" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-ar.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_reordered_columns fm/feat-ar)"
+  out=$(run_crew_state "$d" feat-ar)
+  assert_contains "$out" " · ask-user: authority decision" \
+    "the action column is located by header index, not by fixed position"
+
+  # A header index alone is not enough: with `description` ahead of `action` the
+  # comma walk lands inside free text, so the shape is refused and the crewmate
+  # keeps the noisy verdict.
+  reset_fakes
+  d=$(new_case parked-free-text-before-action)
+  make_repo_on_branch "$d/wt" fm/feat-af
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-af.meta" "window=fm:fm-feat-af" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-af.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_free_text_before_action fm/feat-af)"
+  assert_contains "$FM_FAKE_AXI_STATUS" "findings[1]{id,severity,file,line,description,action}:" \
+    "the fixture must really place free text before the action column"
+  assert_contains "$FM_FAKE_AXI_STATUS" ", ask-user," \
+    "the fixture description must carry the token where the comma walk would accept it"
+  out=$(run_crew_state "$d" feat-af)
+  assert_contains "$out" "state: parked" "an unsafe findings header still reports parked"
+  assert_not_contains "$out" " · ask-user: authority decision" \
+    "a findings header that puts free text before action must not mint the component"
+
+  # The header and the rows must come from the SAME block: an earlier unbraced
+  # `findings[N]:` block must not supply rows at the braced table's index.
+  reset_fakes
+  d=$(new_case parked-unbraced-findings-precursor)
+  make_repo_on_branch "$d/wt" fm/feat-ub
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ub.meta" "window=fm:fm-feat-ub" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-ub.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_unbraced_findings_precursor fm/feat-ub)"
+  assert_contains "$FM_FAKE_AXI_STATUS" "findings[2]:" \
+    "the fixture must really place an unbraced findings block before the gate's table"
+  assert_contains "$FM_FAKE_AXI_STATUS" ",ask-user," \
+    "the earlier block must carry the token where the wrong-block walk would accept it"
+  out=$(run_crew_state "$d" feat-ub)
+  assert_contains "$out" "state: parked" "an unbraced findings precursor still reports parked"
+  assert_not_contains "$out" " · ask-user: authority decision" \
+    "rows from an earlier unbraced findings block must not mint the component"
+  pass "the parked human-decision component is derived from the findings table's action column"
 }
 
 test_scalar_gate_parked_not_superseded() {
@@ -1858,6 +2034,7 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
+test_parked_human_decision_comes_from_the_action_column
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run

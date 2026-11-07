@@ -385,6 +385,84 @@ nm_gate_findings_count() {
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
 }
+# 0 when the gate's own findings table holds at least one row whose `action`
+# column is exactly `ask-user` - the pipeline's own record that this gate's
+# answer is owed by a HUMAN, not by the crewmate (the gate's shape -
+# awaiting_approval, fix_review, awaiting_agent - is reported parked in every
+# case and does not by itself say who owes the answer; only a findings row whose
+# `action` column is exactly `ask-user` does).
+#
+# Read POSITIONALLY, the way nm_gate_step_row above reads its row: locate the
+# `findings[N]{...}` header, take the index of the `action` column from it, walk
+# each of the N rows that follow to that index, and compare for EQUALITY. A
+# substring search over the run payload cannot make this distinction - the
+# trailing `description` column is free text that routinely quotes finding
+# actions, and the payload also carries the branch name and step names, so a
+# gate owed the crewmate's own answer would match just as readily as one owed a
+# human. Column order is read from the header rather than assumed, so a table
+# that grows a column keeps answering correctly. Both the header match and the
+# row scan require the BRACE, so the count, the index and the rows all come from
+# the same block: an earlier unbraced `findings[N]:` line from a resolved round
+# must not supply the rows while the braced gate table supplies the index, which
+# would read the wrong block's rows at the right block's offset
+# (tests/fm-crew-state.test.sh's unbraced-precursor case pins it).
+#
+# Reading the index out of the header and then walking RAW COMMAS to it is only
+# positional in name: the walk is sound only while every column before `action`
+# is comma-free, and the producer does not quote commas inside `description`
+# (tests/fm-crew-state.test.sh's own fixture proves it). A header ordering that
+# puts free text before `action` would therefore let a row's description mint
+# the marker - silently, with no error - which is the same class of hole the
+# positional derivation exists to close, arriving by a different route. So the
+# columns preceding `action` are checked against a WHITELIST of names this table
+# is known to carry as short comma-free scalars, and anything else refuses:
+# a whitelist rather than a blacklist of free-text names, because an unknown
+# column must read as unsafe rather than as safe. When the table's shape is not
+# provably safe the correct answer is the noisy one - a crewmate that went quiet
+# before answering its own gate is the failure that must never be silenced.
+# Residual bound, which no unquoted positional parse of this table escapes: a
+# comma inside a whitelisted field's own value (a path with a comma in it, say)
+# still shifts the walk.
+nm_gate_awaits_human_decision() {
+  local header count cols idx i name field rows row rest
+  header=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*findings\[[0-9]+\]\{[^}]*\}:' | head -1)
+  [ -n "$header" ] || return 1
+  count=$(printf '%s' "$header" | sed -n 's/^[[:space:]]*findings\[\([0-9][0-9]*\)\].*/\1/p')
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$count" -gt 0 ] || return 1
+  cols=$(printf '%s' "$header" | sed -n 's/^[^{]*{\([^}]*\)}.*/\1/p')
+  [ -n "$cols" ] || return 1
+  idx=0
+  i=0
+  while [ -n "$cols" ]; do
+    i=$((i + 1))
+    name=$(strip_quotes "$(trim "${cols%%,*}")")
+    if [ "$name" = action ]; then idx=$i; break; fi
+    case "$name" in
+      id|severity|file|line) ;;
+      *) return 1 ;;
+    esac
+    case "$cols" in *,*) cols=${cols#*,} ;; *) cols='' ;; esac
+  done
+  [ "$idx" -gt 0 ] || return 1
+  rows=$(printf '%s\n' "$RUN_OUT" \
+    | awk -v n="$count" 'f { print; if (++c >= n) exit; next } /^[[:space:]]*findings\[[0-9]+\]\{/ { f = 1 }')
+  while IFS= read -r row; do
+    case "$row" in *,*) ;; *) continue ;; esac
+    rest=$row
+    i=1
+    while [ "$i" -lt "$idx" ]; do
+      case "$rest" in *,*) rest=${rest#*,} ;; *) rest=''; break ;; esac
+      i=$((i + 1))
+    done
+    [ -n "$rest" ] || continue
+    field=$(strip_quotes "$(trim "${rest%%,*}")")
+    [ "$field" = ask-user ] && return 0
+  done <<EOF
+$rows
+EOF
+  return 1
+}
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
   case "$(status_line_note "$LOG_LINE")" in
@@ -593,8 +671,11 @@ if [ "$HAVE_RUN" = 1 ]; then
       RUN_DETAIL="parked at $gate"
       fcount=$(nm_gate_findings_count)
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
-      if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
-        RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
+      # Its own ${SEP} component, not free text inside the detail: consumers
+      # compare a whole component for equality, so nothing a gate name or a
+      # later note happens to contain can mint it.
+      if nm_gate_awaits_human_decision; then
+        RUN_DETAIL="$RUN_DETAIL${SEP}${FM_GATE_HUMAN_DECISION:-ask-user: authority decision}"
       fi
     else
       case "$status" in

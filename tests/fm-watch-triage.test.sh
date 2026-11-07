@@ -44,10 +44,16 @@ ack_stopped_cycle() {  # <state>
 # points at the case's hermetic fake fm-crew-state.sh (installed by make_case) so the
 # absorb-only-when-provably-working triage reads a canned verdict; a test fixes that
 # verdict via FM_FAKE_CREW_STATE in its environment before calling watch_bg.
+# Echo batching is default-on in production, so it is disabled here unless a case
+# opts in with its own FM_ECHO_BATCH_SECS: these cases assert which wake class a
+# signal belongs to, and the batching suite owns the window's own behavior.
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+  # env(1) parses the extra assignments after expansion; a bare "$@" word list
+  # would make them the command name instead.
+  env PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_ECHO_BATCH_SECS=off \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
 }
 
@@ -147,6 +153,79 @@ record_pi_busy() {  # <state-dir> <id>
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
     --source pi-ext --event agent-start
+}
+
+# --- echo-batching and churn fixtures ---------------------------------------
+# Point the watcher at a case-local config dir and opt it into pane-churn absorb.
+churn_config() {  # <case-dir>
+  local cfg="$1/config"
+  mkdir -p "$cfg"
+  : > "$cfg/turnend-churn-absorb"
+  printf '%s\n' "$cfg"
+}
+
+# Age the persisted echo batch's opening epoch so its window is due without a
+# test sleeping for the production 60-300s bound. Only the first line's epoch
+# moves; later entries keep their own times.
+backdate_echo_batch() {  # <state-dir> <seconds-overdue>
+  local state=$1 overdue=$2 file="$1/.echo-batch" stamp tmp
+  stamp=$(( $(date +%s) - overdue ))
+  tmp="$file.tmp.$$"
+  awk -F '\t' -v s="$stamp" 'BEGIN { OFS = "\t" } { if (NR == 1) $1 = s; print }' \
+    "$file" > "$tmp" && mv -f "$tmp" "$file"
+}
+
+wait_echo_batch_entries() {  # <state-dir> <count> [limit-ticks]
+  local state=$1 want=$2 limit=${3:-100} i=0 got
+  while [ "$i" -lt "$limit" ]; do
+    got=0
+    [ -f "$state/.echo-batch" ] && got=$(grep -c . "$state/.echo-batch" 2>/dev/null || true)
+    [ "${got:-0}" -ge "$want" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# A task whose panes stay busy (so the staleness backbone does not pre-empt the
+# batch), whose meta/marker pair is a live incarnation, and whose fake crew state
+# is supplied by the caller.
+make_echo_task() {  # <case-dir> <id> <gen>
+  local dir=$1 id=$2 gen=$3
+  local window="test:fm-$id"
+  printf 'window=%s\nkind=ship\nharness=pi\nspawn_gen=%s\n' "$window" "$gen" > "$dir/state/$id.meta"
+  : > "$dir/state/$id.turn-ended.$gen"
+  record_pi_busy "$dir/state" "$id" >/dev/null
+}
+
+# A pane capture containing OMP's live blocking status line. R2/R3 require it.
+blocking_capture() {  # <path>
+  printf '%s\n' '⎋ Blocking…' '  (waiting on the supervisor)' > "$1"
+}
+
+# Wait until the watcher records an absorbed wake matching <needle> in its
+# triage log. 1 if the watcher exits first (i.e. it surfaced the wake instead).
+wait_for_absorbed() {  # <state> <pid> <needle> [limit-ticks]
+  local state=$1 pid=$2 needle=$3 limit=${4:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    grep -Fq "$needle" "$state/.watch-triage.log" 2>/dev/null && return 0
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Wait for one triage-log line without requiring the watcher to exit (defer log
+# lines land just after the durable batch append).
+wait_log_line() {  # <state> <needle> [limit-ticks]
+  local state=$1 needle=$2 limit=${3:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    grep -Fq "$needle" "$state/.watch-triage.log" 2>/dev/null && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
 }
 
 reap() { stop_pid "$1"; }
@@ -4188,14 +4267,875 @@ test_remote_stale_age_and_inconclusive_bound_escalate() {
   pass "a conclusive stale age escalates, and 3 consecutive inconclusive probes escalate at the bound"
 }
 
+# --- upstream kunchenguid/firstmate#2877: bounded pane-churn turn-end absorb ---
+# A harness whose semantic busy state has no verified source (codex) can never
+# report working, so the authoritative proof is unreachable and every worker turn
+# boundary woke firstmate. Pane content that changed since the previous poll is
+# harness-independent evidence the crew is still executing - the same liveness
+# input the stale backbone already trusts - so a bare turn-end from a churning
+# pane is benign. It is opt-in because that evidence infers execution from bytes.
+test_turn_ended_churning_pane_absorbed() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case turn-ended-churning); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexer"
+  : > "$state/codexer.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexer.meta"
+  printf 'apply_patch: writing bin/thing.sh' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The previous poll recorded DIFFERENT pane content, so this poll is churn.
+  printf '%s' "$(hash_text 'reading the brief')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a bare turn-end from a churning pane was not absorbed: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "an absorbed churning-pane turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an absorbed churning-pane turn-end enqueued a durable wake record"
+  [ -s "$state/.churn-since-$key" ] \
+    || { reap "$pid"; fail "an absorbed churning-pane turn-end did not open a bounded deferral window"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare turn-end from a pane that churned since the previous poll is absorbed"
+}
+
+test_turn_ended_per_generation_marker_churn_absorbed() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case turn-ended-churning-pergen); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexpergen"
+  : > "$state/codexpergen.turn-ended.s1794017"
+  printf 'window=%s\nkind=ship\nharness=codex\nspawn_gen=s1794017\n' "$window" > "$state/codexpergen.meta"
+  printf 'apply_patch: writing tests/fm-watch-triage.test.sh' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'running the suite')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a live per-generation turn-end was not absorbed on churn: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "an absorbed per-generation turn-end printed a wake reason: $(cat "$out")"
+  [ -s "$state/.churn-since-$key" ] \
+    || { reap "$pid"; fail "a per-generation churn absorb opened no deferral window"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "the pane-churn proof reaches the per-generation turn-end markers production writes"
+}
+
+test_turn_ended_still_pane_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-still); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexstopped"
+  : > "$state/codexstopped.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexstopped.meta"
+  printf 'apply_patch: writing bin/thing.sh' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'apply_patch: writing bin/thing.sh')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a bare turn-end from an unchanged pane"
+  grep -F "signal: $state/codexstopped.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced still-pane turn-end signal"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the still-pane turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexstopped.turn-ended" >/dev/null \
+    || fail "surfaced still-pane turn-end was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare turn-end from a pane unchanged since the previous poll still surfaces"
+}
+
+test_turn_ended_churn_absorb_off_by_default() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-churn-default-off); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexdefault"
+  : > "$state/codexdefault.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexdefault.meta"
+  printf 'apply_patch: writing bin/thing.sh' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'reading the brief')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a churning turn-end without the opt-in flag"
+  grep -F "signal: $state/codexdefault.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced default-off churning turn-end: $(cat "$out") | triage: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  [ ! -e "$state/.churn-since-$key" ] || fail "the default-off path opened a bounded deferral window"
+  unset FM_FAKE_CREW_STATE
+  pass "pane-churn turn-end absorb is off until a home opts in"
+}
+
+test_turn_ended_churn_absorb_bounded() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-churn-bounded); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexclock"
+  : > "$state/codexclock.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexclock.meta"
+  printf 'a background renderer that never stops' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the previous frame')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  printf '%s' "$(( $(date +%s) - 600 ))" > "$state/.churn-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_TURNEND_CHURN_ABSORB_SECS=60 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a perpetually churning pane deferred its turn-end past the absorb bound"
+  grep -F "signal: $state/codexclock.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the turn-end surfaced by the exhausted absorb bound"
+  [ ! -e "$state/.churn-since-$key" ] \
+    || fail "an exhausted deferral window was not restarted after surfacing"
+  unset FM_FAKE_CREW_STATE
+  pass "a perpetually churning pane surfaces once its bounded deferral window is spent"
+}
+
+test_turn_ended_malformed_prior_hash_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-malformed-hash); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexmalformed"
+  : > "$state/codexmalformed.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexmalformed.meta"
+  printf 'stopped after rendering this' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'x' > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end backed by a malformed prior hash"
+  grep -F "signal: $state/codexmalformed.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced malformed-hash turn-end"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare turn-end backed by a malformed prior hash surfaces"
+}
+
+test_turn_ended_missing_prior_hash_surfaced() {
+  local dir state fakebin out capture_file window pid
+  dir=$(make_case turn-ended-missing-hash); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexmissing"
+  : > "$state/codexmissing.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexmissing.meta"
+  printf 'rendered before any prior poll' > "$capture_file"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end with no prior hash to compare"
+  grep -F "signal: $state/codexmissing.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced missing-hash turn-end"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare turn-end with no prior hash to compare surfaces"
+}
+
+test_status_and_turn_end_batch_never_uses_churn_evidence() {
+  local dir state fakebin out capture_file first_window second_window second_key pid
+  dir=$(make_case status-and-turn-ended-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  first_window="test:fm-firststatus"; second_window="test:fm-secondturn"
+  printf 'working: authoritative task still running\n' > "$state/firststatus.status"
+  : > "$state/secondturn.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$first_window" > "$state/firststatus.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$second_window" > "$state/secondturn.meta"
+  printf 'second task rendered after the prior poll' > "$capture_file"
+  second_key=$(printf '%s' "$second_window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'second task previous render')" > "$state/.hash-$second_key"
+  printf '0\n' > "$state/.count-$second_key"
+  export FM_FAKE_CREW_STATE_firststatus='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_secondturn='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-firststatus\nfm-secondturn')" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a status-and-turn-end batch on churn evidence"
+  grep -F "$state/firststatus.status" "$out" >/dev/null \
+    || fail "watcher did not print the status file from the surfaced mixed batch"
+  grep -F "$state/secondturn.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the turn-end from the surfaced mixed batch"
+  [ ! -e "$state/.churn-since-$second_key" ] \
+    || fail "a status-bearing batch opened a pane-churn deadline"
+  unset FM_FAKE_CREW_STATE_firststatus FM_FAKE_CREW_STATE_secondturn
+  pass "a status-bearing batch never falls through to pane-churn evidence"
+}
+
+test_secondmate_turn_ended_churning_pane_surfaced() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case secondmate-turn-ended-churning); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-mate-churning"
+  : > "$state/mate.turn-ended"
+  printf 'window=%s\nkind=secondmate\nharness=pi\n' "$window" > "$state/mate.meta"
+  printf 'working on the next routed item' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'waiting for work')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a churning secondmate turn-end"
+  grep -F "signal: $state/mate.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced churning secondmate turn-end"
+  [ ! -e "$state/.churn-since-$key" ] \
+    || fail "a secondmate turn-end opened a deferral window that cannot re-surface"
+  unset FM_FAKE_CREW_STATE
+  pass "a churning secondmate turn-end surfaces without a stale resurface path"
+}
+
+test_turn_ended_colliding_window_key_surfaced() {
+  local dir state fakebin out capture_file window colliding key pid
+  dir=$(make_case turn-ended-colliding-key); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-a.b"; colliding="test:fm-a_b"
+  : > "$state/a.b.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/a.b.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$colliding" > "$state/a_b.meta"
+  printf 'rendered after the prior poll' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the other window pane')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with an ambiguous pane marker"
+  grep -F "signal: $state/a.b.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced ambiguous-marker turn-end"
+  [ ! -e "$state/.churn-since-$key" ] || fail "an ambiguous marker key opened a deferral window"
+  unset FM_FAKE_CREW_STATE
+  pass "a turn-end whose marker key matches another recorded endpoint surfaces"
+}
+
+test_turn_ended_churn_timer_write_failure_surfaced() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case turn-ended-churn-timer-write-failure); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codextimer"
+  : > "$state/codextimer.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codextimer.meta"
+  printf 'rendered after the previous poll' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the previous render')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  mkdir "$state/.churn-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a churning turn-end without recording its deadline"
+  grep -F "signal: $state/codextimer.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the turn-end whose churn deadline could not be recorded"
+  unset FM_FAKE_CREW_STATE
+  pass "an unrecordable pane-churn deadline surfaces the turn-end"
+}
+
+test_turn_ended_invalid_churn_bound_surfaced() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case turn-ended-invalid-churn-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexbound"
+  : > "$state/codexbound.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexbound.meta"
+  printf 'rendered after the previous poll' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the previous render')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_TURNEND_CHURN_ABSORB_SECS=bogus \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with an invalid churn bound"
+  grep -F "signal: $state/codexbound.turn-ended" "$out" >/dev/null \
+    || fail "watcher terminated before printing the invalid-bound turn-end"
+  [ ! -e "$state/.churn-since-$key" ] || fail "an invalid churn bound opened a deferral window"
+  unset FM_FAKE_CREW_STATE
+  pass "an invalid pane-churn bound surfaces the turn-end"
+}
+
+test_turn_ended_mixed_positive_evidence_batch_absorbed() {
+  local dir state fakebin out capture_file first_window second_window first_key second_key pid
+  dir=$(make_case turn-ended-mixed-evidence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  first_window="test:fm-first"; second_window="test:fm-second"
+  : > "$state/first.turn-ended"; : > "$state/second.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$first_window" > "$state/first.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$second_window" > "$state/second.meta"
+  printf 'second task rendered after the prior poll' > "$capture_file"
+  first_key=$(printf '%s' "$first_window" | tr ':/.' '___')
+  second_key=$(printf '%s' "$second_window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'first task static pane')" > "$state/.hash-$first_key"
+  printf '%s' "$(hash_text 'second task previous render')" > "$state/.hash-$second_key"
+  printf '0\n' > "$state/.count-$first_key"; printf '0\n' > "$state/.count-$second_key"
+  export FM_FAKE_CREW_STATE_first='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_second='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-first\nfm-second')" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_FORBIDDEN_TARGET="$first_window" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a mixed authoritative-and-churn batch was not absorbed: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "an absorbed mixed-evidence batch printed a wake reason: $(cat "$out")"
+  [ ! -e "$state/.churn-since-$first_key" ] \
+    || fail "an authoritatively working task opened a pane-churn deadline"
+  [ -s "$state/.churn-since-$second_key" ] \
+    || fail "the churn-proven task did not open its bounded deferral window"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE_first FM_FAKE_CREW_STATE_second
+  pass "per-task evidence composes inside one batch and only churn-proven tasks open a deadline"
+}
+
+# --- upstream kunchenguid/firstmate#4974: parked-gate wedge deferral ----------
+# A lane whose validation run is parked at a gate waiting on a human is correctly
+# quiet, but nothing in its status line says so: the evidence is the pipeline's
+# own gate state. The wedge timer would otherwise climb the ladder for the whole
+# wait. The evidence is opt-in (`config/wedge-defer-parked-gate`) and needs BOTH
+# the gate's `action`-column verdict (fm-crew-state) and an open `needs-decision`
+# for that run; an answered gate, a crewmate-owed gate, an unrelated open key, or
+# a runless verdict all keep the unchanged ladder.
+parked_gate_fixture() {  # <name> <status-log> [wedge-timer-age]
+  local name=$1 log=$2 timer=${3-} dir state statusf window key text
+  dir=$(make_case "$name"); state="$dir/state"; window="test:fm-wedge"
+  printf 'waiting at the gate' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=pi\nspawn_gen=g1\n' "$window" > "$state/wedge.meta"
+  printf '%s\n' "$log" > "$state/wedge.status"
+  printf '%s' "$(seen_sig "$state/wedge.status")" > "$state/.seen-wedge_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'waiting at the gate')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$(hash_text 'waiting at the gate')" > "$state/.stale-$key"
+  [ -z "$timer" ] || printf '%s\n' "$(( $(date +%s) - timer ))" > "$state/.stale-since-$key"
+  mkdir -p "$dir/config"
+  printf '%s\n' "$dir"
+}
+
+parked_gate_round() {  # <case-dir> <crew-state-verdict> <exit|absorb>
+  local dir=$1 verdict=$2 mode=$3 state="$1/state" fakebin="$1/fakebin" pid cycles=0
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-wedge FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE="$verdict" FM_ECHO_BATCH_SECS=off \
+    FM_PAUSE_RESURFACE_SECS="${FM_TEST_PAUSE_RESURFACE:-999}" FM_STALE_ESCALATE_SECS=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" >> "$dir/watch.out" &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    return 0
+  fi
+  while [ "$cycles" -lt 3 ]; do
+    wait_poll_cycle "$state" "$pid" 300 || { reap "$pid"; return 1; }
+    cycles=$((cycles + 1))
+  done
+  reap "$pid"
+  return 0
+}
+
+test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human() {
+  local dir state key n human crewmate unrelated runless
+  human='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · ask-user: authority decision · run: 01RUNGATE'
+  # The gate name is free text carried out of the run payload: a consumer that
+  # searched the verdict for the marker words instead of comparing a whole
+  # component would read this crewmate-owed gate as human-owed.
+  crewmate='state: parked · source: run-step · parked at fix_review (ask-user: authority decision follow-up): 2 finding(s) · run: 01RUNGATE'
+  runless='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · ask-user: authority decision'
+  # The crew escalated the gate's question and nobody has answered it yet, so the
+  # fold still holds one open needs-decision; the trailing working: note keeps
+  # the LAST line non-captain-relevant, which is the plain wedge-timer route.
+  local escalated='needs-decision [key=nm-01RUNGATE-review]: the gate raised an authority question
+working: still parked at that gate'
+  local unrelated='needs-decision [key=earlier-question]: which changelog section fits
+working: still parked at that gate'
+  local answered='needs-decision [key=nm-01RUNGATE-review]: the gate raised an authority question
+resolved [key=nm-01RUNGATE-review]: firstmate chose the second fix'
+  key=$(printf '%s' 'test:fm-wedge' | tr ':/.' '___')
+
+  # Armed, human-owed, decision still open: the first threshold delivers one
+  # recheck that names firstmate and the action, never a suspected wedge.
+  dir=$(parked_gate_fixture parked-gate-human "$escalated")
+  : > "$dir/config/wedge-defer-parked-gate"
+  state="$dir/state"
+  parked_gate_round "$dir" "$human" exit || fail "a gate awaiting a human was never rechecked: $(cat "$dir/watch.out")"
+  grep -F 'verified wait at a parked gate' "$dir/watch.out" >/dev/null \
+    || fail "the parked-gate recheck did not name its evidence: $(cat "$dir/watch.out")"
+  grep -F "awaiting firstmate's ask-user decision" "$dir/watch.out" >/dev/null \
+    || fail "the parked-gate recheck did not name firstmate as the one the wait is on: $(cat "$dir/watch.out")"
+  grep -F "decide the gate's ask-user finding and relay the decision to the crewmate" "$dir/watch.out" >/dev/null \
+    || fail "the parked-gate recheck did not name the action that clears the lane: $(cat "$dir/watch.out")"
+  grep -F 'awaiting the captain' "$dir/watch.out" >/dev/null \
+    && fail "the parked-gate recheck named the captain for a decision firstmate owns"
+  grep -F 'possible wedge' "$dir/watch.out" >/dev/null \
+    && fail "a gate awaiting a human was reported as a possible wedge"
+  grep -E ', waiting [0-9]+s' "$dir/watch.out" >/dev/null \
+    && fail "the parked-gate recheck published a wait age it has no record for"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a deferred gate counted a wedge escalation"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the parked-gate recheck"
+
+  # Inside the recheck cadence the lane is absorbed whole: no new wake, no
+  # escalation count, and the throttle holds.
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+  FM_TEST_PAUSE_RESURFACE=240 parked_gate_round "$dir" "$human" absorb \
+    || fail "a gate awaiting a human wedge-escalated inside its recheck cadence: $(cat "$dir/watch.out")"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a rechecked gate counted a wedge escalation"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the absorbed recheck round"
+
+  # The other direction: a gate the CREWMATE owes keeps the unchanged ladder,
+  # reason, and demand-deep-inspection wording.
+  dir=$(parked_gate_fixture parked-gate-crewmate "$escalated")
+  : > "$dir/config/wedge-defer-parked-gate"
+  state="$dir/state"
+  n=1
+  while [ "$n" -le 3 ]; do
+    parked_gate_round "$dir" "$crewmate" exit || fail "a crewmate-owed gate stopped escalating at threshold $n"
+    grep -F "possible wedge, escalation $n" "$dir/watch.out" >/dev/null \
+      || fail "a crewmate-owed gate did not reach escalation $n: $(cat "$dir/watch.out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge crewmate-gate escalation $n"
+    n=$((n + 1))
+  done
+  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$dir/watch.out" >/dev/null \
+    || fail "a crewmate-owed gate lost the demand-deep-inspection wording"
+  grep -F 'verified wait at a parked gate' "$dir/watch.out" >/dev/null \
+    && fail "a crewmate-owed gate was deferred as a wait on a human"
+
+  # An answered gate (resolved line already written at answer time) keeps the
+  # ladder: what is outstanding is the crewmate's own relay.
+  dir=$(parked_gate_fixture parked-gate-answered "$answered")
+  : > "$dir/config/wedge-defer-parked-gate"
+  state="$dir/state"
+  parked_gate_round "$dir" "$human" exit || fail "an answered gate never escalated"
+  grep -F 'possible wedge, escalation 1' "$dir/watch.out" >/dev/null \
+    || fail "an answered gate did not take the unchanged ladder: $(cat "$dir/watch.out")"
+  grep -F 'verified wait at a parked gate' "$dir/watch.out" >/dev/null \
+    && fail "an answered gate was deferred as an open wait"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the answered-gate escalation"
+
+  # An open decision under an unrelated key is not evidence about THIS gate.
+  dir=$(parked_gate_fixture parked-gate-unrelated-key "$unrelated")
+  : > "$dir/config/wedge-defer-parked-gate"
+  state="$dir/state"
+  parked_gate_round "$dir" "$human" exit || fail "a gate with only an unrelated open decision stopped escalating"
+  grep -F 'possible wedge, escalation 1' "$dir/watch.out" >/dev/null \
+    || fail "an unrelated open decision was read as this gate's wait: $(cat "$dir/watch.out")"
+  grep -F 'verified wait at a parked gate' "$dir/watch.out" >/dev/null \
+    && fail "an unrelated open decision was read as this gate's wait"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the unrelated-key escalation"
+
+  # A verdict naming no run cannot be bound to any decision.
+  dir=$(parked_gate_fixture parked-gate-runless "$escalated")
+  : > "$dir/config/wedge-defer-parked-gate"
+  state="$dir/state"
+  parked_gate_round "$dir" "$runless" exit || fail "a runless human-owed gate never escalated"
+  grep -F 'possible wedge, escalation 1' "$dir/watch.out" >/dev/null \
+    || fail "a runless human-owed gate did not take the unchanged ladder: $(cat "$dir/watch.out")"
+  grep -F 'verified wait at a parked gate' "$dir/watch.out" >/dev/null \
+    && fail "a runless verdict was read as a gate wait"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the runless-gate escalation"
+
+  # Away-posture adaptation: in this fork state/.afk hands ALL triage to the
+  # away-mode daemon and the watcher is one-shot, so the watcher never reaches its
+  # wedge timer under away posture at all. The ported record still marks
+  # `whom=supervisor`, which is what would keep it unsilenced on any caller that
+  # does run the timer, but the daemon's own escalation path is out of this port's
+  # scope and keeps its existing schedule.
+  pass "a gate awaiting firstmate's decision for its own run is rechecked instead of wedge-escalated, while a crewmate-owed gate, an answered gate, an unrelated key and a runless verdict keep the ladder"
+}
+
+test_wedge_threshold_parked_gate_is_off_until_armed() {
+  local dir state key n
+  local human='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · ask-user: authority decision · run: 01RUNGATE'
+  local escalated='needs-decision [key=nm-01RUNGATE-review]: the gate raised an authority question
+working: still parked at that gate'
+  key=$(printf '%s' 'test:fm-wedge' | tr ':/.' '___')
+  dir=$(parked_gate_fixture parked-gate-unarmed "$escalated")
+  state="$dir/state"
+  [ ! -e "$dir/config/wedge-defer-parked-gate" ] || fail "the unarmed fixture armed the flag, so it proves nothing"
+  n=1
+  while [ "$n" -le 3 ]; do
+    parked_gate_round "$dir" "$human" exit || fail "an unarmed home stopped escalating a parked gate at threshold $n"
+    grep -F "possible wedge, escalation $n" "$dir/watch.out" >/dev/null \
+      || fail "an unarmed home did not reach escalation $n: $(cat "$dir/watch.out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge unarmed-gate escalation $n"
+    n=$((n + 1))
+  done
+  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$dir/watch.out" >/dev/null \
+    || fail "an unarmed home lost the demand-deep-inspection wording"
+  grep -F 'verified wait at a parked gate' "$dir/watch.out" >/dev/null \
+    && fail "an unarmed home deferred a parked gate"
+  [ ! -e "$state/.wait-resurfaced-$key" ] || fail "an unarmed home wrote the parked-gate recheck throttle"
+  pass "with config/wedge-defer-parked-gate absent a parked gate keeps the unchanged ladder and wording"
+}
+
+# --- echo batching -----------------------------------------------------------
+# Status-only and bare turn-ended echoes are deferred inside one window and
+# delivered as ONE wake. The window is production-default 120s; cases age the
+# persisted batch rather than sleeping it out.
+
+test_echo_batch_groups_turnend_echoes_into_one_wake() {
+  local dir state fakebin out pid queued
+  dir=$(make_case echo-batch-groups); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
+  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  pid=$!
+  make_echo_task "$dir" echoa ga
+  wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the first turn-end echo was not deferred: $(cat "$out")"; }
+  make_echo_task "$dir" echob gb
+  wait_echo_batch_entries "$state" 2 || { reap "$pid"; fail "the second turn-end echo was not deferred: $(cat "$out")"; }
+  make_echo_task "$dir" echoc gc
+  wait_echo_batch_entries "$state" 3 || { reap "$pid"; fail "the third turn-end echo was not deferred: $(cat "$out")"; }
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "the watcher exited before the batch window elapsed: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "a deferred batch printed a wake before its window: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a deferred batch enqueued a durable row before its window"; }
+  backdate_echo_batch "$state" 121
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the due echo batch never delivered: $(cat "$out")"; }
+  [ "$(grep -c '^signal:' "$out")" -eq 1 ] \
+    || fail "three echoes in one window did not produce exactly one wake: $(cat "$out")"
+  queued=$(grep -c "$(printf '\tsignal\t')" "$state/.wake-queue" 2>/dev/null || true)
+  [ "${queued:-0}" -eq 3 ] || fail "the batched wake queued $queued row(s), expected 3"
+  [ ! -e "$state/.echo-batch" ] || fail "the delivered batch was not retired"
+  [ "$(grep -c 'echo-batch defer rule=window' "$state/.watch-triage.log")" -ge 3 ] \
+    || fail "not every deferral was logged with its rule name"
+  grep -F 'echo-batch flush rule=window' "$state/.watch-triage.log" >/dev/null \
+    || fail "the batch flush was not logged with its rule name"
+  unset FM_FAKE_CREW_STATE
+  pass "N turn-end echoes inside the window produce exactly one delivered wake"
+}
+
+test_echo_batch_survives_a_watcher_restart() {
+  local dir state fakebin out pid queued
+  dir=$(make_case echo-batch-restart); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
+  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  pid=$!
+  make_echo_task "$dir" first fa
+  wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the first echo was not deferred"; }
+  make_echo_task "$dir" second fb
+  wait_echo_batch_entries "$state" 2 || { reap "$pid"; fail "the second echo was not deferred"; }
+  reap "$pid"
+  # Acknowledge the intentional stop so the restart does not take the
+  # rearm-resurface recovery path (which is itself an immediate wake).
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentionally stopped watcher"
+  [ "$(grep -c . "$state/.echo-batch" 2>/dev/null || true)" -eq 2 ] \
+    || fail "the deferred batch did not survive the watcher stop"
+  : > "$out"
+  # A fresh watcher inherits the same persisted window and must not lose it.
+  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the restarted watcher did not complete a poll: $(cat "$out") | triage: $(cat "$state/.watch-triage.log" 2>/dev/null)"; }
+  [ "$(grep -c . "$state/.echo-batch" 2>/dev/null || true)" -eq 2 ] \
+    || { reap "$pid"; fail "the restarted watcher discarded its inherited batch"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "an inherited batch delivered before its window: $(cat "$out")"; }
+  backdate_echo_batch "$state" 121
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the inherited batch never flushed: $(cat "$out")"; }
+  [ "$(grep -c '^signal:' "$out")" -eq 1 ] || fail "the restarted batch did not deliver exactly one wake"
+  queued=$(grep -c "$(printf '\tsignal\t')" "$state/.wake-queue" 2>/dev/null || true)
+  [ "${queued:-0}" -eq 2 ] || fail "the restarted batch queued $queued row(s), expected 2"
+  unset FM_FAKE_CREW_STATE
+  pass "a deferred batch survives a watcher restart and flushes once"
+}
+
+test_echo_batch_immediate_status_verbs_never_deferred() {
+  local verb dir state fakebin out pid
+  for verb in needs-decision blocked done failed; do
+    dir=$(make_case "echo-batch-immediate-$verb"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
+    watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+    pid=$!
+    make_echo_task "$dir" echoimm g1
+    wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$verb: the echo was not deferred first"; }
+    printf '%s: urgent supervisor event\n' "$verb" > "$state/urgent.status"
+    wait_for_exit "$pid" 40 \
+      || { reap "$pid"; fail "$verb: the immediate status event waited out the window: $(cat "$out")"; }
+    grep -F "$state/urgent.status" "$out" >/dev/null \
+      || fail "$verb: the immediate status event was not surfaced: $(cat "$out")"
+    [ ! -e "$state/.echo-batch" ] || fail "$verb: the pending batch was not flushed into the immediate wake"
+    grep "$(printf '\tsignal\t')" "$state/.wake-queue" | grep -F "$state/echoimm.turn-ended.g1" >/dev/null \
+      || fail "$verb: the pending echo row was lost behind the immediate wake"
+    unset FM_FAKE_CREW_STATE
+  done
+  pass "needs-decision, blocked, done, and failed status events are never deferred and flush the pending batch"
+}
+
+test_echo_batch_check_wake_flushes_pending_batch() {
+  local dir state fakebin out pid
+  dir=$(make_case echo-batch-check-flush); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
+  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120 FM_CHECK_INTERVAL=1
+  pid=$!
+  make_echo_task "$dir" echochk g1
+  wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the echo was not deferred before the check"; }
+  cat > "$state/live.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo check-now
+SH
+  chmod +x "$state/live.check.sh"
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "the check wake waited out the echo window: $(cat "$out")"; }
+  grep -F 'check:' "$out" >/dev/null || fail "the check wake was not surfaced: $(cat "$out")"
+  [ ! -e "$state/.echo-batch" ] || fail "the check wake did not flush the pending batch"
+  grep "$(printf '\tsignal\t')" "$state/.wake-queue" | grep -F "$state/echochk.turn-ended.g1" >/dev/null \
+    || fail "the pending echo row was not carried by the check wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a check wake is immediate and flushes the pending echo batch"
+}
+
+test_echo_batch_stale_wake_flushes_pending_batch() {
+  local dir state fakebin out pid capture_file
+  dir=$(make_case echo-batch-stale-flush); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
+  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  pid=$!
+  make_echo_task "$dir" echost g1
+  wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the echo was not deferred before the stale wake"; }
+  # A second, stopped task whose static pane earns the ordinary stale wake.
+  capture_file="$dir/stopped-pane.txt"
+  printf 'idle prompt\n' > "$capture_file"
+  printf 'window=test:fm-stopped\nkind=ship\nharness=codex\n' > "$state/stopped.meta"
+  wait_for_exit "$pid" 60 || { reap "$pid"; fail "the stale wake waited out the echo window: $(cat "$out")"; }
+  grep -F 'stale: test:fm-stopped' "$out" >/dev/null || fail "the stale wake was not surfaced: $(cat "$out")"
+  [ ! -e "$state/.echo-batch" ] || fail "the stale wake did not flush the pending batch"
+  grep "$(printf '\tsignal\t')" "$state/.wake-queue" | grep -F "$state/echost.turn-ended.g1" >/dev/null \
+    || fail "the pending echo row was not carried by the stale wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a stale wake is immediate and flushes the pending echo batch"
+}
+
+test_echo_batch_afk_never_defers() {
+  local dir state fakebin out pid
+  dir=$(make_case echo-batch-afk); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  : > "$state/.afk"
+  export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
+  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  pid=$!
+  make_echo_task "$dir" echoafk g1
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "away-mode triage deferred a wake: $(cat "$out")"; }
+  grep -F "$state/echoafk.turn-ended.g1" "$out" >/dev/null || fail "away mode did not surface the turn-end"
+  [ ! -e "$state/.echo-batch" ] || fail "away mode wrote a deferred batch"
+  unset FM_FAKE_CREW_STATE
+  pass "the away-mode daemon's one-shot triage never defers a wake"
+}
+
+test_echo_batch_status_echo_joins_window() {
+  local dir state fakebin out pid statusf queued
+  dir=$(make_case echo-batch-status); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/report.status"
+  printf 'working: preparing\n' > "$statusf"
+  prime_turnend_seen "$statusf"
+  export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
+  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  pid=$!
+  printf 'PR ready: https://github.com/o/r/pull/1\n' >> "$statusf"
+  wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the status echo was not deferred: $(cat "$out")"; }
+  make_echo_task "$dir" echomix g1
+  wait_echo_batch_entries "$state" 2 || { reap "$pid"; fail "the turn-end echo did not join the window"; }
+  backdate_echo_batch "$state" 121
+  wait_for_exit "$pid" 60 || { reap "$pid"; fail "the mixed echo batch never delivered: $(cat "$out")"; }
+  [ "$(grep -c '^signal:' "$out")" -eq 1 ] || fail "a status echo and a turn-end echo produced more than one wake"
+  queued=$(grep -c "$(printf '\tsignal\t')" "$state/.wake-queue" 2>/dev/null || true)
+  [ "${queued:-0}" -eq 2 ] || fail "the mixed batch queued $queued row(s), expected 2"
+  unset FM_FAKE_CREW_STATE
+  pass "a non-immediate status echo shares the window with a turn-end echo"
+}
+
+# R2: every task parked at a no-mistakes gate whose key already has a recorded
+# firstmate decision, with an actively blocking pane. Any near miss delivers.
+test_echo_batch_answered_gate_drop_and_near_misses() {
+  local variant dir state fakebin out capture response pid
+  for variant in drop unanswered idle-not-blocking not-parked; do
+    dir=$(make_case "echo-batch-answered-gate-$variant"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture="$dir/pane.txt"
+    if [ "$variant" = idle-not-blocking ]; then printf 'idle prompt\n' > "$capture"; else blocking_capture "$capture"; fi
+    printf 'window=test:fm-gate\nkind=ship\nharness=pi\nspawn_gen=ggate\n' > "$state/gate.meta"
+    : > "$state/gate.turn-ended.ggate"
+    record_pi_busy "$state" gate >/dev/null
+    case "$variant" in
+      unanswered) response='needs-decision [key=nm-01RUN-review]: the gate raised a question' ;;
+      *)          response='needs-decision [key=nm-01RUN-review]: the gate raised a question'$'\n''resolved [key=nm-01RUN-review]: answered: option A' ;;
+    esac
+    printf '%s\n' "$response" > "$state/gate.status"
+    prime_turnend_seen "$state/gate.status"
+    case "$variant" in
+      not-parked) export FM_FAKE_CREW_STATE_gate='state: parked · source: pane · waiting' ;;
+      *)          export FM_FAKE_CREW_STATE_gate='state: parked · source: run-step · parked at review: 1 finding(s) · ask-user: authority decision · run: 01RUN' ;;
+    esac
+    watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120 \
+      FM_FAKE_TMUX_WINDOW=test:fm-gate FM_FAKE_TMUX_CAPTURE="$capture"
+    pid=$!
+    wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: the gate echo was not deferred"; }
+    backdate_echo_batch "$state" 121
+    if [ "$variant" = drop ]; then
+      wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$variant: the watcher did not complete its flush poll"; }
+      kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "$variant: the answered-gate echo woke the supervisor: $(cat "$out")"; }
+      [ ! -e "$state/.echo-batch" ] || { reap "$pid"; fail "$variant: the dropped batch was not retired"; }
+      grep -F 'echo-batch drop rule=answered-gate' "$state/.watch-triage.log" >/dev/null \
+        || { reap "$pid"; fail "$variant: the drop was not logged with its rule name"; }
+    else
+      wait_for_exit "$pid" 60 || { reap "$pid"; fail "$variant: the near miss was dropped instead of delivered: $(cat "$out")"; }
+      grep -F "$state/gate.turn-ended.ggate" "$out" >/dev/null \
+        || fail "$variant: the delivered near miss did not name the turn-end"
+        grep -F 'echo-batch drop rule=answered-gate' "$state/.watch-triage.log" >/dev/null \
+          && fail "$variant: a near miss was logged as an answered-gate drop"
+    fi
+    reap "$pid" 2>/dev/null || true
+    unset FM_FAKE_CREW_STATE_gate
+  done
+  pass "answered-gate echoes drop only under every report condition; unanswered, idle-pane, and non-parked near misses deliver"
+}
+
+# R3: every task's crew-state line byte-identical to its last delivered-wake
+# line, an active blocking pane, and no firstmate steer since that wake.
+test_echo_batch_no_change_drop_and_near_misses() {
+  local variant dir state fakebin out capture pid line epoch gen
+  line='state: parked · source: pane · waiting on the supervisor'
+  for variant in drop changed-state steered idle-not-blocking no-baseline; do
+    dir=$(make_case "echo-batch-no-change-$variant"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture="$dir/pane.txt"
+    if [ "$variant" = idle-not-blocking ]; then printf 'idle prompt\n' > "$capture"; else blocking_capture "$capture"; fi
+    printf 'window=test:fm-steady\nkind=ship\nharness=pi\nspawn_gen=gsteady\n' > "$state/steady.meta"
+    : > "$state/steady.turn-ended.gsteady"
+    record_pi_busy "$state" steady >/dev/null
+    epoch=$(( $(date +%s) - 100 )); gen=gsteady
+    if [ "$variant" != changed-state ]; then
+      export FM_FAKE_CREW_STATE_steady="$line"
+    else
+      export FM_FAKE_CREW_STATE_steady='state: parked · source: pane · the supervisor answered'
+    fi
+    if [ "$variant" != no-baseline ]; then
+      printf '%s\t%s\t%s\n' "$epoch" "$gen" "$line" > "$state/.last-delivered-steady"
+    fi
+    if [ "$variant" = steered ]; then
+      mkdir -p "$state/steady.inbox/handled"
+      printf 'answer\n' > "$state/steady.inbox/handled/001.msg"
+    fi
+    watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120 \
+      FM_FAKE_TMUX_WINDOW=test:fm-steady FM_FAKE_TMUX_CAPTURE="$capture"
+    pid=$!
+    wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: the no-change echo was not deferred"; }
+    backdate_echo_batch "$state" 121
+    if [ "$variant" = drop ]; then
+      wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$variant: the watcher did not complete its flush poll"; }
+      kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "$variant: an unchanged echo woke the supervisor: $(cat "$out")"; }
+      [ ! -e "$state/.echo-batch" ] || { reap "$pid"; fail "$variant: the dropped batch was not retired"; }
+      grep -F 'echo-batch drop rule=no-change' "$state/.watch-triage.log" >/dev/null \
+        || { reap "$pid"; fail "$variant: the drop was not logged with its rule name"; }
+    else
+      wait_for_exit "$pid" 60 || { reap "$pid"; fail "$variant: the near miss was dropped instead of delivered: $(cat "$out")"; }
+      grep -F "$state/steady.turn-ended.gsteady" "$out" >/dev/null \
+        || fail "$variant: the delivered near miss did not name the turn-end"
+      grep -F 'echo-batch drop rule=no-change' "$state/.watch-triage.log" >/dev/null \
+        && fail "$variant: a near miss was logged as a no-change drop"
+    fi
+    reap "$pid" 2>/dev/null || true
+    unset FM_FAKE_CREW_STATE_steady
+  done
+  pass "no-change echoes drop only under every report condition; changed state, a steer, an idle pane, and no baseline all deliver"
+}
+
+test_echo_batch_config_window_and_disable() {
+  local variant dir state fakebin out pid window
+  for variant in config-off invalid-default tuned-off-by-env; do
+    dir=$(make_case "echo-batch-config-$variant"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; mkdir -p "$dir/config"
+    case "$variant" in
+      invalid-default) window=30 ;;
+      *)               window=240 ;;
+    esac
+    printf '%s\n' "$window" > "$dir/config/wake-echo-batch"
+    export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
+    case "$variant" in
+      config-off)
+        printf 'off\n' > "$dir/config/wake-echo-batch"
+        ;;
+    esac
+    # Spawn directly (not through watch_bg, which forces the env override off)
+    # so the config file alone decides unless a case proves the override wins.
+    if [ "$variant" = tuned-off-by-env ]; then
+      PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_CONFIG_OVERRIDE="$dir/config" FM_ECHO_BATCH_SECS=off \
+        FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    else
+      PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_CONFIG_OVERRIDE="$dir/config" \
+        FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    fi
+    pid=$!
+    make_echo_task "$dir" echocfg g1
+    case "$variant" in
+      config-off|tuned-off-by-env)
+        wait_for_exit "$pid" 40 || { reap "$pid"; fail "$variant: a disabled window still deferred: $(cat "$out")"; }
+        [ ! -e "$state/.echo-batch" ] || fail "$variant: a disabled window wrote a batch"
+        ;;
+      invalid-default)
+        wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: an invalid window did not fall back to the default"; }
+        wait_log_line "$state" 'echo-batch config invalid' \
+          || { reap "$pid"; fail "$variant: the invalid value was not reported"; }
+        wait_log_line "$state" 'window=120s' \
+          || { reap "$pid"; fail "$variant: the fallback window was not the documented default: $(cat "$state/.watch-triage.log" 2>/dev/null)"; }
+        reap "$pid"
+        ;;
+      *)
+        wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: the configured window did not defer"; }
+        wait_log_line "$state" 'window=240s' \
+          || { reap "$pid"; fail "$variant: the configured window was not used"; }
+        reap "$pid"
+        ;;
+    esac
+    unset FM_FAKE_CREW_STATE
+  done
+  pass "config/wake-echo-batch selects 60-300 seconds or off, the environment override wins, and an invalid value falls back with one log line"
+}
+
 case "${FM_WATCH_TRIAGE_TEST:-}" in
   '')
     ;;
-  test_stale_terminal_status_overridden_by_active_run|test_wedge_worker_decision_deferral_is_opt_in|test_open_decision_reminders_use_persisted_backoff|test_open_decision_reminders_serialize_retirement|test_wedge_backlog_captain_hold_defers_escalation)
-    "$FM_WATCH_TRIAGE_TEST"
-    exit
-    ;;
   *)
+    if declare -F "$FM_WATCH_TRIAGE_TEST" >/dev/null 2>&1; then
+      "$FM_WATCH_TRIAGE_TEST"
+      exit
+    fi
     fail "unknown FM_WATCH_TRIAGE_TEST: $FM_WATCH_TRIAGE_TEST"
     ;;
 esac
@@ -4221,6 +5161,19 @@ test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
+test_turn_ended_churning_pane_absorbed
+test_turn_ended_per_generation_marker_churn_absorbed
+test_turn_ended_still_pane_surfaced
+test_turn_ended_churn_absorb_off_by_default
+test_turn_ended_churn_absorb_bounded
+test_turn_ended_malformed_prior_hash_surfaced
+test_turn_ended_missing_prior_hash_surfaced
+test_status_and_turn_end_batch_never_uses_churn_evidence
+test_secondmate_turn_ended_churning_pane_surfaced
+test_turn_ended_colliding_window_key_surfaced
+test_turn_ended_churn_timer_write_failure_surfaced
+test_turn_ended_invalid_churn_bound_surfaced
+test_turn_ended_mixed_positive_evidence_batch_absorbed
 test_turn_ended_recreated_same_second_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
@@ -4232,6 +5185,18 @@ test_wedge_worker_decision_deferral_is_opt_in
 test_open_decision_reminders_use_persisted_backoff
 test_open_decision_reminders_serialize_retirement
 test_wedge_backlog_captain_hold_defers_escalation
+test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
+test_wedge_threshold_parked_gate_is_off_until_armed
+test_echo_batch_groups_turnend_echoes_into_one_wake
+test_echo_batch_survives_a_watcher_restart
+test_echo_batch_immediate_status_verbs_never_deferred
+test_echo_batch_check_wake_flushes_pending_batch
+test_echo_batch_stale_wake_flushes_pending_batch
+test_echo_batch_afk_never_defers
+test_echo_batch_status_echo_joins_window
+test_echo_batch_answered_gate_drop_and_near_misses
+test_echo_batch_no_change_drop_and_near_misses
+test_echo_batch_config_window_and_disable
 
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
