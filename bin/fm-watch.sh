@@ -2324,8 +2324,9 @@ echo_batch_answered_gate_drop() {  # <task> ...
 # at its last delivered wake, the pane is actively blocked, and firstmate has not
 # steered it since that wake. No recorded baseline, an empty/unreadable line, or
 # an unreadable inbox all fail closed to delivery.
-echo_batch_no_change_drop() {  # <task> ...
+echo_batch_no_change_drop() (  # <task> ...
   local task baseline epoch gen stored line current_gen rec m
+  shopt -s nullglob
   [ "$#" -gt 0 ] || return 1
   for task in "$@"; do
     [ -n "$task" ] || return 1
@@ -2345,13 +2346,14 @@ echo_batch_no_change_drop() {  # <task> ...
     [ "$line" = "$stored" ] || return 1
     pane_is_blocking_for_task "$task" || return 1
     for rec in "$STATE/$task.inbox"/*.msg "$STATE/$task.inbox/handled"/*.msg; do
-      [ -e "$rec" ] || continue
-      m=$(stat_mtime "$rec")
-      [ -n "$m" ] && [ "$m" -ge "$epoch" ] && return 1
+      [ -e "$rec" ] || return 1
+      m=$(stat_mtime "$rec") || return 1
+      case "$m" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$m" -lt "$epoch" ] || return 1
     done
   done
   return 0
-}
+)
 
 # Deliver the persisted batch, applying the two drop rules first. <mode> is
 # `due` (the window elapsed; one wake is printed) or `immediate` (another wake is

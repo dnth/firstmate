@@ -5055,7 +5055,7 @@ test_echo_batch_answered_gate_drop_and_near_misses() {
 test_echo_batch_no_change_drop_and_near_misses() {
   local variant dir state fakebin out capture pid line epoch gen
   line='state: parked · source: pane · waiting on the supervisor'
-  for variant in drop changed-state steered same-second-pending same-second-handled idle-not-blocking no-baseline afk; do
+  for variant in drop old-pending old-handled changed-state steered same-second-pending same-second-handled moved-during-scan pending-stat-failure handled-stat-failure empty-stat malformed-stat idle-not-blocking no-baseline afk; do
     dir=$(make_case "echo-batch-no-change-$variant"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture="$dir/pane.txt"
     if [ "$variant" = idle-not-blocking ]; then printf 'idle prompt\n' > "$capture"; else blocking_capture "$capture"; fi
@@ -5088,9 +5088,56 @@ test_echo_batch_no_change_drop_and_near_misses() {
         printf '%s\t%s\t%s\n' "$epoch" "$gen" "$line" > "$state/.last-delivered-steady"
         ;;
     esac
+    case "$variant" in
+      old-pending|old-handled)
+        mkdir -p "$state/steady.inbox/handled"
+        printf 'older steer\n' > "$state/steady.inbox/001.msg"
+        set_mtime "$((epoch - 1))" "$state/steady.inbox/001.msg"
+        if [ "$variant" = old-handled ]; then
+          mv "$state/steady.inbox/001.msg" "$state/steady.inbox/handled/001.msg"
+        fi
+        ;;
+    esac
+    case "$variant" in
+      moved-during-scan|pending-stat-failure|handled-stat-failure|empty-stat|malformed-stat)
+        mkdir -p "$state/steady.inbox/handled"
+        printf 'older steer\n' > "$state/steady.inbox/001.msg"
+        set_mtime "$((epoch - 1))" "$state/steady.inbox/001.msg"
+        if [ "$variant" = handled-stat-failure ]; then
+          mv "$state/steady.inbox/001.msg" "$state/steady.inbox/handled/001.msg"
+        fi
+        if [ "$variant" = moved-during-scan ]; then
+          printf 'newer steer\n' > "$state/steady.inbox/002.msg"
+        fi
+        cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+rec=${!#}
+case "$rec" in
+  */steady.inbox/001.msg|*/steady.inbox/handled/001.msg)
+    case "$*" in
+      '-c %Y '*|'-f %m '*)
+        printf '%s\n' "$FM_TEST_STAT_MODE" > "$FM_STATE_OVERRIDE/.stat-fault-observed"
+        case "$FM_TEST_STAT_MODE" in
+          moved-during-scan)
+            mv "${rec%/*}/002.msg" "${rec%/*}/handled/002.msg"
+            ;;
+          pending-stat-failure|handled-stat-failure) exit 1 ;;
+          empty-stat) exit 0 ;;
+          malformed-stat) printf 'unknown\n'; exit 0 ;;
+        esac
+        ;;
+    esac
+    ;;
+esac
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+        chmod +x "$fakebin/stat"
+        ;;
+    esac
     printf '120\n' > "$dir/config/wake-echo-batch"
     watch_bg "$state" "$fakebin" "$out" \
-      FM_FAKE_TMUX_WINDOW=test:fm-steady FM_FAKE_TMUX_CAPTURE="$capture"
+      FM_FAKE_TMUX_WINDOW=test:fm-steady FM_FAKE_TMUX_CAPTURE="$capture" \
+      FM_TEST_STAT_MODE="$variant" FM_TEST_REAL_STAT="$(command -v stat)"
     pid=$!
     wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: the no-change echo was not deferred"; }
     if [ "$variant" = afk ]; then
@@ -5098,7 +5145,7 @@ test_echo_batch_no_change_drop_and_near_misses() {
     else
       backdate_echo_batch "$state" 121
     fi
-    if [ "$variant" = drop ]; then
+    if [ "$variant" = drop ] || [ "$variant" = old-pending ] || [ "$variant" = old-handled ]; then
       wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$variant: the watcher did not complete its flush poll"; }
       kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "$variant: an unchanged echo woke the supervisor: $(cat "$out")"; }
       [ ! -e "$state/.echo-batch" ] || { reap "$pid"; fail "$variant: the dropped batch was not retired"; }
@@ -5110,6 +5157,15 @@ test_echo_batch_no_change_drop_and_near_misses() {
         || fail "$variant: the delivered near miss did not name the turn-end"
       grep -F 'echo-batch drop rule=no-change' "$state/.watch-triage.log" >/dev/null \
         && fail "$variant: a near miss was logged as a no-change drop"
+    fi
+    case "$variant" in
+      moved-during-scan|pending-stat-failure|handled-stat-failure|empty-stat|malformed-stat)
+        [ -s "$state/.stat-fault-observed" ] || fail "$variant: the timestamp fault was never exercised"
+        ;;
+    esac
+    if [ "$variant" = moved-during-scan ]; then
+      [ ! -e "$state/steady.inbox/002.msg" ] && [ -e "$state/steady.inbox/handled/002.msg" ] \
+        || fail "the newer steer was not acknowledged during the scan"
     fi
     reap "$pid" 2>/dev/null || true
     unset FM_FAKE_CREW_STATE_steady
