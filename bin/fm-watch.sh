@@ -620,7 +620,7 @@ signal_turnend_panes_churned() {  # <file> ...
   local f base task meta kind w key backend label terminal prev now since now_s absorb_secs marker age
   local rec_task task_index i j count hash_file hash_bytes created
   local max_absorb_secs=9223372036854775807
-  local -a signal_tasks=() signal_statuses=() snapshot_tasks=() snapshot_kinds=()
+  local -a signal_tasks=() snapshot_tasks=() snapshot_kinds=()
   local -a snapshot_windows=() snapshot_keys=() snapshot_backends=() snapshot_labels=()
   local -a signal_indexes=() churn_indexes=() churned_keys=() missing_keys=() created_keys=()
   [ "$#" -gt 0 ] || return 1
@@ -631,8 +631,8 @@ signal_turnend_panes_churned() {  # <file> ...
       # Both marker generations are eligible: bare .turn-ended (legacy) and the
       # per-incarnation .turn-ended.<spawn_gen> every publisher writes today.
       # Missing the latter would make the whole proof unreachable in production.
-      *.turn-ended.*) task=${base%%.turn-ended.*}; kind=turn-ended ;;
-      *.turn-ended)   task=${base%.turn-ended}; kind=turn-ended ;;
+      *.turn-ended.*) task=${base%%.turn-ended.*} ;;
+      *.turn-ended)   task=${base%.turn-ended} ;;
       *)              return 1 ;;
     esac
     [ -n "$task" ] || return 1
@@ -642,9 +642,6 @@ signal_turnend_panes_churned() {  # <file> ...
     done
     if [ "$task_index" -lt 0 ]; then
       signal_tasks+=("$task")
-      [ "$kind" = status ] && signal_statuses+=(1) || signal_statuses+=(0)
-    elif [ "$kind" = status ]; then
-      signal_statuses[task_index]=1
     fi
   done
   for meta in "$STATE"/*.meta; do
@@ -2028,8 +2025,7 @@ EOF
 #
 # The window opens at the first deferred echo, defaults to 120 s, and is tunable
 # through config/wake-echo-batch: a whole number of seconds in [60,300], or
-# `off`. FM_ECHO_BATCH_SECS is the environment override (same validation;
-# `off`/`0` disables). An invalid value falls back to 120 and logs once per
+# `off`. An invalid value falls back to 120 and logs once per
 # watcher process. The batch is persisted at state/.echo-batch as
 # `<deferred-epoch>\t<signal-file>` lines, so a watcher restart cannot lose it;
 # an overdue batch is flushed at the top of the next cycle.
@@ -2065,9 +2061,7 @@ ECHO_BATCH_RESOLVED=
 echo_batch_resolve() {
   local raw valid
   [ -n "$ECHO_BATCH_RESOLVED" ] && return 0
-  if [ -n "${FM_ECHO_BATCH_SECS:-}" ]; then
-    raw=$FM_ECHO_BATCH_SECS
-  elif [ -e "$CONFIG/wake-echo-batch" ] && [ ! -L "$CONFIG/wake-echo-batch" ]; then
+  if [ -e "$CONFIG/wake-echo-batch" ] && [ ! -L "$CONFIG/wake-echo-batch" ]; then
     raw=$(head -1 "$CONFIG/wake-echo-batch" 2>/dev/null || true)
   else
     ECHO_BATCH_RESOLVED=$ECHO_BATCH_DEFAULT_SECS
@@ -2095,11 +2089,6 @@ echo_batch_resolve() {
     triage_log "echo-batch config invalid (expected ${ECHO_BATCH_MIN_SECS}-${ECHO_BATCH_MAX_SECS} or off); using ${ECHO_BATCH_DEFAULT_SECS}s"
   fi
   return 0
-}
-
-echo_batch_window() {
-  echo_batch_resolve
-  printf '%s' "$ECHO_BATCH_RESOLVED"
 }
 
 echo_batch_enabled() {
@@ -2534,16 +2523,22 @@ procevent_surface_queued() {
   local key reason
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  while IFS= read -r key; do
-    case "$key" in procevent:*) ;; *) continue ;; esac
-    [ -e "$(procevent_surfaced_marker "$key")" ] && continue
-    PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
-  done < <(fm_wake_queued_keys_locked check)
-  if [ -z "$PROCEVENT_SURFACED" ]; then
+  while :; do
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+    PROCEVENT_SURFACED=
+    while IFS= read -r key; do
+      case "$key" in procevent:*) ;; *) continue ;; esac
+      [ -e "$(procevent_surfaced_marker "$key")" ] && continue
+      PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
+    done < <(fm_wake_queued_keys_locked check)
+    if [ -z "$PROCEVENT_SURFACED" ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
+    [ -s "$ECHO_BATCH_FILE" ] || break
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-    return 0
-  fi
+    echo_batch_flush immediate || return 1
+  done
   reason="check: process-event result captured:$PROCEVENT_SURFACED"
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output

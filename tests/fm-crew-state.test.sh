@@ -572,6 +572,11 @@ test_parked_human_decision_comes_from_the_action_column() {
   assert_contains "$out" "state: parked" "an ask-user row still reports parked"
   assert_contains "$out" " · ask-user: authority decision" \
     "an action column of ask-user mints the human-decision component"
+  assert_contains "$out" " · run: 01RUN" "a parked human gate exposes its attributed run"
+  local gate_run
+  gate_run=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" \
+    FM_CREW_STATE_BIN="$CREW_STATE" crew_gate_awaits_human_decision feat-au)
+  [ "$gate_run" = 01RUN ] || fail "the gate consumer rejected the real producer's run identity"
 
   # The counterexample. Nothing here is owed a human: every action column is
   # auto-fix. A description enumerating the action values, and a branch named
@@ -593,6 +598,7 @@ test_parked_human_decision_comes_from_the_action_column() {
   assert_contains "$out" "state: parked" "a crewmate-owed gate still reports parked"
   assert_not_contains "$out" " · ask-user: authority decision" \
     "free text and a branch name must not mint the human-decision component"
+  assert_contains "$out" " · run: 01RUN" "a worker-owned parked gate also exposes its attributed run"
 
   # Column order is read from the header, not assumed.
   reset_fakes

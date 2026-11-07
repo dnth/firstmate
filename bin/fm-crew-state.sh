@@ -676,6 +676,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       if nm_gate_awaits_human_decision; then
         RUN_DETAIL="$RUN_DETAIL${SEP}${FM_GATE_HUMAN_DECISION:-ask-user: authority decision}"
       fi
+      run_id=$(strip_quotes "$(nm_field id)")
+      [ -z "$run_id" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $run_id"
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;

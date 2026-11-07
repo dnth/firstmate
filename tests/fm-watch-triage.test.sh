@@ -45,7 +45,7 @@ ack_stopped_cycle() {  # <state>
 # absorb-only-when-provably-working triage reads a canned verdict; a test fixes that
 # verdict via FM_FAKE_CREW_STATE in its environment before calling watch_bg.
 # Echo batching is default-on in production, so it is disabled here unless a case
-# opts in with its own FM_ECHO_BATCH_SECS: these cases assert which wake class a
+# opts in through its config file: these cases assert which wake class a
 # signal belongs to, and the batching suite owns the window's own behavior.
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
@@ -53,7 +53,7 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   # env(1) parses the extra assignments after expansion; a bare "$@" word list
   # would make them the command name instead.
   env PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="${state%/state}/config" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
 }
 
@@ -4288,7 +4288,7 @@ test_turn_ended_churning_pane_absorbed() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4316,7 +4316,7 @@ test_turn_ended_per_generation_marker_churn_absorbed() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4343,7 +4343,7 @@ test_turn_ended_still_pane_surfaced() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4370,7 +4370,7 @@ test_turn_ended_churn_absorb_off_by_default() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$dir/config" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$dir/config" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4396,7 +4396,7 @@ test_turn_ended_churn_absorb_bounded() {
   printf '%s' "$(( $(date +%s) - 600 ))" > "$state/.churn-since-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_TURNEND_CHURN_ABSORB_SECS=60 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -4424,7 +4424,7 @@ test_turn_ended_malformed_prior_hash_surfaced() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4445,7 +4445,7 @@ test_turn_ended_missing_prior_hash_surfaced() {
   printf 'rendered before any prior poll' > "$capture_file"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4472,7 +4472,7 @@ test_status_and_turn_end_batch_never_uses_churn_evidence() {
   export FM_FAKE_CREW_STATE_firststatus='state: working · source: run-step · running'
   export FM_FAKE_CREW_STATE_secondturn='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-firststatus\nfm-secondturn')" \
-    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4500,7 +4500,7 @@ test_secondmate_turn_ended_churning_pane_surfaced() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4527,7 +4527,7 @@ test_turn_ended_colliding_window_key_surfaced() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4553,7 +4553,7 @@ test_turn_ended_churn_timer_write_failure_surfaced() {
   mkdir "$state/.churn-since-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
   pid=$!
@@ -4577,7 +4577,7 @@ test_turn_ended_invalid_churn_bound_surfaced() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_TURNEND_CHURN_ABSORB_SECS=bogus \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
@@ -4608,7 +4608,7 @@ test_turn_ended_mixed_positive_evidence_batch_absorbed() {
   export FM_FAKE_CREW_STATE_second='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-first\nfm-second')" \
     FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_FORBIDDEN_TARGET="$first_window" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_ECHO_BATCH_SECS=off \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4653,7 +4653,7 @@ parked_gate_round() {  # <case-dir> <crew-state-verdict> <exit|absorb>
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-wedge FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_CONFIG_OVERRIDE="$dir/config" FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_FAKE_CREW_STATE="$verdict" FM_ECHO_BATCH_SECS=off \
+    FM_FAKE_CREW_STATE="$verdict" \
     FM_PAUSE_RESURFACE_SECS="${FM_TEST_PAUSE_RESURFACE:-999}" FM_STALE_ESCALATE_SECS=1 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" >> "$dir/watch.out" &
@@ -4814,7 +4814,8 @@ test_echo_batch_groups_turnend_echoes_into_one_wake() {
   dir=$(make_case echo-batch-groups); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
   export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
-  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  printf '120\n' > "$dir/config/wake-echo-batch"
+  watch_bg "$state" "$fakebin" "$out"
   pid=$!
   make_echo_task "$dir" echoa ga
   wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the first turn-end echo was not deferred: $(cat "$out")"; }
@@ -4845,7 +4846,8 @@ test_echo_batch_survives_a_watcher_restart() {
   dir=$(make_case echo-batch-restart); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
   export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
-  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  printf '120\n' > "$dir/config/wake-echo-batch"
+  watch_bg "$state" "$fakebin" "$out"
   pid=$!
   make_echo_task "$dir" first fa
   wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the first echo was not deferred"; }
@@ -4859,7 +4861,8 @@ test_echo_batch_survives_a_watcher_restart() {
     || fail "the deferred batch did not survive the watcher stop"
   : > "$out"
   # A fresh watcher inherits the same persisted window and must not lose it.
-  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  printf '120\n' > "$dir/config/wake-echo-batch"
+  watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the restarted watcher did not complete a poll: $(cat "$out") | triage: $(cat "$state/.watch-triage.log" 2>/dev/null)"; }
   [ "$(grep -c . "$state/.echo-batch" 2>/dev/null || true)" -eq 2 ] \
@@ -4880,7 +4883,8 @@ test_echo_batch_immediate_status_verbs_never_deferred() {
     dir=$(make_case "echo-batch-immediate-$verb"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"
     export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
-    watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+    printf '120\n' > "$dir/config/wake-echo-batch"
+    watch_bg "$state" "$fakebin" "$out"
     pid=$!
     make_echo_task "$dir" echoimm g1
     wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$verb: the echo was not deferred first"; }
@@ -4902,7 +4906,8 @@ test_echo_batch_check_wake_flushes_pending_batch() {
   dir=$(make_case echo-batch-check-flush); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
   export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
-  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120 FM_CHECK_INTERVAL=1
+  printf '120\n' > "$dir/config/wake-echo-batch"
+  watch_bg "$state" "$fakebin" "$out" FM_CHECK_INTERVAL=1
   pid=$!
   make_echo_task "$dir" echochk g1
   wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the echo was not deferred before the check"; }
@@ -4925,7 +4930,8 @@ test_echo_batch_stale_wake_flushes_pending_batch() {
   dir=$(make_case echo-batch-stale-flush); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
   export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
-  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  printf '120\n' > "$dir/config/wake-echo-batch"
+  watch_bg "$state" "$fakebin" "$out"
   pid=$!
   make_echo_task "$dir" echost g1
   wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the echo was not deferred before the stale wake"; }
@@ -4948,7 +4954,8 @@ test_echo_batch_afk_never_defers() {
   out="$dir/watch.out"
   : > "$state/.afk"
   export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
-  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  printf '120\n' > "$dir/config/wake-echo-batch"
+  watch_bg "$state" "$fakebin" "$out"
   pid=$!
   make_echo_task "$dir" echoafk g1
   wait_for_exit "$pid" 40 || { reap "$pid"; fail "away-mode triage deferred a wake: $(cat "$out")"; }
@@ -4965,7 +4972,8 @@ test_echo_batch_status_echo_joins_window() {
   printf 'working: preparing\n' > "$statusf"
   prime_turnend_seen "$statusf"
   export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
-  watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120
+  printf '120\n' > "$dir/config/wake-echo-batch"
+  watch_bg "$state" "$fakebin" "$out"
   pid=$!
   printf 'PR ready: https://github.com/o/r/pull/1\n' >> "$statusf"
   wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the status echo was not deferred: $(cat "$out")"; }
@@ -5013,7 +5021,8 @@ test_echo_batch_answered_gate_drop_and_near_misses() {
       other-run) FM_FAKE_CREW_STATE_gate=${FM_FAKE_CREW_STATE_gate/01RUN/02RUN} ;;
       other-step) FM_FAKE_CREW_STATE_gate=${FM_FAKE_CREW_STATE_gate/at review:/at test:} ;;
     esac
-    watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120 \
+    printf '120\n' > "$dir/config/wake-echo-batch"
+    watch_bg "$state" "$fakebin" "$out" \
       FM_FAKE_TMUX_WINDOW=test:fm-gate FM_FAKE_TMUX_CAPTURE="$capture"
     pid=$!
     wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: the gate echo was not deferred"; }
@@ -5079,7 +5088,8 @@ test_echo_batch_no_change_drop_and_near_misses() {
         printf '%s\t%s\t%s\n' "$epoch" "$gen" "$line" > "$state/.last-delivered-steady"
         ;;
     esac
-    watch_bg "$state" "$fakebin" "$out" FM_ECHO_BATCH_SECS=120 \
+    printf '120\n' > "$dir/config/wake-echo-batch"
+    watch_bg "$state" "$fakebin" "$out" \
       FM_FAKE_TMUX_WINDOW=test:fm-steady FM_FAKE_TMUX_CAPTURE="$capture"
     pid=$!
     wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: the no-change echo was not deferred"; }
@@ -5109,7 +5119,7 @@ test_echo_batch_no_change_drop_and_near_misses() {
 
 test_echo_batch_config_window_and_disable() {
   local variant dir state fakebin out pid window
-  for variant in config-off invalid-default leading-zero octal-invalid oversized false-alias uppercase-alias no-alias zero-alias tuned-off-by-env; do
+  for variant in config-off invalid-default leading-zero octal-invalid oversized false-alias uppercase-alias no-alias zero-alias tuned-window absent-default; do
     dir=$(make_case "echo-batch-config-$variant"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; mkdir -p "$dir/config"
     case "$variant" in
@@ -5130,28 +5140,21 @@ test_echo_batch_config_window_and_disable() {
         printf 'off\n' > "$dir/config/wake-echo-batch"
         ;;
     esac
-    # Spawn directly (not through watch_bg, which forces the env override off)
-    # so the config file alone decides unless a case proves the override wins.
-    if [ "$variant" = tuned-off-by-env ]; then
-      PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-        FM_CONFIG_OVERRIDE="$dir/config" FM_ECHO_BATCH_SECS=off \
-        FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-    else
-      PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-        FM_CONFIG_OVERRIDE="$dir/config" \
-        FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-    fi
+    [ "$variant" != absent-default ] || rm -f "$dir/config/wake-echo-batch"
+    watch_bg "$state" "$fakebin" "$out"
     pid=$!
     make_echo_task "$dir" echocfg g1
     case "$variant" in
-      config-off|tuned-off-by-env)
+      config-off)
         wait_for_exit "$pid" 40 || { reap "$pid"; fail "$variant: a disabled window still deferred: $(cat "$out")"; }
         [ ! -e "$state/.echo-batch" ] || fail "$variant: a disabled window wrote a batch"
         ;;
-      invalid-default|leading-zero|octal-invalid|oversized|false-alias|uppercase-alias|no-alias|zero-alias)
+      absent-default|invalid-default|leading-zero|octal-invalid|oversized|false-alias|uppercase-alias|no-alias|zero-alias)
         wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "$variant: an invalid window did not fall back to the default"; }
-        wait_log_line "$state" 'echo-batch config invalid' \
-          || { reap "$pid"; fail "$variant: the invalid value was not reported"; }
+        if [ "$variant" != absent-default ]; then
+          wait_log_line "$state" 'echo-batch config invalid' \
+            || { reap "$pid"; fail "$variant: the invalid value was not reported"; }
+        fi
         wait_log_line "$state" 'window=120s' \
           || { reap "$pid"; fail "$variant: the fallback window was not the documented default: $(cat "$state/.watch-triage.log" 2>/dev/null)"; }
         reap "$pid"
@@ -5165,10 +5168,39 @@ test_echo_batch_config_window_and_disable() {
     esac
     unset FM_FAKE_CREW_STATE
   done
-  pass "config/wake-echo-batch selects 60-300 seconds or off, the environment override wins, and an invalid value falls back with one log line"
+  pass "config/wake-echo-batch selects 60-300 seconds or off, an absent file uses 120 seconds, and an invalid value falls back with one log line"
+}
+
+test_echo_batch_procevent_flush_does_not_deadlock() {
+  local dir state out pid
+  dir=$(make_case echo-batch-procevent-lock); state="$dir/state"; out="$dir/watch.out"
+  printf '120\n' > "$dir/config/wake-echo-batch"
+  export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  make_echo_task "$dir" echope g1
+  wait_echo_batch_entries "$state" 1 || { reap "$pid"; fail "the echo was not deferred before the process event"; }
+  append_wake "$state" check procevent:batch-lock:1 'check: procevent fixture batch-lock 1'
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a pending batch deadlocked process-event delivery"; }
+  grep -F 'check: process-event result captured: procevent:batch-lock:1' "$out" >/dev/null \
+    || fail "the immediate output did not name the process event"
+  grep "$(printf '\tsignal\t')" "$state/.wake-queue" | grep -F "$state/echope.turn-ended.g1" >/dev/null \
+    || fail "the process-event wake lost the pending echo"
+  [ ! -e "$state/.echo-batch" ] || fail "the process-event wake did not retire the pending batch"
+  [ ! -d "$state/.wake-queue.lock" ] || fail "the process-event output retained the queue lock"
+  unset FM_FAKE_CREW_STATE
+  pass "a process-event wake flushes a pending echo batch without reacquiring its queue lock"
 }
 
 test_echo_review_regressions() {
+  test_echo_batch_procevent_flush_does_not_deadlock
+  test_procevent_surface_serializes_with_drain
+  test_procevent_surface_crash_boundaries
+  test_procevent_marker_failure_exits_and_replays
+  test_turn_ended_churning_pane_absorbed
+  test_status_and_turn_end_batch_never_uses_churn_evidence
+  test_echo_batch_groups_turnend_echoes_into_one_wake
+  test_echo_batch_survives_a_watcher_restart
   test_echo_batch_answered_gate_drop_and_near_misses
   test_echo_batch_no_change_drop_and_near_misses
   test_echo_batch_config_window_and_disable
@@ -5233,6 +5265,7 @@ test_open_decision_reminders_serialize_retirement
 test_wedge_backlog_captain_hold_defers_escalation
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_is_off_until_armed
+test_echo_batch_procevent_flush_does_not_deadlock
 test_echo_batch_groups_turnend_echoes_into_one_wake
 test_echo_batch_survives_a_watcher_restart
 test_echo_batch_immediate_status_verbs_never_deferred

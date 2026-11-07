@@ -194,7 +194,7 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 Status-only and bare turn-ended `signal:` wakes are echoes: the delivery that carried their news already happened, and the supervisor does not need a separate turn for every following turn boundary.
 The watcher defers those within one bounded window and delivers the group as one wake, using the same `signal:` reason grammar and one durable queue row per distinct file.
 Batching is default-on at `120` seconds.
-The local, gitignored `config/wake-echo-batch` file holds one value: a whole number of seconds in `[60,300]`, or `off`; `FM_ECHO_BATCH_SECS` is the environment override with the same validation, and the empty/absent case keeps the default.
+The local, gitignored `config/wake-echo-batch` file holds one value: a whole number of seconds in `[60,300]`, or `off`; an absent file keeps the default.
 An invalid value falls back to `120` and records one warning per watcher process rather than silently disabling the feature.
 The value is resolved once per watcher process, so a config change takes effect on the next watcher cycle chain.
 The window opens at the first deferred echo; a repeated turn boundary for a file already in the window joins it without extending the window.
@@ -1397,7 +1397,6 @@ FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE if set, else the poll-
 FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3   # unacknowledged downtime announcements before an armed watcher resumes pane supervision instead of exiting on the resurface wake; invalid values use the default (docs/watcher-continuity.md "Recovery episode acknowledgement")
 FM_WATCH_RESURFACE_MAX_SECS=900   # seconds since the first unacknowledged downtime announcement after which the same bound trips; invalid values use the defaults
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
-FM_ECHO_BATCH_SECS=120  # window for deferring status-only and bare turn-ended echo signals into one wake; a whole 60-300 or "off" (env override of config/wake-echo-batch; invalid values use 120 and warn once)
 FM_TURNEND_CHURN_ABSORB_SECS=900   # longest one endpoint's bare turn-ends may be deferred on pane-churn evidence alone; only consulted when config/turnend-churn-absorb is present
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked

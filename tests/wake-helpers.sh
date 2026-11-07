@@ -57,7 +57,8 @@ make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
+  mkdir -p "$dir/state" "$dir/config" "$fakebin"
+  printf 'off\n' > "$dir/config/wake-echo-batch"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
