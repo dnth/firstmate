@@ -4879,7 +4879,7 @@ test_echo_batch_survives_a_watcher_restart() {
 
 test_echo_batch_immediate_status_verbs_never_deferred() {
   local verb dir state fakebin out pid
-  for verb in needs-decision blocked done failed; do
+  for verb in needs-decision blocked 'done' failed; do
     dir=$(make_case "echo-batch-immediate-$verb"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"
     export FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on the supervisor'
