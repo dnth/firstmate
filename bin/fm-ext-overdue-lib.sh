@@ -5,11 +5,10 @@
 # appends the durable wake row and rings. This owner decides WHICH request earns
 # the next reminder and records that it rang.
 #
-# Every drain presents an unanswered request, so one that has waited past
-# FM_EXT_OVERDUE_SECS means no drain reached main since it arrived - typically
-# because its check close was coalesced behind a handling episode. One reminder
-# per request per FM_EXT_OVERDUE_REMIND_SECS bounds the nagging, and the record's
-# removal (ext-respond answering or dismissing it) stops it at the next cycle.
+# Presentation does not resolve a request: an unanswered record remains eligible
+# for reminders even after a drain showed it. One reminder per request per
+# FM_EXT_OVERDUE_REMIND_SECS bounds the nagging, and record removal stops further
+# reminders at the next cycle.
 #
 # A request acknowledged on Discord while the task spawned for it is still live
 # is expected to stay unanswered, so that pair stays quiet; with no live task

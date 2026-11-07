@@ -867,14 +867,12 @@ Wake rows can still be hidden by a filtered read of the drain and are consumed b
 A request stays on that list across drains and acknowledgements until `bin/fm-ext-inbox.sh remove` clears its inbox record on a recorded delivery disposition, or `bin/fm-ext-inbox.sh dismiss` records why it needs no reply.
 The [`bin/fm-wake-drain.sh` header](../bin/fm-wake-drain.sh) owns the unanswered-request acknowledgement refusal and ack-only warning; [`fm_ext_ack_only_warn_secs` in `bin/fm-ext-lib.sh`](../bin/fm-ext-lib.sh) owns the warning threshold setting and default.
 
-A request's `check: ext-request <slug>` close asks a question about live state rather than reporting a one-shot event, so it is never finished as merely covered by the main handling episode it was coalesced into.
-The boundary that closes that episode releases the close for delivery whenever the home has an unanswered request the drain has not presented since suppression, scanning the inbox in slug order rather than relying on IDs retained in a possibly truncated close payload.
-`state/.ext-presented/<slug>` is the presentation note the drain writes when it lists a request, and it is what tells the core a repeat would only duplicate that listing.
-[`docs/omp-supervision-branch.md`](omp-supervision-branch.md) "Main-fallback re-entry coalescing" owns that boundary contract.
+`state/.ext-presented/<slug>` records the last drain presentation by its mtime and is cleared when `bin/fm-ext-inbox.sh` removes the request.
+The [OMP main-fallback boundary contract](omp-supervision-branch.md#main-fallback-re-entry-coalescing) owns how that evidence governs suppressed request closes.
 
 A request can still outlive every close that reached main, for example when a long main turn keeps the queue from draining.
 Each watcher cycle then re-surfaces one request that has waited past `FM_EXT_OVERDUE_SECS` (default 300) as `check: ext-request-overdue <slug> age=<n>m`, appends its own durable row keyed `ext-request-overdue:<slug>`, and rings.
-`FM_EXT_OVERDUE_REMIND_SECS` (default 600) bounds the repeats for one request, `state/.ext-overdue.<slug>` records the last eligibility check, and that marker disappears with the record, so a reminder stops as soon as ext-respond answers or dismisses the request.
+`FM_EXT_OVERDUE_REMIND_SECS` (default 600) bounds the repeats for one request, `state/.ext-overdue.<slug>` records the last eligibility check, and the next watcher cycle prunes it after the record is removed, stopping reminders once ext-respond answers or dismisses the request.
 A request whose only reply is an `ack` stays quiet while a task linked to it is still live - `ext_request_slug` in that task's `state/<task>.meta` with a current `bin/fm-crew-state.sh` verdict of `working`, `parked`, or `paused` - and earns the same reminder once that task is not.
 Task reconciliation runs only after the age and cadence gates, with the cadence window claimed before checking liveness.
 [`bin/fm-ext-overdue-lib.sh`](../bin/fm-ext-overdue-lib.sh) owns which request is due and the cadence.

@@ -155,7 +155,7 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-ext-lib.sh
 . "$SCRIPT_DIR/fm-ext-lib.sh"
-# Unanswered Communication Officer requests that no drain reached: which request
+# Unanswered Communication Officer requests: which request
 # is overdue, the reminder cadence, and the ack-only-with-live-task exemption.
 # shellcheck source=bin/fm-ext-overdue-lib.sh
 . "$SCRIPT_DIR/fm-ext-overdue-lib.sh"
@@ -914,11 +914,9 @@ ext_doorbell_tick() {
   wake "$reason"
 }
 
-# Unanswered-request backstop. Every drain presents an unanswered request, so one
-# still waiting past FM_EXT_OVERDUE_SECS means no drain reached main since it
-# arrived - typically because its check close was coalesced behind a handling
-# episode. bin/fm-ext-overdue-lib.sh owns which request is due and the cadence;
-# this cycle appends the durable row and rings it.
+# Unanswered-request backstop, including requests already presented by a drain.
+# bin/fm-ext-overdue-lib.sh owns eligibility and cadence; this cycle appends the
+# durable row and rings it.
 ext_overdue_tick() {
   local payload slug
   fm_ext_overdue_remind_secs > /dev/null
