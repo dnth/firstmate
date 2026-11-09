@@ -319,9 +319,9 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # persisted counter that the next reminder reports. The ledger is
 # state/.held-alert-<window-key>; docs/configuration.md owns the behavior.
 HELD_ALERT_BACKOFF_SECS=${FM_HELD_ALERT_BACKOFF_SECS:-3600}
-case "$HELD_ALERT_BACKOFF_SECS" in ''|0*|*[!0-9]*) HELD_ALERT_BACKOFF_SECS=3600 ;; esac
+case "$HELD_ALERT_BACKOFF_SECS" in ''|0*|*[!0-9]*|??????????*) HELD_ALERT_BACKOFF_SECS=3600 ;; esac
 HELD_ALERT_BACKOFF_MAX_SECS=${FM_HELD_ALERT_BACKOFF_MAX_SECS:-21600}
-case "$HELD_ALERT_BACKOFF_MAX_SECS" in ''|0*|*[!0-9]*) HELD_ALERT_BACKOFF_MAX_SECS=21600 ;; esac
+case "$HELD_ALERT_BACKOFF_MAX_SECS" in ''|0*|*[!0-9]*|??????????*) HELD_ALERT_BACKOFF_MAX_SECS=21600 ;; esac
 [ "$HELD_ALERT_BACKOFF_MAX_SECS" -ge "$HELD_ALERT_BACKOFF_SECS" ] \
   || HELD_ALERT_BACKOFF_MAX_SECS=$HELD_ALERT_BACKOFF_SECS
 # How often the per-poll release check may re-read the linked call while a
@@ -1590,8 +1590,10 @@ held_alert_tick() {  # <window> <endpoint> <age> <since-file> [now]
   # shorten the next interval by that delay. A caller-supplied clock is kept
   # verbatim so the gate stays deterministically testable.
   [ -n "$now_arg" ] || now=$(date +%s)
-  interval=$((interval * 2))
-  [ "$interval" -le "$HELD_ALERT_BACKOFF_MAX_SECS" ] || interval=$HELD_ALERT_BACKOFF_MAX_SECS
+  if [ "$last" -ne 0 ]; then
+    interval=$((interval * 2))
+    [ "$interval" -le "$HELD_ALERT_BACKOFF_MAX_SECS" ] || interval=$HELD_ALERT_BACKOFF_MAX_SECS
+  fi
   write_held_alert_ledger "$ledger" "$hold" "$identity" 0 "$now" "$interval" || exit 1
   # The idle timer and the ledger share one instant, so the next threshold can
   # never report the interval elapsed while the idle age still says otherwise.
@@ -1650,6 +1652,11 @@ held_alert_release_tick() {  # <window> <since-file> [now]
 # must restore alerting on the next cycle rather than at the next threshold.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason wait_key evidence wait_min_age
+  # An answered, released, or re-held decision lifts the linked-decision
+  # backoff before the threshold is read, so the unchanged escalation path
+  # fires on this cycle instead of waiting out a suppression that no longer
+  # applies.
+  held_alert_release_tick "$win" "$since_file"
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1658,20 +1665,6 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       triage_log "absorbed $label timer reset: $win"
       ;;
     *)
-      # An answered, released, or re-held decision lifts the linked-decision
-      # backoff before the threshold is read, so the unchanged escalation path
-      # fires on this cycle instead of waiting out a suppression that no longer
-      # applies.
-      held_alert_release_tick "$win" "$since_file"
-      since=$(cat "$since_file" 2>/dev/null || true)
-      case "$since" in
-        ''|*[!0-9]*)
-          date +%s > "$since_file"
-          clear_wedge_deferral_tracking "$(window_key "$win")"
-          triage_log "absorbed $label timer reset: $win"
-          return 0
-          ;;
-      esac
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         # Escalation boundary: a run that finished while its wedge timer was

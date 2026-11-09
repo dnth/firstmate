@@ -2201,8 +2201,8 @@ test_held_alert_backoff_folds_repeats_across_restart() {
   [ -e "$state/captain-hold-endpoints/boatqa.links" ] \
     || fail "the fixture did not record the endpoint link"
   run_held_endpoint_watch "$dir" "$out" \
-    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=6 \
-    FM_HELD_ALERT_BACKOFF_MAX_SECS=12 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=12 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=24 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
   pid=$HELD_WATCH_PID
   wait_for_exit "$pid" 150 || fail "the first held escalation did not surface"
   reason=$(cat "$out")
@@ -2221,8 +2221,8 @@ test_held_alert_backoff_folds_repeats_across_restart() {
   # must report the folded count.
   : > "$out"
   run_held_endpoint_watch "$dir" "$out" \
-    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=6 \
-    FM_HELD_ALERT_BACKOFF_MAX_SECS=12 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=12 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=24 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
   pid=$HELD_WATCH_PID
   wait_log_line "$state" "repeats folded" 100 \
     || { stop_pid "$pid"; fail "the restarted watcher did not fold a repeat inside the interval: out=$(cat "$out" 2>/dev/null) ledger=$(cat "$state/.held-alert-remote_boatqa" 2>/dev/null) triage=$(tail -5 "$state/.watch-triage.log" 2>/dev/null | tr '\n' '|')"; }
@@ -2404,6 +2404,37 @@ test_held_alert_backoff_new_episode_is_not_suppressed() {
   reason=$(grep -c "captain decision boatqa-retire-decision is open" "$wakes" || true)
   [ "$reason" = 2 ] || fail "the new episode did not alert inside the old interval: $(cat "$wakes")"
   pass "a released and re-held linked call is a new episode that is never suppressed by the old backoff"
+}
+
+test_held_alert_backoff_schedule_starts_at_base_interval() {
+  local dir state wakes
+  dir=$(setup_held_endpoint_case held-alert-schedule linked)
+  state="$dir/state"
+  wakes="$dir/wakes"
+  # Documented schedule with base 60 and cap 240: reminders 60, then 120, then
+  # 240 seconds apart, capped at 240. A gate that doubled before the first gap
+  # would fold the reminder due at 1060.
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_HELD_ALERT_BACKOFF_SECS=60 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=240 WAKES="$wakes" bash -c '
+      . "$1"
+      wake() { printf "%s\n" "$1" >> "$WAKES"; }
+      since="$STATE/.stale-since-remote_boatqa"
+      expect() {  # <now> <wake-count>
+        held_alert_tick "remote:boatqa" boatqa 500 "$since" "$1" || exit 1
+        [ "$(grep -c . "$WAKES")" = "$2" ] || { echo "at $1 expected $2 wakes" >&2; exit 1; }
+      }
+      expect 1000 1
+      expect 1059 1
+      expect 1060 2
+      expect 1179 2
+      expect 1180 3
+      expect 1419 3
+      expect 1420 4
+      expect 1659 4
+      expect 1660 5
+    ' _ "$WATCH" || fail "the held-alert reminders did not follow the base-then-doubling schedule: $(cat "$wakes" 2>/dev/null)"
+  pass "held-alert reminders start one base interval apart and double up to the cap"
 }
 
 make_path_without_deadline_tools() {  # <destination>
@@ -5701,6 +5732,7 @@ test_held_alert_backoff_folds_repeats_across_restart
 test_held_alert_backoff_release_restores_immediate_alerting
 test_held_alert_backoff_clears_on_real_change
 test_held_alert_backoff_ignores_unlinked_endpoint
+test_held_alert_backoff_schedule_starts_at_base_interval
 test_held_alert_backoff_new_episode_is_not_suppressed
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_is_off_until_armed

@@ -170,7 +170,7 @@ At the wedge threshold, the watcher checks a wait its own record explains, then 
 ### Linked captain-decision backoff
 
 A captain call can cover a supervision endpoint other than its own task id, such as a secondmate id whose endpoint is unreachable.
-`bin/fm-captain-hold.sh link <task-id> --endpoint <endpoint-id>` records that link, `hold ... --endpoint <endpoint-id>` records it in the same act as the hold, and the hold script's header owns the record format, the `unlink` command, and the read-only `endpoint-open` predicate the watcher asks.
+`bin/fm-captain-hold.sh link <task-id> --endpoint <endpoint-id>` records that link, `hold ... --endpoint <endpoint-id>` records it in the same act as the hold, and the hold script's header owns the record format and the read-only `endpoint-open` predicate the watcher asks.
 The link is durable under `state/captain-hold-endpoints/` and is dropped when the call is answered, released, or closed.
 When a stale or idle endpoint's condition is unchanged and a linked captain call is open, repeat stale escalations back off instead of firing once per watcher cycle.
 The first escalation of an episode still fires at once.

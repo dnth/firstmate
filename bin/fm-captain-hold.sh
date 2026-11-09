@@ -42,7 +42,6 @@
 #   fm-captain-hold.sh due
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh link <task-id> --endpoint <endpoint-id>
-#   fm-captain-hold.sh unlink <task-id> [--endpoint <endpoint-id>]
 #   fm-captain-hold.sh endpoint-open <endpoint-id> [--identity]
 #   fm-captain-hold.sh answered <task-id>
 #   fm-captain-hold.sh diverged
@@ -238,14 +237,12 @@
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
 #
-# `link` and `unlink` record which supervision endpoint a captain call covers,
+# `link` records which supervision endpoint a captain call covers,
 # so the watcher can bound repeat alerts for an endpoint whose fate already
 # waits on that call. The link is a private record under
 # `state/captain-hold-endpoints/`, one `<endpoint-id>.links` file holding a
 # schema line and one `task=<task-id>` line per linked call. `link` requires the
-# task to be an open captain call and is idempotent; `unlink` removes one task
-# from one endpoint, or from every endpoint when no `--endpoint` is given; a
-# successful answer, release, or evidence-backed reconcile close removes the
+# task to be an open captain call and is idempotent; a successful answer, release, or evidence-backed reconcile close removes the
 # task's links. `hold ... --endpoint <endpoint-id>` writes the link in the same
 # act as the hold.
 # `endpoint-open <endpoint-id> [--identity]` is the read-only predicate the
@@ -2607,9 +2604,8 @@ EOF
   write_endpoint_links "$endpoint" "$updated"
 }
 
-# Remove <task-id> from one endpoint record, or from every record when
-# <endpoint-id> is empty. Returns 1 on an unreadable record; callers that are
-# cleanup paths ignore that and keep going.
+# Remove <task-id> from one endpoint record. Returns 1 on an unreadable record;
+# the cleanup caller ignores that and keeps going.
 unlink_task_from_endpoint() {  # <task-id> <endpoint-id>
   local id=$1 endpoint=$2 existing='' updated='' task
   existing=$(read_endpoint_links "$endpoint") || return 1
@@ -2621,38 +2617,6 @@ unlink_task_from_endpoint() {  # <task-id> <endpoint-id>
 $existing
 EOF
   write_endpoint_links "$endpoint" "$updated"
-}
-
-command_unlink() {
-  local id=${1:-} endpoint='' path f endpoint_id
-  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
-  shift
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --endpoint) shift; endpoint=${1:-} ;;
-      *) usage >&2; exit 2 ;;
-    esac
-    shift
-  done
-  validate_slug task-id "$id"
-  if [ -n "$endpoint" ]; then
-    validate_slug endpoint-id "$endpoint"
-    path=$(endpoint_link_path "$endpoint")
-    [ -e "$path" ] || { printf 'unlinked: %s -> %s\n' "$id" "$endpoint"; return 0; }
-    unlink_task_from_endpoint "$id" "$endpoint" \
-      || fail "captain-hold endpoint record is unreadable: $path"
-    printf 'unlinked: %s -> %s\n' "$id" "$endpoint"
-    return 0
-  fi
-  [ -d "$ENDPOINT_LINK_DIR" ] && [ ! -L "$ENDPOINT_LINK_DIR" ] || return 0
-  for f in "$ENDPOINT_LINK_DIR"/*.links; do
-    [ -e "$f" ] || continue
-    endpoint_id=${f##*/}
-    endpoint_id=${endpoint_id%.links}
-    unlink_task_from_endpoint "$id" "$endpoint_id" \
-      || fail "captain-hold endpoint record is unreadable: $f"
-    printf 'unlinked: %s -> %s\n' "$id" "$endpoint_id"
-  done
 }
 
 # Drop every link owned by <task-id>. A cleanup path: an unreadable record is
@@ -2885,7 +2849,6 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
   link) shift; command_link "$@" ;;
-  unlink) shift; command_unlink "$@" ;;
   endpoint-open) shift; command_endpoint_open "$@" ;;
   answered) shift; command_answered "$@" ;;
   due) shift; command_due "$@" ;;

@@ -1185,7 +1185,8 @@ test_hold_records_review_by_date_and_stays_live() {
 
 # An endpoint link exists only while its call is open: link refuses a task that
 # is not a captain call, endpoint-open reports the open linked call with its
-# lifecycle identity, unlink removes one link, and answering the call drops it.
+# lifecycle identity, a repeated link is idempotent, and answering the call
+# drops it.
 test_endpoint_links_track_open_calls() {
   local home call_id out
   home=$(make_home endpoint-links)
@@ -1205,11 +1206,6 @@ test_endpoint_links_track_open_calls() {
     "$call_id"$'\t'*'#'*) : ;;
     *) fail "endpoint-open identity was malformed: $out" ;;
   esac
-  run_captain "$home" unlink "$call_id" --endpoint remote-one >/dev/null \
-    || fail "unlink failed"
-  if run_captain "$home" endpoint-open remote-one >/dev/null 2>&1; then
-    fail "endpoint-open still reported an unlinked endpoint"
-  fi
   run_captain "$home" link "$call_id" --endpoint remote-one >/dev/null \
     || fail "link failed for the still-open call"
   printf 'retire it\n' > "$home/decision.txt"
