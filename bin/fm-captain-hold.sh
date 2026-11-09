@@ -29,7 +29,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--endpoint <endpoint-id>]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release | --close-live]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance> [--no-steer]   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -40,6 +41,9 @@
 #   fm-captain-hold.sh verify <origin-id> [--require-answered]
 #   fm-captain-hold.sh due
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh link <task-id> --endpoint <endpoint-id>
+#   fm-captain-hold.sh unlink <task-id> [--endpoint <endpoint-id>]
+#   fm-captain-hold.sh endpoint-open <endpoint-id> [--identity]
 #   fm-captain-hold.sh answered <task-id>
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
@@ -233,6 +237,24 @@
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
+#
+# `link` and `unlink` record which supervision endpoint a captain call covers,
+# so the watcher can bound repeat alerts for an endpoint whose fate already
+# waits on that call. The link is a private record under
+# `state/captain-hold-endpoints/`, one `<endpoint-id>.links` file holding a
+# schema line and one `task=<task-id>` line per linked call. `link` requires the
+# task to be an open captain call and is idempotent; `unlink` removes one task
+# from one endpoint, or from every endpoint when no `--endpoint` is given; a
+# successful answer, release, or evidence-backed reconcile close removes the
+# task's links. `hold ... --endpoint <endpoint-id>` writes the link in the same
+# act as the hold.
+# `endpoint-open <endpoint-id> [--identity]` is the read-only predicate the
+# watcher asks: exit 0 prints the first still-open linked task id (with
+# `--identity`, the call's `<hold-set stamp>#<recorded answers>` lifecycle after
+# a tab), 1 means no linked call is open, and 2 means the record could not be
+# read. The watcher treats 2 as not-held, so an unreadable record never
+# suppresses an alert. The record format and this predicate are owned here; the
+# watcher's backoff behavior is owned by docs/configuration.md.
 #
 # `answered` is the read-only reader for what a closed call recorded. It prints
 # the newest resolution record's mode on the first line, the captain's answer
@@ -1167,7 +1189,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how>"
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
+  local id=${1:-} title='' reason='' repo='' origin='' until='' endpoint='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
@@ -1178,12 +1200,14 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --endpoint) shift; endpoint=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
   validate_one_line reason "$reason"
+  [ -z "$endpoint" ] || validate_slug endpoint-id "$endpoint"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   if [ -n "$origin" ]; then
     validate_slug origin-id "$origin"
@@ -1256,6 +1280,10 @@ command_hold() {
   show=$TASK_SHOW_OUTPUT
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  if [ -n "$endpoint" ]; then
+    record_endpoint_link "$id" "$endpoint" \
+      || fail "task $id is held for the captain but its endpoint link to $endpoint could not be recorded"
+  fi
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
@@ -1325,6 +1353,10 @@ close_answered() {  # <task-id> <release-0-or-1>; --close-live closes like 0
     apply_pending_retained_artifact "$1" || return 1
     tasks_axi "done" "$1" >/dev/null
   fi
+  # The decision is settled, so its endpoint links must stop bounding alerts.
+  # Best-effort: the answer is already durable and a leftover link still reads
+  # as closed through endpoint-open.
+  release_endpoint_links "$1"
 }
 
 remove_interrupted_answer_stamp() {  # <task-id>
@@ -2485,6 +2517,212 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+# --- the durable captain-call -> supervision-endpoint link --------------------
+#
+# The record format, the predicate, and the cleanup rule are documented in this
+# script's header under `link`. The watcher's backoff behavior is owned by
+# docs/configuration.md.
+
+ENDPOINT_LINK_DIR="$STATE/captain-hold-endpoints"
+ENDPOINT_LINK_SCHEMA=fm-captain-hold-endpoint.v1
+
+endpoint_link_path() { printf '%s/%s.links\n' "$ENDPOINT_LINK_DIR" "$1"; }
+
+# Print the linked task ids, one per line. A record that exists but cannot be
+# read is an error (nonzero), never an empty link set: an unreadable record may
+# hide a live call, and the watcher must not read that as "no decision".
+read_endpoint_links() {  # <endpoint-id>
+  local path schema
+  path=$(endpoint_link_path "$1")
+  [ -e "$path" ] || return 0
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  schema=$(sed -n 's/^schema=//p' "$path" | head -1)
+  [ "$schema" = "$ENDPOINT_LINK_SCHEMA" ] || return 1
+  sed -n 's/^task=//p' "$path"
+}
+
+# Atomically replace <endpoint-id>'s record with <newline-separated task ids>,
+# removing the file when the list is empty.
+write_endpoint_links() {  # <endpoint-id> <task-lines>
+  local endpoint=$1 tasks=$2 path tmp task
+  path=$(endpoint_link_path "$endpoint")
+  if [ -z "$tasks" ]; then
+    rm -f -- "$path"
+    return 0
+  fi
+  (umask 077; mkdir -p "$ENDPOINT_LINK_DIR") || return 1
+  [ -d "$ENDPOINT_LINK_DIR" ] && [ ! -L "$ENDPOINT_LINK_DIR" ] || return 1
+  tmp=$(umask 077; mktemp "$ENDPOINT_LINK_DIR/.links.XXXXXX") || return 1
+  {
+    printf 'schema=%s\n' "$ENDPOINT_LINK_SCHEMA"
+    printf '%s\n' "$tasks" | while IFS= read -r task; do
+      [ -n "$task" ] || continue
+      printf 'task=%s\n' "$task"
+    done
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$path"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+command_link() {
+  local id=${1:-} endpoint=''
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --endpoint) shift; endpoint=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug task-id "$id"
+  validate_slug endpoint-id "$endpoint"
+  # Only a live captain call may own a link, so a stale record can never
+  # suppress alerts for a decision that no longer exists.
+  command_open "$id" >/dev/null 2>&1 \
+    || fail "task $id is not an open captain call; link only a live call"
+  record_endpoint_link "$id" "$endpoint" \
+    || fail "cannot record the endpoint link for $endpoint"
+  printf 'linked: %s -> %s\n' "$id" "$endpoint"
+}
+
+# Idempotently add <task-id> to <endpoint-id>'s record. The caller owns
+# validation and the open-call check.
+record_endpoint_link() {  # <task-id> <endpoint-id>
+  local id=$1 endpoint=$2 existing='' updated='' task
+  existing=$(read_endpoint_links "$endpoint") || return 1
+  while IFS= read -r task; do
+    [ -n "$task" ] || continue
+    [ "$task" = "$id" ] && continue
+    case "$task" in
+      *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    updated="$updated$task"$'\n'
+  done <<EOF
+$existing
+EOF
+  updated="$updated$id"
+  write_endpoint_links "$endpoint" "$updated"
+}
+
+# Remove <task-id> from one endpoint record, or from every record when
+# <endpoint-id> is empty. Returns 1 on an unreadable record; callers that are
+# cleanup paths ignore that and keep going.
+unlink_task_from_endpoint() {  # <task-id> <endpoint-id>
+  local id=$1 endpoint=$2 existing='' updated='' task
+  existing=$(read_endpoint_links "$endpoint") || return 1
+  while IFS= read -r task; do
+    [ -n "$task" ] || continue
+    [ "$task" = "$id" ] && continue
+    updated="$updated$task"$'\n'
+  done <<EOF
+$existing
+EOF
+  write_endpoint_links "$endpoint" "$updated"
+}
+
+command_unlink() {
+  local id=${1:-} endpoint='' path f endpoint_id
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --endpoint) shift; endpoint=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug task-id "$id"
+  if [ -n "$endpoint" ]; then
+    validate_slug endpoint-id "$endpoint"
+    path=$(endpoint_link_path "$endpoint")
+    [ -e "$path" ] || { printf 'unlinked: %s -> %s\n' "$id" "$endpoint"; return 0; }
+    unlink_task_from_endpoint "$id" "$endpoint" \
+      || fail "captain-hold endpoint record is unreadable: $path"
+    printf 'unlinked: %s -> %s\n' "$id" "$endpoint"
+    return 0
+  fi
+  [ -d "$ENDPOINT_LINK_DIR" ] && [ ! -L "$ENDPOINT_LINK_DIR" ] || return 0
+  for f in "$ENDPOINT_LINK_DIR"/*.links; do
+    [ -e "$f" ] || continue
+    endpoint_id=${f##*/}
+    endpoint_id=${endpoint_id%.links}
+    unlink_task_from_endpoint "$id" "$endpoint_id" \
+      || fail "captain-hold endpoint record is unreadable: $f"
+    printf 'unlinked: %s -> %s\n' "$id" "$endpoint_id"
+  done
+}
+
+# Drop every link owned by <task-id>. A cleanup path: an unreadable record is
+# reported on stderr but never fails the answer or close that already landed.
+release_endpoint_links() {  # <task-id>
+  local id=$1 f endpoint_id
+  [ -d "$ENDPOINT_LINK_DIR" ] && [ ! -L "$ENDPOINT_LINK_DIR" ] || return 0
+  for f in "$ENDPOINT_LINK_DIR"/*.links; do
+    [ -e "$f" ] || continue
+    endpoint_id=${f##*/}
+    endpoint_id=${endpoint_id%.links}
+    unlink_task_from_endpoint "$id" "$endpoint_id" 2>/dev/null \
+      || printf 'actionable: could not drop the endpoint link %s -> %s after resolving the call\n' \
+        "$id" "$endpoint_id" >&2
+  done
+  return 0
+}
+
+# Read-only predicate: is a captain call linked to <endpoint-id> still open?
+# Exit 0 prints the first open linked task id, with its lifecycle identity after
+# a tab under --identity; 1 when none is open; 2 when the record cannot be read.
+command_endpoint_open() {
+  local endpoint='' identity=0 links='' task out rc
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --identity) identity=1 ;;
+      -*) usage >&2; exit 2 ;;
+      *)
+        [ -z "$endpoint" ] || { usage >&2; exit 2; }
+        endpoint=$1
+        ;;
+    esac
+    shift
+  done
+  validate_slug endpoint-id "$endpoint"
+  links=$(read_endpoint_links "$endpoint") || {
+    printf 'fm-captain-hold: cannot read the endpoint link record for %s\n' "$endpoint" >&2
+    exit 2
+  }
+  while IFS= read -r task; do
+    [ -n "$task" ] || continue
+    case "$task" in
+      *[!A-Za-z0-9._-]*)
+        printf 'fm-captain-hold: endpoint link record names an invalid task id: %s\n' "$task" >&2
+        exit 2
+        ;;
+    esac
+    if out=$( ( command_open "$task" --identity ) 2>/dev/null ); then
+      rc=0
+    else
+      rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
+      if [ "$identity" -eq 1 ]; then
+        printf '%s\t%s\n' "$task" "$out"
+      else
+        printf '%s\n' "$task"
+      fi
+      return 0
+    fi
+    if [ "$rc" -eq 2 ]; then
+      printf 'fm-captain-hold: cannot establish whether linked call %s is open\n' "$task" >&2
+      exit 2
+    fi
+  done <<EOF
+$links
+EOF
+  return 1
+}
+
 # The header owns report eligibility and read limits. Prints one
 # `<task>\t<review-by>\t<title>\t<identity>` line per eligible call in board order,
 # or nothing when none is due.
@@ -2646,6 +2884,9 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  link) shift; command_link "$@" ;;
+  unlink) shift; command_unlink "$@" ;;
+  endpoint-open) shift; command_endpoint_open "$@" ;;
   answered) shift; command_answered "$@" ;;
   due) shift; command_due "$@" ;;
   diverged) shift; command_diverged "$@" ;;

@@ -1183,6 +1183,46 @@ test_hold_records_review_by_date_and_stays_live() {
   pass "a hold records its 14-day review-by date while staying live and visible"
 }
 
+# An endpoint link exists only while its call is open: link refuses a task that
+# is not a captain call, endpoint-open reports the open linked call with its
+# lifecycle identity, unlink removes one link, and answering the call drops it.
+test_endpoint_links_track_open_calls() {
+  local home id out
+  home=$(make_home endpoint-links)
+  id=endpoint-decision
+  tasks_in "$home" add plain-task "ordinary work" --repo sample >/dev/null \
+    || fail "could not create the non-call fixture"
+  if run_captain "$home" link plain-task --endpoint remote-one >/dev/null 2>&1; then
+    fail "link accepted a task that is not an open captain call"
+  fi
+  tasks_in "$home" add "$id" "Retire the endpoint" --kind captain --repo sample >/dev/null \
+    || fail "could not create the endpoint-link fixture"
+  run_captain "$home" hold "$id" --reason "retire or restore" --endpoint remote-one >/dev/null \
+    || fail "hold --endpoint did not record the link"
+  out=$(run_captain "$home" endpoint-open remote-one --identity) \
+    || fail "endpoint-open did not report the linked open call"
+  case "$out" in
+    "$id"$'\t'*'#'*) : ;;
+    *) fail "endpoint-open identity was malformed: $out" ;;
+  esac
+  run_captain "$home" unlink "$id" --endpoint remote-one >/dev/null \
+    || fail "unlink failed"
+  if run_captain "$home" endpoint-open remote-one >/dev/null 2>&1; then
+    fail "endpoint-open still reported an unlinked endpoint"
+  fi
+  run_captain "$home" link "$id" --endpoint remote-one >/dev/null \
+    || fail "link failed for the still-open call"
+  printf 'retire it\n' > "$home/decision.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/decision.txt" >/dev/null \
+    || fail "could not answer the linked call"
+  if run_captain "$home" endpoint-open remote-one >/dev/null 2>&1; then
+    fail "answering the call left its endpoint link open"
+  fi
+  [ ! -e "$home/state/captain-hold-endpoints/remote-one.links" ] \
+    || fail "answering the call left the endpoint link record behind"
+  pass "endpoint links exist only for an open linked call and drop when it is answered"
+}
+
 # A --until deferral leaves Captain's Call until its date, then returns.
 test_deferred_hold_leaves_captains_call_until_due() {
   local home id json
@@ -1841,6 +1881,7 @@ test_reconcile_requests_and_outcomes
 test_lavish_reconcile_selections_split_from_answers
 test_diverged_reports_status_close_over_open_hold
 test_hold_records_review_by_date_and_stays_live
+test_endpoint_links_track_open_calls
 test_past_due_call_marked_due_while_held
 test_due_reads_the_whole_body_not_a_listing_preview
 test_due_advisory_rechecks_eligibility

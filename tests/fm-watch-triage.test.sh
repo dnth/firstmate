@@ -2087,6 +2087,325 @@ SH
   pass "a TERM-ignoring remote beacon probe is force-bounded and still reaches wedge escalation"
 }
 
+# --- linked captain-decision backoff ----------------------------------------
+#
+# An endpoint whose fate waits on an open captain call must not re-alert once per
+# watcher cycle. These cases drive the real watcher: a conclusive stale remote
+# secondmate probe, a captain-held task linked to that endpoint through
+# bin/fm-captain-hold.sh, and small backoff intervals so the schedule is
+# observable. The watcher exits on each actionable wake, so each case re-arms a
+# fresh process exactly as firstmate does.
+
+# Build one hermetic remote-secondmate case whose stale probe is conclusive.
+# <link> is `linked` (hold and link the decision), `unlinked` (hold it without a
+# link), or `none` (no hold at all). Prints the case directory; the caller
+# derives state/fakebin/home/on_bin paths and runs the watcher.
+setup_held_endpoint_case() {  # <name> <linked|unlinked|none>
+  local name=$1 link=$2 dir state fakebin home window key pane_hash back sig on_bin calls deadline_calls
+  dir=$(make_case "$name")
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  home="$dir/home"
+  mkdir -p "$home/data" "$home/state" "$home/config"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] boatqa-retire-decision - Retire or bring back boatqa (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  case "$link" in
+    linked)
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+        FM_CONFIG_OVERRIDE="$dir/config" \
+        "$ROOT/bin/fm-captain-hold.sh" hold boatqa-retire-decision \
+        --reason 'retire or bring back the unreachable secondmate' --endpoint boatqa >/dev/null \
+        || fail "could not create the linked captain hold"
+      ;;
+    unlinked)
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+        FM_CONFIG_OVERRIDE="$dir/config" \
+        "$ROOT/bin/fm-captain-hold.sh" hold boatqa-retire-decision \
+        --reason 'retire or bring back the unreachable secondmate' >/dev/null \
+        || fail "could not create the unlinked captain hold"
+      ;;
+    none) : ;;
+    *) fail "unknown link mode: $link" ;;
+  esac
+  window="remote:boatqa"
+  printf 'window=%s\nkind=secondmate\nremote_host=remote-mac\nhome=/remote/home\n' "$window" \
+    > "$state/boatqa.meta"
+  printf 'working: supervising the remote crew\n' > "$state/boatqa.status"
+  sig=$(seen_sig "$state/boatqa.status"); printf '%s' "$sig" > "$state/.seen-boatqa_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  pane_hash=$(hash_text "secondmate watcher beacon missing or stale: $window")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 500 ))
+  printf '%s\n' "$back" > "$state/.stale-since-$key"
+  # The remote probe reaches a fake fm-on.sh through the available deadline tool.
+  on_bin="$dir/fm-on.sh"
+  calls="$dir/remote-calls"
+  deadline_calls="$dir/deadline-calls"
+  cat > "$on_bin" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${3:-missing}" >> "${FM_FAKE_REMOTE_CALLS:?}"
+printf '%s\n' "$FM_FAKE_REMOTE_BEACON_AGE"
+SH
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+printf 'timeout\n' >> "${FM_FAKE_DEADLINE_CALLS:?}"
+case "${1:-}" in
+  -k) shift; shift; shift ;;
+  --kill-after=*) shift; shift ;;
+  *) shift ;;
+esac
+"$@"
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 97
+SH
+  chmod +x "$on_bin" "$fakebin/timeout" "$fakebin/tmux"
+  printf '%s\n' "$dir"
+}
+
+# Run the watcher against the fixture once. <extra env assignments...> follow the
+# case directory and output path; the process is left in the background and its
+# pid is published as HELD_WATCH_PID. The function must run in the caller's shell
+# (never a command substitution) so wait_for_exit can reap the child.
+run_held_endpoint_watch() {  # <dir> <out> [env assignments...]
+  local dir=$1 out=$2
+  shift 2
+  env PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="remote:boatqa" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_HOME="$dir/home" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_ON_BIN="$dir/fm-on.sh" FM_FAKE_REMOTE_CALLS="$dir/remote-calls" \
+    FM_FAKE_DEADLINE_CALLS="$dir/deadline-calls" FM_FAKE_REMOTE_BEACON_AGE=500 \
+    FM_WATCH_REMOTE_TIMEOUT=1 FM_REMOTE_INCONCLUSIVE_MAX=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · supervising the remote crew' \
+    "$@" "$WATCH" > "$out" &
+  HELD_WATCH_PID=$!
+}
+
+test_held_alert_backoff_folds_repeats_across_restart() {
+  local dir state out pid reason
+  dir=$(setup_held_endpoint_case held-alert-backoff linked)
+  state="$dir/state"
+  out="$dir/watch.out"
+  [ -e "$state/captain-hold-endpoints/boatqa.links" ] \
+    || fail "the fixture did not record the endpoint link"
+  run_held_endpoint_watch "$dir" "$out" \
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=6 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=12 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+  pid=$HELD_WATCH_PID
+  wait_for_exit "$pid" 150 || fail "the first held escalation did not surface"
+  reason=$(cat "$out")
+  case "$reason" in
+    *"captain decision boatqa-retire-decision is open"*) : ;;
+    *) fail "the first held escalation omitted its linked decision: $reason" ;;
+  esac
+  case "$reason" in
+    *"0 repeats folded since the last reminder"*) : ;;
+    *) fail "the first escalation of the episode was not reported as unfolded: $reason" ;;
+  esac
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first held escalation"
+
+  # Restart the watcher immediately: the persisted ledger must fold repeats
+  # inside the current interval instead of re-alerting, and the next reminder
+  # must report the folded count.
+  : > "$out"
+  run_held_endpoint_watch "$dir" "$out" \
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=6 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=12 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+  pid=$HELD_WATCH_PID
+  wait_log_line "$state" "repeats folded" 100 \
+    || { stop_pid "$pid"; fail "the restarted watcher did not fold a repeat inside the interval: out=$(cat "$out" 2>/dev/null) ledger=$(cat "$state/.held-alert-remote_boatqa" 2>/dev/null) triage=$(tail -5 "$state/.watch-triage.log" 2>/dev/null | tr '\n' '|')"; }
+  [ ! -s "$out" ] || { stop_pid "$pid"; fail "a folded repeat still printed a wake: $(cat "$out")"; }
+  wait_for_exit "$pid" 200 || fail "the backed-off watcher never emitted its next reminder"
+  reason=$(cat "$out")
+  case "$reason" in
+    *"repeats folded since the last reminder"*) : ;;
+    *) fail "the next reminder omitted its folded-repeat count: $reason" ;;
+  esac
+  case "$reason" in
+    *"0 repeats folded since the last reminder"*)
+      fail "the restart discarded the persisted folded-repeat count: $reason" ;;
+  esac
+  ack_stopped_cycle "$state" || fail "could not acknowledge the backed-off reminder"
+  pass "an open linked decision backs off repeat stale alerts across a watcher restart and reports folded repeats"
+}
+
+test_held_alert_backoff_release_restores_immediate_alerting() {
+  local dir state out pid reason link_file
+  dir=$(setup_held_endpoint_case held-alert-release linked)
+  state="$dir/state"
+  out="$dir/watch.out"
+  link_file="$state/captain-hold-endpoints/boatqa.links"
+  [ -e "$link_file" ] || fail "the fixture did not record the endpoint link"
+  run_held_endpoint_watch "$dir" "$out" \
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=3600 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=3600 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+  pid=$HELD_WATCH_PID
+  wait_for_exit "$pid" 150 || fail "the held escalation did not surface"
+  case "$(cat "$out")" in
+    *"captain decision boatqa-retire-decision is open"*) : ;;
+    *) fail "the held escalation did not name its decision: $(cat "$out")" ;;
+  esac
+  ack_stopped_cycle "$state" || fail "could not acknowledge the held escalation"
+
+  printf 'retire it\n' > "$dir/decision.txt"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" answer boatqa-retire-decision \
+    --decision-file "$dir/decision.txt" --close-live >/dev/null \
+    || fail "could not answer the linked captain call"
+  [ ! -e "$link_file" ] || fail "answering the call left its endpoint link in place"
+
+  : > "$out"
+  run_held_endpoint_watch "$dir" "$out" \
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=3600 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=3600 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+  pid=$HELD_WATCH_PID
+  wait_for_exit "$pid" 150 \
+    || fail "an answered decision did not restore immediate alerting on the next cycle"
+  reason=$(cat "$out")
+  case "$reason" in
+    *"possible wedge, escalation 1"*) : ;;
+    *) fail "the released endpoint did not resume the ordinary escalation: $reason" ;;
+  esac
+  case "$reason" in
+    *"captain decision"*) fail "the released endpoint still used the held reason: $reason" ;;
+  esac
+  ack_stopped_cycle "$state" || fail "could not acknowledge the restored escalation"
+  pass "answering the linked decision restores the ordinary escalation on the next cycle"
+}
+
+test_held_alert_backoff_clears_on_real_change() {
+  local dir state out pid reason
+  dir=$(setup_held_endpoint_case held-alert-real-change linked)
+  state="$dir/state"
+  out="$dir/watch.out"
+  run_held_endpoint_watch "$dir" "$out" \
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=3600 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=3600 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+  pid=$HELD_WATCH_PID
+  wait_for_exit "$pid" 150 || fail "the held escalation did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the held escalation"
+  [ -e "$state/.held-alert-remote_boatqa" ] || fail "the held escalation left no backoff ledger"
+
+  # A fresh beacon is a real change: the stale condition is gone, so the
+  # backoff ledger must be dropped and no stale wake may fire.
+  : > "$out"
+  run_held_endpoint_watch "$dir" "$out" FM_FAKE_REMOTE_BEACON_AGE=0 \
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=3600 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=3600 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+  pid=$HELD_WATCH_PID
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pid "$pid"; fail "the recovered endpoint did not complete a poll"; }
+  [ ! -s "$out" ] || { stop_pid "$pid"; fail "a recovered endpoint still alerted: $(cat "$out")"; }
+  [ ! -e "$state/.held-alert-remote_boatqa" ] \
+    || { stop_pid "$pid"; fail "a recovered endpoint retained the backoff ledger"; }
+  stop_pid "$pid"
+
+  # A status change is never suppressed by the backoff, even while the linked
+  # call stays open and the endpoint is still stale.
+  run_held_endpoint_watch "$dir" "$out" \
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=3600 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=3600 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+  pid=$HELD_WATCH_PID
+  wait_for_exit "$pid" 150 || fail "the returning stale condition did not alert"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the returning stale wake"
+  : > "$out"
+  printf 'blocked: the host is still unreachable\n' >> "$state/boatqa.status"
+  run_held_endpoint_watch "$dir" "$out" \
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=3600 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=3600 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+  pid=$HELD_WATCH_PID
+  wait_for_exit "$pid" 150 || fail "a status change was suppressed while the decision stayed open"
+  reason=$(cat "$out")
+  case "$reason" in
+    *"signal: "*"boatqa.status"*) : ;;
+    *) fail "a status change did not surface its signal wake: $reason" ;;
+  esac
+  ack_stopped_cycle "$state" || fail "could not acknowledge the status change"
+  pass "a recovered endpoint clears the backoff and a status change is never suppressed"
+}
+
+test_held_alert_backoff_ignores_unlinked_endpoint() {
+  local dir state out pid reason run expected
+  dir=$(setup_held_endpoint_case held-alert-unlinked unlinked)
+  state="$dir/state"
+  out="$dir/watch.out"
+  for run in 1 2; do
+    [ "$run" -eq 1 ] && expected=1
+    [ "$run" -eq 2 ] && expected=3
+    : > "$out"
+    run_held_endpoint_watch "$dir" "$out" \
+      FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=3600 \
+      FM_HELD_ALERT_BACKOFF_MAX_SECS=3600 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+    pid=$HELD_WATCH_PID
+    wait_for_exit "$pid" 150 || fail "[run $run] the unlinked endpoint did not escalate"
+    reason=$(cat "$out")
+    case "$reason" in
+      *"captain decision"*) fail "[run $run] an unlinked hold suppressed the escalation: $reason" ;;
+    esac
+    case "$reason" in
+      *"possible wedge, escalation $expected"*) : ;;
+      *) fail "[run $run] the unlinked escalation ladder changed: $reason" ;;
+    esac
+    [ ! -e "$state/.held-alert-remote_boatqa" ] \
+      || fail "[run $run] an unlinked endpoint wrote a backoff ledger"
+    ack_stopped_cycle "$state" || fail "[run $run] could not acknowledge the escalation"
+    # Put the persisted ladder at the boundary for the second run, so the
+    # unchanged deep-inspection wording is still proven without a third spawn.
+    [ "$run" -ne 1 ] || printf '2\n' > "$state/.wedge-escalations-remote_boatqa"
+  done
+  case "$reason" in
+    *"demand-deep-inspection"*) : ;;
+    *) fail "the unchanged deep-inspection wording was lost: $reason" ;;
+  esac
+  pass "an endpoint with no linked open decision keeps the unchanged escalation ladder and deep-inspection wording"
+}
+
+test_held_alert_backoff_new_episode_is_not_suppressed() {
+  local dir state reason wakes
+  dir=$(setup_held_endpoint_case held-alert-new-episode linked)
+  state="$dir/state"
+  wakes="$dir/wakes"
+  printf 'retire it\n' > "$dir/decision.txt"
+  # Drive the real gate through its sourced public functions with a controlled
+  # clock: the first call starts the episode, the second folds, and a released
+  # and re-held call is a new decision that must alert even inside the old
+  # interval.
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_HELD_ALERT_BACKOFF_SECS=60 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=120 WAKES="$wakes" bash -c '
+      . "$1"
+      wake() { printf "%s\n" "$1" >> "$WAKES"; }
+      since="$STATE/.stale-since-remote_boatqa"
+      held_alert_tick "remote:boatqa" boatqa 500 "$since" 1000 || exit 1
+      held_alert_tick "remote:boatqa" boatqa 500 "$since" 1001 || exit 1
+      grep -Fq "captain decision boatqa-retire-decision is open" "$WAKES" || exit 1
+      [ "$(grep -c . "$WAKES")" = 1 ] || exit 1
+      "$SCRIPT_DIR/fm-captain-hold.sh" answer boatqa-retire-decision \
+        --decision-file "$2" --release >/dev/null 2>&1 || exit 1
+      "$SCRIPT_DIR/fm-captain-hold.sh" hold boatqa-retire-decision \
+        --reason "retire or bring back the unreachable secondmate" --endpoint boatqa >/dev/null 2>&1 || exit 1
+      held_alert_tick "remote:boatqa" boatqa 500 "$since" 1002 || exit 1
+      [ "$(grep -c . "$WAKES")" = 2 ] || exit 1
+      grep -F "0 repeats folded since the last reminder" "$WAKES" >/dev/null
+    ' _ "$WATCH" "$dir/decision.txt" || fail "a new episode inherited the previous backoff"
+  reason=$(grep -c "captain decision boatqa-retire-decision is open" "$wakes" || true)
+  [ "$reason" = 2 ] || fail "the new episode did not alert inside the old interval: $(cat "$wakes")"
+  pass "a released and re-held linked call is a new episode that is never suppressed by the old backoff"
+}
+
 make_path_without_deadline_tools() {  # <destination>
   local destination=$1 path_dir path name old_ifs
   old_ifs=$IFS
@@ -5378,6 +5697,11 @@ test_wedge_worker_decision_deferral_is_opt_in
 test_open_decision_reminders_use_persisted_backoff
 test_open_decision_reminders_serialize_retirement
 test_wedge_backlog_captain_hold_defers_escalation
+test_held_alert_backoff_folds_repeats_across_restart
+test_held_alert_backoff_release_restores_immediate_alerting
+test_held_alert_backoff_clears_on_real_change
+test_held_alert_backoff_ignores_unlinked_endpoint
+test_held_alert_backoff_new_episode_is_not_suppressed
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_is_off_until_armed
 test_turnend_markers_preserve_full_task_identity
