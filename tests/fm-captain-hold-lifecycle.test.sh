@@ -1187,33 +1187,33 @@ test_hold_records_review_by_date_and_stays_live() {
 # is not a captain call, endpoint-open reports the open linked call with its
 # lifecycle identity, unlink removes one link, and answering the call drops it.
 test_endpoint_links_track_open_calls() {
-  local home id out
+  local home call_id out
   home=$(make_home endpoint-links)
-  id=endpoint-decision
+  call_id=endpoint_decision
   tasks_in "$home" add plain-task "ordinary work" --repo sample >/dev/null \
     || fail "could not create the non-call fixture"
   if run_captain "$home" link plain-task --endpoint remote-one >/dev/null 2>&1; then
     fail "link accepted a task that is not an open captain call"
   fi
-  tasks_in "$home" add "$id" "Retire the endpoint" --kind captain --repo sample >/dev/null \
+  tasks_in "$home" add "$call_id" "Retire the endpoint" --kind captain --repo sample >/dev/null \
     || fail "could not create the endpoint-link fixture"
-  run_captain "$home" hold "$id" --reason "retire or restore" --endpoint remote-one >/dev/null \
+  run_captain "$home" hold "$call_id" --reason "retire or restore" --endpoint remote-one >/dev/null \
     || fail "hold --endpoint did not record the link"
   out=$(run_captain "$home" endpoint-open remote-one --identity) \
     || fail "endpoint-open did not report the linked open call"
   case "$out" in
-    "$id"$'\t'*'#'*) : ;;
+    "$call_id"$'\t'*'#'*) : ;;
     *) fail "endpoint-open identity was malformed: $out" ;;
   esac
-  run_captain "$home" unlink "$id" --endpoint remote-one >/dev/null \
+  run_captain "$home" unlink "$call_id" --endpoint remote-one >/dev/null \
     || fail "unlink failed"
   if run_captain "$home" endpoint-open remote-one >/dev/null 2>&1; then
     fail "endpoint-open still reported an unlinked endpoint"
   fi
-  run_captain "$home" link "$id" --endpoint remote-one >/dev/null \
+  run_captain "$home" link "$call_id" --endpoint remote-one >/dev/null \
     || fail "link failed for the still-open call"
   printf 'retire it\n' > "$home/decision.txt"
-  run_captain "$home" answer "$id" --decision-file "$home/decision.txt" >/dev/null \
+  run_captain "$home" answer "$call_id" --decision-file "$home/decision.txt" >/dev/null \
     || fail "could not answer the linked call"
   if run_captain "$home" endpoint-open remote-one >/dev/null 2>&1; then
     fail "answering the call left its endpoint link open"
