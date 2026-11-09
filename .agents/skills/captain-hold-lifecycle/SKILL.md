@@ -20,6 +20,8 @@ Every unresolved question that belongs to the captain and is discovered while pr
 Prefer holding the work item the question gates over minting a new row; create a new task only when no work item exists to hold.
 Put the question and its options in the hold reason, and keep one held task per genuine gate: a multi-question review is one held task pointing at its report, not a row per question. Represent that task with exactly one board card that consolidates its questions and options; never fan one task id into duplicate same-key cards.
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id.
+When the call gates a supervision endpoint rather than only its own task - a secondmate whose host is unreachable, for example - link it to that endpoint id with `hold ... --endpoint <endpoint-id>`, or with `bin/fm-captain-hold.sh link <task-id> --endpoint <endpoint-id>` for an existing call.
+`bin/fm-captain-hold.sh --help` owns the link commands and record format, and `docs/configuration.md` owns the watcher backoff they enable; an unlinked call leaves the ordinary escalation ladder untouched.
 After inventorying the whole report and review surface, run `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` only when the reviewed surface leaves nothing waiting on the captain.
 Every hold records a review-by date 14 days after the hold (`FM_CAPTAIN_HOLD_REVIEW_DAYS` overrides).
 Past-due live calls resurface in drain OPEN DECISIONS marked due for review, for one batched captain review through the existing answer, reconcile, and `--until` paths.

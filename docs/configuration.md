@@ -167,6 +167,20 @@ The default-on backlog captain-hold check defers wedge escalation while the task
 Creating the local, gitignored `config/wedge-defer-worker-wait` presence flag also defers escalation when the worker's newest status event is a still-open `needs-decision` or `blocked`; a different latest status verb, resolution, or newer handled inbox answer ends that deferral.
 At the wedge threshold, the watcher checks a wait its own record explains, then the opt-in worker wait, then the backlog captain hold, then the existing worktree-write evidence.
 
+### Linked captain-decision backoff
+
+A captain call can cover a supervision endpoint other than its own task id, such as a secondmate id whose endpoint is unreachable.
+`bin/fm-captain-hold.sh link <task-id> --endpoint <endpoint-id>` records that link, `hold ... --endpoint <endpoint-id>` records it in the same act as the hold, and the hold script's header owns the record format and the read-only `endpoint-open` predicate the watcher asks.
+The link is durable under `state/captain-hold-endpoints/` and is dropped when the call is answered, released, or closed.
+When a stale or idle endpoint's condition is unchanged and a linked captain call is open, repeat stale escalations back off instead of firing once per watcher cycle.
+The first escalation of an episode still fires at once.
+Each later reminder doubles its interval from `FM_HELD_ALERT_BACKOFF_SECS` (default `3600`) up to `FM_HELD_ALERT_BACKOFF_MAX_SECS` (default `21600`); both values must be positive integers of at most nine digits without leading zeros, invalid values fall back to their defaults, and a cap below the base is raised to the base.
+A suppressed repeat increments a persisted counter and is recorded in `state/.watch-triage.log`, and the next reminder's reason states how many repeats it folded.
+The ledger is `state/.held-alert-<window-key>`, so the schedule and the folded count survive a watcher restart.
+It is dropped when the endpoint's pane hash changes, when the linked call is answered, released, closed, or re-held as a new decision, and when the endpoint becomes reachable again, so any real change restores the unchanged escalation path on the next cycle; a status change always surfaces its own signal wake and never waits on the backoff.
+`FM_HELD_ALERT_RELEASE_CHECK_SECS` (default `60`, `0` checks every poll) bounds how often the watcher re-reads the linked call while backed off.
+An endpoint with no linked open decision keeps the unchanged escalation ladder, reason, and `demand-deep-inspection` wording.
+
 ### Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
