@@ -145,10 +145,12 @@ kill -0 "$fallback_pid" 2>/dev/null || fail "fallback herdr server did not survi
 fallback_sid=$(python3 -c 'import os,sys; print(os.getsid(int(sys.argv[1])))' "$fallback_pid")
 [ -n "$fallback_sid" ] && [ "$fallback_sid" != "$invoking_sid" ] \
   || fail "fallback herdr server did not leave the invoking session (sid=$fallback_sid invoking_sid=$invoking_sid)"
+[ "$fallback_sid" = "$fallback_pid" ] \
+  || fail "fallback herdr server is not its own session leader (sid=$fallback_sid pid=$fallback_pid)"
 fallback_group=$(cat "$outcome.group")
 kill -0 -- "-$fallback_group" 2>/dev/null && fail "fallback herdr server remained in the invoking group"
 kill "$fallback_pid" 2>/dev/null || true
-pass "setsid-absent fallback double-forks away from the invoking group"
+pass "setsid-absent fallback forks away from the invoking group"
 
 # An SSH pipe can be inherited above the usual low descriptor range. Keep
 # its read end in the caller and require EOF while the server is still alive.
@@ -181,6 +183,7 @@ try:
         server_pid = int(pid_file.read())
     os.kill(server_pid, 0)
     assert os.getsid(server_pid) != os.getsid(0), "server retained the invoking session"
+    assert os.getsid(server_pid) == server_pid, "server is not its own session leader"
     ready, _, _ = select.select([reader], [], [], 2)
     assert ready and os.read(reader, 1) == b"", "server retained descriptor 300 pipe"
     os.kill(server_pid, 0)

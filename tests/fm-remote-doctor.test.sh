@@ -122,8 +122,10 @@ EOF
       *)
         cat > "$loaded" <<EOF
 path = $FM_FAKE_PLIST
-program = $FM_FAKE_HERDR_BIN
+program = /usr/bin/perl
 arguments = {
+	/usr/bin/perl
+	$FM_FAKE_LAUNCHER
 	$FM_FAKE_HERDR_BIN
 	server
 	--session
@@ -186,7 +188,12 @@ case "${1:-} ${2:-}" in
         running=true
       fi
     fi
-    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s}}\n' "$running"
+    detached=$(cat "$FM_FAKE_STATE/herdr.detached" 2>/dev/null || printf 'true')
+    if [ "$detached" = absent ]; then
+      printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s}}\n' "$running"
+    else
+      printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s,"detached_server_daemon":%s}}\n' "$running" "$detached"
+    fi
     ;;
   "server "*|"server ")
     printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
@@ -236,6 +243,7 @@ doctor() {
     FM_FAKE_PLIST="$CASE_PLIST" \
     FM_FAKE_JOB_PLIST="$CASE_JOB_PLIST" \
     FM_FAKE_JOB_WORKER="$ROOT/bin/fm-remote-job-worker.sh" \
+    FM_FAKE_LAUNCHER="$ROOT/bin/fm-remote-herdr-launch.pl" \
     FM_FAKE_LAUNCH_AGENT_LOG="$CASE_HOME/Library/Logs/$LABEL.log" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
     FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
@@ -252,8 +260,10 @@ write_loaded_contract() { # <herdr-path> [properties]
   local herdr_bin=$1 properties=${2:-'keepalive | runatload | inferred program'}
   cat > "$CASE_STATE/loaded-$LABEL" <<EOF
 path = $CASE_PLIST
-program = $herdr_bin
+program = /usr/bin/perl
 arguments = {
+	/usr/bin/perl
+	$ROOT/bin/fm-remote-herdr-launch.pl
 	$herdr_bin
 	server
 	--session
@@ -403,6 +413,80 @@ assert_grep '<key>RunAtLoad</key>' "$CASE_PLIST" "the repaired launch agent does
 assert_grep '<key>KeepAlive</key>' "$CASE_PLIST" "the repaired launch agent is not kept alive"
 assert_no_grep '/obsolete/bin/herdr' "$CASE_PLIST" "the obsolete herdr path survived repair"
 pass "a loaded and running launch agent must match the complete owned contract"
+
+new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_PLIST")"
+cat > "$CASE_PLIST" <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$CASE_BIN/herdr</string>
+		<string>server</string>
+		<string>--session</string>
+		<string>fm-remote</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>$CASE_HOME/Library/Logs/$LABEL.log</string>
+	<key>StandardErrorPath</key>
+	<string>$CASE_HOME/Library/Logs/$LABEL.log</string>
+</dict>
+</plist>
+XML
+cat > "$CASE_STATE/loaded-$LABEL" <<EOF
+path = $CASE_PLIST
+program = $CASE_BIN/herdr
+arguments = {
+	$CASE_BIN/herdr
+	server
+	--session
+	fm-remote
+}
+stdout path = $CASE_HOME/Library/Logs/$LABEL.log
+stderr path = $CASE_HOME/Library/Logs/$LABEL.log
+properties = keepalive | runatload | inferred program
+EOF
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+doctor
+expect_code 1 "$DOCTOR_RC" "a pre-launcher plist running herdr server directly was reported ready"
+assert_contains "$DOCTOR_OUT" 'check launchagent=fixable:' "the pre-launcher plist was not flagged for repair"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=fixable:' "the pre-launcher loaded job was not flagged for repair"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not replace the pre-launcher plist"
+assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the replaced plist was not confirmed"
+assert_grep '<string>/usr/bin/perl</string>' "$CASE_PLIST" "the replaced plist does not start through the detach launcher"
+assert_grep 'fm-remote-herdr-launch.pl' "$CASE_PLIST" "the replaced plist does not name the detach launcher"
+pass "a pre-launcher plist that runs herdr server directly is flagged for repair"
+
+# --- a running server that is not detached is not ready ---------------------
+
+new_case Darwin with-herdr gui
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+printf 'false\n' > "$CASE_STATE/herdr.detached"
+doctor
+expect_code 1 "$DOCTOR_RC" "a running server reporting detached_server_daemon false was reported ready"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=human:' "a non-detached running server was not tagged human"
+assert_not_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "a non-detached running server was reported ok"
+pass "a running herdr server must report detached_server_daemon true to be ready"
+
+new_case Darwin with-herdr gui
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+printf 'absent\n' > "$CASE_STATE/herdr.detached"
+doctor
+expect_code 1 "$DOCTOR_RC" "a running server without detached_server_daemon was reported ready"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=human:' "a server without detached_server_daemon was not tagged human"
+assert_contains "$DOCTOR_OUT" 'upgrade herdr' "a server without detached_server_daemon was not told to upgrade herdr"
+assert_not_contains "$DOCTOR_OUT" 'kickstart' "a server without detached_server_daemon was told a restart would fix it"
+pass "a running herdr server that cannot report detached_server_daemon needs a herdr upgrade"
 
 # --- failed replacement cannot hide a stale loaded launch-agent contract -----
 

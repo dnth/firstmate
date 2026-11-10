@@ -114,6 +114,8 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 ```
 
 Over the plain SSH doctor bootstrap, it writes and reloads the Firstmate-owned `dev.firstmate.remote-job` and `dev.firstmate.herdr.fm-remote` launch agents on macOS, both scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
+On macOS the `dev.firstmate.herdr.fm-remote` launch agent runs the server through `bin/fm-remote-herdr-launch.pl`, which makes it its own session leader so Herdr reports `detached_server_daemon: true`.
+Herdr saved machines refuse a server that is not detached, so the Mac host cannot be added as a saved machine without this.
 On Linux it starts the account worker directly and fully detaches the Herdr server from the invoking process group and inherited pipes, so repair returns once the server is healthy.
 It recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent and creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target, stopping after one harness satisfies the at-least-one requirement.
 It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
