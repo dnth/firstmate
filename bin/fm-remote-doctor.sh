@@ -582,6 +582,11 @@ check_herdr_server() {
   if herdr_server_running; then
     if [ "$PLATFORM" = darwin ]; then
       detached=$(herdr_server_detached)
+      if [ "$detached" = missing ]; then
+        record herdr-server "human: the herdr server for session $HERDR_SESSION_NAME is running but does not report detached_server_daemon, so this herdr is too old for saved machines" \
+          "upgrade herdr to a version that reports detached_server_daemon, then rerun this command"
+        return 0
+      fi
       if [ "$detached" != true ]; then
         record herdr-server "human: the herdr server for session $HERDR_SESSION_NAME is running but reports detached_server_daemon=$detached, so Herdr refuses it as a saved machine" \
           "after the captain approves a restart, run: launchctl kickstart -k gui/$UID_NUM/$LAUNCH_AGENT_LABEL"

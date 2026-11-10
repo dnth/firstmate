@@ -189,7 +189,11 @@ case "${1:-} ${2:-}" in
       fi
     fi
     detached=$(cat "$FM_FAKE_STATE/herdr.detached" 2>/dev/null || printf 'true')
-    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s,"detached_server_daemon":%s}}\n' "$running" "$detached"
+    if [ "$detached" = absent ]; then
+      printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s}}\n' "$running"
+    else
+      printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s,"detached_server_daemon":%s}}\n' "$running" "$detached"
+    fi
     ;;
   "server "*|"server ")
     printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
@@ -473,6 +477,16 @@ expect_code 1 "$DOCTOR_RC" "a running server reporting detached_server_daemon fa
 assert_contains "$DOCTOR_OUT" 'check herdr-server=human:' "a non-detached running server was not tagged human"
 assert_not_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "a non-detached running server was reported ok"
 pass "a running herdr server must report detached_server_daemon true to be ready"
+
+new_case Darwin with-herdr gui
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+printf 'absent\n' > "$CASE_STATE/herdr.detached"
+doctor
+expect_code 1 "$DOCTOR_RC" "a running server without detached_server_daemon was reported ready"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=human:' "a server without detached_server_daemon was not tagged human"
+assert_contains "$DOCTOR_OUT" 'upgrade herdr' "a server without detached_server_daemon was not told to upgrade herdr"
+assert_not_contains "$DOCTOR_OUT" 'kickstart' "a server without detached_server_daemon was told a restart would fix it"
+pass "a running herdr server that cannot report detached_server_daemon needs a herdr upgrade"
 
 # --- failed replacement cannot hide a stale loaded launch-agent contract -----
 
