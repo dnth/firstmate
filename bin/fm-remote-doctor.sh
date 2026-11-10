@@ -184,6 +184,13 @@ herdr_server_running() {
   [ "$running" = true ]
 }
 
+herdr_server_detached() {
+  local detached
+  detached=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" status --json 2>/dev/null \
+    | jq -r '[.. | objects | select(has("detached_server_daemon")) | .detached_server_daemon] | if length == 0 then "missing" else (.[0] | tostring) end' 2>/dev/null) || detached=missing
+  printf '%s\n' "${detached:-missing}"
+}
+
 launch_agent_is_aqua() {
   local stripped
   [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ] || return 1
@@ -205,6 +212,8 @@ render_launch_agent() { # <resolved-herdr-path>
 	<string>$LAUNCH_AGENT_LABEL</string>
 	<key>ProgramArguments</key>
 	<array>
+		<string>/usr/bin/perl</string>
+		<string>$FM_ROOT/bin/fm-remote-herdr-launch.pl</string>
 		<string>$herdr_bin</string>
 		<string>server</string>
 		<string>--session</string>
@@ -235,16 +244,17 @@ launch_agent_contract_matches() {
 }
 
 launch_agent_loaded_contract_matches() {
-  local loaded herdr_bin herdr_compact plist_compact log_compact args
+  local loaded herdr_bin herdr_compact plist_compact log_compact launcher_compact args
   herdr_bin=$(command -v herdr 2>/dev/null) || return 1
   loaded=$(launchctl print "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" 2>/dev/null) || return 1
   loaded=$(printf '%s' "$loaded" | tr -d ' \t\r\n') || return 1
   herdr_compact=$(printf '%s' "$herdr_bin" | tr -d ' \t\r\n') || return 1
   plist_compact=$(printf '%s' "$LAUNCH_AGENT_PLIST" | tr -d ' \t\r\n') || return 1
   log_compact=$(printf '%s' "$LAUNCH_AGENT_LOG" | tr -d ' \t\r\n') || return 1
-  args="arguments={$herdr_compact"'server--session'"$HERDR_SESSION_NAME}"
+  launcher_compact=$(printf '%s' "$FM_ROOT/bin/fm-remote-herdr-launch.pl" | tr -d ' \t\r\n') || return 1
+  args="arguments={/usr/bin/perl$launcher_compact$herdr_compact"'server--session'"$HERDR_SESSION_NAME}"
   [[ "$loaded" == *"path=$plist_compact"* ]] || return 1
-  [[ "$loaded" == *"program=$herdr_compact"* ]] || return 1
+  [[ "$loaded" == *'program=/usr/bin/perl'* ]] || return 1
   [[ "$loaded" == *"$args"* ]] || return 1
   [[ "$loaded" == *"stdoutpath=$log_compact"* ]] || return 1
   [[ "$loaded" == *"stderrpath=$log_compact"* ]] || return 1
@@ -563,12 +573,21 @@ check_launch_agent_loaded() {
 }
 
 check_herdr_server() {
+  local detached
   if ! herdr_cli_available; then
     record herdr-server "human: herdr server status cannot be read without both herdr and jq on the runtime PATH" \
       "install the missing tool reported above, then rerun this command"
     return 0
   fi
   if herdr_server_running; then
+    if [ "$PLATFORM" = darwin ]; then
+      detached=$(herdr_server_detached)
+      if [ "$detached" != true ]; then
+        record herdr-server "human: the herdr server for session $HERDR_SESSION_NAME is running but reports detached_server_daemon=$detached, so Herdr refuses it as a saved machine" \
+          "after the captain approves a restart, run: launchctl kickstart -k gui/$UID_NUM/$LAUNCH_AGENT_LABEL"
+        return 0
+      fi
+    fi
     record herdr-server "ok: session $HERDR_SESSION_NAME is running"
     return 0
   fi
