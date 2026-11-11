@@ -2057,16 +2057,29 @@ SH
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
     FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_DEADLINE_CALLS="$deadline_calls" \
     FM_FAKE_REMOTE_BEACON_AGE=hang FM_WATCH_REMOTE_TIMEOUT=1 \
-    FM_REMOTE_INCONCLUSIVE_MAX=1 \
     FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 150 \
-    || { reap "$pid"; fail "a non-returning remote beacon probe blocked stale tracking"; }
+  # A hung probe is bounded per poll and only feeds the route's unreachable
+  # episode; it must not reach stale tracking or block the watcher.
+  wait_poll_cycle "$state" "$pid" 150 \
+    || { reap "$pid"; fail "a non-returning remote beacon probe blocked the watcher"; }
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a hung remote beacon probe raised a wake: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "a hung remote beacon probe printed a wake reason: $(cat "$out")"; }
+  [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "a hung remote beacon probe recorded a stale verdict"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a hung remote beacon probe started the wedge timer"; }
+  [ -s "$state/.remote-unreachable-since-remote" ] \
+    || { reap "$pid"; fail "a hung remote beacon probe did not start the unreachable episode"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the hung remote beacon stop"
   elapsed=$(( $(date +%s) - start ))
   [ "$elapsed" -le 15 ] || fail "remote beacon timeout exceeded its watcher bound: ${elapsed}s"
+  # A conclusive stale age still reaches the ordinary wedge escalation. Prime the
+  # pane bookkeeping so the aged wedge timer is reached on the first poll.
+  pane_hash=$(hash_text "secondmate watcher beacon missing or stale: $window")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
@@ -2084,7 +2097,7 @@ SH
   grep -v '^timeout$' "$deadline_calls" | grep . >/dev/null \
     && fail "remote beacon probes used an unexpected deadline command"
   unset FM_FAKE_CREW_STATE
-  pass "a TERM-ignoring remote beacon probe is force-bounded and still reaches wedge escalation"
+  pass "a TERM-ignoring remote beacon probe is force-bounded, never wedge evidence, and a conclusive stale age still escalates"
 }
 
 # --- linked captain-decision backoff ----------------------------------------
@@ -2186,7 +2199,7 @@ run_held_endpoint_watch() {  # <dir> <out> [env assignments...]
     FM_CONFIG_OVERRIDE="$dir/config" \
     FM_ON_BIN="$dir/fm-on.sh" FM_FAKE_REMOTE_CALLS="$dir/remote-calls" \
     FM_FAKE_DEADLINE_CALLS="$dir/deadline-calls" FM_FAKE_REMOTE_BEACON_AGE=500 \
-    FM_WATCH_REMOTE_TIMEOUT=1 FM_REMOTE_INCONCLUSIVE_MAX=1 \
+    FM_WATCH_REMOTE_TIMEOUT=1 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_FAKE_CREW_STATE='state: working · source: run-step · supervising the remote crew' \
     "$@" "$WATCH" > "$out" &
@@ -2201,8 +2214,8 @@ test_held_alert_backoff_folds_repeats_across_restart() {
   [ -e "$state/captain-hold-endpoints/boatqa.links" ] \
     || fail "the fixture did not record the endpoint link"
   run_held_endpoint_watch "$dir" "$out" \
-    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=12 \
-    FM_HELD_ALERT_BACKOFF_MAX_SECS=24 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=120 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=240 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
   pid=$HELD_WATCH_PID
   wait_for_exit "$pid" 150 || fail "the first held escalation did not surface"
   reason=$(cat "$out")
@@ -2211,7 +2224,7 @@ test_held_alert_backoff_folds_repeats_across_restart() {
     *) fail "the first held escalation omitted its linked decision: $reason" ;;
   esac
   case "$reason" in
-    *"0 repeats folded since the last reminder"*) : ;;
+    *"captain, 0 repeats folded since the last reminder"*) : ;;
     *) fail "the first escalation of the episode was not reported as unfolded: $reason" ;;
   esac
   ack_stopped_cycle "$state" || fail "could not acknowledge the first held escalation"
@@ -2221,20 +2234,20 @@ test_held_alert_backoff_folds_repeats_across_restart() {
   # must report the folded count.
   : > "$out"
   run_held_endpoint_watch "$dir" "$out" \
-    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=12 \
-    FM_HELD_ALERT_BACKOFF_MAX_SECS=24 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
+    FM_STALE_ESCALATE_SECS=1 FM_HELD_ALERT_BACKOFF_SECS=120 \
+    FM_HELD_ALERT_BACKOFF_MAX_SECS=240 FM_HELD_ALERT_RELEASE_CHECK_SECS=0
   pid=$HELD_WATCH_PID
-  wait_log_line "$state" "repeats folded" 100 \
+  wait_log_line "$state" "repeats folded" 300 \
     || { stop_pid "$pid"; fail "the restarted watcher did not fold a repeat inside the interval: out=$(cat "$out" 2>/dev/null) ledger=$(cat "$state/.held-alert-remote_boatqa" 2>/dev/null) triage=$(tail -5 "$state/.watch-triage.log" 2>/dev/null | tr '\n' '|')"; }
   [ ! -s "$out" ] || { stop_pid "$pid"; fail "a folded repeat still printed a wake: $(cat "$out")"; }
-  wait_for_exit "$pid" 200 || fail "the backed-off watcher never emitted its next reminder"
+  wait_for_exit "$pid" 1400 || fail "the backed-off watcher never emitted its next reminder"
   reason=$(cat "$out")
   case "$reason" in
     *"repeats folded since the last reminder"*) : ;;
     *) fail "the next reminder omitted its folded-repeat count: $reason" ;;
   esac
   case "$reason" in
-    *"0 repeats folded since the last reminder"*)
+    *"captain, 0 repeats folded since the last reminder"*)
       fail "the restart discarded the persisted folded-repeat count: $reason" ;;
   esac
   ack_stopped_cycle "$state" || fail "could not acknowledge the backed-off reminder"
@@ -2455,7 +2468,7 @@ make_path_without_deadline_tools() {  # <destination>
 
 test_remote_deadline_fallback() {  # <gtimeout|perl>
   local mode=$1 dir state fakebin runtimebin out statusf window key sig pid on_bin sentinel
-  local calls fallback_marker started elapsed real_timeout
+  local calls fallback_marker started elapsed real_timeout pane_hash
   dir=$(make_case "remote-$mode-fallback"); state="$dir/state"; fakebin="$dir/fakebin"
   runtimebin="$dir/runtimebin"; mkdir -p "$runtimebin"
   out="$dir/watch.out"; statusf="$state/remote.status"; window="remote:$mode"
@@ -2472,6 +2485,10 @@ use warnings;
 open my $calls, '>>', $ENV{FM_FAKE_REMOTE_CALLS} or die $!;
 print {$calls} (($ARGV[2] // 'missing') . "\n");
 close $calls;
+if (defined $ENV{FM_FAKE_REMOTE_AGE}) {
+  print "$ENV{FM_FAKE_REMOTE_AGE}\n";
+  exit 0;
+}
 $SIG{TERM} = 'IGNORE';
 my $pid = fork();
 die "fork failed" unless defined $pid;
@@ -2503,12 +2520,14 @@ SH
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
     FM_FAKE_REMOTE_CALLS="$calls" FM_TEST_SENTINEL="$sentinel" \
     FM_FAKE_FALLBACK_MARKER="$fallback_marker" FM_FAKE_REAL_TIMEOUT="${real_timeout:-}" \
-    FM_WATCH_REMOTE_TIMEOUT=1 FM_REMOTE_INCONCLUSIVE_MAX=1 \
+    FM_WATCH_REMOTE_TIMEOUT=1 \
     FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 180 \
-    || { reap "$pid"; fail "$mode fallback did not route a bounded probe failure into stale tracking"; }
+  wait_numeric_file "$state/.remote-unreachable-since-remote" 180 \
+    || { reap "$pid"; fail "$mode fallback did not route a bounded probe failure into the unreachable episode"; }
+  [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "$mode fallback turned an inconclusive probe into stale evidence"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "$mode fallback printed a wake for an inconclusive probe: $(cat "$out")"; }
   reap "$pid"
   elapsed=$(( $(date +%s) - started ))
   [ "$elapsed" -le 18 ] || fail "$mode fallback exceeded its watcher bound: ${elapsed}s"
@@ -2518,13 +2537,20 @@ SH
     [ -e "$fallback_marker" ] || fail "gtimeout fallback was not selected"
   fi
   ack_stopped_cycle "$state" || fail "could not acknowledge the $mode fallback probe stop"
+  # A conclusive stale age through the same fallback still reaches the ordinary
+  # wedge escalation. Prime the pane bookkeeping so the aged timer is reached.
+  pane_hash=$(hash_text "secondmate watcher beacon missing or stale: $window")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$runtimebin" FM_FAKE_TMUX_WINDOW="$window" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
     FM_FAKE_REMOTE_CALLS="$calls" FM_TEST_SENTINEL="$sentinel" \
     FM_FAKE_FALLBACK_MARKER="$fallback_marker" FM_FAKE_REAL_TIMEOUT="${real_timeout:-}" \
-    FM_WATCH_REMOTE_TIMEOUT=1 FM_REMOTE_INCONCLUSIVE_MAX=1 \
+    FM_FAKE_REMOTE_AGE=500 \
+    FM_WATCH_REMOTE_TIMEOUT=1 \
     FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -2537,12 +2563,12 @@ SH
 
 test_remote_deadline_gtimeout_fallback() {
   test_remote_deadline_fallback gtimeout
-  pass "the gtimeout fallback bounds remote stale and wedge detection"
+  pass "the gtimeout fallback bounds remote probes and still permits a conclusive stale escalation"
 }
 
 test_remote_deadline_perl_process_group_fallback() {
   test_remote_deadline_fallback perl
-  pass "the Perl fallback bounds remote stale and wedge detection"
+  pass "the Perl fallback bounds remote probes and still permits a conclusive stale escalation"
 }
 
 test_secondmate_stale_supervisor_beacon_escalates() {
@@ -4538,6 +4564,7 @@ printf '%s\n' "$n" > "$FM_FAKE_PROBE_COUNTER"
 case "$FM_FAKE_REMOTE_MODE" in
   once) [ "$n" -eq 1 ] && sleep 30; printf '0\n' ;;
   hang) sleep 30 ;;
+  noise) printf 'not-a-beacon-age\n' ;;
   stale) printf '500\n' ;;
   fresh) printf '0\n' ;;
   *) exit 1 ;;
@@ -4567,9 +4594,9 @@ test_remote_inconclusive_probe_is_absorbed_then_fresh() {
   state="$dir/state"; out="$dir/watch.out"
   key=$(printf '%s' 'remote:ios' | tr '.:/' '___')
   # Prime the pane tracker the way a long-running watcher holds it after one
-  # earlier stable sighting: without the fix, this single timeout is enough for
-  # the next poll to reach the stale verdict and wake firstmate. The probe then
-  # answers a fresh age, so no part of this sequence is stale evidence.
+  # earlier stable sighting: a timeout must not be enough to reach the stale
+  # verdict. The probe then answers a fresh age, so no part of this sequence is
+  # stale evidence and the episode ends conclusively.
   h=$(hash_text "secondmate watcher beacon missing or stale: remote:ios")
   printf '%s' "$h" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -4584,17 +4611,61 @@ test_remote_inconclusive_probe_is_absorbed_then_fresh() {
   [ ! -s "$out" ] || { reap "$pid"; fail "one inconclusive remote probe printed a wake reason: $(cat "$out")"; }
   [ ! -e "$state/.stale-$key" ] \
     || { reap "$pid"; fail "one inconclusive remote probe recorded a stale verdict"; }
-  [ ! -e "$state/.remote-inconclusive-$key" ] \
-    || { reap "$pid"; fail "a later fresh age did not reset the inconclusive probe count"; }
+  [ ! -e "$state/.remote-unreachable-since-remote" ] \
+    || { reap "$pid"; fail "a later fresh age did not end the unreachable episode"; }
   probes=$(cat "$dir/probe-calls" 2>/dev/null || echo 0)
   [ "$probes" -ge 2 ] \
     || { reap "$pid"; fail "the remote probe was not retried after its deadline"; }
   reap "$pid"
-  pass "an inconclusive remote probe is absorbed and a later fresh age clears it"
+  pass "an inconclusive remote probe is absorbed and a later fresh age ends its episode"
 }
 
-test_remote_stale_age_and_inconclusive_bound_escalate() {
-  local dir state out pid probes
+test_remote_inconclusive_probes_never_raise_a_verdict() {
+  local mode dir state out pid i key
+  for mode in hang unreachable noise; do
+    dir=$(remote_probe_case "remote-inconclusive-$mode")
+    state="$dir/state"; out="$dir/watch.out"
+    key=$(printf '%s' 'remote:ios' | tr '.:/' '___')
+    # A leftover counter from the retired consecutive-probe rule is inert.
+    printf '99\n' > "$state/.remote-inconclusive-$key"
+    run_remote_probe_watch "$dir" "$out" FM_FAKE_REMOTE_MODE="$mode" \
+      FM_REMOTE_UNREACHABLE_ALERT_SECS=3600
+    pid=$PROBE_WATCH_PID
+    for i in 1 2 3 4; do
+      wait_poll_cycle "$state" "$pid" 300 \
+        || { reap "$pid"; fail "$mode inconclusive probe stopped the watcher: $(cat "$out")"; }
+    done
+    [ ! -s "$out" ] || { reap "$pid"; fail "$mode inconclusive probe printed a wake: $(cat "$out")"; }
+    [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$mode inconclusive probe queued a wake"; }
+    [ ! -e "$state/.stale-$key" ] \
+      || { reap "$pid"; fail "$mode inconclusive probe recorded a stale verdict"; }
+    [ ! -e "$state/.stale-since-$key" ] \
+      || { reap "$pid"; fail "$mode inconclusive probe started the wedge timer"; }
+    [ ! -e "$state/.wedge-escalations-$key" ] \
+      || { reap "$pid"; fail "$mode inconclusive probe started a wedge count"; }
+    [ -s "$state/.remote-unreachable-since-remote" ] \
+      || { reap "$pid"; fail "$mode inconclusive probe did not start the route's unreachable episode"; }
+    reap "$pid"
+  done
+  pass "timeout, unreachable, and non-numeric remote probes never raise a stale or wedge verdict"
+}
+
+test_remote_unreachable_window_validation() {
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-remote-liveness-lib.sh"
+  [ "$(FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_alert_secs)" = 1 ] \
+    || fail "a positive unreachable window was not honored"
+  [ "$(FM_REMOTE_UNREACHABLE_ALERT_SECS=0 fm_remote_unreachable_alert_secs)" = 1800 ] \
+    || fail "a zero unreachable window did not fall back to 1800"
+  [ "$(FM_REMOTE_UNREACHABLE_ALERT_SECS=soon fm_remote_unreachable_alert_secs)" = 1800 ] \
+    || fail "a non-numeric unreachable window did not fall back to 1800"
+  [ "$(FM_REMOTE_UNREACHABLE_ALERT_SECS=9999999999 fm_remote_unreachable_alert_secs)" = 1800 ] \
+    || fail "an oversized unreachable window did not fall back to 1800"
+  pass "the sustained-unreachable window accepts positive integers and falls back on invalid values"
+}
+
+test_remote_conclusive_stale_age_escalates() {
+  local dir state out pid
   # A conclusive stale beacon age is its own evidence and still escalates.
   dir=$(remote_probe_case remote-conclusive-stale)
   state="$dir/state"; out="$dir/watch.out"
@@ -4603,18 +4674,72 @@ test_remote_stale_age_and_inconclusive_bound_escalate() {
   wait_for_exit "$pid" 90 || { reap "$pid"; fail "a conclusive stale beacon age did not escalate: $(cat "$out")"; }
   grep -F "stale: remote:ios" "$out" >/dev/null \
     || fail "a conclusive stale beacon age omitted the stale wake"
+  [ ! -e "$state/.remote-unreachable-since-remote" ] \
+    || fail "a conclusive stale answer created an unreachable episode"
+  pass "a conclusive stale beacon age still raises the unchanged stale wake"
+}
 
-  # Consecutive inconclusive probes escalate only once the documented bound is met.
-  dir=$(remote_probe_case remote-inconclusive-bound)
+test_remote_unreachable_episode_alerts_once() {
+  local dir state out pid rows i
+  dir=$(remote_probe_case remote-unreachable-episode)
   state="$dir/state"; out="$dir/watch.out"
-  run_remote_probe_watch "$dir" "$out" FM_FAKE_REMOTE_MODE=hang FM_REMOTE_INCONCLUSIVE_MAX=3
+
+  # The episode reaches its window and raises one unreachable wake.
+  run_remote_probe_watch "$dir" "$out" FM_FAKE_REMOTE_MODE=hang \
+    FM_REMOTE_UNREACHABLE_ALERT_SECS=1
   pid=$PROBE_WATCH_PID
-  wait_for_exit "$pid" 120 || { reap "$pid"; fail "three consecutive inconclusive probes never escalated: $(cat "$out")"; }
-  grep -F "stale: remote:ios" "$out" >/dev/null \
-    || fail "the inconclusive-probe bound did not raise a stale wake"
-  probes=$(cat "$dir/probe-calls" 2>/dev/null || echo 0)
-  [ "$probes" -ge 3 ] || fail "stale escalation preceded the documented 3-probe bound ($probes probes)"
-  pass "a conclusive stale age escalates, and 3 consecutive inconclusive probes escalate at the bound"
+  wait_for_exit "$pid" 120 \
+    || { reap "$pid"; fail "a sustained-unreachable route never alerted: $(cat "$out")"; }
+  grep -F "unreachable" "$out" >/dev/null \
+    || fail "the sustained-unreachable wake omitted its unreachable wording: $(cat "$out")"
+  if grep -E 'stale:|possible wedge' "$out" >/dev/null; then
+    fail "the sustained-unreachable wake read as a stale or wedge verdict: $(cat "$out")"
+  fi
+  [ -e "$state/.remote-unreachable-alerted-remote" ] \
+    || fail "the one unreachable alert was not recorded for the episode"
+  rows=$(wc -l < "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$rows" -eq 1 ] || fail "the episode raised $rows wake rows instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the unreachable alert"
+
+  # Restarting inside the alerted episode must not repeat it.
+  : > "$out"
+  run_remote_probe_watch "$dir" "$out" FM_FAKE_REMOTE_MODE=hang \
+    FM_REMOTE_UNREACHABLE_ALERT_SECS=1
+  pid=$PROBE_WATCH_PID
+  for i in 1 2 3; do
+    wait_poll_cycle "$state" "$pid" 300 \
+      || { reap "$pid"; fail "the watcher stopped while an alerted episode continued: $(cat "$out")"; }
+  done
+  [ ! -s "$out" ] || { reap "$pid"; fail "a repeated unreachable wake escaped the episode guard: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the continued episode queued another wake"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the continued-episode stop"
+
+  # A conclusive fresh answer ends the episode.
+  run_remote_probe_watch "$dir" "$out" FM_FAKE_REMOTE_MODE=fresh \
+    FM_REMOTE_UNREACHABLE_ALERT_SECS=1
+  pid=$PROBE_WATCH_PID
+  for i in 1 2; do
+    wait_poll_cycle "$state" "$pid" 300 \
+      || { reap "$pid"; fail "the watcher stopped on a conclusive fresh answer: $(cat "$out")"; }
+  done
+  [ ! -e "$state/.remote-unreachable-since-remote" ] \
+    || { reap "$pid"; fail "a conclusive probe did not end the unreachable episode"; }
+  [ ! -e "$state/.remote-unreachable-alerted-remote" ] \
+    || { reap "$pid"; fail "a conclusive probe retained the episode's alert marker"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the conclusive fresh-answer stop"
+
+  # A later episode may alert again.
+  : > "$out"
+  run_remote_probe_watch "$dir" "$out" FM_FAKE_REMOTE_MODE=hang \
+    FM_REMOTE_UNREACHABLE_ALERT_SECS=1
+  pid=$PROBE_WATCH_PID
+  wait_for_exit "$pid" 120 \
+    || { reap "$pid"; fail "a new unreachable episode after a conclusive probe never alerted: $(cat "$out")"; }
+  grep -F "unreachable" "$out" >/dev/null \
+    || fail "the new unreachable episode omitted its unreachable wake"
+  pass "one sustained-unreachable episode raises exactly one unreachable wake and a conclusive probe ends it"
 }
 
 # --- upstream kunchenguid/firstmate#2877: bounded pane-churn turn-end absorb ---
@@ -5768,7 +5893,10 @@ test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_remote_secondmate_beacon_is_bounded
 test_remote_inconclusive_probe_is_absorbed_then_fresh
-test_remote_stale_age_and_inconclusive_bound_escalate
+test_remote_inconclusive_probes_never_raise_a_verdict
+test_remote_unreachable_window_validation
+test_remote_conclusive_stale_age_escalates
+test_remote_unreachable_episode_alerts_once
 test_remote_deadline_gtimeout_fallback
 test_remote_deadline_perl_process_group_fallback
 test_secondmate_stale_supervisor_beacon_escalates

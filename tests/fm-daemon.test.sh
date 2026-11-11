@@ -528,24 +528,26 @@ SH
         FM_STALE_ESCALATE_SECS=240 \
         FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
       if [ "$mode" = unknown ]; then
-        # One inconclusive owner probe is not stale evidence: the next pass
-        # must stay deferred while the bound is unmet.
+        # An inconclusive owner probe is never stale evidence: the next pass
+        # stays deferred while the route's unreachable episode is below its
+        # window.
         FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
           FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
           FM_REMOTE_STATUS_FILE="$remote_status_file" \
           FM_STALE_ESCALATE_SECS=240 \
           FM_REMOTE_STALE_RECHECK_SECS=0 housekeeping "$state"
         [ ! -s "$state/.subsuper-escalations" ] \
-          || fail "unknown remote owner escalated before the inconclusive bound"
+          || fail "unknown remote owner escalated before the unreachable window"
         [ -e "$state/.subsuper-stale-$key" ] \
-          || fail "unknown remote owner dropped the stale marker below the bound"
-        [ -e "$state/.subsuper-remote-inconclusive-$key" ] \
-          || fail "unknown remote owner did not count its inconclusive probes"
-        # The third consecutive probe meets the bound and escalates.
+          || fail "unknown remote owner dropped the stale marker below the window"
+        [ -e "$state/.remote-unreachable-since-$key" ] \
+          || fail "unknown remote owner did not start the route's unreachable episode"
+        # Age the episode past its window; the next probe raises its one alert.
+        printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.remote-unreachable-since-$key"
         FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
           FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
           FM_REMOTE_STATUS_FILE="$remote_status_file" \
-          FM_STALE_ESCALATE_SECS=240 \
+          FM_STALE_ESCALATE_SECS=240 FM_REMOTE_UNREACHABLE_ALERT_SECS=1 \
           FM_REMOTE_STALE_RECHECK_SECS=0 housekeeping "$state"
       fi
     ) || fail "remote captain-held stale housekeeping failed for $mode result"
@@ -568,12 +570,14 @@ SH
       unknown)
         [ ! -e "$state/.subsuper-stale-$key" ] || fail "unknown remote owner result retained stale marker after escalation"
         [ ! -e "$state/.subsuper-remote-recheck-$key" ] || fail "unknown remote owner result retained recheck throttle marker"
-        grep -q 'remote stale owner probe inconclusive' "$state/.subsuper-escalations" \
-          || fail "unknown remote owner result did not escalate bounded visibility"
+        grep -q 'remote host unreachable' "$state/.subsuper-escalations" \
+          || fail "unknown remote owner result did not escalate its unreachable episode"
+        [ -e "$state/.remote-unreachable-alerted-$key" ] \
+          || fail "unknown remote owner did not record its one unreachable alert"
         [ ! -e "$state/.subsuper-remote-inconclusive-$key" ] \
-          || fail "unknown remote owner retained its inconclusive count after escalation"
+          || fail "unknown remote owner retained its retired inconclusive counter"
         [ "$(wc -l < "$probe_calls")" -eq 3 ] \
-          || fail "unknown remote owner did not probe exactly the documented bound: $(wc -l < "$probe_calls")"
+          || fail "unknown remote owner did not probe once per pass: $(wc -l < "$probe_calls")"
         ;;
     esac
   done

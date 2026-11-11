@@ -273,7 +273,16 @@ An SSH exit status of 255 always means transport failure or unknown remote compl
 The transport never retries automatically.
 Semantic callers preserve the route or pending request and require same-host reconciliation rather than resending an operation that may already have happened.
 An unavailable remote home is projected as unknown and is never replaced by a local second mate.
-The [secondmate beacon rule](supervision-protocols/omp.md) owns supervision of quiet remote endpoints and bounded handling of inconclusive probes; the [daemon header](../bin/fm-supervise-daemon.sh) owns away-mode owner-probe retries.
+The [liveness rule](#liveness) owns how quiet endpoints and inconclusive probes are judged, and the [daemon header](../bin/fm-supervise-daemon.sh) owns away-mode owner rechecks.
+
+### Liveness
+
+A remote route's liveness is judged only on conclusive probes.
+A fresh beacon suppresses stale detection, and a conclusive stale age still enters the ordinary stale and wedge path unchanged.
+An inconclusive probe - deadline hit, no answer, transport failure, non-numeric output, or no deadline tool - is never evidence of a wedge, however many arrive in a row.
+It starts or continues one sustained-unreachable episode for that route, and once the episode has lasted `FM_REMOTE_UNREACHABLE_ALERT_SECS` (default 1800 seconds) supervision raises exactly one wake that says the host is unreachable.
+Only a conclusive probe ends the episode, after which a new one may alert again.
+The [liveness library header](../bin/fm-remote-liveness-lib.sh) owns the window, the episode state files, and the absorb-or-alert decision; the [watcher header](../bin/fm-watch.sh) owns beacon-probe mechanics, and the [daemon header](../bin/fm-supervise-daemon.sh) owns away-mode owner rechecks.
 
 ## Backlog handoff
 

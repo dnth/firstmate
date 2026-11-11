@@ -28,8 +28,8 @@ When this session owns supervision and away mode is not active:
 For a persistent secondmate, the watcher in that secondmate home touches `state/.last-watcher-beat` at the start of every cycle.
 The parent watcher treats a fresh, non-future secondmate-home beacon as positive liveness evidence when the secondmate is neither paused nor captain-held and its pane is idle between child polls, reading remote beacon age through a short bounded call with a forced-kill grace on the configured host route.
 The parent watcher uses `FM_STALE_ESCALATE_SECS` (default 240 seconds) as the beacon-age bound, so a conclusive age at or beyond that bound, or a missing or invalid local beacon, still enters normal stale and wedge detection.
-A remote probe that hits `FM_WATCH_REMOTE_TIMEOUT` or returns no usable answer is inconclusive evidence, not a stale verdict: it is absorbed while the route stays below `FM_REMOTE_INCONCLUSIVE_MAX` (default 3) consecutive inconclusive probes, and a fresh or conclusive stale answer resets that count.
-The [watcher script header](../../bin/fm-watch.sh) owns the probe mechanics, and the [away-mode daemon header](../../bin/fm-supervise-daemon.sh) owns its remote owner recheck using the same consecutive-probe bound.
+A remote probe that hits `FM_WATCH_REMOTE_TIMEOUT` or returns no usable answer is inconclusive evidence, never a stale verdict: it feeds one sustained-unreachable episode whose single alert names an unreachable host, not a wedged mate.
+The [remote route liveness rule](../remote-secondmates.md#liveness) owns that episode, and the [watcher script header](../../bin/fm-watch.sh) owns the probe mechanics.
 
 The integrated startup, blocking stop, primary safety, watcher, follow-up, and shutdown adapter lives at `__FM_OMP_PRIMARY_EXT__`.
 Plain OMP discovers this tracked project extension natively from `.omp/extensions/` without Pi project trust or Pi event semantics.
