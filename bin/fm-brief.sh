@@ -35,6 +35,21 @@
 #   caller-supplied repo string cannot be relied on to identify this repo for a
 #   safety gate. Briefs made without it carry a loud declaration so an omitted
 #   contract cannot be silent.
+# The active home's private, gitignored config/brief-preamble.md is included
+# verbatim, under its own "# Captain standing preferences" section, in every ship
+# and scout brief this script scaffolds, so the captain's worker-relevant standing
+# preferences need no manual paste. The section is emitted between the task
+# instructions and the definition of done, after the task and acceptance criteria,
+# so it cannot be mistaken for or overwrite the {TASK} and {ACCEPTANCE CRITERION}
+# placeholders firstmate fills. An absent, empty, or whitespace-only file
+# contributes nothing, leaving the brief byte-identical to one scaffolded without
+# the file. A preamble carrying {TASK}, {ACCEPTANCE CRITERION}, a level-1
+# "# Acceptance criteria" heading, or a "Delivery contract: mode=" line is refused
+# with its line number, because firstmate's fill and the brief's single-occurrence
+# checks would otherwise corrupt it, block the spawn, or reject the brief.
+# Secondmate charters never carry the section, while a secondmate home receives its
+# own copy through the inherited-local-material allowlist in
+# bin/fm-config-inherit-lib.sh.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -522,6 +537,65 @@ fi
 exit 0
 fi
 
+# Captain preamble. The active home's private, gitignored config/brief-preamble.md
+# carries the captain's worker-relevant standing preferences into every ship and
+# scout scaffold, so firstmate never has to paste them into a brief by hand. The
+# section is emitted between the task instructions and the definition of done,
+# after the task and acceptance criteria, where nothing firstmate fills or parses
+# can collide with it.
+# An absent, empty, or whitespace-only file contributes no bytes, so a home
+# without one scaffolds exactly the brief it scaffolded before this section
+# existed. Secondmate charters are not task briefs and never carry it; a
+# secondmate home instead receives its own copy through the inherited-local-
+# material allowlist owned by bin/fm-config-inherit-lib.sh.
+# The scaffold's own fill tokens and its exclusive single-occurrence lines are
+# refused rather than escaped: firstmate replaces every {TASK} and
+# {ACCEPTANCE CRITERION} after scaffolding, bin/fm-spawn.sh refuses a brief that
+# still contains {TASK}, bin/fm-receipt-check.sh --parse-criteria reads every
+# level-1 acceptance-criteria heading, and the delivery-contract helpers require
+# exactly one "Delivery contract: mode=" line. Escaping would silently rewrite
+# the captain's words; refusing keeps the fill, the checks, and the parsers
+# meaningful and names the exact offending line.
+BRIEF_PREAMBLE_FILE="$FM_HOME/config/brief-preamble.md"
+PREAMBLE_SECTION=
+if [ -f "$BRIEF_PREAMBLE_FILE" ]; then
+  if ! PREAMBLE_BODY=$(cat -- "$BRIEF_PREAMBLE_FILE"); then
+    echo "error: could not read $BRIEF_PREAMBLE_FILE" >&2
+    exit 1
+  fi
+  if printf '%s' "$PREAMBLE_BODY" | grep -q '[^[:space:]]'; then
+    PREAMBLE_OFFENSE=
+    for PREAMBLE_TOKEN in '{TASK}' '{ACCEPTANCE CRITERION}'; do
+      PREAMBLE_HIT=$(grep -nF -- "$PREAMBLE_TOKEN" "$BRIEF_PREAMBLE_FILE" | head -n 1 || true)
+      if [ -n "$PREAMBLE_HIT" ]; then
+        PREAMBLE_OFFENSE="line ${PREAMBLE_HIT%%:*}: contains the scaffold fill token $PREAMBLE_TOKEN"
+        break
+      fi
+    done
+    if [ -z "$PREAMBLE_OFFENSE" ]; then
+      PREAMBLE_HIT=$(grep -nE '^# Acceptance criteria[[:space:]]*$' "$BRIEF_PREAMBLE_FILE" | head -n 1 || true)
+      [ -z "$PREAMBLE_HIT" ] \
+        || PREAMBLE_OFFENSE="line ${PREAMBLE_HIT%%:*}: repeats the exclusive '# Acceptance criteria' heading"
+    fi
+    if [ -z "$PREAMBLE_OFFENSE" ]; then
+      PREAMBLE_HIT=$(grep -nE '^Delivery contract: mode=' "$BRIEF_PREAMBLE_FILE" | head -n 1 || true)
+      [ -z "$PREAMBLE_HIT" ] \
+        || PREAMBLE_OFFENSE="line ${PREAMBLE_HIT%%:*}: repeats the exclusive 'Delivery contract:' line"
+    fi
+    if [ -n "$PREAMBLE_OFFENSE" ]; then
+      echo "error: $BRIEF_PREAMBLE_FILE $PREAMBLE_OFFENSE; firstmate fills, parses, and checks that scaffold line after it scaffolds, so rephrase it" >&2
+      exit 1
+    fi
+    IFS= read -r -d '' PREAMBLE_NOTE <<'EOF' || true
+# Captain standing preferences
+This section is carried verbatim from this home's private `config/brief-preamble.md`, the captain's worker-relevant standing preferences. Apply them to this task. Do not edit or fill anything inside this section.
+EOF
+    PREAMBLE_NOTE=${PREAMBLE_NOTE%$'\n'}
+    PREAMBLE_SECTION="$PREAMBLE_NOTE
+$PREAMBLE_BODY"
+  fi
+fi
+
 REPO=${POS[1]}
 
 # True when the ship task's repo argument resolves to a checkout (main checkout
@@ -642,7 +716,9 @@ $INBOX_SECTION
 
 $SUBAGENT_SECTION
 
-# Definition of done
+${PREAMBLE_SECTION:+$PREAMBLE_SECTION
+
+}# Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 $CONFIDENCE_SECTION
@@ -765,7 +841,9 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
-$DOD
+${PREAMBLE_SECTION:+$PREAMBLE_SECTION
+
+}$DOD
 EOF
 if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
   FM_RECEIPT_SCAFFOLD_BRIEF="$SHIP_BRIEF" "$FM_ROOT/bin/fm-receipt-store.sh" "$ID" scaffold; then

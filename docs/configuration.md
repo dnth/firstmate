@@ -62,6 +62,15 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Worker brief preamble (config/brief-preamble.md)
+
+The optional local, gitignored `config/brief-preamble.md` file under the effective `FM_HOME` carries the captain's worker-relevant standing preferences - a mandatory Python runner, a reply-length rule, anything every worker must know - into every ship and scout brief [`bin/fm-brief.sh`](../bin/fm-brief.sh) scaffolds.
+The scaffold emits the file's content verbatim, under a `# Captain standing preferences` section between the task instructions and the definition of done, so the preferences need no manual paste and cannot be mistaken for the placeholders firstmate fills.
+An absent, empty, or whitespace-only file contributes nothing, leaving the generated brief byte-identical to one scaffolded without the feature.
+The file must not contain the scaffold fill tokens `{TASK}` or `{ACCEPTANCE CRITERION}`, repeat the exclusive `# Acceptance criteria` heading, or repeat a `Delivery contract: mode=` line: firstmate replaces those tokens after scaffolding, and the spawn, criteria, and delivery-contract checks each require exactly one of those scaffold lines, so the scaffold refuses such a file with its offending line and creates no brief.
+Secondmate charters never carry the section, and a secondmate home receives its own copy through the inherited-local-material allowlist, so its own worker briefs carry the same preferences.
+[`bin/fm-brief.sh`](../bin/fm-brief.sh)'s header owns the exact rendering, placement, and refusal mechanics.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -706,7 +715,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, `brief-preamble.md`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
