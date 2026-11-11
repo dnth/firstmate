@@ -60,6 +60,7 @@ fm_remote_unreachable_key_ok() {  # <key>
 fm_remote_unreachable_lock() {
   local state=$1 key=$2
   if ! declare -F fm_lock_acquire_wait >/dev/null; then
+    # shellcheck source=bin/fm-wake-lib.sh
     FM_STATE_OVERRIDE="$state" . "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh"
   fi
   mkdir -p "$state/.remote-unreachable-locks" || return 2

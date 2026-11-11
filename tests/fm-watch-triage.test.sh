@@ -4655,6 +4655,7 @@ test_remote_unreachable_alert_claim_is_atomic() {
   local -a pids=()
   dir=$(make_case remote-alert-claim)
   state="$dir/state"
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-remote-liveness-lib.sh"
   FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac 100 >/dev/null
   for n in {1..24}; do
@@ -4679,6 +4680,7 @@ test_remote_unreachable_route_names_are_independent() {
   local dir state task reset_task rc
   dir=$(make_case remote-route-names)
   state="$dir/state"
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-remote-liveness-lib.sh"
   for task in foo.lock since-foo alerted-foo; do
     FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" "$task" 100 >/dev/null
@@ -4709,13 +4711,14 @@ test_remote_unreachable_reset_serializes_with_claim() {
   local dir state claimant resetter n
   dir=$(make_case remote-reset-claim)
   state="$dir/state"
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-remote-liveness-lib.sh"
   FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac 100 >/dev/null
   (
+    # shellcheck disable=SC2329 # Called by fm_remote_unreachable_tick for its clock.
     date() {
       : > "$dir/clock-requested"
-      local attempt
-      for attempt in {1..200}; do
+      for _ in {1..200}; do
         if [ -e "$dir/release-clock" ]; then printf '102\n'; return; fi
         sleep 0.05
       done
