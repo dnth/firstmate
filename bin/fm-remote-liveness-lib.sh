@@ -23,9 +23,9 @@
 #
 # The episode's first alert is due once it has lasted
 # FM_REMOTE_UNREACHABLE_ALERT_SECS (positive integer of at most nine digits,
-# default 1800; a zero, non-numeric, or oversized value uses 1800). A caller
-# marks the alert before delivering it, so the same episode never alerts twice,
-# including across a watcher or daemon restart. Only a conclusive probe ends the
+# default 1800; a zero, non-numeric, or oversized value uses 1800). The tick
+# atomically claims the alert before returning it for delivery, preventing repeats
+# across watcher or daemon restarts. Only a conclusive probe ends the
 # episode and removes both files; the next inconclusive probe after that starts a
 # new episode, which may alert again.
 #
@@ -62,7 +62,8 @@ fm_remote_unreachable_lock() {
   if ! declare -F fm_lock_acquire_wait >/dev/null; then
     FM_STATE_OVERRIDE="$state" . "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh"
   fi
-  fm_lock_acquire_wait "$state/.remote-unreachable-$key.lock"
+  mkdir -p "$state/.remote-unreachable-locks" || return 2
+  fm_lock_acquire_wait "$state/.remote-unreachable-locks/$key.lock"
 }
 
 # Record one inconclusive probe for <state> <endpoint-key> [now].
@@ -75,7 +76,7 @@ fm_remote_unreachable_tick() (  # <state> <key> [now]
   fm_remote_unreachable_key_ok "$key" || return 2
   [ -d "$state" ] || return 2
   fm_remote_unreachable_lock "$state" "$key" || return 2
-  trap 'fm_lock_release "$state/.remote-unreachable-$key.lock"' EXIT
+  trap 'fm_lock_release "$state/.remote-unreachable-locks/$key.lock"' EXIT
   if [ -z "$now" ]; then
     now=$(date +%s)
   fi
@@ -105,7 +106,7 @@ fm_remote_unreachable_end() (  # <state> <key>
   fm_remote_unreachable_key_ok "$key" || return 2
   [ -d "$state" ] || return 2
   fm_remote_unreachable_lock "$state" "$key" || return 2
-  trap 'fm_lock_release "$state/.remote-unreachable-$key.lock"' EXIT
+  trap 'fm_lock_release "$state/.remote-unreachable-locks/$key.lock"' EXIT
   rm -f "$state/.remote-unreachable-since-$key" \
     "$state/.remote-unreachable-alerted-$key"
 )

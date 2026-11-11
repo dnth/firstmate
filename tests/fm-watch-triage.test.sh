@@ -4675,6 +4675,36 @@ test_remote_unreachable_alert_claim_is_atomic() {
   pass "concurrent callers claim one alert per episode"
 }
 
+test_remote_unreachable_route_names_are_independent() {
+  local dir state task reset_task rc
+  dir=$(make_case remote-route-names)
+  state="$dir/state"
+  . "$ROOT/bin/fm-remote-liveness-lib.sh"
+  for task in foo.lock since-foo alerted-foo; do
+    FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" "$task" 100 >/dev/null
+    rc=$?
+    [ "$rc" -eq 1 ] || fail "$task could not start an independent episode: $rc"
+  done
+  for task in foo.lock since-foo alerted-foo; do
+    FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" "$task" 102 >/dev/null \
+      || fail "$task could not claim its independent alert"
+  done
+  for reset_task in foo.lock since-foo alerted-foo; do
+    fm_remote_unreachable_end "$state" "$reset_task" || fail "$reset_task could not reset"
+    FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" "$reset_task" 200 >/dev/null
+    rc=$?
+    [ "$rc" -eq 1 ] || fail "$reset_task did not begin a new episode after reset: $rc"
+    FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" "$reset_task" 202 >/dev/null \
+      || fail "$reset_task could not alert after reset"
+    for task in foo.lock since-foo alerted-foo; do
+      FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" "$task" 203 >/dev/null
+      rc=$?
+      [ "$rc" -eq 1 ] || fail "resetting $reset_task disturbed $task's claimed alert: $rc"
+    done
+  done
+  pass "valid route names claim and reset episodes independently"
+}
+
 test_remote_unreachable_reset_serializes_with_claim() {
   local dir state claimant resetter n
   dir=$(make_case remote-reset-claim)
@@ -5979,6 +6009,7 @@ test_remote_secondmate_beacon_is_bounded
 test_remote_inconclusive_probe_is_absorbed_then_fresh
 test_remote_inconclusive_probes_never_raise_a_verdict
 test_remote_unreachable_alert_claim_is_atomic
+test_remote_unreachable_route_names_are_independent
 test_remote_unreachable_reset_serializes_with_claim
 test_remote_unreachable_window_validation
 test_remote_conclusive_stale_age_escalates
