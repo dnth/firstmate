@@ -75,17 +75,21 @@ function firstNonOption(words, operandOptions = new Set()) {
 function pythonIntent(words) {
   for (let index = 0; index < words.length; index += 1) {
     const value = words[index].value;
-    if (value === "-c" || value === "-") return { kind: "inline" };
-    if (value === "-m") return { kind: "module", module: words[index + 1]?.value ?? "" };
-    const attached = value.match(/^-m([A-Za-z0-9_.]+)$/);
-    if (attached) return { kind: "module", module: attached[1] };
-    if (value === "-W" || value === "-X") {
-      index += 1;
-      continue;
-    }
+    if (value === "-") return { kind: "inline" };
     if (value === "--") return { kind: "script" };
-    if (value.startsWith("-")) continue;
-    return { kind: "script" };
+    if (!value.startsWith("-")) return { kind: "script" };
+    if (value.startsWith("--")) continue;
+    for (let offset = 1; offset < value.length; offset += 1) {
+      const option = value[offset];
+      if (option === "c") return { kind: "inline" };
+      if (option === "m") {
+        return { kind: "module", module: value.slice(offset + 1) || words[index + 1]?.value || "" };
+      }
+      if (option === "W" || option === "X") {
+        if (offset + 1 === value.length) index += 1;
+        break;
+      }
+    }
   }
   return { kind: "script" };
 }

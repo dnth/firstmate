@@ -180,13 +180,24 @@ for prefix in 'command -pv' 'command command -V' 'env -u command command -v' 'co
     matrix_case "nested-query-${#MATRIX_IDS[@]}" allow '' "$prefix $tool"
   done
 done
-for option in '-W ignore' '-X dev' '-Wignore' '-Xdev' '-W ignore -X dev'; do
+for option in '-W ignore' '-X dev' '-Wignore' '-Xdev' '-W ignore -X dev' '-IW ignore' '-IX dev' '-IWignore' '-IXdev' '-IW m' '-IX m' '-IWm' '-IXm'; do
   matrix_case "venv-options-${#MATRIX_IDS[@]}" deny 'uv venv' "python3 $option -m venv .venv"
   matrix_case "virtualenv-options-${#MATRIX_IDS[@]}" deny 'uv venv' "python3 $option -m virtualenv .venv"
   matrix_case "pip-options-${#MATRIX_IDS[@]}" deny 'uv add' "python3 $option -m pip install requests"
   matrix_case "module-options-${#MATRIX_IDS[@]}" deny 'uvx' "python3 $option -m http.server"
   matrix_case "script-options-${#MATRIX_IDS[@]}" deny 'uv run python' "python3 $option script.py -m venv"
 done
+for option in '-Im ' '-Im' '-IBm '; do
+  matrix_case "venv-group-${#MATRIX_IDS[@]}" deny 'uv venv' "python3 ${option}venv .venv"
+  matrix_case "virtualenv-group-${#MATRIX_IDS[@]}" deny 'uv venv' "python3 ${option}virtualenv .venv"
+  matrix_case "pip-group-${#MATRIX_IDS[@]}" deny 'uv add' "python3 ${option}pip install requests"
+  matrix_case "module-group-${#MATRIX_IDS[@]}" deny 'uvx' "python3 ${option}http.server"
+done
+matrix_case grouped-inline deny 'uv run python' 'python3 -Ic "print(1)" -m venv'
+matrix_case grouped-attached-inline deny 'uv run python' 'python3 -Ic"print(1)" -m venv'
+matrix_case grouped-stdin deny 'uv run python' 'python3 -IB - -m venv'
+matrix_case grouped-end-options deny 'uv run python' 'python3 -IB -- -m venv'
+matrix_case grouped-uv allow '' 'uv run python3 -Im venv .venv'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-python-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
