@@ -57,15 +57,25 @@ fm_remote_unreachable_key_ok() {  # <key>
   return 0
 }
 
+fm_remote_unreachable_lock() {
+  local state=$1 key=$2
+  if ! declare -F fm_lock_acquire_wait >/dev/null; then
+    FM_STATE_OVERRIDE="$state" . "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh"
+  fi
+  fm_lock_acquire_wait "$state/.remote-unreachable-$key.lock"
+}
+
 # Record one inconclusive probe for <state> <endpoint-key> [now].
 # Prints the episode's age in seconds.
 # Returns 0 when that age has reached the window and this episode has not
-# alerted yet (the caller must mark before delivering the alert), 1 while the
+# alerted yet, 1 while the
 # probe must be absorbed, and 2 on an unusable key or state directory.
-fm_remote_unreachable_tick() {  # <state> <key> [now]
+fm_remote_unreachable_tick() (  # <state> <key> [now]
   local state=$1 key=$2 now=${3:-} since_file alerted_file started age window
   fm_remote_unreachable_key_ok "$key" || return 2
   [ -d "$state" ] || return 2
+  fm_remote_unreachable_lock "$state" "$key" || return 2
+  trap 'fm_lock_release "$state/.remote-unreachable-$key.lock"' EXIT
   if [ -z "$now" ]; then
     now=$(date +%s)
   fi
@@ -85,39 +95,17 @@ fm_remote_unreachable_tick() {  # <state> <key> [now]
   [ ! -e "$alerted_file" ] || return 1
   window=$(fm_remote_unreachable_alert_secs)
   [ "$age" -ge "$window" ] || return 1
+  printf '%s\n' "$now" > "$alerted_file" || return 2
   return 0
-}
-
-# Print the current episode age in seconds. Returns 1 when no episode exists.
-fm_remote_unreachable_age() {  # <state> <key> [now]
-  local state=$1 key=$2 now=${3:-} started
-  fm_remote_unreachable_key_ok "$key" || return 2
-  if [ -z "$now" ]; then
-    now=$(date +%s)
-  fi
-  case "$now" in ''|*[!0-9]*) return 2 ;; esac
-  started=$(cat "$state/.remote-unreachable-since-$key" 2>/dev/null || true)
-  case "$started" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$started" -le "$now" ] || started=$now
-  printf '%s\n' $(( now - started ))
-}
-
-# Mark the current episode's one alert as delivered. Callers run this before
-# appending or printing the alert so a crash cannot repeat it.
-fm_remote_unreachable_alert_mark() {  # <state> <key> [now]
-  local state=$1 key=$2 now=${3:-}
-  fm_remote_unreachable_key_ok "$key" || return 2
-  if [ -z "$now" ]; then
-    now=$(date +%s)
-  fi
-  case "$now" in ''|*[!0-9]*) return 2 ;; esac
-  ( set -C; printf '%s\n' "$now" > "$state/.remote-unreachable-alerted-$key" ) 2>/dev/null
-}
+)
 
 # End the route's episode after a conclusive probe.
-fm_remote_unreachable_end() {  # <state> <key>
+fm_remote_unreachable_end() (  # <state> <key>
   local state=$1 key=$2
   fm_remote_unreachable_key_ok "$key" || return 2
+  [ -d "$state" ] || return 2
+  fm_remote_unreachable_lock "$state" "$key" || return 2
+  trap 'fm_lock_release "$state/.remote-unreachable-$key.lock"' EXIT
   rm -f "$state/.remote-unreachable-since-$key" \
     "$state/.remote-unreachable-alerted-$key"
-}
+)

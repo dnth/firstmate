@@ -3550,7 +3550,7 @@ EOF
             # when it reaches its window and never as a wedge.
             unreach_age=$(fm_remote_unreachable_tick "$STATE" "$task")
             unreach_rc=$?
-            if [ "$unreach_rc" -eq 0 ] && fm_remote_unreachable_alert_mark "$STATE" "$task"; then
+            if [ "$unreach_rc" -eq 0 ]; then
               reason="check: remote second mate host $remote_host unreachable for ${unreach_age}s: $w (no conclusive answer; liveness unknown)"
               fm_wake_append check "$w" "$reason" || exit 1
               wake "$reason"

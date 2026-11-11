@@ -4656,9 +4656,10 @@ test_remote_unreachable_alert_claim_is_atomic() {
   dir=$(make_case remote-alert-claim)
   state="$dir/state"
   . "$ROOT/bin/fm-remote-liveness-lib.sh"
+  FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac 100 >/dev/null
   for n in {1..24}; do
     (
-      if fm_remote_unreachable_alert_mark "$state" ios.mac; then
+      if FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac 102 >/dev/null; then
         printf 'winner\n' >> "$dir/winners"
       fi
     ) &
@@ -4668,9 +4669,64 @@ test_remote_unreachable_alert_claim_is_atomic() {
   [ "$(wc -l < "$dir/winners")" -eq 1 ] \
     || fail "concurrent alert claims produced multiple winners"
   fm_remote_unreachable_end "$state" ios.mac
-  fm_remote_unreachable_alert_mark "$state" ios.mac \
+  FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac 200 >/dev/null
+  FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac 202 >/dev/null \
     || fail "a conclusive reset did not allow a new alert claim"
   pass "concurrent callers claim one alert per episode"
+}
+
+test_remote_unreachable_reset_serializes_with_claim() {
+  local dir state claimant resetter n
+  dir=$(make_case remote-reset-claim)
+  state="$dir/state"
+  . "$ROOT/bin/fm-remote-liveness-lib.sh"
+  FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac 100 >/dev/null
+  (
+    date() {
+      : > "$dir/clock-requested"
+      local attempt
+      for attempt in {1..200}; do
+        if [ -e "$dir/release-clock" ]; then printf '102\n'; return; fi
+        sleep 0.05
+      done
+      return 1
+    }
+    FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac >/dev/null
+  ) &
+  claimant=$!
+  for n in {1..100}; do
+    [ ! -e "$dir/clock-requested" ] || break
+    sleep 0.05
+  done
+  [ -e "$dir/clock-requested" ] || fail "claim did not reach the clock boundary"
+  (
+    : > "$dir/reset-started"
+    fm_remote_unreachable_end "$state" ios.mac || exit 1
+    : > "$dir/reset-completed"
+  ) &
+  resetter=$!
+  for n in {1..100}; do
+    [ ! -e "$dir/reset-started" ] || break
+    sleep 0.05
+  done
+  sleep 0.2
+  if [ -e "$dir/reset-completed" ]; then
+    : > "$dir/release-clock"
+    wait "$claimant"
+    fail "reset overtook an in-flight alert claim"
+  fi
+  : > "$dir/release-clock"
+  wait "$claimant" || fail "the due episode did not claim its alert"
+  wait "$resetter" || fail "the conclusive reset failed"
+  [ ! -e "$state/.remote-unreachable-alerted-ios.mac" ] \
+    || fail "the ended episode left an orphaned alert claim"
+  FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac 200 >/dev/null
+  FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac 202 >/dev/null \
+    || fail "an interleaved reset suppressed the next episode's alert"
+  if FM_REMOTE_UNREACHABLE_ALERT_SECS=1 fm_remote_unreachable_tick "$state" ios.mac 203 >/dev/null; then
+    fail "the new episode alerted more than once"
+  fi
+  pass "a reset serializes with a due claim and the next episode alerts once"
 }
 
 test_remote_unreachable_window_validation() {
@@ -5923,6 +5979,7 @@ test_remote_secondmate_beacon_is_bounded
 test_remote_inconclusive_probe_is_absorbed_then_fresh
 test_remote_inconclusive_probes_never_raise_a_verdict
 test_remote_unreachable_alert_claim_is_atomic
+test_remote_unreachable_reset_serializes_with_claim
 test_remote_unreachable_window_validation
 test_remote_conclusive_stale_age_escalates
 test_remote_unreachable_episode_alerts_once
