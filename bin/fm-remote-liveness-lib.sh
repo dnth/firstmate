@@ -3,7 +3,7 @@
 # sustained-unreachable rule.
 #
 # An unreachable remote host is never evidence that its second mate is dead or
-# wedged. Only a conclusive probe may drive supervision:
+# wedged. Only a conclusive probe may drive stale or wedge detection:
 #
 #   conclusive    a numeric beacon age, or an owner state answer. A fresh age
 #                 suppresses stale detection and a stale age enters the ordinary
@@ -48,7 +48,7 @@ fm_remote_unreachable_alert_secs() {
   printf '%s\n' "$secs"
 }
 
-# Validate one episode key. Returns 2 for an empty or path-unsafe key, which the
+# Validate one episode key. Returns 1 for an empty or path-unsafe key, which the
 # callers treat as unusable evidence rather than tracking a bogus route.
 fm_remote_unreachable_key_ok() {  # <key>
   case "$1" in
@@ -68,8 +68,7 @@ fm_remote_unreachable_lock() {
 
 # Record one inconclusive probe for <state> <endpoint-key> [now].
 # Prints the episode's age in seconds.
-# Returns 0 when that age has reached the window and this episode has not
-# alerted yet, 1 while the
+# Returns 0 after atomically claiming this episode's due alert, 1 while the
 # probe must be absorbed, and 2 on an unusable key or state directory.
 fm_remote_unreachable_tick() (  # <state> <key> [now]
   local state=$1 key=$2 now=${3:-} since_file alerted_file started age window

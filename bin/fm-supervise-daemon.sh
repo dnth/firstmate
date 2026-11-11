@@ -1700,9 +1700,8 @@ EOF
           fi
           ;;
         3)
-          # Deferred: a throttled recheck or an inconclusive probe the route's
-          # unreachable episode still absorbs. Keep the stale marker for the
-          # next pass.
+          # Deferred: a throttled recheck or unavailable route metadata.
+          # Keep the stale marker for the next pass.
           :
           ;;
       esac
