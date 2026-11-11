@@ -1043,7 +1043,7 @@ remote_stale_recheck() {  # <window> <state>
   else
     # Deadline, no answer, or no deadline tool: inconclusive evidence can only
     # feed the route's unreachable episode, never a wedge verdict.
-    if fm_remote_unreachable_tick "$state" "$key" >/dev/null; then
+    if fm_remote_unreachable_tick "$state" "$task" >/dev/null; then
       return 2
     fi
     return 3
@@ -1052,7 +1052,7 @@ remote_stale_recheck() {  # <window> <state>
     dead|missing|alive|ambiguous|unreadable|unverified)
       # A conclusive owner answer ends the episode and clears its retired
       # consecutive-probe counter.
-      fm_remote_unreachable_end "$state" "$key"
+      fm_remote_unreachable_end "$state" "$task"
       rm -f "$state/.subsuper-remote-inconclusive-$key"
       case "$endpoint_state" in
         dead|missing) return 0 ;;
@@ -1061,7 +1061,7 @@ remote_stale_recheck() {  # <window> <state>
       ;;
   esac
   # Any other answer is unusable evidence, so it joins the unreachable episode.
-  if fm_remote_unreachable_tick "$state" "$key" >/dev/null; then
+  if fm_remote_unreachable_tick "$state" "$task" >/dev/null; then
     return 2
   fi
   return 3
@@ -1643,10 +1643,7 @@ housekeeping() {  # <state>
     # legacy fallback for old markers that predate meta lookup.
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
-      # Window gone (task torn down): drop the marker and its route episode,
-      # nothing to escalate.
       stale_markers_remove_by_key "$state" "$key"
-      fm_remote_unreachable_end "$state" "$key"
       continue
     fi
     task=$(window_to_task "$win" "$state")
@@ -1703,12 +1700,13 @@ EOF
           if [ -n "$latest" ] && daemon_pause_status_is_valid "$win" "$state" "$latest"; then
             reconcile_pause_tracking "$win" "$state" "$latest"
           else
-            unreach_age=$(fm_remote_unreachable_age "$state" "$key" 2>/dev/null || true)
+            unreach_age=$(fm_remote_unreachable_age "$state" "$task" 2>/dev/null || true)
             # Mark the episode's one alert before delivering it, so a restart
             # cannot repeat the same unreachable escalation.
-            fm_remote_unreachable_alert_mark "$state" "$key" || true
-            escalate_add "$state" "remote host unreachable for ${unreach_age:-?}s while its endpoint stayed stale (no conclusive answer): $win" \
-              "$task" worker - "$adv_endpoint" "$adv_ident"
+            if fm_remote_unreachable_alert_mark "$state" "$task"; then
+              escalate_add "$state" "remote host unreachable for ${unreach_age:-?}s while its endpoint stayed stale (no conclusive answer): $win" \
+                "$task" worker - "$adv_endpoint" "$adv_ident"
+            fi
             stale_marker_remove "$win" "$state"
           fi
           ;;

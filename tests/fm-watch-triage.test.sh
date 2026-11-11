@@ -4650,6 +4650,29 @@ test_remote_inconclusive_probes_never_raise_a_verdict() {
   pass "timeout, unreachable, and non-numeric remote probes never raise a stale or wedge verdict"
 }
 
+test_remote_unreachable_alert_claim_is_atomic() {
+  local dir state n pid
+  local -a pids=()
+  dir=$(make_case remote-alert-claim)
+  state="$dir/state"
+  . "$ROOT/bin/fm-remote-liveness-lib.sh"
+  for n in {1..24}; do
+    (
+      if fm_remote_unreachable_alert_mark "$state" ios.mac; then
+        printf 'winner\n' >> "$dir/winners"
+      fi
+    ) &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do wait "$pid"; done
+  [ "$(wc -l < "$dir/winners")" -eq 1 ] \
+    || fail "concurrent alert claims produced multiple winners"
+  fm_remote_unreachable_end "$state" ios.mac
+  fm_remote_unreachable_alert_mark "$state" ios.mac \
+    || fail "a conclusive reset did not allow a new alert claim"
+  pass "concurrent callers claim one alert per episode"
+}
+
 test_remote_unreachable_window_validation() {
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-remote-liveness-lib.sh"
@@ -4657,6 +4680,11 @@ test_remote_unreachable_window_validation() {
     || fail "a positive unreachable window was not honored"
   [ "$(FM_REMOTE_UNREACHABLE_ALERT_SECS=0 fm_remote_unreachable_alert_secs)" = 1800 ] \
     || fail "a zero unreachable window did not fall back to 1800"
+  local zero
+  for zero in 00 000000000; do
+    [ "$(FM_REMOTE_UNREACHABLE_ALERT_SECS=$zero fm_remote_unreachable_alert_secs)" = 1800 ] \
+      || fail "an all-zero unreachable window did not fall back to 1800"
+  done
   [ "$(FM_REMOTE_UNREACHABLE_ALERT_SECS=soon fm_remote_unreachable_alert_secs)" = 1800 ] \
     || fail "a non-numeric unreachable window did not fall back to 1800"
   [ "$(FM_REMOTE_UNREACHABLE_ALERT_SECS=9999999999 fm_remote_unreachable_alert_secs)" = 1800 ] \
@@ -5894,6 +5922,7 @@ test_secondmate_nonpaused_stale_remains_suppressed
 test_remote_secondmate_beacon_is_bounded
 test_remote_inconclusive_probe_is_absorbed_then_fresh
 test_remote_inconclusive_probes_never_raise_a_verdict
+test_remote_unreachable_alert_claim_is_atomic
 test_remote_unreachable_window_validation
 test_remote_conclusive_stale_age_escalates
 test_remote_unreachable_episode_alerts_once

@@ -42,8 +42,9 @@ FM_REMOTE_UNREACHABLE_ALERT_SECS_DEFAULT=1800
 fm_remote_unreachable_alert_secs() {
   local secs=${FM_REMOTE_UNREACHABLE_ALERT_SECS:-$FM_REMOTE_UNREACHABLE_ALERT_SECS_DEFAULT}
   case "$secs" in
-    ''|*[!0-9]*|0|??????????*) secs=$FM_REMOTE_UNREACHABLE_ALERT_SECS_DEFAULT ;;
+    ''|*[!0-9]*|??????????*) secs=$FM_REMOTE_UNREACHABLE_ALERT_SECS_DEFAULT ;;
   esac
+  [ -n "${secs//0/}" ] || secs=$FM_REMOTE_UNREACHABLE_ALERT_SECS_DEFAULT
   printf '%s\n' "$secs"
 }
 
@@ -110,7 +111,7 @@ fm_remote_unreachable_alert_mark() {  # <state> <key> [now]
     now=$(date +%s)
   fi
   case "$now" in ''|*[!0-9]*) return 2 ;; esac
-  printf '%s\n' "$now" > "$state/.remote-unreachable-alerted-$key"
+  ( set -C; printf '%s\n' "$now" > "$state/.remote-unreachable-alerted-$key" ) 2>/dev/null
 }
 
 # End the route's episode after a conclusive probe.
