@@ -537,25 +537,10 @@ fi
 exit 0
 fi
 
-# Captain preamble. The active home's private, gitignored config/brief-preamble.md
-# carries the captain's worker-relevant standing preferences into every ship and
-# scout scaffold, so firstmate never has to paste them into a brief by hand. The
-# section is emitted between the task instructions and the definition of done,
-# after the task and acceptance criteria, where nothing firstmate fills or parses
-# can collide with it.
-# An absent, empty, or whitespace-only file contributes no bytes, so a home
-# without one scaffolds exactly the brief it scaffolded before this section
-# existed. Secondmate charters are not task briefs and never carry it; a
-# secondmate home instead receives its own copy through the inherited-local-
-# material allowlist owned by bin/fm-config-inherit-lib.sh.
-# The scaffold's own fill tokens and its exclusive single-occurrence lines are
-# refused rather than escaped: firstmate replaces every {TASK} and
-# {ACCEPTANCE CRITERION} after scaffolding, bin/fm-spawn.sh refuses a brief that
-# still contains {TASK}, bin/fm-receipt-check.sh --parse-criteria reads every
-# level-1 acceptance-criteria heading, and the delivery-contract helpers require
-# exactly one "Delivery contract: mode=" line. Escaping would silently rewrite
-# the captain's words; refusing keeps the fill, the checks, and the parsers
-# meaningful and names the exact offending line.
+# The header owns the preamble contract. Refuse collisions rather than escaping
+# the captain's words: spawn rejects remaining {TASK} tokens, the criteria parser
+# reads every level-1 acceptance heading, and delivery checks require one contract.
+# The sentinel preserves trailing newlines that command substitution would strip.
 BRIEF_PREAMBLE_FILE="$FM_HOME/config/brief-preamble.md"
 PREAMBLE_SECTION=
 if [ -f "$BRIEF_PREAMBLE_FILE" ]; then

@@ -475,6 +475,26 @@
       "audience": "operator-current"
     },
     {
+      "path": "tests/fixtures/fm-brief-pre-preamble/README.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief-pre-preamble/brief-inert-dpr.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief-pre-preamble/brief-inert-lo.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief-pre-preamble/brief-inert-nm.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief-pre-preamble/brief-inert-scout.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
     }
