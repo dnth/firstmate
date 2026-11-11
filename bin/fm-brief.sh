@@ -559,10 +559,11 @@ fi
 BRIEF_PREAMBLE_FILE="$FM_HOME/config/brief-preamble.md"
 PREAMBLE_SECTION=
 if [ -f "$BRIEF_PREAMBLE_FILE" ]; then
-  if ! PREAMBLE_BODY=$(cat -- "$BRIEF_PREAMBLE_FILE"); then
+  if ! PREAMBLE_BODY=$(cat -- "$BRIEF_PREAMBLE_FILE" && printf '.'); then
     echo "error: could not read $BRIEF_PREAMBLE_FILE" >&2
     exit 1
   fi
+  PREAMBLE_BODY=${PREAMBLE_BODY%.}
   if printf '%s' "$PREAMBLE_BODY" | grep -q '[^[:space:]]'; then
     PREAMBLE_OFFENSE=
     for PREAMBLE_TOKEN in '{TASK}' '{ACCEPTANCE CRITERION}'; do

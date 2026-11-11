@@ -1240,6 +1240,20 @@ test_screen_change_criteria_are_declared_and_markable() {
 # carries them verbatim, once, under one labeled section appended after the task
 # and acceptance-criteria placeholders firstmate fills, so the fill, the
 # spawn-time {TASK} check, and the acceptance-criteria parser keep working.
+assert_preamble_bytes() {
+  local brief=$1 home=$2
+  cat > "$home/expected-section.md" <<'EOF'
+# Captain standing preferences
+This section is carried verbatim from this home's private `config/brief-preamble.md`, the captain's worker-relevant standing preferences. Apply them to this task. Do not edit or fill anything inside this section.
+EOF
+  cat "$home/config/brief-preamble.md" >> "$home/expected-section.md"
+  printf '\n\n' >> "$home/expected-section.md"
+  sed -E -n '/^# Captain standing preferences$/,/^# (Acceptance evidence|Definition of done)$/ { /^# (Acceptance evidence|Definition of done)$/!p; }' \
+    "$brief" > "$home/actual-section.md"
+  cmp -s "$home/expected-section.md" "$home/actual-section.md" \
+    || fail "captain preamble section changed bytes, including trailing newlines"
+}
+
 test_brief_preamble_reaches_ship_and_scout_briefs() {
   local home id mode brief count ac_line task_line heading_line dod_line filled
   home="$TMP_ROOT/preamble-home"
@@ -1249,6 +1263,7 @@ Use uv for every Python invocation: `uv run`, `uv run --with <pkg>`, or `uvx`.
 Keep worker replies short and evidence-first.
 Placeholder-looking text such as {PLACEHOLDER} and {{name}} is literal and must survive.
 EOF
+  printf '\n\n\n' >> "$home/config/brief-preamble.md"
 
   for id_mode in "brief-preamble-nm:no-mistakes" "brief-preamble-dpr:direct-PR" "brief-preamble-lo:local-only"; do
     id=${id_mode%%:*}
@@ -1256,6 +1271,7 @@ EOF
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode: ship scaffold with a captain preamble exited non-zero"
     brief="$home/data/$id/brief.md"
+    assert_preamble_bytes "$brief" "$home"
     count=$(grep -cF '# Captain standing preferences' "$brief" || true)
     [ "$count" -eq 1 ] || fail "$mode: captain preamble section appeared $count times, expected exactly once"
     count=$(grep -cF 'Use uv for every Python invocation' "$brief" || true)
@@ -1287,6 +1303,7 @@ EOF
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-preamble-scout alpha --scout >/dev/null 2>&1 \
     || fail "scout scaffold with a captain preamble exited non-zero"
   brief="$home/data/brief-preamble-scout/brief.md"
+  assert_preamble_bytes "$brief" "$home"
   count=$(grep -cF '# Captain standing preferences' "$brief" || true)
   [ "$count" -eq 1 ] || fail "scout: captain preamble section appeared $count times, expected exactly once"
   count=$(grep -cF 'Use uv for every Python invocation' "$brief" || true)
@@ -1314,15 +1331,23 @@ test_brief_preamble_absent_or_empty_is_inert() {
   local home id mode variant brief reference
   home="$TMP_ROOT/preamble-inert"
   mkdir -p "$home/data"
-  reference="$home/reference"
-  mkdir -p "$reference"
+  reference="$ROOT/tests/fixtures/fm-brief-pre-preamble"
 
   scaffold_inert_brief() {  # <id> <mode|--scout>
     if [ "$2" = --scout ]; then
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$1" alpha --scout >/dev/null 2>&1
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+        FM_CLASSIFY_PAUSED_VERB=paused FM_IDLE_OPEN_WORK_SECS=600 \
+        "$ROOT/bin/fm-brief.sh" "$1" alpha --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$1" alpha --mode "$2" >/dev/null 2>&1
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+        FM_CLASSIFY_PAUSED_VERB=paused FM_IDLE_OPEN_WORK_SECS=600 \
+        "$ROOT/bin/fm-brief.sh" "$1" alpha --mode "$2" >/dev/null 2>&1
     fi
+  }
+
+  normalize_inert_brief() {
+    FM_SNAPSHOT_ROOT="$ROOT" FM_SNAPSHOT_HOME="$home" perl -0777 -pe \
+      's/\Q$ENV{FM_SNAPSHOT_HOME}\E/\@FM_HOME\@/g; s/\Q$ENV{FM_SNAPSHOT_ROOT}\E/\@FM_ROOT\@/g' "$1"
   }
 
   for id_mode in "brief-inert-nm:no-mistakes" "brief-inert-dpr:direct-PR" \
@@ -1335,7 +1360,9 @@ test_brief_preamble_absent_or_empty_is_inert() {
     brief="$home/data/$id/brief.md"
     assert_no_grep '# Captain standing preferences' "$brief" \
       "$mode: an absent preamble still emitted a section"
-    cp "$brief" "$reference/$id-absent.md"
+    normalize_inert_brief "$brief" > "$home/normalized.md"
+    cmp -s "$reference/$id.md" "$home/normalized.md" \
+      || fail "$mode: absent preamble changed the pre-change scaffold bytes"
     for variant in empty whitespace; do
       rm -rf "$home/data/$id"
       mkdir -p "$home/config"
@@ -1345,7 +1372,8 @@ test_brief_preamble_absent_or_empty_is_inert() {
       esac
       scaffold_inert_brief "$id" "$mode" \
         || fail "$mode: scaffold with a $variant preamble exited non-zero"
-      cmp -s "$reference/$id-absent.md" "$home/data/$id/brief.md" \
+      normalize_inert_brief "$home/data/$id/brief.md" > "$home/normalized.md"
+      cmp -s "$reference/$id.md" "$home/normalized.md" \
         || fail "$mode: a $variant preamble changed the generated brief"
       assert_no_grep '# Captain standing preferences' "$home/data/$id/brief.md" \
         "$mode: a $variant preamble emitted a section"
@@ -1360,7 +1388,8 @@ test_brief_preamble_absent_or_empty_is_inert() {
       skipping && /^# / { skipping = 0 }
       !skipping { print }
     ' "$home/data/$id/brief.md" > "$home/data/$id/stripped.md"
-    cmp -s "$reference/$id-absent.md" "$home/data/$id/stripped.md" \
+    normalize_inert_brief "$home/data/$id/stripped.md" > "$home/normalized.md"
+    cmp -s "$reference/$id.md" "$home/normalized.md" \
       || fail "$mode: removing the labeled preamble section did not restore the preamble-free brief"
     rm -f "$home/config/brief-preamble.md"
   done
