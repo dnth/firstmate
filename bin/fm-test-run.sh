@@ -134,6 +134,7 @@ family_for_basename() {
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-brief.test.sh|fm-receipt.test.sh|fm-receipt-check.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
+    fm-python-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
