@@ -47,7 +47,7 @@ It follows the cd-guard's command-position classification: leading assignments a
 | Denied command shape | uv replacement named in the reason |
 | --- | --- |
 | `python`, `python3`, `python3.X` running a script, `-c` code, `-` stdin, or no argument | `uv run python ...`; `uv run --script <script>` for a script with inline PEP 723 dependency metadata; `uv run --with <pkg> python ...` for a one-off dependency |
-| `pip` / `pip3` invocations, including `install` | `uv add <pkg>` in a project, `uv pip install <pkg>` in a venv, `uv pip <subcommand>` for the rest |
+| `pip install` / `pip3 install` | `uv add <pkg>` in a project, `uv pip install <pkg>` in a venv |
 | `python -m pip ...` | the same `uv add` / `uv pip install` guidance |
 | `pipx run <tool>` | `uvx <tool>` |
 | `pipx install <tool>` | `uv tool install <tool>` |
@@ -60,6 +60,7 @@ The guard allows everything else, including these safe forms that must never be 
 - A bare command word appearing as data: inside a quoted string, an argument, a heredoc body, a comment, or a file path (`echo "python3 script.py"`, `grep python3 README.md`, `ls /usr/bin/python3`, `chmod +x ./python3`).
 - A different command whose name merely contains the text, such as `python3.12-config`, or a path-qualified interpreter such as `./python3`.
 - Other pipx subcommands (`pipx list`), which the guard leaves alone because only `run` and `install` have the specified uv replacements.
+- Pip inspection commands (`pip list`, `pip show`, `pip --version`) and command queries (`command -v python3`, `command -V pip`).
 
 ### Accepted non-goals
 
@@ -79,7 +80,7 @@ Every deny carries one stable code in square brackets before its prose reason.
 | Code | Meaning |
 | --- | --- |
 | `bare-python` | A bare Python interpreter invocation, including a `-m` module that is not pip or venv. |
-| `bare-pip` | A bare `pip`/`pip3` invocation, including `python -m pip`. |
+| `bare-pip` | A bare `pip install`/`pip3 install` invocation, or `python -m pip`. |
 | `bare-pipx` | A bare `pipx run` or `pipx install` invocation. |
 | `bare-virtualenv` | Bare venv creation through `python -m venv` or `virtualenv`. |
 

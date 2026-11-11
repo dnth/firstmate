@@ -118,7 +118,7 @@ matrix_case D22 deny 'uv run python' 'python3 script.py > out.log'
 matrix_case D23 deny 'uv run python' 'p"ython"3 script.py'
 matrix_case D24 deny 'uv run python' 'py\thon3 script.py'
 matrix_case D25 deny 'uv add' 'pip --quiet install requests'
-matrix_case D26 deny 'uv pip install' 'pip list'
+matrix_case D26 deny 'uv pip install' 'pip3 --quiet install requests'
 matrix_case D27 deny 'uv venv' 'python3 -m virtualenv .venv'
 
 # ALLOW: uv tooling, data, arguments, paths, and non-executed occurrences.
@@ -143,6 +143,30 @@ matrix_case A18 allow '' 'python3.12-config --cflags'
 matrix_case A19 allow '' "echo 'pip install requests'"
 matrix_case A20 allow '' 'git log --grep python3'
 matrix_case A21 allow '' 'printf "%s\n" python3'
+matrix_case A22 allow '' 'pip list'
+matrix_case A23 allow '' 'pip3 show requests'
+matrix_case A24 allow '' 'pip --version'
+matrix_case A25 allow '' 'pip uninstall requests'
+
+for separator in ';' $'\n' '|' '|&' '&&' '||' '&'; do
+  for invocation in 'python3 script.py' 'pip install requests' 'pipx run ruff' 'pipx install ruff' 'virtualenv .venv'; do
+    matrix_case "list-${#MATRIX_IDS[@]}" deny 'uv' "pipx list $separator $invocation"
+  done
+done
+for prefix in 'command -v' 'command -V' 'env command -v' 'sudo command -V' 'timeout 2 command -v' 'builtin command -v'; do
+  for tool in python3 pip pipx virtualenv; do
+    matrix_case "query-${#MATRIX_IDS[@]}" allow '' "$prefix $tool"
+  done
+done
+matrix_case query-list deny 'uv run python' 'command -v python3; python3 script.py'
+matrix_case pip-list deny 'uv run python' 'pip list; python3 script.py'
+for option in '-W ignore' '-X dev' '-Wignore' '-Xdev' '-W ignore -X dev'; do
+  matrix_case "venv-options-${#MATRIX_IDS[@]}" deny 'uv venv' "python3 $option -m venv .venv"
+  matrix_case "virtualenv-options-${#MATRIX_IDS[@]}" deny 'uv venv' "python3 $option -m virtualenv .venv"
+  matrix_case "pip-options-${#MATRIX_IDS[@]}" deny 'uv add' "python3 $option -m pip install requests"
+  matrix_case "module-options-${#MATRIX_IDS[@]}" deny 'uvx' "python3 $option -m http.server"
+  matrix_case "script-options-${#MATRIX_IDS[@]}" deny 'uv run python' "python3 $option script.py -m venv"
+done
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-python-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -177,6 +201,11 @@ run_matrix_entry() {
       ;;
   esac
 
+  assert_matrix_result "$id" "$expected" "$token" "$entry" "$rc" "$out_file" "$err_file"
+}
+
+assert_matrix_result() {
+  local id=$1 expected=$2 token=$3 entry=$4 rc=$5 out_file=$6 err_file=$7
   if [ "$expected" = allow ]; then
     [ "$rc" -eq 0 ] || fail "$id via $entry must allow, got exit $rc: $(cat "$err_file")"
     [ ! -s "$out_file" ] || fail "$id via $entry allow must leave stdout empty: $(cat "$out_file")"
@@ -185,15 +214,15 @@ run_matrix_entry() {
   fi
 
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
-  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[bare-(python|pip|pipx|virtualenv)\\]"))' "$err_file" >/dev/null 2>&1 \
+  jq -e '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[bare-(python|pip|pipx|virtualenv)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a bare-tooling reason code on stderr: $(cat "$err_file")"
   jq -e --arg token "$token" '.systemMessage | contains($token)' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must name the uv replacement '$token': $(cat "$err_file")"
   if [ "$entry" = claude ]; then
     [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
-  elif [ "$entry" = grok ]; then
-    jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \
-      || fail "$id via grok deny must carry decision=deny on stdout: $(cat "$out_file")"
+  else
+    jq -e --arg token "$token" '.decision == "deny" and (.reason | contains($token))' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via $entry deny must carry decision=deny and uv guidance on stdout: $(cat "$out_file")"
   fi
 }
 
@@ -381,20 +410,49 @@ test_policy_cli_direct() {
 # --- per-harness wiring -----------------------------------------------------
 
 test_stdio_harness_wiring() {
-  local settings codex grok
-  settings="$ROOT/.claude/settings.json"
-  codex="$ROOT/.codex/hooks.json"
-  grok="$ROOT/.grok/hooks/fm-primary-python-check.json"
-  [ -f "$settings" ] || fail "tracked .claude/settings.json is missing"
-  [ -f "$codex" ] || fail "tracked .codex/hooks.json is missing"
-  [ -f "$grok" ] || fail "tracked .grok/hooks/fm-primary-python-check.json is missing"
-  jq -e 'any(.hooks.PreToolUse[]? | select(.matcher == "Bash") | .hooks[]?; (.command // "") | contains("fm-python-pretool-check.sh"))' \
-    "$settings" >/dev/null 2>&1 || fail ".claude/settings.json Bash PreToolUse must forward to fm-python-pretool-check.sh"
-  jq -e 'any(.hooks.PreToolUse[]?.hooks[]?; (.command // "") | contains("fm-python-pretool-check.sh"))' \
-    "$codex" >/dev/null 2>&1 || fail ".codex/hooks.json PreToolUse must forward to fm-python-pretool-check.sh"
-  jq -e 'any(.hooks.PreToolUse[]?.hooks[]?; (.command // "") | contains("fm-python-pretool-check.sh"))' \
-    "$grok" >/dev/null 2>&1 || fail ".grok/hooks/fm-primary-python-check.json must invoke fm-python-pretool-check.sh"
-  pass "python-guard: Claude, Codex, and Grok hook configs forward to the checker"
+  local repo entry config cmd expected payload hook rc blocked out_file err_file
+  repo=$(make_primary_fixture "$TMP_ROOT/stdio-hooks")
+  mkdir -p "$repo/.claude" "$repo/.codex" "$repo/.grok/hooks"
+  cp "$ROOT/.claude/settings.json" "$repo/.claude/settings.json"
+  cp "$ROOT/.codex/hooks.json" "$repo/.codex/hooks.json"
+  cp "$ROOT/.grok/hooks/fm-primary-python-check.json" "$repo/.grok/hooks/fm-primary-python-check.json"
+  cp "$ROOT/bin/fm-arm-pretool-check.sh" "$ROOT/bin/fm-cd-pretool-check.sh" "$ROOT/bin/fm-cd-command-policy.mjs" "$repo/bin/"
+  for entry in claude codex grok; do
+    case "$entry" in
+      claude) config="$repo/.claude/settings.json" ;;
+      codex) config="$repo/.codex/hooks.json" ;;
+      grok) config="$repo/.grok/hooks/fm-primary-python-check.json" ;;
+    esac
+    for expected in deny allow; do
+      cmd='python3 script.py'
+      [ "$expected" != allow ] || cmd='uv run python3 script.py'
+      if [ "$entry" = grok ]; then
+        payload=$(jq -cn --arg command "$cmd" '{toolName:"run_terminal_command",toolInput:{command:$command}}')
+      else
+        payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
+      fi
+      blocked=0
+      while IFS= read -r hook; do
+        out_file="$MATRIX_TMP/hook-$entry.out"
+        err_file="$MATRIX_TMP/hook-$entry.err"
+        (
+          cd "$repo" || exit 1
+          export CLAUDE_PROJECT_DIR="$repo" GROK_WORKSPACE_ROOT="$repo" FM_HOME="$repo"
+          unset FM_ROOT_OVERRIDE FM_CONFIG_OVERRIDE
+          printf '%s' "$payload" | bash -c "$hook"
+        ) >"$out_file" 2>"$err_file"
+        rc=$?
+        if [ "$rc" -eq 2 ] && [ "$expected" = deny ]; then
+          assert_matrix_result hook deny 'uv run python' "$entry" "$rc" "$out_file" "$err_file"
+          blocked=1
+        else
+          assert_matrix_result hook allow '' "$entry" "$rc" "$out_file" "$err_file"
+        fi
+      done < <(jq -r '.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[] | select(.type == "command") | .command' "$config")
+      [ "$expected" != deny ] || [ "$blocked" -eq 1 ] || fail "$entry configured hooks must deny bare Python"
+    done
+  done
+  pass "python-guard: configured Claude, Codex, and Grok hooks deny bare Python and silently allow uv"
 }
 
 test_opencode_plugin_forwards_and_blocks() {

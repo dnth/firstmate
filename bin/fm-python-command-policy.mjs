@@ -22,7 +22,7 @@ const REASONS = {
   python:
     "run Python through uv instead of bare python or python3: `uv run python <script>` (use `uv run --script <script>` when the script carries inline PEP 723 dependency metadata), `uv run python -c '<code>'`, or `uv run --with <pkg> python ...` for a one-off dependency.",
   pip:
-    "manage Python packages through uv instead of bare pip: `uv add <pkg>` in a project, or `uv pip install <pkg>` in a venv (`uv pip <subcommand>` for the rest).",
+    "manage Python packages through uv instead of bare pip: `uv add <pkg>` in a project, or `uv pip install <pkg>` in a venv.",
   pipxRun:
     "run a Python tool through uv instead of pipx: `uvx <tool>`.",
   pipxInstall:
@@ -69,6 +69,10 @@ function pythonIntent(words) {
     if (value === "-m") return { kind: "module", module: words[index + 1]?.value ?? "" };
     const attached = value.match(/^-m([A-Za-z0-9_.]+)$/);
     if (attached) return { kind: "module", module: attached[1] };
+    if (value === "-W" || value === "-X") {
+      index += 1;
+      continue;
+    }
     if (value === "--") return { kind: "script" };
     if (value.startsWith("-")) continue;
     return { kind: "script" };
@@ -106,6 +110,12 @@ function decision(command) {
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
     const position = commandPosition(tokens);
+    let commandPrefix = false;
+    const query = position.words.slice(position.prefixAssignments, position.index).some((word) => {
+      if (word.value === "command") commandPrefix = true;
+      return commandPrefix && /^-[^-]*[vV]/.test(word.value);
+    });
+    if (query) continue;
     let command = position.command;
     let wordIndex = position.index;
     while (command && (command.value === "builtin" || command.value === "command")) {
@@ -116,8 +126,11 @@ function decision(command) {
     const value = command.value;
     const args = argsAfter(position, wordIndex);
     if (PYTHON_NAME.test(value)) return pythonDecision(args);
-    if (PIP_NAME.test(value)) return deny("bare-pip", REASONS.pip);
-    if (value === "pipx") return pipxDecision(args);
+    if (PIP_NAME.test(value) && firstNonOption(args) === "install") return deny("bare-pip", REASONS.pip);
+    if (value === "pipx") {
+      const result = pipxDecision(args);
+      if (result.decision === "deny") return result;
+    }
     if (value === "virtualenv") return deny("bare-virtualenv", REASONS.venv);
   }
   return { decision: "allow" };
