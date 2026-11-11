@@ -41,6 +41,11 @@ const PIP_NAME = /^pip(?:\d+(?:\.\d+)*)?$/;
 const MODULE_PIP_NAME = /^pip(?:\.[A-Za-z0-9_]+)*$/;
 const MODULE_VENV_NAME = "venv";
 const MODULE_VIRTUALENV_NAME = "virtualenv";
+const PIP_OPTION_OPERANDS = new Set([
+  "--python", "--log", "--keyring-provider", "--proxy", "--retries",
+  "--timeout", "--exists-action", "--trusted-host", "--cert", "--client-cert",
+  "--cache-dir", "--use-feature", "--use-deprecated", "--resume-retries",
+]);
 
 function deny(code, reason) {
   return { decision: "deny", code, reason };
@@ -50,11 +55,16 @@ function argsAfter(position, wordIndex) {
   return position.words.slice(wordIndex + 1);
 }
 
-function firstNonOption(words) {
-  for (const word of words) {
-    if (word.value === "--") continue;
-    if (word.value.startsWith("-")) continue;
-    return word.value;
+function firstNonOption(words, operandOptions = new Set()) {
+  for (let index = 0; index < words.length; index += 1) {
+    const value = words[index].value;
+    if (value === "--") return words[index + 1]?.value ?? "";
+    if (operandOptions.has(value)) {
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("-")) continue;
+    return value;
   }
   return "";
 }
@@ -110,12 +120,7 @@ function decision(command) {
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
     const position = commandPosition(tokens);
-    let commandPrefix = false;
-    const query = position.words.slice(position.prefixAssignments, position.index).some((word) => {
-      if (word.value === "command") commandPrefix = true;
-      return commandPrefix && /^-[^-]*[vV]/.test(word.value);
-    });
-    if (query) continue;
+    if (position.commandQuery) continue;
     let command = position.command;
     let wordIndex = position.index;
     while (command && (command.value === "builtin" || command.value === "command")) {
@@ -126,7 +131,7 @@ function decision(command) {
     const value = command.value;
     const args = argsAfter(position, wordIndex);
     if (PYTHON_NAME.test(value)) return pythonDecision(args);
-    if (PIP_NAME.test(value) && firstNonOption(args) === "install") return deny("bare-pip", REASONS.pip);
+    if (PIP_NAME.test(value) && firstNonOption(args, PIP_OPTION_OPERANDS) === "install") return deny("bare-pip", REASONS.pip);
     if (value === "pipx") {
       const result = pipxDecision(args);
       if (result.decision === "deny") return result;

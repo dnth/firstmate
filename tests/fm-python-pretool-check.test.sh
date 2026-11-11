@@ -160,6 +160,26 @@ for prefix in 'command -v' 'command -V' 'env command -v' 'sudo command -V' 'time
 done
 matrix_case query-list deny 'uv run python' 'command -v python3; python3 script.py'
 matrix_case pip-list deny 'uv run python' 'pip list; python3 script.py'
+for option in '--log pip.log' '--python .venv' '--keyring-provider disabled' '--proxy http://proxy.invalid' '--retries 3' '--timeout 5' '--exists-action i' '--trusted-host host.invalid' '--cert ca.pem' '--client-cert client.pem' '--cache-dir cache' '--use-feature feature' '--use-deprecated feature' '--resume-retries 3'; do
+  matrix_case "pip-global-${#MATRIX_IDS[@]}" deny 'uv add' "pip $option install requests"
+  matrix_case "pip-inspect-${#MATRIX_IDS[@]}" allow '' "pip $option list"
+done
+for tool in pip pip3 pip3.12; do
+  matrix_case "pip-equals-${#MATRIX_IDS[@]}" deny 'uv add' "$tool --log=pip.log --python=.venv --quiet install requests"
+  matrix_case "pip-mixed-${#MATRIX_IDS[@]}" deny 'uv add' "$tool --log pip.log --python=.venv --log second.log install requests"
+  matrix_case "pip-operand-${#MATRIX_IDS[@]}" allow '' "$tool --log install list"
+  matrix_case "pip-equals-operand-${#MATRIX_IDS[@]}" allow '' "$tool --log=install show requests"
+done
+for prefix in 'command env -v' 'command timeout -v 2' 'command timeout --verbose 2' 'command env -u command -v' 'env command timeout -v 2' 'command -- env -v'; do
+  for invocation in 'python3 script.py' 'pip install requests' 'pipx run ruff' 'pipx install ruff' 'virtualenv .venv'; do
+    matrix_case "wrapper-verbose-${#MATRIX_IDS[@]}" deny 'uv' "$prefix $invocation"
+  done
+done
+for prefix in 'command -pv' 'command command -V' 'env -u command command -v' 'command env command -V'; do
+  for tool in python3 pip pipx virtualenv; do
+    matrix_case "nested-query-${#MATRIX_IDS[@]}" allow '' "$prefix $tool"
+  done
+done
 for option in '-W ignore' '-X dev' '-Wignore' '-Xdev' '-W ignore -X dev'; do
   matrix_case "venv-options-${#MATRIX_IDS[@]}" deny 'uv venv' "python3 $option -m venv .venv"
   matrix_case "virtualenv-options-${#MATRIX_IDS[@]}" deny 'uv venv' "python3 $option -m virtualenv .venv"
