@@ -20,11 +20,7 @@ Its threat model is agent mistakes, the same as the other guards in the family: 
 
 ## Opt-in
 
-The guard ships inert and is opt-in per home.
-`bin/fm-python-pretool-check.sh` reads `config/python-runner` from the effective home: `FM_CONFIG_OVERRIDE`, else `$FM_HOME/config`, else the primary checkout's `config/`.
-The only recognized value is `uv` (whitespace ignored).
-An absent file, or any other value, makes the guard a silent no-op, so the shared template imposes nothing on other users.
-The file is local and gitignored, like the other `config/` operating choices.
+The guard ships inert; [`configuration.md`](configuration.md#python-runner-guard-configpython-runner) owns the per-home `config/python-runner` opt-in value and lookup order.
 
 ## Scope: plain firstmate checkouts only
 
@@ -52,7 +48,7 @@ It follows the cd-guard's command-position classification: leading assignments a
 | `pipx run <tool>` | `uvx <tool>` |
 | `pipx install <tool>` | `uv tool install <tool>` |
 | `python -m <tool>` | `uvx <tool>` (or `uv run python -m <tool>` inside the project environment) |
-| `python -m venv ...`, `virtualenv ...` | `uv venv` |
+| `python -m venv ...`, `python -m virtualenv ...`, `virtualenv ...` | `uv venv` |
 
 The guard allows everything else, including these safe forms that must never be blocked:
 
@@ -79,10 +75,10 @@ Every deny carries one stable code in square brackets before its prose reason.
 
 | Code | Meaning |
 | --- | --- |
-| `bare-python` | A bare Python interpreter invocation, including a `-m` module that is not pip or venv. |
+| `bare-python` | A bare Python interpreter invocation, including a `-m` module other than pip, venv, or virtualenv. |
 | `bare-pip` | A bare `pip install`/`pip3 install` invocation, or `python -m pip`. |
 | `bare-pipx` | A bare `pipx run` or `pipx install` invocation. |
-| `bare-virtualenv` | Bare venv creation through `python -m venv` or `virtualenv`. |
+| `bare-virtualenv` | Bare venv creation through `python -m venv`, `python -m virtualenv`, or `virtualenv`. |
 
 ## Transport and fail-open behavior
 
@@ -127,7 +123,7 @@ The Python guard never duplicates shell lexing; it adds only the Python-tooling 
 | Codex | `.codex/hooks.json` PreToolUse hook that anchors from `pwd -P`, verifies the hook-loaded firstmate root, and forwards the payload | Blocks on exit 2 and displays stderr. |
 | Grok | `.grok/hooks/fm-primary-python-check.json` PreToolUse hook anchored on `${GROK_WORKSPACE_ROOT:-}` | Consumes the stdout `decision=deny` object. |
 | OpenCode | `.opencode/plugins/fm-primary-python-check.js` `tool.execute.before` | Throws, which surfaces as the failed tool result. |
-| Pi | `.pi/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{ block: true }`; piggybacks on the already-loaded primary extension so no extra `-e` flag is needed. |
+| Pi / pi-signed | `.pi/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{ block: true }`; piggybacks on the already-loaded primary extension so no extra `-e` flag is needed. |
 | OMP | `.omp/extensions/fm-primary-omp.ts` `tool_call` handler | Returns `{ block: true }`; piggybacks on the natively discovered primary extension. |
 
 Each harness runs the Python guard alongside the watcher-arm and cd guards; the checks are independent, and either deny blocks the command.
@@ -147,7 +143,7 @@ bash -n bin/fm-python-pretool-check.sh
 shellcheck bin/fm-python-pretool-check.sh tests/fm-python-pretool-check.test.sh
 node --check bin/fm-python-command-policy.mjs
 node --check bin/fm-arm-command-policy.mjs
-tests/fm-python-pretool-check.test.sh
-tests/fm-cd-pretool-check.test.sh
-tests/fm-omp-primary.test.sh
+bash tests/fm-python-pretool-check.test.sh
+bash tests/fm-cd-pretool-check.test.sh
+bash tests/fm-omp-primary.test.sh
 ```

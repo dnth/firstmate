@@ -253,10 +253,9 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 ## Python runner guard (config/python-runner)
 
 `config/python-runner` is an optional local, gitignored opt-in file in the effective home: `FM_CONFIG_OVERRIDE`, else `$FM_HOME/config`, else the primary checkout's `config/`.
-When its content is exactly `uv` (whitespace ignored), the primary-session Python runner guard refuses bare `python`/`python3`, `pip`/`pip3`, `pipx run`/`pipx install`, `python -m venv`, and `virtualenv` in the primary firstmate shell, and its deny reason names the uv replacement.
+When its content is exactly `uv` (whitespace ignored), it enables the primary-session Python runner guard.
 An absent file, or any other value, leaves the guard inert, so the shared template imposes nothing on other users.
-The guard is inert outside a plain primary firstmate checkout, so crewmate and scout task worktrees are never affected.
-See [`python-guard.md`](python-guard.md) for the full contract, reason codes, and harness wiring.
+See [`python-guard.md`](python-guard.md) for the command policy, checkout scope, reason codes, and harness wiring.
 
 ## Treehouse pool sweep (config/treehouse-sweep-clean)
 

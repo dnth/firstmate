@@ -2,8 +2,9 @@
 # Stable PreToolUse transport for the Python runner guard command policy.
 #
 # The rule is "Python runs through uv everywhere, never bare python3". This
-# seatbelt denies bare python, pip, pipx, and virtualenv invocations in the
-# PRIMARY firstmate shell before they run, and names the uv replacement.
+# seatbelt denies bare Python interpreter invocations, pip installs, pipx
+# runs/installs, and virtualenv invocations in the PRIMARY firstmate shell
+# before they run, and names the uv replacement.
 # bin/fm-python-command-policy.mjs is the sole owner of the block/allow
 # decision; it reuses the shell classifier owned by
 # bin/fm-arm-command-policy.mjs. This wrapper only requires the local opt-in
