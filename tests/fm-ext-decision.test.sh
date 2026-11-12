@@ -1958,9 +1958,11 @@ test_23_clicks_find_firstmate_tools_off_the_hosting_path() {
   # The account's login shell, stood in for by a shell that reports the
   # captain's PATH; the second one reports nothing the click cannot get itself.
   shell="$home/shell"
+  # shellcheck disable=SC2016 # Positional parameters expand in the generated shell.
   printf '#!/bin/bash\nPATH="%s:%s:%s"\nexport PATH\nexec /bin/bash --noprofile --norc -c "${@: -1}"\n' \
     "$toolbin" "$jqbin" "$hostbin" > "$shell"
   noshell="$home/shell-no-tools"
+  # shellcheck disable=SC2016 # Positional parameters expand in the generated shell.
   printf '#!/bin/bash\nPATH="%s:%s"\nexport PATH\nexec /bin/bash --noprofile --norc -c "${@: -1}"\n' \
     "$partial" "$hostbin" > "$noshell"
   chmod +x "$shell" "$noshell"
