@@ -480,16 +480,17 @@ test_stale_captain_held_remote_remains_ambiguous() {
 }
 
 test_housekeeping_remote_stale_marker_rechecks_owner() {
-  local mode result status_line dir state win key capture_attempted probe_calls on_bin remote_status_file
-  for mode in dead missing alive ambiguous unknown working-missing held-working; do
+  local mode result status_line dir state win key capture_attempted probe_calls on_bin remote_status_file task
+  for mode in dead missing alive ambiguous unknown noise working-missing held-working; do
     dir=$(make_supercase "housekeeping-captain-held-remote-$mode")
     state="$dir/state"
-    win="remote:held-remote-housekeeping"
-    key=$(printf '%s' "held-remote-housekeeping" | tr ':/.' '___')
+    task=held.remote.housekeeping
+    win="remote:$task"
+    key=$(printf '%s' "$task" | tr ':/.' '___')
     capture_attempted="$dir/capture-attempted"
     probe_calls="$dir/probe-calls"
     on_bin="$dir/fm-on.sh"
-    remote_status_file="$state/held-remote-housekeeping.status"
+    remote_status_file="$state/$task.status"
     cat > "$on_bin" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_REMOTE_PROBE_CALLS:?}"
@@ -501,6 +502,7 @@ case "${FM_REMOTE_PROBE_RESULT:?}" in
     printf 'missing\n'
     ;;
   unknown) exit 1 ;;
+  noise) printf 'unusable\n' ;;
 esac
 SH
     chmod +x "$on_bin"
@@ -514,8 +516,8 @@ SH
         status_line='captain-held [key=route]: waiting for recovery ownership'
         ;;
     esac
-    printf '%s\n' "$status_line" > "$state/held-remote-housekeeping.status"
-    fm_write_meta "$state/held-remote-housekeeping.meta" \
+    printf '%s\n' "$status_line" > "$state/$task.status"
+    fm_write_meta "$state/$task.meta" \
       "window=$win" "remote_host=remote-mac" "remote_backend=herdr" \
       "remote_target=fm-remote:w1:p1" "harness=codex"
     echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
@@ -527,26 +529,43 @@ SH
         FM_REMOTE_STATUS_FILE="$remote_status_file" \
         FM_STALE_ESCALATE_SECS=240 \
         FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
-      if [ "$mode" = unknown ]; then
-        # One inconclusive owner probe is not stale evidence: the next pass
-        # must stay deferred while the bound is unmet.
+      if { [ "$mode" = unknown ] || [ "$mode" = noise ]; }; then
+        # An inconclusive owner probe is never stale evidence: the next pass
+        # stays deferred while the route's unreachable episode is below its
+        # window.
         FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
           FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
           FM_REMOTE_STATUS_FILE="$remote_status_file" \
           FM_STALE_ESCALATE_SECS=240 \
           FM_REMOTE_STALE_RECHECK_SECS=0 housekeeping "$state"
         [ ! -s "$state/.subsuper-escalations" ] \
-          || fail "unknown remote owner escalated before the inconclusive bound"
+          || fail "unknown remote owner escalated before the unreachable window"
         [ -e "$state/.subsuper-stale-$key" ] \
-          || fail "unknown remote owner dropped the stale marker below the bound"
-        [ -e "$state/.subsuper-remote-inconclusive-$key" ] \
-          || fail "unknown remote owner did not count its inconclusive probes"
-        # The third consecutive probe meets the bound and escalates.
+          || fail "unknown remote owner dropped the stale marker below the window"
+        [ -e "$state/.remote-unreachable-since-$task" ] \
+          || fail "unknown remote owner did not start the route's unreachable episode"
+        # Age the episode past its window; the next probe raises its one alert.
+        printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.remote-unreachable-since-$task"
         FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
           FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
           FM_REMOTE_STATUS_FILE="$remote_status_file" \
-          FM_STALE_ESCALATE_SECS=240 \
+          FM_STALE_ESCALATE_SECS=240 FM_REMOTE_UNREACHABLE_ALERT_SECS=1 \
           FM_REMOTE_STALE_RECHECK_SECS=0 housekeeping "$state"
+        [ -e "$state/.remote-unreachable-alerted-$task" ] \
+          || fail "unknown remote owner did not record its one unreachable alert"
+        echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+        FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
+          FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
+          FM_REMOTE_STATUS_FILE="$remote_status_file" \
+          FM_REMOTE_UNREACHABLE_ALERT_SECS=1 FM_REMOTE_STALE_RECHECK_SECS=0 housekeeping "$state"
+        [ "$(wc -l < "$state/.subsuper-escalations")" -eq 1 ] \
+          || fail "a shared alerted episode escalated again"
+        FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
+          FM_REMOTE_PROBE_RESULT=dead FM_REMOTE_PROBE_CALLS="$probe_calls" \
+          FM_REMOTE_STALE_RECHECK_SECS=0 housekeeping "$state"
+        [ ! -e "$state/.remote-unreachable-since-$task" ] \
+          && [ ! -e "$state/.remote-unreachable-alerted-$task" ] \
+          || fail "a conclusive owner probe did not reset the raw task episode"
       fi
     ) || fail "remote captain-held stale housekeeping failed for $mode result"
     [ ! -e "$capture_attempted" ] || fail "remote captain-held stale attempted a local capture for $mode result"
@@ -565,15 +584,15 @@ SH
             || fail "$mode remote owner did not escalate stale marker"
         fi
         ;;
-      unknown)
+      unknown|noise)
         [ ! -e "$state/.subsuper-stale-$key" ] || fail "unknown remote owner result retained stale marker after escalation"
         [ ! -e "$state/.subsuper-remote-recheck-$key" ] || fail "unknown remote owner result retained recheck throttle marker"
-        grep -q 'remote stale owner probe inconclusive' "$state/.subsuper-escalations" \
-          || fail "unknown remote owner result did not escalate bounded visibility"
+        grep -q 'remote host unreachable' "$state/.subsuper-escalations" \
+          || fail "unknown remote owner result did not escalate its unreachable episode"
         [ ! -e "$state/.subsuper-remote-inconclusive-$key" ] \
-          || fail "unknown remote owner retained its inconclusive count after escalation"
-        [ "$(wc -l < "$probe_calls")" -eq 3 ] \
-          || fail "unknown remote owner did not probe exactly the documented bound: $(wc -l < "$probe_calls")"
+          || fail "unknown remote owner retained its retired inconclusive counter"
+        [ "$(wc -l < "$probe_calls")" -eq 5 ] \
+          || fail "unknown remote owner did not probe once per pass: $(wc -l < "$probe_calls")"
         ;;
     esac
   done

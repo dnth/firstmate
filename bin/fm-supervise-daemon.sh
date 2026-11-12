@@ -53,8 +53,10 @@
 #     captain-held recovery whose endpoint is proven dead or missing instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge
 #     escalation. Live or ambiguous recovery stays visible, and remote stale
-#     endpoints are checked through their owner; inconclusive owner results use
-#     the bounded retry policy described under FM_REMOTE_INCONCLUSIVE_MAX below.
+#     endpoints are checked through their owner; an inconclusive owner result is
+#     never wedge evidence and instead feeds that route's sustained-unreachable
+#     episode, whose one alert and state files are owned by
+#     bin/fm-remote-liveness-lib.sh.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -124,16 +126,17 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
-#          FM_REMOTE_STALE_RECHECK_SECS seconds between inconclusive remote
-#                                   stale-owner probes (default 60)
-#          FM_REMOTE_INCONCLUSIVE_MAX consecutive inconclusive owner probes
-#                                   before escalation (positive integer,
-#                                   default 3; invalid values use 3). Counts
-#                                   persist per route in
-#                                   state/.subsuper-remote-inconclusive-<key>;
-#                                   conclusive owner answers or stale-marker
-#                                   cleanup reset them. Throttled rechecks do
-#                                   not count as probes.
+#          FM_REMOTE_STALE_RECHECK_SECS seconds between remote stale-owner
+#                                   rechecks (default 60)
+#          FM_REMOTE_UNREACHABLE_ALERT_SECS seconds of continuous inconclusive
+#                                   remote owner probes before that route's one
+#                                   unreachable-host escalation (positive
+#                                   integer of at most nine digits, default
+#                                   1800; invalid values use 1800). The episode
+#                                   and its state files are owned by
+#                                   bin/fm-remote-liveness-lib.sh, and a
+#                                   conclusive owner answer ends the episode.
+#                                   Throttled rechecks do not count as probes.
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 2700)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
@@ -238,6 +241,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-wedge-alarm-lib.sh
 . "$FM_DAEMON_DIR/fm-wedge-alarm-lib.sh"
 
+# Remote-route sustained-unreachable episodes, shared with the always-on
+# watcher: an inconclusive owner probe is never wedge evidence, and one episode
+# owns at most one unreachable-host escalation.
+# shellcheck source=bin/fm-remote-liveness-lib.sh
+. "$FM_DAEMON_DIR/fm-remote-liveness-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -250,8 +259,6 @@ FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 REMOTE_STALE_RECHECK_SECS_DEFAULT=60
-# The header owns the remote owner-probe retry policy.
-REMOTE_INCONCLUSIVE_MAX_DEFAULT=3
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
@@ -999,38 +1006,16 @@ remote_stale_probe_with_deadline() {
   fi
 }
 
-# Record one inconclusive remote owner probe for <state> <key>. Returns 0 once
-# FM_REMOTE_INCONCLUSIVE_MAX consecutive probes have produced no usable answer,
-# 1 while still below the bound.
-remote_inconclusive_max() {
-  local max=${FM_REMOTE_INCONCLUSIVE_MAX:-$REMOTE_INCONCLUSIVE_MAX_DEFAULT}
-  case "$max" in
-    ''|*[!0-9]*|0) max=$REMOTE_INCONCLUSIVE_MAX_DEFAULT ;;
-  esac
-  printf '%s\n' "$max"
-}
-
-remote_inconclusive_tick() {  # <state> <key>
-  local state=$1 key=$2 file max count
-  max=$(remote_inconclusive_max)
-  file="$state/.subsuper-remote-inconclusive-$key"
-  count=$(( $(cat "$file" 2>/dev/null || echo 0) + 1 ))
-  [ "$count" -le "$max" ] || count=$max
-  printf '%s\n' "$count" > "$file"
-  [ "$count" -ge "$max" ]
-}
-
-# Probe a stale remote route's own owner. Returns 0 for a conclusive dead or
-# missing endpoint, 1 for a conclusive live/ambiguous answer, 2 once the
-# consecutive-inconclusive bound is reached, and 3 while deferred (a throttled
-# recheck or an inconclusive probe still below its bound).
+# Probe a stale remote route's own owner.
+# Returns 0 for a conclusive dead or missing endpoint, 1 for a conclusive
+# live/ambiguous answer, 2 for an inconclusive probe, and 3 while deferred.
 remote_stale_recheck() {  # <window> <state>
   local win=$1 state=$2 task meta remote_host on_bin timeout retry_secs key marker now last endpoint_state
   task=$(window_to_task "$win" "$state")
   meta="$state/$task.meta"
-  [ -f "$meta" ] || return 2
+  [ -f "$meta" ] || return 3
   remote_host=$(fm_meta_get "$meta" remote_host)
-  [ -n "$remote_host" ] || return 2
+  [ -n "$remote_host" ] || return 3
   retry_secs=${FM_REMOTE_STALE_RECHECK_SECS:-$REMOTE_STALE_RECHECK_SECS_DEFAULT}
   case "$retry_secs" in
     ''|*[!0-9]*) retry_secs=$REMOTE_STALE_RECHECK_SECS_DEFAULT ;;
@@ -1050,24 +1035,28 @@ remote_stale_recheck() {  # <window> <state>
     ''|*[!0-9]*|0) timeout=5 ;;
     *) [ "$timeout" -le 15 ] || timeout=5 ;;
   esac
-  endpoint_state=$(remote_stale_probe_with_deadline "$timeout" "$on_bin" "$task" \
-    fm-remote-secondmate-control.sh state "$task" </dev/null 2>/dev/null) || {
-    remote_inconclusive_tick "$state" "$key" && return 2
-    return 3
-  }
+  if endpoint_state=$(remote_stale_probe_with_deadline "$timeout" "$on_bin" "$task" \
+      fm-remote-secondmate-control.sh state "$task" </dev/null 2>/dev/null); then
+    :
+  else
+    # Deadline, no answer, or no deadline tool: inconclusive evidence can only
+    # feed the route's unreachable episode, never a wedge verdict.
+    return 2
+  fi
   case "$endpoint_state" in
-    dead|missing)
-      rm -f "$marker" "$state/.subsuper-remote-inconclusive-$key"
-      return 0
-      ;;
-    alive|ambiguous|unreadable|unverified)
-      rm -f "$marker" "$state/.subsuper-remote-inconclusive-$key"
-      return 1
+    dead|missing|alive|ambiguous|unreadable|unverified)
+      # A conclusive owner answer ends the episode and clears its retired
+      # consecutive-probe counter.
+      fm_remote_unreachable_end "$state" "$task"
+      rm -f "$state/.subsuper-remote-inconclusive-$key"
+      case "$endpoint_state" in
+        dead|missing) return 0 ;;
+        *) return 1 ;;
+      esac
       ;;
   esac
-  # Any other answer is unusable evidence, so it counts toward the bound.
-  remote_inconclusive_tick "$state" "$key" && return 2
-  return 3
+  # Any other answer is unusable evidence, so it joins the unreachable episode.
+  return 2
 }
 
 recovery_projection_path() {  # <state>
@@ -1604,7 +1593,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last latest max_defer oldest pause_secs
-  local adv_endpoint adv_ident adv_recheck_rc adv_kind adv_key adv_verb
+  local adv_endpoint adv_ident adv_recheck_rc adv_kind adv_key adv_verb unreach_age
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1646,8 +1635,8 @@ housekeeping() {  # <state>
     # legacy fallback for old markers that predate meta lookup.
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
-      # Window gone (task torn down): drop the marker, nothing to escalate.
-      stale_markers_remove_by_key "$state" "$key"; continue
+      stale_markers_remove_by_key "$state" "$key"
+      continue
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
@@ -1665,7 +1654,7 @@ housekeeping() {  # <state>
       if daemon_compute_dormant "$task"; then
         # A dormant scale-to-zero route has no host to probe: the watcher's
         # once-per-window recheck owns its visibility, so an aged wedge marker
-        # must never become a false wedge or inconclusive-probe escalation.
+        # must never become a false wedge or an unreachable-host alert.
         stale_marker_remove "$win" "$state"
         continue
       fi
@@ -1703,14 +1692,16 @@ EOF
           if [ -n "$latest" ] && daemon_pause_status_is_valid "$win" "$state" "$latest"; then
             reconcile_pause_tracking "$win" "$state" "$latest"
           else
-            escalate_add "$state" "remote stale owner probe inconclusive after $(remote_inconclusive_max) consecutive probes: $win" \
-              "$task" worker - "$adv_endpoint" "$adv_ident"
-            stale_marker_remove "$win" "$state"
+            if unreach_age=$(fm_remote_unreachable_tick "$state" "$task"); then
+              escalate_add "$state" "remote host unreachable for ${unreach_age:-?}s while its endpoint stayed stale (no conclusive answer): $win" \
+                "$task" worker - "$adv_endpoint" "$adv_ident"
+              stale_marker_remove "$win" "$state"
+            fi
           fi
           ;;
         3)
-          # Deferred: a throttled recheck or an inconclusive probe still below
-          # its consecutive bound. Keep the stale marker for the next pass.
+          # Deferred: a throttled recheck or unavailable route metadata.
+          # Keep the stale marker for the next pass.
           :
           ;;
       esac
@@ -2114,7 +2105,7 @@ handle_wake() {  # <reason> <state>
           # A dormant scale-to-zero recheck is a bounded pause-cadence event, not
           # wedge aging: the watcher owns its once-per-window throttle, so the
           # daemon records no .subsuper-stale marker that housekeeping would
-          # later escalate as a false wedge or inconclusive probe.
+          # later escalate as a false wedge or unreachable-host alert.
           reconcile_pause_tracking "$arg" "$state" "$last"
           log "self-handle (dormant): $reason -> $distilled"
           return

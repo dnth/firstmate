@@ -67,8 +67,8 @@
 #                          is also absorbed while its home watcher beacon is fresh
 #                          within the wedge threshold; conclusive stale evidence
 #                          follows the ordinary stale and possible-wedge path.
-#                          Inconclusive remote evidence uses the consecutive-probe
-#                          bound documented below. A RunPod route in a recognized
+#                          Inconclusive remote evidence follows the shared rule in
+#                          bin/fm-remote-liveness-lib.sh. A RunPod route in a recognized
 #                          no-host lifecycle is dormant instead and uses the long
 #                          pause cadence without probing its absent endpoint.
 #                          A stale escalation whose endpoint is covered by an
@@ -124,14 +124,16 @@
 # probe in its own process group, sends TERM at the bound, and sends KILL after
 # a 0.2-second grace. With none of those tools, the probe returns missing evidence.
 # A remote probe is either conclusive (a numeric beacon age, fresh or stale) or
-# inconclusive (deadline hit, no answer, non-numeric output, or no deadline tool).
-# Inconclusive evidence is never a stale verdict by itself: a slow SSH round trip
-# on a healthy host is normal. Consecutive inconclusive probes are counted per
-# route in state/.remote-inconclusive-<key>, and only
-# FM_REMOTE_INCONCLUSIVE_MAX of them (positive integer, default 3, also used
-# for invalid values) enter the ordinary stale path.
-# A conclusive stale age, or a live fresh age, resets the
-# count and takes its own path immediately.
+# inconclusive (deadline hit, no answer, transport failure, non-numeric output,
+# or no deadline tool). Inconclusive evidence is never a stale verdict and never
+# raises a wedge alert: a slow SSH round trip on a healthy host is normal.
+# Per route, inconclusive probes start or continue one sustained-unreachable
+# episode, and that episode raises exactly one wake once it has lasted
+# FM_REMOTE_UNREACHABLE_ALERT_SECS, worded as an unreachable host rather than a
+# wedged mate. A conclusive probe - fresh or stale - ends the episode, so a later
+# episode may alert again. bin/fm-remote-liveness-lib.sh owns the window, the
+# episode state files, and the absorb/alert decision; the retired consecutive-
+# probe counter state/.remote-inconclusive-<key> is ignored and cleaned up.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -193,6 +195,11 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-compute-lib.sh
 . "$SCRIPT_DIR/fm-compute-lib.sh"
+# Remote-route sustained-unreachable episodes: an unreachable host is never
+# evidence of death, and one episode owns at most one alert. Shared with the
+# away-mode daemon's owner recheck.
+# shellcheck source=bin/fm-remote-liveness-lib.sh
+. "$SCRIPT_DIR/fm-remote-liveness-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
@@ -209,10 +216,6 @@ REMOTE_TIMEOUT=${FM_WATCH_REMOTE_TIMEOUT:-5}
 case "$REMOTE_TIMEOUT" in
   ''|*[!0-9]*|0) REMOTE_TIMEOUT=5 ;;
   *) [ "$REMOTE_TIMEOUT" -le 15 ] || REMOTE_TIMEOUT=5 ;;
-esac
-REMOTE_INCONCLUSIVE_MAX=${FM_REMOTE_INCONCLUSIVE_MAX:-3}
-case "$REMOTE_INCONCLUSIVE_MAX" in
-  ''|*[!0-9]*|0) REMOTE_INCONCLUSIVE_MAX=3 ;;
 esac
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 PR_PUBLICATION_LOCK_STALE_SECS=30
@@ -2072,8 +2075,8 @@ run_with_deadline() {
 # 0 = alive (a fresh beacon), 1 = conclusive stale (an answer that is missing,
 # stale, or shaped wrong for a local home), and 2 = inconclusive remote evidence:
 # the probe hit its deadline, returned no answer, or emitted non-numeric output.
-# Only the caller may turn 2 into a stale verdict, and only after the route's
-# consecutive-inconclusive bound.
+# A caller must never turn 2 into a stale verdict; it feeds the route's
+# sustained-unreachable episode instead (bin/fm-remote-liveness-lib.sh).
 secondmate_supervision_is_alive() {  # <window> <meta> <remote-host>
   local win=$1 meta=$2 remote_host=$3 home beat task age
   [ -n "$meta" ] || return 1
@@ -3539,27 +3542,31 @@ EOF
       if ! status_is_paused_or_captain_held "$last"; then
         secondmate_supervision_is_alive "$w" "$meta" "$remote_host"
         probe_rc=$?
+        if [ -n "$remote_host" ]; then
+          if [ "$probe_rc" -eq 2 ]; then
+            # Inconclusive evidence (deadline, no answer, transport failure,
+            # unusable output) is never a stale verdict. It starts or continues
+            # this route's one sustained-unreachable episode, which alerts once
+            # when it reaches its window and never as a wedge.
+            unreach_age=$(fm_remote_unreachable_tick "$STATE" "$task")
+            unreach_rc=$?
+            if [ "$unreach_rc" -eq 0 ]; then
+              reason="check: remote second mate host $remote_host unreachable for ${unreach_age}s: $w (no conclusive answer; liveness unknown)"
+              fm_wake_append check "$w" "$reason" || exit 1
+              wake "$reason"
+            fi
+            triage_log "absorbed inconclusive remote beacon probe (host unreachable ${unreach_age:-?}s): $w"
+            continue
+          fi
+          # A conclusive answer - fresh or stale - ends the unreachable episode
+          # and takes its own path below. The retired consecutive-probe counter
+          # is removed here and never read.
+          fm_remote_unreachable_end "$STATE" "$task"
+          rm -f "$STATE/.remote-inconclusive-$key"
+        fi
         if [ "$probe_rc" -eq 0 ]; then
           clear_pause_tracking "$key"
           continue
-        fi
-        icf="$STATE/.remote-inconclusive-$key"
-        if [ "$probe_rc" -eq 2 ]; then
-          # Inconclusive evidence (deadline, no answer, unusable output) is not a
-          # stale verdict: count it per route and absorb until the documented
-          # consecutive-probe bound, so one slow SSH round trip on a live host
-          # never wakes firstmate.
-          icn=$(( $(cat "$icf" 2>/dev/null || echo 0) + 1 ))
-          [ "$icn" -le "$REMOTE_INCONCLUSIVE_MAX" ] || icn=$REMOTE_INCONCLUSIVE_MAX
-          printf '%s\n' "$icn" > "$icf"
-          if [ "$icn" -lt "$REMOTE_INCONCLUSIVE_MAX" ]; then
-            triage_log "absorbed inconclusive remote beacon probe ($icn/$REMOTE_INCONCLUSIVE_MAX): $w"
-            continue
-          fi
-          triage_log "inconclusive remote beacon probes reached the bound ($icn/$REMOTE_INCONCLUSIVE_MAX): $w"
-        else
-          # A conclusive answer (fresh or stale) resets the inconclusive count.
-          rm -f "$icf"
         fi
       fi
       secondmate_stale=1
