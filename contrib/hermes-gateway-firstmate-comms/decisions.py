@@ -371,10 +371,11 @@ def ensure_click_route() -> bool:
     return True
 
 
-def buttons_ready() -> bool:
+def buttons_ready(bot_user_id: str) -> bool:
     """True when the gateway's current Discord client routes decision clicks.
     The outbox poster attaches buttons only then.
     """
     client = live_discord_client()
     with _attach_lock:
-        return client is not None and _attached is not None and _attached() is client
+        return (client is not None and _attached is not None and _attached() is client
+                and bool(bot_user_id) and str(getattr(getattr(client, "user", None), "id", "")) == bot_user_id)

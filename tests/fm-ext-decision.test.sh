@@ -129,7 +129,7 @@ deliver() {
 import sys
 from pathlib import Path
 import decisions, outbox_poster
-decisions.buttons_ready = lambda: True
+decisions.buttons_ready = lambda bot_user_id: True
 def send(p):
     return {"ok": True, "discord_message_id": str(int(sys.argv[3]) + int(p.get("chunk_index", 0))),
             "buttons": bool(p.get("decision"))}
@@ -261,6 +261,13 @@ class PostEdge:
         edge = self
 
         class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"id": "700000000000000002"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or 0)
                 edge.posts.append({"path": self.path, "body": json.loads(self.rfile.read(length) or b"{}")})
@@ -311,7 +318,7 @@ fmdecide.setup()
 os.environ["DISCORD_BOT_TOKEN"] = "test-bot-token"
 edge = fmdecide.PostEdge()
 outbox_poster.DISCORD_API_BASE = edge.base
-decisions.buttons_ready = lambda: True
+decisions.buttons_ready = lambda bot_user_id: bot_user_id == "700000000000000002"
 outbox_poster.drain_outbox(home=Path(sys.argv[1]))
 print(json.dumps(edge.posts))
 PY
@@ -1039,10 +1046,10 @@ async def main():
 
     print("routed-unconnected=%s" % decisions.ensure_click_route())
     adapter._client = bot
-    print("ready-before=%s" % decisions.buttons_ready())
+    print("ready-before=%s" % decisions.buttons_ready(BOT))
     print("routed=%s" % decisions.ensure_click_route())
     await asyncio.sleep(0.1)
-    print("ready-after=%s" % decisions.buttons_ready())
+    print("ready-after=%s" % decisions.buttons_ready(BOT))
 
     bot._connection.parse_interaction_create(component_click(
         970000000000000001, os.environ["POST"], decisions.custom_id(os.environ["KEY"], 2), "Delete the branch", False))
@@ -1120,7 +1127,7 @@ test_12_topic_thread_posts_take_clicks_there() {
 import json, os, sys
 from pathlib import Path
 import decisions, outbox_poster
-decisions.buttons_ready = lambda: True
+decisions.buttons_ready = lambda bot_user_id: True
 sent = []
 def send(p):
     sent.append(p["thread_id"])

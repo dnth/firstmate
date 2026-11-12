@@ -186,3 +186,89 @@ got = json.loads(sys.argv[1])
 assert got == {"owner": "owner", "after_default": "primary", "unknown_profile": "none"}, got
 PY
 pass "decision click route follows the owning profile's bot"
+
+PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$TMP_ROOT/buttons" <<'PY' || fail "decision buttons must match the posting bot's registered client"
+import io
+import json
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import decisions
+import outbox_poster as poster
+
+home = Path(sys.argv[1]) / "profiles" / "fmcomms"
+home.mkdir(parents=True)
+os.environ["HERMES_HOME"] = str(home.parent.parent)
+os.environ["DISCORD_BOT_TOKEN"] = "default-token"
+poster.configure_bot_identity(home)
+
+
+class Client:
+    def __init__(self, bot_id):
+        self.user = SimpleNamespace(id=bot_id)
+        self.loop = SimpleNamespace(call_soon_threadsafe=lambda fn, item: fn(item))
+        self.items = []
+
+    def add_dynamic_items(self, item):
+        self.items.append(item)
+
+
+client = Client(700000000000000009)
+adapter = SimpleNamespace(_client=client, is_connected=True)
+posts = []
+lookup_fails = False
+rotate_during_lookup = False
+payload = {"thread_id": "700000000000000010", "channel_id": "700000000000000010",
+           "text": "Pick a route: North or South", "decision": {
+               "key": "key:fixture:pick", "options": [{"id": 1, "label": "North"}]}}
+
+
+def urlopen(request, timeout):
+    auth = request.get_header("Authorization")
+    if request.full_url.endswith("/users/@me"):
+        if lookup_fails:
+            raise OSError("identity unavailable")
+        bot_id = {"Bot token-a": "700000000000000009", "Bot token-b": "700000000000000011"}[auth]
+        if rotate_during_lookup:
+            (home / ".env").write_text("DISCORD_BOT_TOKEN=token-a\n")
+        return io.BytesIO(json.dumps({"id": bot_id}).encode())
+    posts.append((auth, json.loads(request.data)))
+    return io.BytesIO(b'{"id":"700000000000000012"}')
+
+
+def send(expect_buttons, expected_auth):
+    receipt = poster.discord_send(payload)
+    auth, body = posts[-1]
+    assert auth == expected_auth, posts
+    assert body["content"] == payload["text"], body
+    assert bool(body.get("components")) == expect_buttons, body
+    assert receipt["buttons"] == expect_buttons, receipt
+
+
+with patch.object(decisions, "_live_discord_adapter", return_value=adapter), \
+        patch.object(decisions, "click_item_class", return_value=object()), \
+        patch.object(poster.urllib.request, "urlopen", side_effect=urlopen):
+    (home / ".env").write_text("DISCORD_BOT_TOKEN=token-a\n")
+    send(False, "Bot token-a")
+    assert decisions.ensure_click_route()
+    assert len(client.items) == 1
+    send(True, "Bot token-a")
+    (home / ".env").write_text("DISCORD_BOT_TOKEN=token-b\n")
+    assert decisions.ensure_click_route()
+    send(False, "Bot token-b")
+    adapter._client = Client(700000000000000011)
+    send(False, "Bot token-b")
+    assert decisions.ensure_click_route()
+    send(True, "Bot token-b")
+    lookup_fails = True
+    send(False, "Bot token-b")
+    lookup_fails = False
+    rotate_during_lookup = True
+    send(True, "Bot token-b")
+    rotate_during_lookup = False
+    send(False, "Bot token-a")
+PY
+pass "decision buttons require the posting bot's registered client across credential changes"

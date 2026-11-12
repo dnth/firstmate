@@ -38,7 +38,7 @@ request, which is how ``firstmate_post_for`` recognises a reply to one of
 Firstmate's own messages.
 
 A decision payload carries buttons only on the final chunk and only when
-``decisions.buttons_ready()`` confirms click routing; otherwise it stays plain
+``decisions.buttons_ready(bot_user_id)`` confirms click routing; otherwise it stays plain
 text. Progress keeps the decision, button state, chunk ids, and posting time.
 Structured sections keep options together on the final chunk and reserve room
 for a later outcome header.
@@ -1180,9 +1180,10 @@ def discord_rename_thread(thread_id: str, name: str) -> dict:
     return {"ok": True, "thread_id": thread_id}
 
 
-def _bot_user_id() -> str:
+def _bot_user_id(token: str | None = None) -> str:
     """This bot's own Discord user id, or "" when it cannot be read."""
-    token = _bot_token()
+    if token is None:
+        token = _bot_token()
     if not token:
         return ""
     request = urllib.request.Request(
@@ -1787,7 +1788,7 @@ def discord_send(payload: dict) -> dict:
         message.update(nonce=payload["nonce"], enforce_nonce=True)
     decision = payload.get("decision")
     last_chunk = int(payload.get("chunk_index") or 0) + 1 >= int(payload.get("chunk_count") or 1)
-    buttons = isinstance(decision, dict) and last_chunk and decisions.buttons_ready()
+    buttons = isinstance(decision, dict) and last_chunk and decisions.buttons_ready(_bot_user_id(token))
     if buttons:
         message["components"] = decisions.components_for(decision)
     files = payload.get("files") or []
