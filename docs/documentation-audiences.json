@@ -343,6 +343,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/python-guard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
     },

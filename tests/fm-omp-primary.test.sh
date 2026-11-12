@@ -499,6 +499,11 @@ SH
 case "${2:-}" in *'cd projects/'*) printf 'directory denied\n' >&2; exit 2 ;; esac
 exit 0
 SH
+  cat > "$fixture/bin/fm-python-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+case "${2:-}" in python3*|pip*|virtualenv*) printf 'python denied\n' >&2; exit 2 ;; esac
+exit 0
+SH
   cat > "$fixture/bin/fm-arm-pretool-check.sh" <<'SH'
 #!/usr/bin/env bash
 case "${2:-}" in *fm-watch-arm.sh*) printf 'watcher arm denied\n' >&2; exit 2 ;; esac
@@ -686,6 +691,10 @@ if (delegation?.block !== true || !delegation.reason.includes("delegation denied
 const directory = await handlers.get("tool_call")({ type: "tool_call", toolName: "bash", input: { command: "cd projects/demo" } });
 if (directory?.block !== true || !directory.reason.includes("directory denied")) {
   throw new Error("OMP persistent directory change was not blocked");
+}
+const python = await handlers.get("tool_call")({ type: "tool_call", toolName: "bash", input: { command: "python3 script.py" } });
+if (python?.block !== true || !python.reason.includes("python denied")) {
+  throw new Error("OMP bare python command was not blocked");
 }
 const foregroundArm = await handlers.get("tool_call")({ type: "tool_call", toolName: "bash", input: { command: "bin/fm-watch-arm.sh" } });
 if (foregroundArm?.block !== true || !foregroundArm.reason.includes("watcher arm denied")) {
@@ -1301,7 +1310,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-python-pretool-check.sh fm-arm-pretool-check.sh; do
     cat > "$fixture/bin/$script" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1450,7 +1459,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-python-pretool-check.sh fm-arm-pretool-check.sh; do
     cat > "$fixture/bin/$script" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1864,7 +1873,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-python-pretool-check.sh fm-arm-pretool-check.sh; do
     cat > "$fixture/bin/$script" <<'SH'
 #!/usr/bin/env bash
 exit 0

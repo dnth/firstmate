@@ -636,6 +636,10 @@ export default function (omp: ExtensionAPI) {
     if (directory.code === 2) {
       return { block: true, reason: directory.stderr.trim() || "denied by the directory-change seatbelt" };
     }
+    const python = await runChecker("fm-python-pretool-check.sh", "--command", command);
+    if (python.code === 2) {
+      return { block: true, reason: python.stderr.trim() || "denied by the python-runner seatbelt" };
+    }
     const watcher = await runChecker("fm-arm-pretool-check.sh", "--command", command);
     if (watcher.code === 2) {
       return { block: true, reason: watcher.stderr.trim() || "denied by the watcher-arm seatbelt" };

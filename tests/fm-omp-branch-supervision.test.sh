@@ -1793,7 +1793,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-python-pretool-check.sh fm-arm-pretool-check.sh; do
     rm -f "$fixture/bin/$script"
     cat > "$fixture/bin/$script" <<'SH'
 #!/usr/bin/env bash
@@ -1823,6 +1823,7 @@ SH
     "$fixture/bin/fm-turnend-guard.sh" \
     "$fixture/bin/fm-subagent-pretool-check.sh" \
     "$fixture/bin/fm-cd-pretool-check.sh" \
+    "$fixture/bin/fm-python-pretool-check.sh" \
     "$fixture/bin/fm-arm-pretool-check.sh" \
     "$fixture/bin/fm-watch-arm.sh"
   printf '%s\n' '{"type":"module","exports":{".":"./index.js","./extensibility/legacy-pi-coding-agent-shim":"./coding-shim.js","./extensibility/legacy-pi-ai-shim":"./ai-shim.js"}}' > "$package_dir/package.json"

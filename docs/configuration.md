@@ -259,6 +259,13 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Python runner guard (config/python-runner)
+
+`config/python-runner` is an optional local, gitignored opt-in file in the effective home: `FM_CONFIG_OVERRIDE`, else `$FM_HOME/config`, else the primary checkout's `config/`.
+When its content is exactly `uv` (whitespace ignored), it enables the primary-session Python runner guard.
+An absent file, or any other value, leaves the guard inert, so the shared template imposes nothing on other users.
+See [`python-guard.md`](python-guard.md) for the command policy, checkout scope, reason codes, and harness wiring.
+
 ## Treehouse pool sweep (config/treehouse-sweep-clean)
 
 `bin/fm-treehouse-sweep.sh` classifies every unleased Treehouse pool slot under the home's backing repos as clean, dirty, damaged, or skipped, using `treehouse status --json` plus the same `.fm-slot-owner` claim and cross-home `state/*.meta` ownership proof teardown applies.
