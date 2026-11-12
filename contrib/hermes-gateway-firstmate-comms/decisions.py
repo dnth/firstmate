@@ -281,10 +281,21 @@ async def respond_to_click(interaction: object, click_id: str) -> None:
         await asyncio.to_thread(_show_sent_posts)
 
 
+# The Hermes profile whose Discord bot posts decision buttons. Its client receives their clicks.
+_OWNER_PROFILE = "default"
+
+
+def set_owner_profile(name) -> None:
+    """Name the profile whose Discord adapter owns this plugin's buttons."""
+    global _OWNER_PROFILE
+    _OWNER_PROFILE = name or "default"
+
+
 def _live_discord_adapter():
-    """The gateway's Discord adapter in this process, or None.
+    """The owning profile's Discord adapter in this process, or None.
     Resolved through the gateway runner's adapter registry, the same route
-    Hermes's own platform-action facade uses.
+    Hermes's own platform-action facade uses. A profile with no live Discord
+    adapter yields None: a button must never be posted by a bot nothing routes.
     """
     try:
         from gateway.config import Platform
@@ -293,13 +304,15 @@ def _live_discord_adapter():
         runner = _gateway_runner_ref()
         if runner is None:
             return None
-        return getattr(runner, "adapters", {}).get(Platform.DISCORD)
+        lookup = getattr(runner, "_adapters_for_profile", None)
+        adapters = lookup(_OWNER_PROFILE) if lookup else getattr(runner, "adapters", None)
+        return (adapters or {}).get(Platform.DISCORD)
     except Exception:
         return None
 
 
 def live_discord_client():
-    """The Discord adapter's live discord.py client, or None."""
+    """The owning profile's Discord adapter's live discord.py client, or None."""
     return getattr(_live_discord_adapter(), "_client", None)
 
 
@@ -358,10 +371,11 @@ def ensure_click_route() -> bool:
     return True
 
 
-def buttons_ready() -> bool:
-    """True when the gateway's current Discord client routes decision clicks.
-    The outbox poster attaches buttons only then.
+def buttons_ready(bot_user_id: str) -> bool:
+    """Require the registered client to belong to the posting credential's bot.
+    Credential rotation can leave the gateway client logged in as the old bot.
     """
     client = live_discord_client()
     with _attach_lock:
-        return client is not None and _attached is not None and _attached() is client
+        return (client is not None and _attached is not None and _attached() is client
+                and bool(bot_user_id) and str(getattr(getattr(client, "user", None), "id", "")) == bot_user_id)

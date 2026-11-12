@@ -13,12 +13,29 @@ the local outbox using ``bin/fm-ext-outbox.sh``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 try:
     from .intake import handle_fm_command, maybe_intake_from_text, pre_gateway_dispatch_hook
-    from .outbox_poster import start_outbox_watcher
+    from .outbox_poster import configure_bot_identity, start_outbox_watcher
 except ImportError:
     from intake import handle_fm_command, maybe_intake_from_text, pre_gateway_dispatch_hook
-    from outbox_poster import start_outbox_watcher
+    from outbox_poster import configure_bot_identity, start_outbox_watcher
+
+
+def _owning_profile_home(ctx):
+    """The Hermes home this plugin was loaded for. The install location is the fallback."""
+    try:
+        from hermes_constants import get_hermes_home
+    except ImportError:
+        get_hermes_home = None
+    if get_hermes_home is not None:
+        return Path(get_hermes_home())
+    path = Path(getattr(getattr(ctx, "manifest", None), "path", None) or "")
+    plugin_dir = path.parent if path.suffix in (".yaml", ".yml") else path
+    if plugin_dir.parent.name == "plugins":
+        return plugin_dir.parent.parent
+    return None
 
 
 def register(ctx):
@@ -32,4 +49,5 @@ def register(ctx):
         args_hint="request",
     )
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch_hook)
+    configure_bot_identity(_owning_profile_home(ctx))
     start_outbox_watcher()

@@ -182,7 +182,6 @@ def setup(home, root, token="test-bot-token"):
     else:
         os.environ.pop("DISCORD_BOT_TOKEN", None)
         os.environ.pop("HERMES_DISCORD_TOKEN", None)
-    outbox_poster._BOT_USER_ID = ""
     edge = Edge()
     outbox_poster.DISCORD_API_BASE = edge.base
     return edge

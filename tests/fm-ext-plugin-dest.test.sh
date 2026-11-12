@@ -343,6 +343,7 @@ plugin = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plugin)
 with patch.object(plugin, "start_outbox_watcher") as watcher:
     ctx = Mock()
+    ctx.manifest.path = Path(sys.argv[3]) / "plugin.yaml"
     error = RuntimeError("hook registration failed")
     ctx.register_hook.side_effect = error
     try:
@@ -357,6 +358,7 @@ with patch.object(plugin, "start_outbox_watcher") as watcher:
         args_hint="request")
     watcher.assert_not_called()
     ctx = Mock()
+    ctx.manifest.path = Path(sys.argv[3]) / "plugin.yaml"
     plugin.register(ctx)
     ctx.register_command.assert_called_once()
     ctx.register_hook.assert_called_once_with("pre_gateway_dispatch", plugin.pre_gateway_dispatch_hook)
