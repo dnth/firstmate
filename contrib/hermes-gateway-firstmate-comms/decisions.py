@@ -372,8 +372,8 @@ def ensure_click_route() -> bool:
 
 
 def buttons_ready(bot_user_id: str) -> bool:
-    """True when the gateway's current Discord client routes decision clicks.
-    The outbox poster attaches buttons only then.
+    """Require the registered client to belong to the posting credential's bot.
+    Credential rotation can leave the gateway client logged in as the old bot.
     """
     client = live_discord_client()
     with _attach_lock:

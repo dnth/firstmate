@@ -22,14 +22,18 @@ The gateway process is `hermes gateway`, not `hermes chat --tui`.
 ## Bot identity
 
 Discord REST calls (posts, edits, thread renames, and the bot user lookup) authenticate as the owning profile's bot.
-The owning profile is the home Hermes loaded this plugin for, read from `register()`.
+At registration, the owning home comes from Hermes's `get_hermes_home()`, with the plugin manifest's install path as the fallback when that API is unavailable.
 The token source depends on the layout:
 
-- Dedicated gateway (process home is the profile home): the process environment first (`DISCORD_BOT_TOKEN`, or `HERMES_DISCORD_TOKEN`), then the profile's `.env`.
-- Multi-profile gateway (process home differs from the profile home): the owning profile's `.env` only, so a profile never posts as the default bot.
+- Dedicated gateway (process home is the profile home): the process environment first, then the owning profile's secret scope.
+- Multi-profile gateway (process home differs from the profile home): the owning profile's secret scope only.
+
+Each source checks `DISCORD_BOT_TOKEN` before `HERMES_DISCORD_TOKEN`.
+Profile secrets are resolved through Hermes's `build_profile_secret_scope(home)`, rather than the adapter's configured token; when Hermes is unavailable, the fallback reads the owning home's `.env`.
+The poster resolves credentials on each use, so replacing or removing a profile token affects subsequent REST calls without restarting the poster.
 
 When the owning profile has no token, the poster does not fall back to another profile's token.
-It logs `fm-ext-poster: no token (...)` naming the sources it tried, and the delivery stays queued until a token appears.
+It logs `fm-ext-poster: bot identity no token (tried ...)` naming the sources it tried, and delivery remains transient with `missing DISCORD_BOT_TOKEN` until a token appears.
 The log names the resolved source (`process-env` or `profile-env`) and never prints token material.
 
 ## Testing a gateway
@@ -96,11 +100,12 @@ After updating this plugin, restart the gateway service so it loads the click ro
 
 Hermes 0.20.x has no plugin hook for Discord component clicks, so the plugin registers a discord.py `DynamicItem` for the `fmd:` and `fmc:` custom ids on the live client of the owning profile's Discord adapter.
 The plugin finds that adapter through the gateway runner's per-profile adapter registry (`_adapters_for_profile`), the same lookup Hermes uses for multi-profile delivery.
-A profile with no live Discord adapter gets no click route, so its decision posts fall back to plain text instead of showing buttons nothing answers.
+Decision posts carry buttons only when the current client has the click route registered and its bot user id matches the identity looked up with the posting credential; an unavailable lookup or a credential change that leaves the client on another bot falls back to plain text.
 The outbox watcher re-registers it whenever the gateway reconnects with a new client, and logs one warning naming the Hermes version if a connected gateway cannot take it.
 A click is deferred ephemerally at once, then runs `bin/fm-ext-decision.sh click`, which owns every check and notice and files the request.
 The plugin then edits the post over Discord REST with mentions disabled: right after a sent click, and on a 30-second sweep once Firstmate records the answer.
-Until the route is registered on the current client, the poster sends a decision as plain text with no buttons, so a button is never shown that nothing would answer; the captain can still reply to it.
+The captain can still reply to a plain-text decision.
+[The bot identity regression test](../../tests/fm-ext-bot-identity.test.sh) covers profile isolation, credential replacement and removal, per-profile adapter selection, and the matching-client requirement for buttons.
 [The decision button regression test](../../tests/fm-ext-decision.test.sh) covers posting, authorisation, sent requests, confirmation, staleness, double clicks, fallbacks, and post edits after Firstmate records an answer, and drives the installed Hermes gateway's real discord.py routing when that Python is available.
 
 ## How it works
