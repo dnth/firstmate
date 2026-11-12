@@ -294,8 +294,7 @@ test_home_forms_resolve_like_absolute() {
 
 # --- home carve-out: CDPATH cannot redirect a relative target --------------
 
-# Bash consults CDPATH for a relative operand that does not begin with a dot or
-# a slash, so an inherited value can send an exempted `cd data` out of the home.
+# An inherited CDPATH can send an exempted relative target out of the home.
 test_cdpath_denies_relative_targets() {
   local out rc
 
@@ -304,12 +303,61 @@ test_cdpath_denies_relative_targets() {
   assert_contains "$out" '[persistent-cd]' 'CDPATH deny must carry the reason code'
 
   out=$(CDPATH=/tmp "$CHECK" --claude --command 'cd ./data' 2>&1); rc=$?
-  expect_code 0 "$rc" 'a dot-prefixed target never consults CDPATH and must stay allowed'
+  expect_code 0 "$rc" 'a ./ target never consults CDPATH and must stay allowed'
 
   out=$(CDPATH='' "$CHECK" --claude --command 'cd data' 2>&1); rc=$?
   expect_code 0 "$rc" 'an empty CDPATH must not deny a home-relative target'
 
   pass 'cd-guard: CDPATH denies a relative target that it could redirect out of the home'
+}
+
+test_reachable_cwd_and_expansion_regressions() {
+  local dir outside command actual out rc
+  dir="$TMP_ROOT/reachable-home"
+  outside="$TMP_ROOT/cdpath-outside"
+  make_primary_fixture "$dir" >/dev/null
+  mkdir -p "$dir/data/state" "$dir/data/sub" "$dir/~/data" "$dir/.cache" "$outside/.cache" "$outside/data"
+  git init -q "$dir/state"
+  git init -q "$dir/~/data"
+  ln -s data/sub "$dir/link"
+
+  for command in 'true || cd data; cd state' 'true && cd data; cd state' 'cd link && cd ../state' 'cd data >missing/output; cd state'; do
+    actual=$(cd "$dir" && bash --noprofile --norc -c "$command; pwd -P" 2>/dev/null)
+    case "$command" in
+      'true && cd data; cd state') [ "$dir/data/state" = "$actual" ] || fail 'Bash executes the conditional cd' ;;
+      *) [ "$dir/state" = "$actual" ] || fail 'Bash reaches the nested checkout' ;;
+    esac
+    out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'every reachable cwd must be safe, including skipped conditional paths'
+  done
+
+  for command in "CDPATH=$outside cd .cache" "CDPATH=$outside; cd data" "CDPATH=\$(printf %s $outside) cd data"; do
+    actual=$(cd "$dir" && bash --noprofile --norc -c "$command >/dev/null; pwd -P")
+    case "$actual" in "$outside/"*) ;; *) fail "Bash CDPATH oracle did not leave the home: $actual" ;; esac
+    out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'CDPATH redirection must deny dot names and changed or unresolved values'
+  done
+
+  for command in "FM_HOME=$outside; cd \"\$FM_HOME\"" "HOME=$outside; cd ~/data"; do
+    actual=$(cd "$dir" && bash --noprofile --norc -c "$command; pwd -P" 2>/dev/null)
+    case "$actual" in "$outside"|"$outside/"*) ;; *) fail "Bash variable oracle did not leave the home: $actual" ;; esac
+    out=$(HOME="$dir" FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'earlier assignments must invalidate expansion context'
+  done
+
+  for command in "cd '~/data'" 'cd "~/data"' 'cd \~/data'; do
+    actual=$(cd "$dir" && HOME="$dir" bash --noprofile --norc -c "$command; pwd -P" 2>/dev/null)
+    [ "$dir/~/data" = "$actual" ] || fail 'Bash keeps quoted and escaped tildes literal'
+    out=$(HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'literal tilde paths into a checkout must deny'
+  done
+  out=$(CDPATH="$outside" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd .cache' 2>&1); rc=$?
+  expect_code 2 "$rc" 'inherited CDPATH must also deny dot-prefixed names'
+  for command in 'cd data && cd ..' 'cd data; cd state' 'cd ~/data' 'cd ./data'; do
+    out=$(HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 0 "$rc" 'ordinary safe directory changes must remain allowed'
+  done
+  pass 'cd-guard: reachable cwd and expansion regressions match Bash' 
 }
 
 # --- home carve-out: kept hazards ------------------------------------------
@@ -515,6 +563,7 @@ test_scripts_are_shellcheck_clean() {
   pass "bin/fm-cd-pretool-check.sh is shellcheck-clean"
 }
 
+test_reachable_cwd_and_expansion_regressions
 test_full_acceptance_matrix
 test_home_forms_resolve_like_absolute
 test_cdpath_denies_relative_targets

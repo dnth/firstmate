@@ -9,18 +9,6 @@
 // scoping to the real primary checkout lives in the bin/fm-cd-pretool-check.sh
 // transport, not here. See docs/cd-guard.md for the full contract.
 //
-// One shape is harmless: a top-level `cd` whose single literal target resolves
-// to the home or to a directory inside the home that is outside `projects/` and
-// outside every git checkout except the home's own. The transport passes the
-// physical primary checkout as --home and the effective home as --fm-home
-// (FM_HOME, else the repo root); a target may also be spelled relatively, with
-// `~`, or with `$FM_HOME`/`$HOME`, and is resolved the same way as its absolute
-// equivalent. Both path rules must stay inside the home: logical (a `..` is
-// collapsed lexically, Bash's default) and physical (symlinks are followed
-// component by component, as under `set -P`). A target either rule resolves
-// outside the home, or that cannot be resolved at all, stays denied, as does
-// every pushd and popd. Without --home no target is exempt.
-//
 // The shell tokenizer and command-position analysis are imported from
 // bin/fm-arm-command-policy.mjs, the sole owner of firstmate's shell
 // classification, so this guard never duplicates shell lexing. This policy
@@ -85,11 +73,13 @@ function hasCommandQueryPrefix(position) {
 // Resolve one target under both path rules. Logical collapses `..` lexically
 // first, like Bash's default `cd`; physical follows symlinks component by
 // component, like `cd -P`. Either failure means the target cannot be resolved.
-function resolvedPaths(home, target) {
-  const physicalInput = target.startsWith("/") ? target : `${home}/${target}`;
+function resolvedPaths(cwd, target) {
+  const logical = resolve(cwd.logical, target);
+  const physicalInput = target.startsWith("/") ? target : `${cwd.physical}/${target}`;
   try {
     return {
-      logical: realpathSync(resolve(home, target)),
+      logical,
+      logicalDestination: realpathSync(logical),
       physical: realpathSync.native(physicalInput),
     };
   } catch {
@@ -137,7 +127,7 @@ function expandTarget(word, context) {
   if (word.subs.length > 0) return null;
   if (word.literal) {
     if (word.unquotedExpansion) return null;
-    return expandTilde(word.value, context.userHome);
+    return word.quoted || word.escaped ? word.value : expandTilde(word.value, context.userHome);
   }
   const match = VARIABLE_WORD.exec(word.value);
   if (!match) return null;
@@ -150,23 +140,26 @@ function expandTarget(word, context) {
   return context.fmHome + rest;
 }
 
-// Bash consults CDPATH for a relative operand that does not begin with a dot,
-// so any non-empty CDPATH - inherited or assigned on this command - can send
-// the target somewhere the lexical resolution would not find.
 function cdpathValue(position, context) {
   let value = context.cdpath;
   for (const word of position.words.slice(0, position.prefixAssignments)) {
     const match = /^CDPATH(\+?=)(.*)$/.exec(word.value);
     if (!match) continue;
-    value = match[1] === "+=" ? `${value}${match[2]}` : match[2];
+    if (!word.literal || word.subs.length > 0 || word.unquotedExpansion) return null;
+    value = match[1] === "+=" ? (value === null ? null : `${value}${match[2]}`) : match[2];
   }
   return value;
 }
 
-// Resolve one exempt cd. `cwd` is the tracked directory at that command, so an
-// allowed cd earlier in the same command list updates what later nodes resolve
-// from. Returns the directory the shell would sit in, or null when the cd is
-// not exempt.
+function invalidateAssignments(position, settings) {
+  for (const word of position.words) {
+    const match = /^(FM_HOME|HOME|CDPATH)(?:\+)?=/.exec(word.value);
+    if (!match) continue;
+    const field = { FM_HOME: "fmHome", HOME: "userHome", CDPATH: "cdpath" }[match[1]];
+    settings[field] = null;
+  }
+}
+
 function cdResolvesInsideHome(command, position, wordIndex, context, cwd) {
   if (!context.home || command.value !== "cd") return null;
   const args = position.words.slice(wordIndex + 1);
@@ -174,17 +167,17 @@ function cdResolvesInsideHome(command, position, wordIndex, context, cwd) {
   if (args.length !== 1) return null;
   const target = expandTarget(args[0], context);
   if (target === null) return null;
-  if (!target.startsWith("/") && !target.startsWith(".") && cdpathValue(position, context) !== "") {
+  if (!target.startsWith("/") && ![".", ".."].includes(target.split("/")[0]) && cdpathValue(position, context) !== "") {
     return null;
   }
   const resolved = resolvedPaths(cwd, target);
   if (resolved === null) return null;
-  for (const path of [resolved.logical, resolved.physical]) {
+  for (const path of [resolved.logical, resolved.logicalDestination, resolved.physical]) {
     if (!isInside(context.home, path)) return null;
     if (isProjectsTree(context.home, path)) return null;
     if (isForeignCheckout(context.home, path)) return null;
   }
-  return resolved.physical;
+  return { logical: resolved.logical, physical: resolved.physical };
 }
 
 function decision(command, context = {}) {
@@ -205,13 +198,15 @@ function decision(command, context = {}) {
   if (lexed.error) return { decision: "allow" };
 
   const { nodes, separators } = splitProgram(lexed.tokens);
-  let cwd = settings.home;
+  let cwds = [{ logical: settings.home, physical: settings.home }];
   for (let index = 0; index < nodes.length; index += 1) {
     if (!nodePersists(separators, index)) continue;
     // commandPosition ignores subshell/brace groups, quoted data, comments, and
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
     const position = commandPosition(nodes[index]);
+    const nodeSettings = { ...settings };
+    invalidateAssignments(position, settings);
     if (hasPathQualifiedCommandPrefix(position)) continue;
     if (hasCommandQueryPrefix(position)) continue;
     let command = position.command;
@@ -223,12 +218,12 @@ function decision(command, context = {}) {
     if (!command) continue;
     if (!CD_BUILTINS.has(command.value)) continue;
     if (position.wrappers.some((wrapper) => FORKING_WRAPPERS.has(wrapper))) continue;
-    const changedTo = cdResolvesInsideHome(command, position, wordIndex, settings, cwd);
-    if (changedTo !== null) {
-      cwd = changedTo;
-      continue;
-    }
-    return deny("persistent-cd");
+    const outcomes = cwds.map((cwd) => cdResolvesInsideHome(command, position, wordIndex, nodeSettings, cwd));
+    if (outcomes.some((outcome) => outcome === null)) return deny("persistent-cd");
+    const conditional = ["&&", "||"].includes(separators[index - 1]);
+    const canFail = nodes[index].some((token) => token.type === "redir");
+    const reachable = conditional || canFail ? [...cwds, ...outcomes] : outcomes;
+    cwds = [...new Map(reachable.map((cwd) => [JSON.stringify(cwd), cwd])).values()];
   }
   return { decision: "allow" };
 }

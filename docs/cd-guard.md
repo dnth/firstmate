@@ -54,9 +54,11 @@ The guard **allows** everything else, including these safe scoped forms that mus
 
 A top-level `cd` is allowed when its single target resolves into the home: the home itself, or a directory inside the home that is outside the `projects/` tree and outside any git checkout other than the home's own.
 The target may be spelled absolutely, relatively, with `~`, or with a `$FM_HOME` prefix, and resolves exactly like the absolute spelling of the same directory.
-Relative targets resolve from the tracked directory: the home at the start of a command, and the destination of every earlier `cd` this guard already allowed in the same command list, so `cd data && cd ..` returns to the home while `cd data && cd state` checks `data/state`.
+Relative targets resolve from every reachable directory, retaining both logical and physical spellings: the set starts at the home and advances through allowed directory changes, preserving previous entries for conditional commands and redirection failures.
 `bin/fm-cd-pretool-check.sh` passes the physical primary checkout as `--home` and the shell's actual `FM_HOME` value as `--fm-home`; without `--home` no target is exempt, and an empty `--fm-home` denies every `$FM_HOME` form rather than inventing a value Bash would not expand to.
-Bash consults `CDPATH` for a relative operand that does not begin with a dot, so a non-empty `CDPATH` - inherited or assigned on the command - denies such a target instead of resolving it from the tracked directory.
+Bash consults `CDPATH` for every relative operand except those whose first component is exactly `.` or `..`, so a non-empty or unknown `CDPATH` - inherited or assigned on the command - denies such a target.
+An assignment to `FM_HOME`, `HOME`, or `CDPATH` makes that value unknown for later nodes, and a command-local CDPATH substitution is likewise unknown.
+A leading tilde expands only in an unquoted, unescaped word; quoted and escaped tildes remain literal path text.
 Both path rules must land inside the home: logical, where a `..` is collapsed lexically first as under Bash's default `cd`, and physical, where symlinks are followed component by component as under `cd -P`.
 A symlink inside the home that points into `projects/`, at a nested checkout, or out of the home is therefore denied, and so is a target that does not exist or otherwise cannot be resolved.
 `/tmp` stays denied on purpose: a firstmate command run from there resolves the wrong home.
@@ -65,12 +67,12 @@ The exemption widens nothing beyond the home: an `FM_HOME` that points somewhere
 
 ### Known limit
 
-The tracked directory starts at the home for every tool call, because the guard cannot observe the shell's cwd from an earlier call.
+The reachable directory set starts at the home for every tool call, because the guard cannot observe the shell's cwd from an earlier call.
 If the primary shell already sits in a subdirectory of the home when a command arrives, a relative target is still resolved from the home, so a nested checkout reachable only from that deeper directory is not detected.
 Passing the hook process's own cwd is deliberately not used: whether it equals the persistent shell's cwd is harness-dependent and unproven, and a wrong value would allow rather than deny.
 A cross-call cwd fact needs live per-harness evidence before the guard may rely on it.
 
-Denying an out-of-home `cd` never causes a wrong-directory write: reaching the target without moving the shell is always available through the forms above, and the guard's steady state remains "always at the home".
+Denying an out-of-home `cd` never causes a wrong-directory write: reaching the target without moving the shell is always available through the forms above, and allowed destinations remain within the home.
 
 ### Accepted non-goals
 
