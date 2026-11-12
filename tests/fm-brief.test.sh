@@ -1235,6 +1235,225 @@ test_screen_change_criteria_are_declared_and_markable() {
   pass "fm-brief.sh: --screen-change declares the screenshot criteria and --mark-screen-change adds them once"
 }
 
+# The captain's worker-relevant standing preferences live in the active home's
+# private, gitignored config/brief-preamble.md. Every ship and scout scaffold
+# carries them verbatim, once, under one labeled section appended after the task
+# and acceptance-criteria placeholders firstmate fills, so the fill, the
+# spawn-time {TASK} check, and the acceptance-criteria parser keep working.
+assert_preamble_bytes() {
+  local brief=$1 home=$2
+  cat > "$home/expected-section.md" <<'EOF'
+# Captain standing preferences
+This section is carried verbatim from this home's private `config/brief-preamble.md`, the captain's worker-relevant standing preferences. Apply them to this task. Do not edit or fill anything inside this section.
+EOF
+  cat "$home/config/brief-preamble.md" >> "$home/expected-section.md"
+  printf '\n\n' >> "$home/expected-section.md"
+  sed -E -n '/^# Captain standing preferences$/,/^# (Acceptance evidence|Definition of done)$/ { /^# (Acceptance evidence|Definition of done)$/!p; }' \
+    "$brief" > "$home/actual-section.md"
+  cmp -s "$home/expected-section.md" "$home/actual-section.md" \
+    || fail "captain preamble section changed bytes, including trailing newlines"
+}
+
+test_brief_preamble_reaches_ship_and_scout_briefs() {
+  local home id mode brief count ac_line task_line heading_line dod_line filled
+  home="$TMP_ROOT/preamble-home"
+  mkdir -p "$home/data" "$home/config"
+  cat > "$home/config/brief-preamble.md" <<'EOF'
+Use uv for every Python invocation: `uv run`, `uv run --with <pkg>`, or `uvx`.
+Keep worker replies short and evidence-first.
+Placeholder-looking text such as {PLACEHOLDER} and {{name}} is literal and must survive.
+EOF
+  printf '\n\n\n' >> "$home/config/brief-preamble.md"
+
+  for id_mode in "brief-preamble-nm:no-mistakes" "brief-preamble-dpr:direct-PR" "brief-preamble-lo:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode: ship scaffold with a captain preamble exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_preamble_bytes "$brief" "$home"
+    count=$(grep -cF '# Captain standing preferences' "$brief" || true)
+    [ "$count" -eq 1 ] || fail "$mode: captain preamble section appeared $count times, expected exactly once"
+    count=$(grep -cF 'Use uv for every Python invocation' "$brief" || true)
+    [ "$count" -eq 1 ] || fail "$mode: captain preamble content appeared $count times, expected exactly once"
+    assert_grep 'Placeholder-looking text such as {PLACEHOLDER} and {{name}} is literal and must survive.' "$brief" \
+      "$mode: captain preamble content was not carried verbatim"
+    assert_grep 'This section is carried verbatim from this home' "$brief" \
+      "$mode: captain preamble section lost its provenance label"
+    ac_line=$(grep -nF -- '- AC1: {ACCEPTANCE CRITERION}' "$brief" | cut -d: -f1)
+    heading_line=$(grep -nF -- '# Captain standing preferences' "$brief" | cut -d: -f1)
+    [ -n "$ac_line" ] && [ -n "$heading_line" ] && [ "$heading_line" -gt "$ac_line" ] \
+      || fail "$mode: captain preamble section was placed at or before the acceptance-criteria fill site"
+    dod_line=$(grep -nF -- '# Definition of done' "$brief" | cut -d: -f1)
+    [ -n "$dod_line" ] && [ "$heading_line" -lt "$dod_line" ] \
+      || fail "$mode: captain preamble section was not placed before the definition of done"
+    # Firstmate's placeholder fill must leave no scaffold token and must not
+    # touch the preamble; the criteria parser must still accept the result.
+    filled="$home/data/$id/filled.md"
+    sed -e 's/{TASK}/Do the requested work/' -e 's/{ACCEPTANCE CRITERION}/The change works/' "$brief" > "$filled"
+    assert_no_grep '{TASK}' "$filled" "$mode: the filled brief still carries a {TASK} placeholder"
+    assert_no_grep '{ACCEPTANCE CRITERION}' "$filled" \
+      "$mode: the filled brief still carries an acceptance-criterion placeholder"
+    assert_grep 'Use uv for every Python invocation' "$filled" \
+      "$mode: the placeholder fill disturbed the captain preamble"
+    "$ROOT/bin/fm-receipt-check.sh" --parse-criteria "$filled" >/dev/null 2>&1 \
+      || fail "$mode: the captain preamble broke the acceptance-criteria parser"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-preamble-scout alpha --scout >/dev/null 2>&1 \
+    || fail "scout scaffold with a captain preamble exited non-zero"
+  brief="$home/data/brief-preamble-scout/brief.md"
+  assert_preamble_bytes "$brief" "$home"
+  count=$(grep -cF '# Captain standing preferences' "$brief" || true)
+  [ "$count" -eq 1 ] || fail "scout: captain preamble section appeared $count times, expected exactly once"
+  count=$(grep -cF 'Use uv for every Python invocation' "$brief" || true)
+  [ "$count" -eq 1 ] || fail "scout: captain preamble content appeared $count times, expected exactly once"
+  task_line=$(grep -nF -- '{TASK}' "$brief" | head -n 1 | cut -d: -f1)
+  heading_line=$(grep -nF -- '# Captain standing preferences' "$brief" | cut -d: -f1)
+  [ -n "$task_line" ] && [ -n "$heading_line" ] && [ "$heading_line" -gt "$task_line" ] \
+    || fail "scout: captain preamble section was placed at or before the task placeholder"
+  dod_line=$(grep -nF -- '# Definition of done' "$brief" | cut -d: -f1)
+  [ -n "$dod_line" ] && [ "$heading_line" -lt "$dod_line" ] \
+    || fail "scout: captain preamble section was not placed before the definition of done"
+  filled="$home/data/brief-preamble-scout/filled.md"
+  sed 's/{TASK}/Do the requested work/' "$brief" > "$filled"
+  assert_no_grep '{TASK}' "$filled" "scout: the filled brief still carries a {TASK} placeholder"
+  assert_grep 'Use uv for every Python invocation' "$filled" \
+    "scout: the placeholder fill disturbed the captain preamble"
+  pass "fm-brief: ship and scout scaffolds carry the captain preamble verbatim, once, after the fill sites"
+}
+
+# An absent, empty, or whitespace-only preamble contributes no bytes: the
+# scaffold is byte-identical to the same scaffold before this feature existed,
+# so a home without the file keeps exactly its previous output. The section is
+# also purely additive, so removing its labeled block restores those bytes.
+test_brief_preamble_absent_or_empty_is_inert() {
+  local home id mode variant brief reference
+  home="$TMP_ROOT/preamble-inert"
+  mkdir -p "$home/data"
+  reference="$ROOT/tests/fixtures/fm-brief-pre-preamble"
+
+  scaffold_inert_brief() {  # <id> <mode|--scout>
+    if [ "$2" = --scout ]; then
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+        FM_CLASSIFY_PAUSED_VERB=paused FM_IDLE_OPEN_WORK_SECS=600 \
+        "$ROOT/bin/fm-brief.sh" "$1" alpha --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+        FM_CLASSIFY_PAUSED_VERB=paused FM_IDLE_OPEN_WORK_SECS=600 \
+        "$ROOT/bin/fm-brief.sh" "$1" alpha --mode "$2" >/dev/null 2>&1
+    fi
+  }
+
+  normalize_inert_brief() {
+    FM_SNAPSHOT_ROOT="$ROOT" FM_SNAPSHOT_HOME="$home" perl -0777 -pe \
+      's/\Q$ENV{FM_SNAPSHOT_HOME}\E/\@FM_HOME\@/g; s/\Q$ENV{FM_SNAPSHOT_ROOT}\E/\@FM_ROOT\@/g' "$1"
+  }
+
+  for id_mode in "brief-inert-nm:no-mistakes" "brief-inert-dpr:direct-PR" \
+                 "brief-inert-lo:local-only" "brief-inert-scout:--scout"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    rm -f "$home/config/brief-preamble.md"
+    rm -rf "$home/data/$id"
+    scaffold_inert_brief "$id" "$mode" || fail "$mode: scaffold without a preamble exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_no_grep '# Captain standing preferences' "$brief" \
+      "$mode: an absent preamble still emitted a section"
+    normalize_inert_brief "$brief" > "$home/normalized.md"
+    cmp -s "$reference/$id.md" "$home/normalized.md" \
+      || fail "$mode: absent preamble changed the pre-change scaffold bytes"
+    for variant in empty whitespace; do
+      rm -rf "$home/data/$id"
+      mkdir -p "$home/config"
+      case "$variant" in
+        empty) : > "$home/config/brief-preamble.md" ;;
+        whitespace) printf '  \n\n\t\n' > "$home/config/brief-preamble.md" ;;
+      esac
+      scaffold_inert_brief "$id" "$mode" \
+        || fail "$mode: scaffold with a $variant preamble exited non-zero"
+      normalize_inert_brief "$home/data/$id/brief.md" > "$home/normalized.md"
+      cmp -s "$reference/$id.md" "$home/normalized.md" \
+        || fail "$mode: a $variant preamble changed the generated brief"
+      assert_no_grep '# Captain standing preferences' "$home/data/$id/brief.md" \
+        "$mode: a $variant preamble emitted a section"
+    done
+    # The section is purely additive: removing exactly its labeled block
+    # restores the preamble-free bytes.
+    rm -rf "$home/data/$id"
+    printf 'Standing preference for every worker.\n' > "$home/config/brief-preamble.md"
+    scaffold_inert_brief "$id" "$mode" || fail "$mode: scaffold with a present preamble exited non-zero"
+    awk '
+      /^# Captain standing preferences$/ { skipping = 1; next }
+      skipping && /^# / { skipping = 0 }
+      !skipping { print }
+    ' "$home/data/$id/brief.md" > "$home/data/$id/stripped.md"
+    normalize_inert_brief "$home/data/$id/stripped.md" > "$home/normalized.md"
+    cmp -s "$reference/$id.md" "$home/normalized.md" \
+      || fail "$mode: removing the labeled preamble section did not restore the preamble-free brief"
+    rm -f "$home/config/brief-preamble.md"
+  done
+  pass "fm-brief: absent, empty, and whitespace-only preambles leave the scaffold byte-identical"
+}
+
+# The scaffold's own fill tokens and its exclusive single-occurrence lines are
+# refused before any brief exists, rather than escaped: firstmate replaces every
+# {TASK} and {ACCEPTANCE CRITERION} after scaffolding, bin/fm-spawn.sh refuses a
+# brief that still contains {TASK}, and the criteria and delivery-contract checks
+# each require exactly one of their scaffold lines. Other placeholder-looking
+# text is carried verbatim.
+test_brief_preamble_refuses_ambiguous_content() {
+  local home token id out status
+  home="$TMP_ROOT/preamble-refusal"
+  mkdir -p "$home/data" "$home/config"
+  for token in '{TASK}' '{ACCEPTANCE CRITERION}'; do
+    id="brief-refuse-$(printf '%s' "$token" | tr -cd 'A-Za-z')"
+    printf 'Standing rule mentioning %s literally.\n' "$token" > "$home/config/brief-preamble.md"
+    status=0
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR 2>&1) || status=$?
+    [ "$status" -ne 0 ] || fail "a preamble carrying $token was accepted"
+    assert_contains "$out" "$token" "the refusal did not name the offending token $token"
+    assert_contains "$out" "brief-preamble.md" "the refusal did not name the preamble file"
+    assert_absent "$home/data/$id/brief.md" "a refused preamble scaffold published a brief"
+  done
+  printf '# Acceptance criteria\nStanding rule.\n' > "$home/config/brief-preamble.md"
+  status=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-refuse-criteria alpha --mode direct-PR 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "a preamble carrying a duplicate acceptance-criteria heading was accepted"
+  assert_contains "$out" "# Acceptance criteria" \
+    "the refusal did not name the duplicate acceptance-criteria heading"
+  assert_absent "$home/data/brief-refuse-criteria/brief.md" \
+    "a refused preamble scaffold published a brief"
+  printf 'Delivery contract: mode=no-mistakes\nStanding rule.\n' > "$home/config/brief-preamble.md"
+  status=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-refuse-contract alpha --mode direct-PR 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "a preamble carrying a delivery-contract line was accepted"
+  assert_contains "$out" "Delivery contract:" \
+    "the refusal did not name the duplicate delivery-contract line"
+  assert_absent "$home/data/brief-refuse-contract/brief.md" \
+    "a refused preamble scaffold published a brief"
+  pass "fm-brief: an ambiguous preamble is refused before a broken brief exists"
+}
+
+# A persistent secondmate charter is not a task brief: it never carries the
+# crewmate preamble, even when the home's preamble file is present. Secondmate
+# homes receive their own copy through the inherited-local-material allowlist.
+test_brief_preamble_skips_secondmate_charter() {
+  local home charter
+  home="$TMP_ROOT/preamble-charter"
+  mkdir -p "$home/data" "$home/config"
+  printf 'Use uv for every Python invocation.\n' > "$home/config/brief-preamble.md"
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-preamble-mate --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate scaffold with a captain preamble exited non-zero"
+  charter="$home/data/brief-preamble-mate/brief.md"
+  assert_no_grep '# Captain standing preferences' "$charter" \
+    "a secondmate charter carried the crewmate preamble section"
+  assert_no_grep 'Use uv for every Python invocation' "$charter" \
+    "a secondmate charter carried the captain preamble content"
+  pass "fm-brief: secondmate charters stay free of the captain worker preamble"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1260,6 +1479,10 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_captain_hold_policy
 test_commit_identity_rule_in_briefs
 test_scout_and_secondmate_scaffold
+test_brief_preamble_reaches_ship_and_scout_briefs
+test_brief_preamble_absent_or_empty_is_inert
+test_brief_preamble_refuses_ambiguous_content
+test_brief_preamble_skips_secondmate_charter
 test_ship_brief_carries_the_pr_body_contract
 test_firstmate_repo_ship_brief_prefills_verification_criterion
 test_concurrent_ship_scaffold_has_one_owner
