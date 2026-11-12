@@ -51,12 +51,6 @@ _CLICK = re.compile(CLICK_TEMPLATE)
 CLICK_CONFIRM = 5
 # Exit codes whose stdout is a notice meant for the clicker.
 _NOTICE_CODES = {0, 3, 4, 5, 6}
-# The tools bin/fm-ext-decision.sh click cannot run without. A worker's keyed
-# decision is read from its task's status log alone, so only a captain call and
-# a confirmation on a post of unknown kind reach tasks-axi.
-CLICK_TOOLS = ("jq", "tasks-axi")
-CLICK_TOOLS_WORKER = ("jq",)
-
 # Discord message component types and button styles.
 _ACTION_ROW = 1
 _BUTTON = 2
@@ -175,10 +169,7 @@ def handle_click(dest: dict[str, str], click_id: str) -> dict:
         option = "discuss" if match["option"] == "d" else match["option"]
         post, extra = dest["message_id"], ["--key", match["key"]]
     home = firstmate_home()
-    needs = CLICK_TOOLS
-    if not match["post"] and str(match["key"]).startswith("key:"):
-        needs = CLICK_TOOLS_WORKER
-    env = firstmate_env(home, firstmate_root(), needs)
+    env = firstmate_env(home, firstmate_root())
     args = [
         str(firstmate_root() / "bin" / "fm-ext-decision.sh"),
         "click",

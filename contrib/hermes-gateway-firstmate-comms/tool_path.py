@@ -9,10 +9,9 @@ version manager adds in the account's rc files are missing, and a
 decision it was made on.
 
 ``firstmate_env`` is the one place that builds the environment for those
-subprocesses. It keeps the loader's own ``PATH`` in front, adds the
-directories ``FM_EXT_TOOL_PATH`` names, and finally asks the account's login
-shell for the directories it would have. A tool that still cannot be found is
-not papered over here: the script that needs it fails by name, and the plugin
+subprocesses. It keeps the loader's own ``PATH`` in front and asks the
+account's login shell for the directories it would have. A tool that still
+cannot be found is not papered over here: the script that needs it fails by name, and the plugin
 shows that name.
 """
 
@@ -20,14 +19,9 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
 
 logger = logging.getLogger(__name__)
-
-# PATH-style list of extra tool directories. An operator or a test sets it when
-# the account's shell cannot be asked (a container, a locked-down service).
-TOOL_PATH_ENV = "FM_EXT_TOOL_PATH"
 
 # The login-shell probe brackets the PATH it prints with this sentinel, so a
 # shell that also prints a banner or a greeting cannot be mistaken for one.
@@ -41,33 +35,19 @@ PROBE_TIMEOUT_SECS = 5.0
 _shell_dirs: dict[str, tuple[str, ...]] = {}
 
 
-def firstmate_env(home, root, needs) -> dict[str, str]:
-    """The environment for one Firstmate subprocess.
-
-    ``home`` is the Firstmate home, ``root`` the checkout its scripts live in,
-    and ``needs`` the tools that call's script cannot run without. Stating
-    ``needs`` is what lets an ordinary launch skip the shell probe.
-    """
+def firstmate_env(home, root) -> dict[str, str]:
+    """The environment for every Firstmate subprocess."""
     env = os.environ.copy()
     env["FM_HOME"] = str(home)
     env["FM_ROOT_OVERRIDE"] = str(root)
-    env["PATH"] = tool_path(needs, base=env.get("PATH", os.defpath))
+    env["PATH"] = tool_path(base=env.get("PATH", os.defpath))
     return env
 
 
-def tool_path(needs, base: str | None = None) -> str:
-    """``base`` PATH, extended so every tool in ``needs`` can be found.
-
-    The loader's entries stay in front, so a tool the gateway already resolves
-    is the one its scripts keep running. The account's shell directories are
-    appended only when one of ``needs`` is missing from what is already there.
-    """
-    entries = _split(os.environ.get(TOOL_PATH_ENV, ""))
-    entries += _split(base if base is not None else os.environ.get("PATH", os.defpath))
-    entries = _unique(entries)
-    if needs and not _resolves(needs, entries):
-        entries = _unique(entries + list(shell_tool_dirs()))
-    return os.pathsep.join(entries)
+def tool_path(base: str | None = None) -> str:
+    """Keep the loader's PATH first, then append the cached shell directories."""
+    entries = _split(base if base is not None else os.environ.get("PATH", os.defpath))
+    return os.pathsep.join(_unique(entries + list(shell_tool_dirs())))
 
 
 def shell_tool_dirs() -> tuple[str, ...]:
@@ -161,8 +141,3 @@ def _unique(entries: list[str]) -> list[str]:
         seen.add(key)
         kept.append(entry)
     return kept
-
-
-def _resolves(needs, entries: list[str]) -> bool:
-    search = os.pathsep.join(entries)
-    return all(shutil.which(tool, path=search) for tool in needs)

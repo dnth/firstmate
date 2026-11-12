@@ -550,7 +550,7 @@ def _run_intake(
     """
     intake = firstmate_root() / "bin" / "fm-ext-intake.sh"
     secret = secret_path(home)
-    env = firstmate_env(home, firstmate_root(), ("jq",))
+    env = firstmate_env(home, firstmate_root())
     # Deliberately no FM_EXT_BRIDGE here. config/ext-bridge is the single
     # activation authority, so installing this plugin cannot switch the intake
     # half of a home on while its bootstrap and watcher still believe the

@@ -260,16 +260,9 @@ def state_dir(home: Path) -> Path:
     return Path(override) if override else home / "state"
 
 
-# Every outbox, decision-post, topic-thread, and media script this module runs
-# reads its payloads with jq, and that is the only tool the ordinary delivery
-# path cannot do without; the legacy chunk splitter's own `uv` stays a visible
-# per-message failure rather than a PATH probe here.
-POSTER_TOOLS = ("jq",)
-
-
 def _env_for(home: Path) -> dict[str, str]:
     """The environment for one Firstmate script this poster runs."""
-    return firstmate_env(home, firstmate_root(), POSTER_TOOLS)
+    return firstmate_env(home, firstmate_root())
 
 
 def list_pending(home: Path | None = None) -> list[Path]:

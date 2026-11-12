@@ -1958,10 +1958,10 @@ test_23_clicks_find_firstmate_tools_off_the_hosting_path() {
   # The account's login shell, stood in for by a shell that reports the
   # captain's PATH; the second one reports nothing the click cannot get itself.
   shell="$home/shell"
-  printf '#!/bin/bash\nPATH="%s:%s:%s"\nexport PATH\nexec /bin/bash "$@"\n' \
+  printf '#!/bin/bash\nPATH="%s:%s:%s"\nexport PATH\nexec /bin/bash --noprofile --norc -c "${@: -1}"\n' \
     "$toolbin" "$jqbin" "$hostbin" > "$shell"
   noshell="$home/shell-no-tools"
-  printf '#!/bin/bash\nPATH="%s:%s"\nexport PATH\nexec /bin/bash "$@"\n' \
+  printf '#!/bin/bash\nPATH="%s:%s"\nexport PATH\nexec /bin/bash --noprofile --norc -c "${@: -1}"\n' \
     "$partial" "$hostbin" > "$noshell"
   chmod +x "$shell" "$noshell"
 
@@ -2017,6 +2017,19 @@ PY
   printf 'South, please.\n' > "$home/answer.txt"
   home_env "$home" "$ROOT/bin/fm-captain-hold.sh" answer "$id-2" --decision-file "$home/answer.txt" \
     || fail "could not answer the second off-PATH captain call"
+  out=$(plugin23 "$jqbin:$hostbin" "$shell" <<'PYTEST'
+import sys
+from pathlib import Path
+import outbox_poster
+edited = []
+def edit(channel, message, content, components):
+    edited.append(message)
+outbox_poster.reconcile_decision_posts(home=Path(sys.argv[1]), edit=edit)
+assert "700000000000000006" in edited, edited
+print("ANSWERED POST RECONCILED")
+PYTEST
+  )
+  assert_contains "$out" "ANSWERED POST RECONCILED" "outbox reconciliation must discover tasks-axi and node even when jq is on the hosting PATH: $out"
   out=$(click23 "$hostbin" "$shell" "fmd:hold:$id-2:1" "$CAPTAIN" 880000000000000007 700000000000000006)
   assert_contains "$out" "Already decided" "a settled post must settle off the hosting PATH: $out"
 
@@ -2032,12 +2045,6 @@ PY
     "the log must name the settle_if_closed step that failed: $(cat "$home/click.err")"
   assert_contains "$(cat "$home/click.err")" "tasks-axi" \
     "the log must name the missing tool: $(cat "$home/click.err")"
-
-  # FM_EXT_TOOL_PATH is the operator's answer for a host whose shell cannot
-  # report anything: naming the directories is enough, with no shell involved.
-  out=$(FM_EXT_TOOL_PATH="$toolbin:$jqbin" \
-    click23 "$hostbin" "$noshell" "fmd:hold:$id-3:1" "$CAPTAIN" 880000000000000010 700000000000000008)
-  assert_contains "$out" "Sent: North." "FM_EXT_TOOL_PATH must supply the tool directories: $out"
 
   # One shared resolution covers the plugin's other subprocesses too: both the
   # intake script and the outbox drain need jq, which hostbin does not have.
@@ -2097,3 +2104,4 @@ test_19_legacy_buttons_settle_in_every_outcome_state
 test_20_legacy_waiting_receipts_need_no_original_or_payload
 test_21_legacy_settled_choices_survive_reopened_keys
 test_22_replaced_posts_need_a_newer_button_post
+test_23_clicks_find_firstmate_tools_off_the_hosting_path
