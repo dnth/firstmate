@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import subprocess
 import threading
@@ -33,8 +32,10 @@ import weakref
 
 try:
     from .intake import _snowflake, firstmate_home, firstmate_root, secret_path
+    from .tool_path import firstmate_env
 except ImportError:  # loaded from sys.path in hermetic tests
     from intake import _snowflake, firstmate_home, firstmate_root, secret_path
+    from tool_path import firstmate_env
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,6 @@ _CLICK = re.compile(CLICK_TEMPLATE)
 CLICK_CONFIRM = 5
 # Exit codes whose stdout is a notice meant for the clicker.
 _NOTICE_CODES = {0, 3, 4, 5, 6}
-
 # Discord message component types and button styles.
 _ACTION_ROW = 1
 _BUTTON = 2
@@ -63,6 +63,9 @@ DISCUSS_LABEL = "Discuss"
 # bin/fm-ext-decision.sh exits 1 only when nothing was sent, so this notice may
 # invite another try.
 REPLY_FAILED = "Firstmate could not send that click. Nothing was decided; try again, or reply to the post instead."
+# The script's own last failure line, appended to that notice so a click that
+# failed for a local reason says which one - a missing tool, for example.
+REPLY_CAUSE = REPLY_FAILED + "\nReason: %s"
 # A click still filing when the wait ends may yet file its request, so the
 # script is left to finish; a second click cannot file a second request.
 REPLY_PENDING = (
@@ -166,9 +169,7 @@ def handle_click(dest: dict[str, str], click_id: str) -> dict:
         option = "discuss" if match["option"] == "d" else match["option"]
         post, extra = dest["message_id"], ["--key", match["key"]]
     home = firstmate_home()
-    env = os.environ.copy()
-    env["FM_HOME"] = str(home)
-    env["FM_ROOT_OVERRIDE"] = str(firstmate_root())
+    env = firstmate_env(home, firstmate_root())
     args = [
         str(firstmate_root() / "bin" / "fm-ext-decision.sh"),
         "click",
@@ -210,10 +211,27 @@ def handle_click(dest: dict[str, str], click_id: str) -> dict:
             proc.returncode,
             (err or "").strip()[-500:],
         )
-        return {"text": REPLY_FAILED, "confirm": None}
+        cause = _failure_cause(err)
+        return {"text": REPLY_CAUSE % cause if cause else REPLY_FAILED, "confirm": None}
     if proc.returncode == CLICK_CONFIRM:
         return {"text": out, "confirm": confirm_id(post, int(option))}
     return {"text": out, "confirm": None}
+
+
+def _failure_cause(stderr: str) -> str:
+    """The script's own last failure line, without its program prefix.
+
+    It names what the click could not do - a tool it cannot find, an intake
+    that could not be written - where the generic notice could not.
+    """
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    line = lines[-1]
+    prefix = "fm-ext-decision: "
+    if line.startswith(prefix):
+        line = line[len(prefix):]
+    return line[:200]
 
 
 def click_item_class():

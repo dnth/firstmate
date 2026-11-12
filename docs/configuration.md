@@ -912,6 +912,7 @@ That presence file is the single activation authority, so the bootstrap, the wat
 `FM_EXT_BRIDGE` can only turn a configured bridge off: an explicit empty/`0`/`false`/`no`/`off` value opts out even when the presence file exists, and no environment value can opt in.
 A caller that could set the environment could otherwise activate the intake half of a home whose supervision half still believed the bridge was off.
 `FM_EXT_SECRET_FILE` and `FM_EXT_ALLOWLIST_FILE` may redirect those two files for tests.
+The plugin's subprocess tool resolution is owned by the [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#finding-firstmates-tools).
 The secret, allowlist, and `config/ext-channel` are not inherited into secondmate homes.
 
 `config/ext-allowlist` is fail-closed.

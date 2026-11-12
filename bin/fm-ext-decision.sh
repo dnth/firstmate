@@ -73,9 +73,13 @@
 #        the option, the decision text, any confirmation, and who and when;
 #        the post then updates under the display rules above
 #   Exit 1 means nothing was filed; the claim is released so the click can be
-#   tried again. If an inbox request was published but notification failed,
-#   exit 0 reports recovery needed; the sent claim remains and retrying uses
-#   the original request id. Discuss also retries its original request id.
+#   tried again. Its failure line names the reason inline - a tool this script
+#   cannot find, an intake that could not be written - because the ledger read
+#   that settles a post runs through Firstmate's own toolchain, and the caller
+#   shows that line to the clicker. The journal also names the settle_if_closed
+#   step that failed. If an inbox request was published but notification
+#   failed, exit 0 reports recovery needed; the sent claim remains and retrying
+#   uses the original request id. Discuss also retries its original request id.
 #   Exit 2 is bad usage.
 #
 # posts
@@ -473,11 +477,26 @@ post_outcome() {
   fm_ext_decision_key_outcome "$(row_field "$row" 3)" "$(row_field "$row" 4)"
 }
 
+# SETTLE_FAIL_STEP and SETTLE_FAIL_DETAIL name why the last settle_if_closed
+# returned 2, for the click's notice and the journal.
+SETTLE_FAIL_STEP=
+SETTLE_FAIL_DETAIL=
+
+# settle_failure <step> [detail]: record and report one failed settle step, so a
+# tool the click cannot find is named here instead of reading as a decision
+# nobody can open.
+settle_failure() {  # <step> [detail]
+  SETTLE_FAIL_STEP=$1
+  SETTLE_FAIL_DETAIL=${2:-}
+  printf 'fm-ext-decision: settle_if_closed failed at %s: %s\n' \
+    "$SETTLE_FAIL_STEP" "${SETTLE_FAIL_DETAIL:-no diagnostic}" >&2
+}
+
 # settle_if_closed <stem> [newer]: settle a post whose decision a newer post
 # replaced or whose own lifecycle closed. ``newer`` is the table's answer; the
 # click path omits it and the lookup runs here. Returns 0 when the post is
 # settled after it, 1 while the decision is still open, and 2 when its state
-# cannot be read.
+# cannot be read, naming that step in SETTLE_FAIL_*.
 settle_if_closed() {  # <stem> [newer]
   local stem=$1 newer=${2-} replaced=0 outcome state option
   settled "$stem" && return 0
@@ -487,10 +506,11 @@ settle_if_closed() {  # <stem> [newer]
     replaced=1
   fi
   if [ "$replaced" = 1 ]; then
-    settle_post "$stem" replaced "Replaced by a newer post $(discord_time "$NOW")" || return 2
+    settle_post "$stem" replaced "Replaced by a newer post $(discord_time "$NOW")" \
+      || { settle_failure settle-replaced-post; return 2; }
     return 0
   fi
-  outcome=$(post_outcome "$stem") || return 2
+  outcome=$(post_outcome "$stem") || { settle_failure read-post-outcome; return 2; }
   state=${outcome%%$'\t'*}
   case "$state" in
     open) return 1 ;;
@@ -498,11 +518,14 @@ settle_if_closed() {  # <stem> [newer]
       option=
       [ "$state" != decided ] || option=$(answer_option "$stem" "${outcome#*$'\t'}")
       settle_post "$stem" "$state" "$(outcome_text "$stem" "$state" "${outcome#*$'\t'}")" "$option" \
-        || return 2
+        || { settle_failure settle-post-outcome; return 2; }
       return 0
       ;;
+    *)
+      settle_failure read-decision-state "${outcome#*$'\t'}"
+      return 2
+      ;;
   esac
-  return 2
 }
 
 # send_request <stem> <message-id> <text> <decision-json>: one request through
@@ -629,7 +652,9 @@ command_click() {
       notice 4 "Already decided: $(settle_text "$stem") - this click changed nothing."
       ;;
     1) ;;
-    *) die "could not read whether the decision is still open" 1 ;;
+    *)
+      die "could not read the decision's state${SETTLE_FAIL_DETAIL:+: $SETTLE_FAIL_DETAIL}" 1
+      ;;
   esac
 
   text=$(post_field "$stem" '.decision.text')

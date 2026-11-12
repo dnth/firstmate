@@ -62,6 +62,17 @@ A `<guild>` rule does **not** hand every member of that Discord server command a
 A rule with an empty component (`<guild>:`) or a fourth component is malformed and is ignored, so a typo cannot widen a grant.
 The allowlist decision lives in `bin/fm-ext-intake.sh`, which this plugin calls; the plugin keeps no copy of the rule grammar and reports the refusal that script returns.
 
+## Finding Firstmate's tools
+
+Firstmate's `bin/` scripts need tools such as `tasks-axi`, its `node` runtime, and `jq` on `PATH`.
+A gateway service's `PATH` can omit tool directories available in your shell, preventing a decision click from reading Firstmate's board.
+
+The shared `tool_path.py` helper keeps the gateway's own `PATH` first and appends directories reported by an interactive login shell for every Firstmate script launch, including decisions, intake, and outbox posting.
+It selects an absolute `SHELL` value when set, otherwise the account's passwd shell, falling back to `/bin/sh` when neither is available; it does not hard-code tool installation paths.
+The shell probe has a five-second timeout and no terminal or input, and its result, including a failed probe, is cached per selected shell for the life of the gateway process.
+If the probe fails, launches retain the gateway's `PATH`; restart the gateway after fixing shell startup or changing its tool directories so the plugin can discover them again.
+When a decision click cannot read the board because `tasks-axi` is missing or incompatible, its notice includes "compatible tasks-axi is required", the journal names the failed `settle_if_closed` step, and no request is filed.
+
 ## Sending a request
 
 In the [dedicated Firstmate channel](#dedicated-firstmate-channel), just write the request as an ordinary message; every message an allowlisted author sends there, or in a thread under it, is a request.

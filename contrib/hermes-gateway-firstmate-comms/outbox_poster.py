@@ -76,10 +76,12 @@ try:
     from . import decisions
     from . import discord_split
     from .intake import dedicated_channel, firstmate_home, firstmate_root
+    from .tool_path import firstmate_env
 except ImportError:  # loaded from sys.path in hermetic tests
     import decisions
     import discord_split
     from intake import dedicated_channel, firstmate_home, firstmate_root
+    from tool_path import firstmate_env
 
 SendFn = Callable[[dict], dict]
 ReactFn = Callable[[str, str, str], None]
@@ -256,10 +258,8 @@ def state_dir(home: Path) -> Path:
 
 
 def _env_for(home: Path) -> dict[str, str]:
-    env = os.environ.copy()
-    env["FM_HOME"] = str(home)
-    env["FM_ROOT_OVERRIDE"] = str(firstmate_root())
-    return env
+    """The environment for one Firstmate script this poster runs."""
+    return firstmate_env(home, firstmate_root())
 
 
 def list_pending(home: Path | None = None) -> list[Path]:
