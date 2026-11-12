@@ -791,6 +791,46 @@ plain_out=$out
 assert_equals "$(grep -v 'latency_ms:' <<<"$peak_out")" "$(grep -v 'latency_ms:' <<<"$plain_out")" "peak output is identical to a run with no window declared"
 pass "peak: ranking and output are identical to no declared window"
 
+MIDNIGHT_RULES="$TMP_ROOT/midnight-rules.json"
+jq '.rules[0].use[0].peak_pricing.windows = [{"weekdays": ["fri"], "start": "00:00", "end": "00:01"}]' "$PEAK_RULES" > "$MIDNIGHT_RULES"
+cat > "$FAKEBIN/date" <<'SH'
+#!/usr/bin/env bash
+for format in "$@"; do :; done
+case "$format" in
+  +%u|+%H:%M|'+%u %H:%M')
+    if [ -s "$FM_TEST_CLOCK_LOG" ]; then
+      dow=6 hhmm=00:00
+    else
+      dow=5 hhmm=23:59
+    fi
+    printf '%s\n' sampled >> "$FM_TEST_CLOCK_LOG"
+    case "$format" in
+      +%u) printf '%s\n' "$dow" ;;
+      +%H:%M) printf '%s\n' "$hhmm" ;;
+      *) printf '%s %s\n' "$dow" "$hhmm" ;;
+    esac
+    ;;
+  *) exec "$FM_TEST_REAL_DATE" "$@" ;;
+esac
+SH
+chmod +x "$FAKEBIN/date"
+export FM_TEST_REAL_DATE FM_TEST_CLOCK_LOG
+FM_TEST_REAL_DATE=$(command -v date)
+FM_TEST_CLOCK_LOG="$TMP_ROOT/clock-log"
+for clock_override in '' 2026-11-13T23:59:59Z; do
+  reset_log
+  : > "$FM_TEST_CLOCK_LOG"
+  cp "$MIDNIGHT_RULES" "$RULES"
+  write_peak_response "$RESPONSE"
+  FM_DISPATCH_CLOCK_UTC="$clock_override" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "a midnight-crossing clock resolves ($clock_override)"
+  assert_contains "$out" "  profile: --harness 'omp' --model 'opencode-go/deepseek-v4.1-flash'" "Friday 23:59 is off-peak; mixing Friday with Saturday 00:00 would select the other model"
+  assert_contains "$out" 'spendPriority=0.3  offpeak=x2' "both clock fields describe the same off-peak instant"
+  assert_equals "$(cat "$FM_TEST_CLOCK_LOG")" sampled "the UTC clock is sampled once ($clock_override)"
+done
+rm "$FAKEBIN/date"
+pass "live and overridden clocks capture weekday and time together across midnight"
+
 reset_log
 PEAK_FLOOR="$TMP_ROOT/peak-floor.json"
 jq '.rules[0].use[0].floor = {"scope": "all_models", "min_percent": 80}' "$PEAK_RULES" > "$PEAK_FLOOR"
@@ -831,6 +871,10 @@ for bad_pricing in \
   '.rules[0].use[0].peak_pricing.windows[0].start = "24:00"' \
   '.rules[0].use[0].peak_pricing.windows[0].start = "1:00"' \
   '.rules[0].use[0].peak_pricing.windows[0].end = "04:00x"' \
+  '.rules[0].use[0].peak_pricing.windows[0].start = "01:00\n"' \
+  '.rules[0].use[0].peak_pricing.windows[0].end = "04:00\n"' \
+  '.default = .rules[0].use | .default[0].peak_pricing.windows[0].start = "01:00\n"' \
+  '.default = .rules[0].use | .default[0].peak_pricing.windows[0].end = "04:00\n"' \
   '.rules[0].use[0].peak_pricing.windows[0].start = "04:00"' \
   '.rules[0].use[0].peak_pricing.windows[0].weekdays = ["funday"]' \
   '.rules[0].use[0].peak_pricing.windows[0].weekdays = []' \

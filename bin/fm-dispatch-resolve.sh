@@ -262,7 +262,7 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
         then (provider_id($f.provider) | not)
         else ($f | has("provider"))
         end);
-  def clock_ok($t): ($t | type) == "string" and ($t | test("^([01][0-9]|2[0-3]):[0-5][0-9]$"));
+  def clock_ok($t): ($t | type) == "string" and ($t | test("^([01][0-9]|2[0-3]):[0-5][0-9]\\z"));
   def weekday_ok($d): ($d | type) == "string" and (["mon","tue","wed","thu","fri","sat","sun"] | index($d)) != null;
   def pricing_window_bad($w):
     ($w | type) != "object"
@@ -360,24 +360,18 @@ fi
 # The clock is read once, here, and every declared window is evaluated against
 # this single weekday and HH:MM. FM_DISPATCH_CLOCK_UTC pins it for tests.
 UTC_DOW='' UTC_HHMM=''
-clock_field() {  # <instant> <date format>
-  date -u -d "$1" "$2" 2>/dev/null \
-    || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" "$2" 2>/dev/null
-}
 if [ -n "${FM_DISPATCH_CLOCK_UTC:-}" ]; then
   case "$FM_DISPATCH_CLOCK_UTC" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
     *) die "FM_DISPATCH_CLOCK_UTC must be YYYY-MM-DDTHH:MM:SSZ (UTC): $FM_DISPATCH_CLOCK_UTC" ;;
   esac
-  UTC_DOW=$(clock_field "$FM_DISPATCH_CLOCK_UTC" +%u)
-  UTC_HHMM=$(clock_field "$FM_DISPATCH_CLOCK_UTC" +%H:%M)
-  if [ -z "$UTC_DOW" ] || [ -z "$UTC_HHMM" ]; then
-    die "FM_DISPATCH_CLOCK_UTC is not a valid UTC instant: $FM_DISPATCH_CLOCK_UTC"
-  fi
+  UTC_CLOCK=$(date -u -d "$FM_DISPATCH_CLOCK_UTC" '+%u %H:%M' 2>/dev/null \
+    || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$FM_DISPATCH_CLOCK_UTC" '+%u %H:%M' 2>/dev/null) \
+    || die "FM_DISPATCH_CLOCK_UTC is not a valid UTC instant: $FM_DISPATCH_CLOCK_UTC"
 else
-  UTC_DOW=$(date -u +%u) || die "could not read the UTC weekday"
-  UTC_HHMM=$(date -u +%H:%M) || die "could not read the UTC clock"
+  UTC_CLOCK=$(date -u '+%u %H:%M') || die "could not read the UTC clock"
 fi
+read -r UTC_DOW UTC_HHMM <<< "$UTC_CLOCK"
 
 RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }

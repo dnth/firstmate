@@ -1130,7 +1130,7 @@ crew_dispatch_validate() {
           end);
     def malformed_profile_floors($items):
       ($items | any(has("floor") and floor_bad(.floor; false)));
-    def clock_ok($t): ($t | type) == "string" and ($t | test("^([01][0-9]|2[0-3]):[0-5][0-9]$"));
+    def clock_ok($t): ($t | type) == "string" and ($t | test("^([01][0-9]|2[0-3]):[0-5][0-9]\\z"));
     def weekday_ok($d): ($d | type) == "string" and (["mon","tue","wed","thu","fri","sat","sun"] | index($d)) != null;
     def pricing_window_bad($w):
       ($w | type) != "object"
