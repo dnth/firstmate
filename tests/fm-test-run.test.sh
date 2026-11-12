@@ -482,15 +482,15 @@ test_portable_serial_shards_partition_the_serial_lane() {
   [ "$(printf '%s\n' "$union" | LC_ALL=C sort)" = "$serial" ] \
     || fail "portable serial shards must exactly cover the portable serial lane"
 
-  # Every shard carries a real share of the lane, so no degenerate partition
-  # leaves one runner doing nearly all of the work the split exists to spread.
+  # No shard holds more than its share of the lane, so a degenerate partition
+  # cannot leave one runner with nearly all of the scripts. A shard may hold a
+  # single script when that script alone carries a full time share of the lane,
+  # which longest-processing-time packing produces for the longest test.
   total=$(printf '%s\n' "$serial" | wc -l | tr -d ' ')
   cap=$((total * 6 / 10))
   shard=1
   while [ "$shard" -le "$count" ]; do
     listed=$("$RUNNER" --list --lane "portable-serial-${shard}of${count}" | wc -l | tr -d ' ')
-    [ "$listed" -ge 2 ] \
-      || fail "portable-serial-${shard}of${count} holds only $listed script(s)"
     [ "$listed" -le "$cap" ] \
       || fail "portable-serial-${shard}of${count} holds $listed of $total scripts"
     shard=$((shard + 1))
