@@ -67,8 +67,8 @@
 #                          is also absorbed while its home watcher beacon is fresh
 #                          within the wedge threshold; conclusive stale evidence
 #                          follows the ordinary stale and possible-wedge path.
-#                          Inconclusive remote evidence uses the consecutive-probe
-#                          bound documented below. A RunPod route in a recognized
+#                          Inconclusive remote evidence follows the shared rule in
+#                          bin/fm-remote-liveness-lib.sh. A RunPod route in a recognized
 #                          no-host lifecycle is dormant instead and uses the long
 #                          pause cadence without probing its absent endpoint.
 #                          A stale escalation whose endpoint is covered by an
