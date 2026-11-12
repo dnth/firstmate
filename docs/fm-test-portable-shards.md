@@ -82,7 +82,7 @@ Nine shards project 12m14.797s-13m29.087s and stay at or below 13m29.087s when r
 The two longest scripts set their own shards: `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` at 809,087 ms (13m29.087s) and `tests/fm-watch-triage.test.sh` at 779,607 ms (12m59.607s).
 That is why two shards hold a single script; each still carries a full time share of the lane.
 
-Evidence from the superseded seven-shard layout: on main run [42768866128](https://github.com/dnth/firstmate/actions/runs/42768866128), shard 2 ran 06:55:23-07:14:43 UTC, 19m20s wall for 19m06s of scripts, one minute under the cap.
+Evidence from the superseded seven-shard layout: on main run [42768866128](https://github.com/dnth/firstmate/actions/runs/42768866128), shard 2 ran 06:55:23-07:14:43 UTC, 19m20s wall for 19m06s of scripts, 40 seconds under the cap.
 Its slowest script was `fm-watch-triage.test.sh` at 775,401 ms (12m55.401s) of that 19m06s, and the remaining scripts consumed the rest, so the overrun was aggregate growth rather than a hung test.
 Job setup costs about 15s: that shard's run step started 8s after the job and the job completed 4s after the run step.
 Earlier cancellations under six and seven shards had the same shape, with the 20-minute limit reached by different tests on different attempts ([38753521432](https://github.com/dnth/firstmate/actions/runs/38753521432) reached it in `fm-on`, `fm-watch-checkpoint`, and `fm-wake-drain-unread-status` across its three attempts).
