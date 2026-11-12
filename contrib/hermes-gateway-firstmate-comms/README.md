@@ -44,12 +44,14 @@ The allowlist decision lives in `bin/fm-ext-intake.sh`, which this plugin calls;
 
 ## Finding Firstmate's tools
 
-The plugin runs Firstmate's `bin/` scripts as subprocesses of the gateway process, so they inherit the gateway's `PATH` - which, under the shared `hermes-gateway.service` unit, is the unit's fixed value rather than your own shell's.
-Firstmate's required tools (`tasks-axi`, `jq`, and whatever those scripts call) are installed wherever your shell puts them, so on a host where the unit's `PATH` lacks that directory, a decision click could not read the board it was made on.
+Firstmate's `bin/` scripts need tools such as `tasks-axi`, its `node` runtime, and `jq` on `PATH`.
+A gateway service's `PATH` can omit tool directories available in your shell, preventing a decision click from reading Firstmate's board.
 
-The plugin closes that gap itself, in one place for every script it runs: every launch keeps the gateway's own `PATH` first and appends the cached directories your login shell reports.
-That last step asks the account's shell once per gateway process, bounded in time, with no terminal attached.
-Nothing is guessed from a hard-coded user path, and a tool that genuinely cannot be found is not hidden: the click names it (for example "compatible tasks-axi is required"), the journal names the failing step, and nothing is recorded or sent.
+The shared `tool_path.py` helper keeps the gateway's own `PATH` first and appends directories reported by an interactive login shell for every Firstmate script launch, including decisions, intake, and outbox posting.
+It selects an absolute `SHELL` value when set, otherwise the account's passwd shell, falling back to `/bin/sh` when neither is available; it does not hard-code tool installation paths.
+The shell probe has a five-second timeout and no terminal or input, and its result, including a failed probe, is cached per selected shell for the life of the gateway process.
+If the probe fails, launches retain the gateway's `PATH`; restart the gateway after fixing shell startup or changing its tool directories so the plugin can discover them again.
+When a decision click cannot read the board because `tasks-axi` is missing or incompatible, its notice includes "compatible tasks-axi is required", the journal names the failed `settle_if_closed` step, and no request is filed.
 
 ## Sending a request
 
