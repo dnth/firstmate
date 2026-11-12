@@ -536,7 +536,8 @@ test_claude_hooks_stale_incarnation_harmless() {
 # and fire one lifecycle handler. Modes: handlers, turn-start, turn-end,
 # agent-start, end-continuing, end-final.
 drive_omp_ext() {
-  EXT_PATH="$1" MODE="$2" node --experimental-strip-types --input-type=module 2>&1 <<'EOF'
+  EXT_PATH="$1" MODE="$2" STATE_PATH="${3:-}" TASK_ID="${4:-}" ROOT_PATH="$ROOT" \
+    node --experimental-strip-types --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
@@ -544,6 +545,40 @@ mod.default({ on: (name, fn) => { handlers[name] = fn; } });
 // ctx.isIdle() reads false at a natural omp agent_end; state must not depend on it.
 const ctx = { isIdle: () => false };
 switch (process.env.MODE) {
+  case "ownership": {
+    const { execFileSync } = await import("node:child_process");
+    const { readFileSync } = await import("node:fs");
+    const childHandlers = {};
+    const childMod = await import(pathToFileURL(process.env.EXT_PATH).href + "?child");
+    childMod.default({ on: (name, fn) => { childHandlers[name] = fn; } });
+    const classify = () => execFileSync("bash", ["-c",
+      '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux fake:w omp "$2" "$3"',
+      "_", process.env.ROOT_PATH, process.env.TASK_ID, process.env.STATE_PATH,
+    ], { encoding: "utf8" }).trim();
+    const record = () => readFileSync(`${process.env.STATE_PATH}/${process.env.TASK_ID}.busy-state`, "utf8");
+    const expect = (value) => {
+      if (classify() !== value) throw new Error(`expected ${value}, got ${classify()}`);
+    };
+    await handlers.agent_start({ type: "agent_start" }, ctx);
+    expect("busy omp-ext");
+    const busy = record();
+    await childHandlers.agent_end?.({ type: "agent_end" }, ctx);
+    expect("busy omp-ext");
+    if (record() !== busy) throw new Error("child completion changed parent record");
+    await handlers.agent_end({ type: "agent_end", willContinue: true }, ctx);
+    expect("busy omp-ext");
+    await handlers.agent_end({ type: "agent_end" }, ctx);
+    expect("idle omp-ext");
+    const idle = record();
+    await childHandlers.agent_start?.({ type: "agent_start" }, ctx);
+    expect("idle omp-ext");
+    if (record() !== idle) throw new Error("child start changed parent record");
+    await handlers.agent_start({ type: "agent_start" }, ctx);
+    expect("busy omp-ext");
+    await handlers.agent_end({ type: "agent_end" }, ctx);
+    expect("idle omp-ext");
+    break;
+  }
   case "handlers": console.log(Object.keys(handlers).sort().join(" ")); break;
   case "turn-start": await handlers["turn_start"]({ type: "turn_start" }, ctx); break;
   case "turn-end": await handlers["turn_end"]({ type: "turn_end", turnIndex: 0 }, ctx); break;
@@ -607,6 +642,8 @@ test_omp_extension_semantic_lifecycle() {
   out=$(drive_omp_ext "$ext" end-final) || fail "final agent_end drive failed: $out"
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "a plain agent_end must classify 'idle omp-ext', got '$out'"
+
+  out=$(drive_omp_ext "$ext" ownership "$state" "$id") || fail "parent/child ownership drive failed: $out"
 
   fm_busy_source_trusted omp pi-ext && fail "omp must not trust the Pi extension's records"
   fm_busy_source_trusted omp omp-ext || fail "omp must trust its own extension's records"

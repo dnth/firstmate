@@ -4925,11 +4925,18 @@ export default function (omp: any) {
       if (active) execFile("touch", ["$OMP_READY"]);
     });
   });
-  omp.on("agent_start", () => busyEvent("busy", "agent-start"));
-  omp.on("agent_end", (event: any) => {
-    if (event && event.willContinue === true) return;
-    return busyEvent("idle", "agent-end");
-  });
+  const ownersKey = Symbol.for("firstmate.omp-busy.owners");
+  const owners: Set<string> =
+    (globalThis as unknown as Record<symbol, Set<string>>)[ownersKey] ??= new Set<string>();
+  const ownerKey = "$STATE_REAL/$ID:$BUSY_GEN";
+  if (!owners.has(ownerKey)) {
+    owners.add(ownerKey);
+    omp.on("agent_start", () => busyEvent("busy", "agent-start"));
+    omp.on("agent_end", (event: any) => {
+      if (event && event.willContinue === true) return;
+      return busyEvent("idle", "agent-end");
+    });
+  }
   omp.on("turn_start", () => {
     taskInboxDoorbell.notifyTurnStart();
     execFile("touch", ["$OMP_STARTED"]);

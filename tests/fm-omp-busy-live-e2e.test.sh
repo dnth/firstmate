@@ -139,10 +139,33 @@ classify() {
 # The tool call forces a second inner turn, so busy==omp-ext also proves the
 # inner turn boundary did not clear the record.
 OMP_LOG="$TMP_ROOT/omp-turn.log"
-( cd "$WT" && omp --no-session -p --auto-approve -e "$EXT" \
+OMP_PID=
+WATCHDOG_PID=
+cleanup() {
+  if [ -n "$WATCHDOG_PID" ]; then
+    kill -KILL -- "-$WATCHDOG_PID" 2>/dev/null || :
+    wait "$WATCHDOG_PID" 2>/dev/null || :
+  fi
+  if [ -n "$OMP_PID" ]; then
+    kill -KILL -- "-$OMP_PID" 2>/dev/null || :
+    wait "$OMP_PID" 2>/dev/null || :
+  fi
+  fm_test_cleanup
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+set -m
+( cd "$WT" && exec omp --no-session -p --auto-approve -e "$EXT" \
   "Run the shell command 'sleep 8; echo hi' and then reply with exactly DONE" \
   >"$OMP_LOG" 2>&1 ) &
 OMP_PID=$!
+(
+  sleep 120
+  printf '%s\n' "$OMP_VERSION: live omp turn timed out after 120 seconds" > "$TMP_ROOT/timeout"
+  kill -KILL -- "-$OMP_PID" 2>/dev/null || :
+) &
+WATCHDOG_PID=$!
 
 BUSY_SEEN=0
 n=0
@@ -158,7 +181,15 @@ while [ "$n" -lt 300 ]; do
   n=$((n + 1))
 done
 
-wait "$OMP_PID" || fail "the live omp turn failed; log follows:"$'\n'"$(cat "$OMP_LOG")"
+OMP_RC=0
+wait "$OMP_PID" || OMP_RC=$?
+[ ! -f "$TMP_ROOT/timeout" ] || fail "$(cat "$TMP_ROOT/timeout")"
+kill -KILL -- "-$WATCHDOG_PID" 2>/dev/null || :
+wait "$WATCHDOG_PID" 2>/dev/null || :
+WATCHDOG_PID=
+kill -KILL -- "-$OMP_PID" 2>/dev/null || :
+OMP_PID=
+[ "$OMP_RC" -eq 0 ] || fail "the live omp turn failed; log follows:"$'\n'"$(cat "$OMP_LOG")"
 [ "$BUSY_SEEN" -eq 1 ] || fail "the live omp turn never reported 'busy omp-ext'; final verdict '$(classify)'"$'\n'"$(cat "$OMP_LOG")"
 
 n=0
