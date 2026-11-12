@@ -126,6 +126,13 @@ matrix_case B35 deny "cd $TMP_ROOT"
 matrix_case B36 deny "cd $PRIMARY/does-not-exist"
 matrix_case B37 deny 'cd data && cd state'
 matrix_case B38 deny 'CDPATH=/tmp cd data'
+# A later node makes the context unprovable, so the exemption stops.
+matrix_case B39 deny 'echo hi; cd data'
+matrix_case B40 deny 'cd data || cd ..'
+# The special - (OLDPWD) and every option stay denied.
+matrix_case B41 deny 'cd -'
+matrix_case B42 deny 'cd -P data'
+matrix_case B43 deny 'cd -- -'
 
 # ALLOW: not a persistent top-level cwd change (scoped, data, or non-cd).
 matrix_case A01 allow 'git -C projects/foo status'
@@ -181,6 +188,8 @@ matrix_case A47 allow "cd $PRIMARY/data && tasks-axi add x"
 # An allowed cd updates the tracked cwd, so later nodes resolve from there.
 matrix_case A48 allow 'cd data && cd ..'
 matrix_case A49 allow 'cd data && cd ../state'
+# A semicolon chain of exempt cds stays provable.
+matrix_case A50 allow 'cd data; cd ..'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -283,6 +292,10 @@ test_home_forms_resolve_like_absolute() {
   out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~/data' 2>&1); rc=$?
   expect_code 0 "$rc" 'cd ~/data must be allowed when it resolves inside the home'
 
+  # Only the tilde prefix decides expansion, so a quoted suffix still expands.
+  out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~/"data"' 2>&1); rc=$?
+  expect_code 0 "$rc" 'an unquoted tilde prefix expands even when the suffix is quoted'
+
   out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~/link-to-project' 2>&1); rc=$?
   expect_code 2 "$rc" 'cd ~/link-to-project must stay denied because it resolves into projects/'
 
@@ -358,6 +371,19 @@ test_reachable_cwd_and_expansion_regressions() {
     expect_code 0 "$rc" 'ordinary safe directory changes must remain allowed'
   done
   pass 'cd-guard: reachable cwd and expansion regressions match Bash' 
+}
+
+test_denies_special_cd_operands() {
+  local dir out rc
+  dir="$TMP_ROOT/special-operand-home"
+  make_primary_fixture "$dir" >/dev/null
+  mkdir -p "$dir/-" "$dir/-P"
+  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd -' 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd - must deny even when a directory named - exists in the home'
+  assert_contains "$out" '[persistent-cd]' 'special-operand deny must carry the reason code'
+  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd -P' 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd -P must deny even when a directory named -P exists in the home'
+  pass 'cd-guard: special cd operands stay denied regardless of same-named directories'
 }
 
 # --- home carve-out: kept hazards ------------------------------------------
@@ -567,6 +593,7 @@ test_reachable_cwd_and_expansion_regressions
 test_full_acceptance_matrix
 test_home_forms_resolve_like_absolute
 test_cdpath_denies_relative_targets
+test_denies_special_cd_operands
 test_denies_foreign_worktree_target
 test_denies_nested_checkout_inside_home
 test_fires_in_secondmate_home

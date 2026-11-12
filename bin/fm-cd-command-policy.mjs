@@ -17,7 +17,7 @@
 // variable-prefixed path it compares against the home.
 
 import { Lexer, splitProgram, commandPosition } from "./fm-arm-command-policy.mjs";
-import { existsSync, realpathSync } from "node:fs";
+import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -127,7 +127,8 @@ function expandTarget(word, context) {
   if (word.subs.length > 0) return null;
   if (word.literal) {
     if (word.unquotedExpansion) return null;
-    return word.quoted || word.escaped ? word.value : expandTilde(word.value, context.userHome);
+    if (!word.value.startsWith("~") || word.firstProtected) return word.value;
+    return expandTilde(word.value, context.userHome);
   }
   const match = VARIABLE_WORD.exec(word.value);
   if (!match) return null;
@@ -137,6 +138,9 @@ function expandTarget(word, context) {
   if (rest.includes("$") || /[*?[\]{}]/.test(rest)) return null;
   const name = match[1] ?? match[2];
   if (name !== "FM_HOME" || !context.fmHome) return null;
+  // A relative FM_HOME resolves against the tracked directories in Bash, which
+  // this policy does not model, so only an absolute value is expandable.
+  if (!context.fmHome.startsWith("/")) return null;
   return context.fmHome + rest;
 }
 
@@ -151,33 +155,53 @@ function cdpathValue(position, context) {
   return value;
 }
 
-function invalidateAssignments(position, settings) {
-  for (const word of position.words) {
-    const match = /^(FM_HOME|HOME|CDPATH)(?:\+)?=/.exec(word.value);
-    if (!match) continue;
-    const field = { FM_HOME: "fmHome", HOME: "userHome", CDPATH: "cdpath" }[match[1]];
-    settings[field] = null;
+// An exempt cd must be certain to succeed: Bash's logical and physical rules
+// must land on a searchable directory inside the home, outside projects/ and
+// outside every foreign checkout. Only then can the next command be assumed to
+// start there, and only then can an earlier cd prove it changed nothing else.
+function exemptDirectory(home, path) {
+  if (!isInside(home, path)) return false;
+  if (isProjectsTree(home, path)) return false;
+  if (isForeignCheckout(home, path)) return false;
+  try {
+    if (!statSync(path).isDirectory()) return false;
+    accessSync(path, constants.X_OK);
+  } catch {
+    return false;
   }
+  return true;
 }
 
-function cdResolvesInsideHome(command, position, wordIndex, context, cwd) {
-  if (!context.home || command.value !== "cd") return null;
+// The one operand a cd may carry. A leading `-` covers the special `-`
+// (OLDPWD) and every option, which this policy does not model.
+function cdOperand(position, wordIndex, context) {
   const args = position.words.slice(wordIndex + 1);
   if (args[0]?.value === "--" && args[0].literal && args[0].subs.length === 0) args.shift();
   if (args.length !== 1) return null;
   const target = expandTarget(args[0], context);
+  if (target === null || target.startsWith("-")) return null;
+  const first = target.split("/")[0];
+  const cdpath = cdpathValue(position, context);
+  if (!target.startsWith("/") && first !== "." && first !== ".." && cdpath !== "") return null;
+  return target;
+}
+
+// One exempt cd, resolved from every directory the shell may currently sit in.
+// Returns the possible destinations, or null when the cd is not exempt.
+function cdDestinations(position, wordIndex, context, reachable) {
+  if (!context.home) return null;
+  const target = cdOperand(position, wordIndex, context);
   if (target === null) return null;
-  if (!target.startsWith("/") && ![".", ".."].includes(target.split("/")[0]) && cdpathValue(position, context) !== "") {
-    return null;
+  const destinations = [];
+  for (const cwd of reachable) {
+    const resolved = resolvedPaths(cwd, target);
+    if (resolved === null) return null;
+    for (const path of [resolved.logical, resolved.logicalDestination, resolved.physical]) {
+      if (!exemptDirectory(context.home, path)) return null;
+    }
+    destinations.push({ logical: resolved.logical, physical: resolved.physical });
   }
-  const resolved = resolvedPaths(cwd, target);
-  if (resolved === null) return null;
-  for (const path of [resolved.logical, resolved.logicalDestination, resolved.physical]) {
-    if (!isInside(context.home, path)) return null;
-    if (isProjectsTree(context.home, path)) return null;
-    if (isForeignCheckout(context.home, path)) return null;
-  }
-  return { logical: resolved.logical, physical: resolved.physical };
+  return destinations;
 }
 
 function decision(command, context = {}) {
@@ -198,32 +222,48 @@ function decision(command, context = {}) {
   if (lexed.error) return { decision: "allow" };
 
   const { nodes, separators } = splitProgram(lexed.tokens);
-  let cwds = [{ logical: settings.home, physical: settings.home }];
+  let reachable = [{ logical: settings.home, physical: settings.home }];
+  // True while every earlier node is an exempt cd. Such a cd always succeeds
+  // and mutates nothing, so nothing earlier can have changed HOME, FM_HOME, or
+  // CDPATH, and no conditional separator can have skipped a node. Any other
+  // node makes a later exemption unprovable: a builtin or function could have
+  // reassigned those variables, which this lexical policy cannot enumerate.
+  let provable = true;
   for (let index = 0; index < nodes.length; index += 1) {
     if (!nodePersists(separators, index)) continue;
     // commandPosition ignores subshell/brace groups, quoted data, comments, and
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
     const position = commandPosition(nodes[index]);
-    const nodeSettings = { ...settings };
-    invalidateAssignments(position, settings);
-    if (hasPathQualifiedCommandPrefix(position)) continue;
-    if (hasCommandQueryPrefix(position)) continue;
+    if (hasPathQualifiedCommandPrefix(position) || hasCommandQueryPrefix(position)) {
+      provable = false;
+      continue;
+    }
     let command = position.command;
     let wordIndex = position.index;
     while (command && (command.value === "builtin" || command.value === "command")) {
       wordIndex += 1;
       command = position.words[wordIndex];
     }
-    if (!command) continue;
-    if (!CD_BUILTINS.has(command.value)) continue;
-    if (position.wrappers.some((wrapper) => FORKING_WRAPPERS.has(wrapper))) continue;
-    const outcomes = cwds.map((cwd) => cdResolvesInsideHome(command, position, wordIndex, nodeSettings, cwd));
-    if (outcomes.some((outcome) => outcome === null)) return deny("persistent-cd");
-    const conditional = ["&&", "||"].includes(separators[index - 1]);
+    if (!command || !CD_BUILTINS.has(command.value)) {
+      provable = false;
+      continue;
+    }
+    if (position.wrappers.some((wrapper) => FORKING_WRAPPERS.has(wrapper))) {
+      provable = false;
+      continue;
+    }
+    // A `||` before this cd means the previous command had to fail; an exempt
+    // predecessor never fails, so that cd cannot run and its destination is
+    // unprovable.
+    if (!provable || separators[index - 1] === "||") return deny("persistent-cd");
+    const destinations = command.value === "cd" ? cdDestinations(position, wordIndex, settings, reachable) : null;
+    if (destinations === null) return deny("persistent-cd");
+    // A redirection can fail before the builtin runs, leaving the shell where
+    // it was, so both the previous and the new directories stay reachable.
     const canFail = nodes[index].some((token) => token.type === "redir");
-    const reachable = conditional || canFail ? [...cwds, ...outcomes] : outcomes;
-    cwds = [...new Map(reachable.map((cwd) => [JSON.stringify(cwd), cwd])).values()];
+    const next = canFail ? [...reachable, ...destinations] : destinations;
+    reachable = [...new Map(next.map((cwd) => [JSON.stringify(cwd), cwd])).values()];
   }
   return { decision: "allow" };
 }
