@@ -339,8 +339,12 @@ Taking the maximum rather than one run's value keeps the projections at or above
 Copy the generated assignments into the snapshot and run the partition guard.
 
 ```sh
-gh run download <run-id> -R dnth/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
-jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*.json | LC_ALL=C sort
+for run_id in 42768866128 42557971268 42756772678; do
+  gh-axi run download "$run_id" -R dnth/firstmate \
+    --pattern 'fm-test-timing-portable-serial-*' -D "/tmp/fm-serial/$run_id"
+done
+jq -sr '[.[].scripts[]] | group_by(.path)[] | [.[0].path, (map(.duration_ms) | max)] | @tsv' \
+  /tmp/fm-serial/*/*/*.json | LC_ALL=C sort
 for i in 1 2 3 4 5 6 7 8; do
   printf 'portable-serial-%sof8\n' "$i"
   bin/fm-test-run.sh --list --lane "portable-serial-${i}of8"
