@@ -7,14 +7,30 @@ Crewmate Hermes is a separate adapter.
 Firstmate still launches crewmates with `hermes chat --tui`.
 That command is not this Discord gateway.
 
-## Dedicated gateway profile
+## Gateway layouts
 
-Use a profile home, for example `~/.hermes/profiles/fmcomms`, which gets its own `hermes-gateway-fmcomms.service`.
+This plugin runs under one of two Hermes gateway layouts.
+A dedicated gateway runs with its process `HERMES_HOME` set to a profile home, for example `~/.hermes/profiles/fmcomms`, under its own service unit.
+A multi-profile gateway runs one `hermes-gateway.service` that serves several profiles, and each profile loads this plugin under its own home.
+Check which layout a profile runs under, because a Hermes update can leave a profile served by the default `hermes-gateway.service` instead of its own unit.
 Installing a gateway from an arbitrary `HERMES_HOME` path reuses and rewrites the default `hermes-gateway.service` on Hermes 0.20.5, so prefer the profile path.
 Copy or symlink this plugin into the profile's `plugins/firstmate-comms/` directory.
 Enable it in that profile's Hermes `config.yaml` `plugins.enabled` list.
 Do not add this plugin to a crewmate profile that Firstmate's Hermes turn-end hook manages.
 The gateway process is `hermes gateway`, not `hermes chat --tui`.
+
+## Bot identity
+
+Discord REST calls (posts, edits, thread renames, and the bot user lookup) authenticate as the owning profile's bot.
+The owning profile is the home Hermes loaded this plugin for, read from `register()`.
+The token source depends on the layout:
+
+- Dedicated gateway (process home is the profile home): the process environment first (`DISCORD_BOT_TOKEN`, or `HERMES_DISCORD_TOKEN`), then the profile's `.env`.
+- Multi-profile gateway (process home differs from the profile home): the owning profile's `.env` only, so a profile never posts as the default bot.
+
+When the owning profile has no token, the poster does not fall back to another profile's token.
+It logs `fm-ext-poster: no token (...)` naming the sources it tried, and the delivery stays queued until a token appears.
+The log names the resolved source (`process-env` or `profile-env`) and never prints token material.
 
 ## Testing a gateway
 
@@ -78,7 +94,9 @@ The [decision buttons reference](../../docs/configuration.md#decision-buttons) o
 Buttons need no extra Discord permission or gateway setting beyond the ones above.
 After updating this plugin, restart the gateway service so it loads the click route.
 
-Hermes 0.20.x has no plugin hook for Discord component clicks, so the plugin registers a discord.py `DynamicItem` for the `fmd:` and `fmc:` custom ids on the Discord adapter's live client, found through the gateway runner's adapter registry the way Hermes's own platform actions find it.
+Hermes 0.20.x has no plugin hook for Discord component clicks, so the plugin registers a discord.py `DynamicItem` for the `fmd:` and `fmc:` custom ids on the live client of the owning profile's Discord adapter.
+The plugin finds that adapter through the gateway runner's per-profile adapter registry (`_adapters_for_profile`), the same lookup Hermes uses for multi-profile delivery.
+A profile with no live Discord adapter gets no click route, so its decision posts fall back to plain text instead of showing buttons nothing answers.
 The outbox watcher re-registers it whenever the gateway reconnects with a new client, and logs one warning naming the Hermes version if a connected gateway cannot take it.
 A click is deferred ephemerally at once, then runs `bin/fm-ext-decision.sh click`, which owns every check and notice and files the request.
 The plugin then edits the post over Discord REST with mentions disabled: right after a sent click, and on a 30-second sweep once Firstmate records the answer.
@@ -117,7 +135,7 @@ The [local bridge configuration reference](../../docs/configuration.md#local-com
 The [outbound media reference](../../docs/configuration.md#outbound-media) owns multipart uploads, verification, retry and text fallback, nonce reconciliation, and media receipts.
 The [media regression test](../../tests/fm-ext-media.test.sh) drives the real poster against a local multipart-parsing Discord stub.
 `FM_EXT_OUTBOX_POLL_SECS` (default 2) sets how often the watcher drains the outbox.
-Set `DISCORD_BOT_TOKEN` (or `HERMES_DISCORD_TOKEN`) for Discord REST delivery.
+Discord REST delivery uses the owning profile's bot token; see [Bot identity](#bot-identity) for which `.env` or process variable supplies it.
 The [local bridge configuration reference](../../docs/configuration.md#local-communication-officer-bridge-configext-bridge) owns the poster's User-Agent requirement and real-sender regression coverage.
 Firstmate core has no Discord library.
 

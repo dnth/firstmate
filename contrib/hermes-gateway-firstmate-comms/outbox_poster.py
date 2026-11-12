@@ -625,8 +625,116 @@ def _mktemp() -> tuple[int, str]:
     return tempfile.mkstemp(prefix="fm-ext-receipt.")
 
 
+_TOKEN_KEYS = ("DISCORD_BOT_TOKEN", "HERMES_DISCORD_TOKEN")
+# Profile home whose bot this poster speaks as. None means unconfigured: process env only.
+_BOT_PROFILE_HOME = None
+# Resolved (token, source) for a configured profile, cached once non-empty.
+_BOT_IDENTITY = None
+_BOT_IDENTITY_LOGGED = ""
+
+
+def _owner_profile_name(home) -> str:
+    """Hermes profile id for *home*: its profiles/<name> folder, else the default profile."""
+    if home is None:
+        return "default"
+    try:
+        from hermes_constants import profile_name_for_home
+    except ImportError:
+        return home.name if home.parent.name == "profiles" else "default"
+    return profile_name_for_home(home) or "default"
+
+
+def configure_bot_identity(profile_home) -> None:
+    """Choose the Hermes profile whose Discord bot REST calls authenticate as.
+
+    register() passes the home Hermes loaded this plugin for. Pass None to
+    keep the process environment alone (standalone runs and tests).
+    """
+    global _BOT_PROFILE_HOME, _BOT_IDENTITY, _BOT_IDENTITY_LOGGED
+    _BOT_PROFILE_HOME = Path(profile_home) if profile_home else None
+    _BOT_IDENTITY = None
+    _BOT_IDENTITY_LOGGED = ""
+    decisions.set_owner_profile(_owner_profile_name(_BOT_PROFILE_HOME))
+
+
+def _process_hermes_home() -> Path:
+    try:
+        from hermes_constants import get_process_hermes_home
+    except ImportError:
+        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    return Path(get_process_hermes_home())
+
+
+def _same_home(a: Path, b: Path) -> bool:
+    return a.resolve() == b.resolve()
+
+
+def _env_token(env) -> str:
+    for key in _TOKEN_KEYS:
+        if env.get(key):
+            return env[key]
+    return ""
+
+
+def _read_env_file(path: Path) -> dict:
+    """KEY=VALUE lines from a profile .env. Used only when Hermes is not importable."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    values = {}
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def _profile_env_token(home: Path) -> str:
+    """The owning profile's bot token from its own secret scope, never another profile's."""
+    try:
+        from agent.secret_scope import build_profile_secret_scope
+    except ImportError:
+        scope = _read_env_file(home / ".env")
+    else:
+        scope = build_profile_secret_scope(home)
+    return _env_token(scope)
+
+
+def _bot_identity() -> tuple:
+    """(token, source). Source names the resolution used, or every source tried when empty."""
+    if _BOT_PROFILE_HOME is None:
+        token = _env_token(os.environ)
+        return (token, "process-env") if token else ("", "tried process-env")
+    home = _BOT_PROFILE_HOME
+    tried = []
+    if _same_home(home, _process_hermes_home()):
+        tried.append("process-env")
+        token = _env_token(os.environ)
+        if token:
+            return token, "process-env"
+    tried.append("profile-env")
+    token = _profile_env_token(home)
+    if token:
+        return token, f"profile-env ({home.name})"
+    return "", "tried " + " then ".join(tried)
+
+
 def _bot_token() -> str:
-    return os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("HERMES_DISCORD_TOKEN") or ""
+    """Discord bot token REST calls authenticate with. Empty when unresolved (transient)."""
+    global _BOT_IDENTITY, _BOT_IDENTITY_LOGGED
+    if _BOT_IDENTITY is not None:
+        return _BOT_IDENTITY[0]
+    token, source = _bot_identity()
+    label = source if token else f"no token ({source})"
+    if label != _BOT_IDENTITY_LOGGED:
+        _BOT_IDENTITY_LOGGED = label
+        print(f"fm-ext-poster: bot identity {label}", file=sys.stderr)
+    if token and _BOT_PROFILE_HOME is not None:
+        _BOT_IDENTITY = (token, source)
+    return token
 
 
 def request_progress_path(payload: dict, home: Path) -> Path:
@@ -2005,7 +2113,7 @@ def waiting_pin_deliver(payload: dict, home: Path) -> str:
 
 def _waiting_pin_deliver_claimed(payload: dict, home: Path) -> str:
     """Post once, pin once, then edit the pinned message in place."""
-    token = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("HERMES_DISCORD_TOKEN")
+    token = _bot_token()
     if not token:
         raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
     channel = str(payload.get("channel_id") or "")
