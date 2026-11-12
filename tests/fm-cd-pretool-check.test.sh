@@ -13,6 +13,10 @@
 # spawned; live per-harness evidence lives in docs/cd-guard.md.
 set -u
 
+# CDPATH redirects a relative cd, so a caller's value must not leak into these
+# fixtures; the CDPATH cases set it explicitly.
+unset CDPATH
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -120,6 +124,8 @@ matrix_case B33 deny "cd $PRIMARY/outside-link"
 matrix_case B34 deny 'cd /tmp'
 matrix_case B35 deny "cd $TMP_ROOT"
 matrix_case B36 deny "cd $PRIMARY/does-not-exist"
+matrix_case B37 deny 'cd data && cd state'
+matrix_case B38 deny 'CDPATH=/tmp cd data'
 
 # ALLOW: not a persistent top-level cwd change (scoped, data, or non-cd).
 matrix_case A01 allow 'git -C projects/foo status'
@@ -172,6 +178,9 @@ matrix_case A44 allow "cd \"$PRIMARY/data\""
 matrix_case A45 allow "cd $PRIMARY/link-to-data"
 matrix_case A46 allow 'cd ./state'
 matrix_case A47 allow "cd $PRIMARY/data && tasks-axi add x"
+# An allowed cd updates the tracked cwd, so later nodes resolve from there.
+matrix_case A48 allow 'cd data && cd ..'
+matrix_case A49 allow 'cd data && cd ../state'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -251,9 +260,13 @@ test_home_forms_resolve_like_absolute() {
   out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd "$FM_HOME/data"' 2>&1); rc=$?
   expect_code 0 "$rc" 'a quoted $FM_HOME target must resolve the same way'
 
-  # An unset FM_HOME means the repo root is the home (docs/configuration.md).
+  # Bash expands an unset variable to the empty string, so this becomes
+  # `cd /data`: the policy must not invent a value that widens beyond the home.
   out=$(env -u FM_HOME "$CHECK" --claude --command 'cd $FM_HOME/data' 2>&1); rc=$?
-  expect_code 0 "$rc" 'an unset FM_HOME must resolve to the repo root, the effective home'
+  expect_code 2 "$rc" 'an unset FM_HOME must stay denied rather than resolve to a made-up home'
+  assert_contains "$out" '[persistent-cd]' 'unset-FM_HOME deny must carry the reason code'
+  out=$(env -u FM_HOME "$CHECK" --claude --command 'cd $FM_HOME' 2>&1); rc=$?
+  expect_code 2 "$rc" 'an empty $FM_HOME must not become a return to the home'
 
   elsewhere="$TMP_ROOT/elsewhere"
   mkdir -p "$elsewhere/data"
@@ -277,6 +290,26 @@ test_home_forms_resolve_like_absolute() {
   expect_code 2 "$rc" 'a ~user target this policy cannot resolve must stay denied'
 
   pass 'cd-guard: $FM_HOME, ~, and relative forms resolve like their absolute spellings'
+}
+
+# --- home carve-out: CDPATH cannot redirect a relative target --------------
+
+# Bash consults CDPATH for a relative operand that does not begin with a dot or
+# a slash, so an inherited value can send an exempted `cd data` out of the home.
+test_cdpath_denies_relative_targets() {
+  local out rc
+
+  out=$(CDPATH=/tmp "$CHECK" --claude --command 'cd data' 2>&1); rc=$?
+  expect_code 2 "$rc" 'an inherited CDPATH must deny the relative target it could redirect'
+  assert_contains "$out" '[persistent-cd]' 'CDPATH deny must carry the reason code'
+
+  out=$(CDPATH=/tmp "$CHECK" --claude --command 'cd ./data' 2>&1); rc=$?
+  expect_code 0 "$rc" 'a dot-prefixed target never consults CDPATH and must stay allowed'
+
+  out=$(CDPATH='' "$CHECK" --claude --command 'cd data' 2>&1); rc=$?
+  expect_code 0 "$rc" 'an empty CDPATH must not deny a home-relative target'
+
+  pass 'cd-guard: CDPATH denies a relative target that it could redirect out of the home'
 }
 
 # --- home carve-out: kept hazards ------------------------------------------
@@ -484,6 +517,7 @@ test_scripts_are_shellcheck_clean() {
 
 test_full_acceptance_matrix
 test_home_forms_resolve_like_absolute
+test_cdpath_denies_relative_targets
 test_denies_foreign_worktree_target
 test_denies_nested_checkout_inside_home
 test_fires_in_secondmate_home

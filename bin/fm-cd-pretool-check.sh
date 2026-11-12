@@ -147,7 +147,7 @@ POLICY="$FM_ROOT/bin/fm-cd-command-policy.mjs"
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --home "$FM_ROOT" --fm-home "${FM_HOME:-$FM_ROOT}" 2>/dev/null) || exit 0
+POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --home "$FM_ROOT" --fm-home "${FM_HOME:-}" 2>/dev/null) || exit 0
 [ -n "$POLICY_OUTPUT" ] || exit 0
 
 TAB=$(printf '\t')

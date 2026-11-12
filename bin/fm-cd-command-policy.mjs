@@ -119,14 +119,6 @@ function isForeignCheckout(home, path) {
   return false;
 }
 
-function targetStaysHome(home, target) {
-  const resolved = resolvedPaths(home, target);
-  if (resolved === null) return false;
-  return [resolved.logical, resolved.physical].every(
-    (path) => isInside(home, path) && !isProjectsTree(home, path) && !isForeignCheckout(home, path),
-  );
-}
-
 function expandTilde(value, userHome) {
   if (!value.startsWith("~")) return value;
   if (!userHome) return null;
@@ -138,7 +130,7 @@ function expandTilde(value, userHome) {
 const VARIABLE_WORD = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(.*)$/;
 
 // The exempt argument is one word: a literal path, `~/...`, or a single
-// `$FM_HOME` / `$HOME` prefix this policy can expand from its own inputs. Any
+// `$FM_HOME` prefix this policy can expand from its own inputs. Any
 // substitution, glob, or further expansion is a value this policy cannot know,
 // so it is never resolved.
 function expandTarget(word, context) {
@@ -154,20 +146,45 @@ function expandTarget(word, context) {
   const rest = match[3];
   if (rest.includes("$") || /[*?[\]{}]/.test(rest)) return null;
   const name = match[1] ?? match[2];
-  const base =
-    name === "FM_HOME" ? context.fmHome : name === "HOME" ? context.userHome : "";
-  if (!base) return null;
-  return base + rest;
+  if (name !== "FM_HOME" || !context.fmHome) return null;
+  return context.fmHome + rest;
 }
 
-function cdStaysHome(command, position, wordIndex, context) {
-  if (!context.home || command.value !== "cd") return false;
+// Bash consults CDPATH for a relative operand that does not begin with a dot,
+// so any non-empty CDPATH - inherited or assigned on this command - can send
+// the target somewhere the lexical resolution would not find.
+function cdpathValue(position, context) {
+  let value = context.cdpath;
+  for (const word of position.words.slice(0, position.prefixAssignments)) {
+    const match = /^CDPATH(\+?=)(.*)$/.exec(word.value);
+    if (!match) continue;
+    value = match[1] === "+=" ? `${value}${match[2]}` : match[2];
+  }
+  return value;
+}
+
+// Resolve one exempt cd. `cwd` is the tracked directory at that command, so an
+// allowed cd earlier in the same command list updates what later nodes resolve
+// from. Returns the directory the shell would sit in, or null when the cd is
+// not exempt.
+function cdResolvesInsideHome(command, position, wordIndex, context, cwd) {
+  if (!context.home || command.value !== "cd") return null;
   const args = position.words.slice(wordIndex + 1);
   if (args[0]?.value === "--" && args[0].literal && args[0].subs.length === 0) args.shift();
-  if (args.length !== 1) return false;
+  if (args.length !== 1) return null;
   const target = expandTarget(args[0], context);
-  if (target === null) return false;
-  return targetStaysHome(context.home, target);
+  if (target === null) return null;
+  if (!target.startsWith("/") && !target.startsWith(".") && cdpathValue(position, context) !== "") {
+    return null;
+  }
+  const resolved = resolvedPaths(cwd, target);
+  if (resolved === null) return null;
+  for (const path of [resolved.logical, resolved.physical]) {
+    if (!isInside(context.home, path)) return null;
+    if (isProjectsTree(context.home, path)) return null;
+    if (isForeignCheckout(context.home, path)) return null;
+  }
+  return resolved.physical;
 }
 
 function decision(command, context = {}) {
@@ -178,6 +195,7 @@ function decision(command, context = {}) {
     home: context.home ? resolve(context.home) : "",
     fmHome: context.fmHome ? resolve(context.fmHome) : "",
     userHome: userHome ? resolve(userHome) : "",
+    cdpath: context.cdpath ?? process.env.CDPATH ?? "",
   };
   const lexed = new Lexer(command).tokenize();
   // Fail open on syntax this classifier cannot tokenize. The cd-guard's threat
@@ -187,6 +205,7 @@ function decision(command, context = {}) {
   if (lexed.error) return { decision: "allow" };
 
   const { nodes, separators } = splitProgram(lexed.tokens);
+  let cwd = settings.home;
   for (let index = 0; index < nodes.length; index += 1) {
     if (!nodePersists(separators, index)) continue;
     // commandPosition ignores subshell/brace groups, quoted data, comments, and
@@ -204,7 +223,11 @@ function decision(command, context = {}) {
     if (!command) continue;
     if (!CD_BUILTINS.has(command.value)) continue;
     if (position.wrappers.some((wrapper) => FORKING_WRAPPERS.has(wrapper))) continue;
-    if (cdStaysHome(command, position, wordIndex, settings)) continue;
+    const changedTo = cdResolvesInsideHome(command, position, wordIndex, settings, cwd);
+    if (changedTo !== null) {
+      cwd = changedTo;
+      continue;
+    }
     return deny("persistent-cd");
   }
   return { decision: "allow" };
@@ -232,18 +255,10 @@ function parseArguments(argv) {
       i += 1;
       continue;
     }
-    if (name.startsWith("--home=")) {
-      result.home = name.slice("--home=".length);
-      continue;
-    }
     if (name === "--fm-home") {
       if (i + 1 >= argv.length) throw new Error("--fm-home requires a value");
       result.fmHome = argv[i + 1];
       i += 1;
-      continue;
-    }
-    if (name.startsWith("--fm-home=")) {
-      result.fmHome = name.slice("--fm-home=".length);
       continue;
     }
     throw new Error(`unknown argument: ${name}`);

@@ -16,7 +16,7 @@ That has actually happened: a persistent top-level `cd` caused a firstmate-owned
 The seatbelt denies a persistent cwd change that would leave the home - reaching a project clone or any other directory outside it - before it runs, and allows one that stays inside the home.
 
 This guard is not a general sandbox.
-It classifies shell command positions only; it never evaluates, sources, or runs any byte of the submitted command, and it expands only a literal `~` prefix and a single `$FM_HOME` or `$HOME` prefix from values the transport supplies.
+It classifies shell command positions only; it never evaluates, sources, or runs any byte of the submitted command, and it expands only a literal `~` prefix and a single `$FM_HOME` prefix from values the transport supplies.
 Its threat model is agent mistakes, the same as the watcher-arm seatbelt: an accidental bare `cd projects/foo`, not a deliberately obfuscated bypass.
 
 ## Scope: plain firstmate checkouts only
@@ -53,13 +53,22 @@ The guard **allows** everything else, including these safe scoped forms that mus
 ### The home exemption
 
 A top-level `cd` is allowed when its single target resolves into the home: the home itself, or a directory inside the home that is outside the `projects/` tree and outside any git checkout other than the home's own.
-The target may be spelled absolutely, relatively, with `~`, or with a `$FM_HOME` or `$HOME` prefix, and resolves exactly like the absolute spelling of the same directory, measured from the home as the primary shell's steady-state directory.
-`bin/fm-cd-pretool-check.sh` passes the physical primary checkout as `--home` and the effective home as `--fm-home` (`FM_HOME`, else the repo root); without `--home` no target is exempt.
+The target may be spelled absolutely, relatively, with `~`, or with a `$FM_HOME` prefix, and resolves exactly like the absolute spelling of the same directory.
+Relative targets resolve from the tracked directory: the home at the start of a command, and the destination of every earlier `cd` this guard already allowed in the same command list, so `cd data && cd ..` returns to the home while `cd data && cd state` checks `data/state`.
+`bin/fm-cd-pretool-check.sh` passes the physical primary checkout as `--home` and the shell's actual `FM_HOME` value as `--fm-home`; without `--home` no target is exempt, and an empty `--fm-home` denies every `$FM_HOME` form rather than inventing a value Bash would not expand to.
+Bash consults `CDPATH` for a relative operand that does not begin with a dot, so a non-empty `CDPATH` - inherited or assigned on the command - denies such a target instead of resolving it from the tracked directory.
 Both path rules must land inside the home: logical, where a `..` is collapsed lexically first as under Bash's default `cd`, and physical, where symlinks are followed component by component as under `cd -P`.
 A symlink inside the home that points into `projects/`, at a nested checkout, or out of the home is therefore denied, and so is a target that does not exist or otherwise cannot be resolved.
 `/tmp` stays denied on purpose: a firstmate command run from there resolves the wrong home.
 A `cd` with no target, more than one argument, an option other than a separating `--`, a glob, a command substitution, or a variable this policy does not model stays denied, as does every `pushd` and `popd`.
 The exemption widens nothing beyond the home: an `FM_HOME` that points somewhere else does not become a second allowed root.
+
+### Known limit
+
+The tracked directory starts at the home for every tool call, because the guard cannot observe the shell's cwd from an earlier call.
+If the primary shell already sits in a subdirectory of the home when a command arrives, a relative target is still resolved from the home, so a nested checkout reachable only from that deeper directory is not detected.
+Passing the hook process's own cwd is deliberately not used: whether it equals the persistent shell's cwd is harness-dependent and unproven, and a wrong value would allow rather than deny.
+A cross-call cwd fact needs live per-harness evidence before the guard may rely on it.
 
 Denying an out-of-home `cd` never causes a wrong-directory write: reaching the target without moving the shell is always available through the forms above, and the guard's steady state remains "always at the home".
 
@@ -94,7 +103,7 @@ It does not permit `cd /some/path` outside the home, because such a `cd` remains
 - Pi, pi-signed, and OMP send the exact command string through `--command <exact string>`.
 
 Processing order is cheapest-first: a strict-superset prefilter, then the primary-checkout scope, then the Node policy owner.
-The policy call carries the checkout as `--home` and the effective home as `--fm-home` (`FM_HOME`, else the checkout) so the home exemption can be decided without the transport ever expanding the command.
+The policy call carries the checkout as `--home` and the shell's own `FM_HOME` value as `--fm-home`, so the home exemption can be decided without the transport ever expanding the command.
 The prefilter removes ordinary single quotes, double quotes, backslashes, carriage returns, and newlines before fast-allowing any command that carries no `cd`, `pushd`, or `popd` substring and no quoting-decoder marker (`$'` ANSI-C or `$"` locale), so quoted or escaped command-word fragments delegate to the policy while most commands never pay for the git scoping calls or the Node process.
 The quoting-decoder marker set is coupled to the classifier's decoder set in `bin/fm-arm-command-policy.mjs`: adding any new quote or expansion form the classifier decodes requires extending the prefilter marker set in the same change, or it stops being a strict superset.
 
