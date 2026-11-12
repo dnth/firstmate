@@ -287,11 +287,11 @@ omp/18.18.6
 ok - omp/18.18.6: real omp reports 'busy omp-ext' during a turn and 'idle omp-ext' after it (never unknown)
 ```
 
-The turn ran a shell tool call, so it crossed two inner `turn_start`/`turn_end` pairs; the record stayed `busy omp-ext` across that boundary and settled to `idle omp-ext` after `agent_end`.
-`tests/fm-busy-adapter-wiring.test.sh` pins the same extension portably in a plain Node host, including `willContinue: true` keeping the record busy.
+The live guard requests a shell tool call and observes `busy omp-ext` during the run and `idle omp-ext` after it; it stops sampling once busy is observed, so it does not prove uninterrupted busy state across inner turn boundaries.
+`tests/fm-busy-adapter-wiring.test.sh` pins the same extension portably in a plain Node host, including inner turn boundaries preserving state, `willContinue: true` keeping the record busy, and native child instances leaving the parent's record untouched.
 The contract is armed at launch, so an OMP worker spawned before this wiring existed keeps classifying `unknown` until it is relaunched; no migration exists.
 
-The native launch-error publisher was verified on the same installed OMP 18.12.5 against a disposable localhost HTTP 429 endpoint, using only a synthetic API key:
+The native launch-error publisher was separately verified on OMP 18.12.5 against a disposable localhost HTTP 429 endpoint, using only a synthetic API key:
 
 ```sh
 FM_OMP_LAUNCH_ERROR_LIVE_E2E=1 bash tests/fm-omp-launch-error-live-e2e.test.sh

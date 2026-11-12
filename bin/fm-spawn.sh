@@ -4893,13 +4893,12 @@ EOF
 // marker is always attributable.
 // Semantic state: "agent_start" -> busy when a low-level agent run begins;
 // "agent_end" -> idle only when event.willContinue is not true. omp has no
-// agent_settled (verified, omp 18.18.6: zero occurrences in the binary), and
-// willContinue marks the auto-retry, compaction-retry, queued-follow-up, and
+// agent_settled; willContinue marks the auto-retry, compaction-retry, queued-follow-up, and
 // session_stop-forced continuation cases that must stay busy.
 // turn_start/turn_end bracket an INNER turn (one model response plus its tool
 // calls), not a run: a single tool-using prompt emits several pairs between one
-// agent_start and agent_end (verified, omp 18.18.6), so they stay wake
-// notifications for the watcher and never state edges. ctx.isIdle() is not
+// agent_start and agent_end, so they stay wake notifications for the watcher
+// and never state edges. ctx.isIdle() is not
 // consulted because it still reads false at a natural agent_end.
 import { execFile } from "node:child_process";
 import { installTaskInboxDoorbell } from "$FM_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts";
@@ -4925,6 +4924,9 @@ export default function (omp: any) {
       if (active) execFile("touch", ["$OMP_READY"]);
     });
   });
+  // Native children bind this extension again in the parent's process. Only
+  // the first instance may write this generation's state; a child's run end
+  // must not mark its still-working parent idle.
   const ownersKey = Symbol.for("firstmate.omp-busy.owners");
   const owners: Set<string> =
     (globalThis as unknown as Record<symbol, Set<string>>)[ownersKey] ??= new Set<string>();

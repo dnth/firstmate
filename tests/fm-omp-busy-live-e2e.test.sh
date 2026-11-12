@@ -136,8 +136,8 @@ classify() {
 [ "$(classify)" = "busy fm-spawn" ] || fail "the spawn seed must classify 'busy fm-spawn', got '$(classify)'"
 
 # One turn that keeps the agent running long enough to observe the state edge.
-# The tool call forces a second inner turn, so busy==omp-ext also proves the
-# inner turn boundary did not clear the record.
+# The requested tool call adds an inner turn; sampling below proves the busy
+# and idle endpoints. The portable adapter regression checks inner boundaries.
 OMP_LOG="$TMP_ROOT/omp-turn.log"
 OMP_PID=
 WATCHDOG_PID=
