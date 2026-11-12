@@ -269,6 +269,28 @@ ok - real isolated tmux OMP secondmate launch, idle health, marked replies, exit
 This proves the complete isolated-home lifecycle on the installed Linux runtime; it does not establish macOS or Herdr compatibility for that version.
 The deterministic launch guard in `tests/fm-omp-secondmate.test.sh` owns independent lock-PID, loaded-version, and session-pointer rejection checks and their named failure diagnostics.
 
+#### OMP semantic busy state
+
+`tests/fm-omp-busy-live-e2e.test.sh` is the live guard for OMP's semantic busy source (`omp-ext`).
+It spawns through the real `fm-spawn` wiring against the installed OMP, runs one real turn through the generated per-task extension, and classifies the record with `bin/fm-busy-lib.sh`; rerun it after every OMP upgrade.
+The guard ran on 2026-11-12 against OMP 18.18.6 on Linux:
+
+```sh
+omp --version
+FM_OMP_BUSY_LIVE_E2E=1 bash tests/fm-omp-busy-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+omp/18.18.6
+ok - omp/18.18.6: real omp reports 'busy omp-ext' during a turn and 'idle omp-ext' after it (never unknown)
+```
+
+The turn ran a shell tool call, so it crossed two inner `turn_start`/`turn_end` pairs; the record stayed `busy omp-ext` across that boundary and settled to `idle omp-ext` after `agent_end`.
+`tests/fm-busy-adapter-wiring.test.sh` pins the same extension portably in a plain Node host, including `willContinue: true` keeping the record busy.
+The contract is armed at launch, so an OMP worker spawned before this wiring existed keeps classifying `unknown` until it is relaunched; no migration exists.
+
 The native launch-error publisher was verified on the same installed OMP 18.12.5 against a disposable localhost HTTP 429 endpoint, using only a synthetic API key:
 
 ```sh

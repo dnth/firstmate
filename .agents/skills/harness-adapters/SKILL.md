@@ -315,6 +315,7 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 | Fact | Value |
 |---|---|
 | Busy-pane signature | `Working… ⟦esc⟧` with a rotating braille prefix. |
+| Busy state | The generated per-task extension's `agent_start` (busy) and `agent_end` with no `willContinue` (idle). Inner `turn_start`/`turn_end` pairs stay wake notifications: one agent run contains several of them, and `ctx.isIdle()` still reads false at a natural `agent_end`. |
 | Exit command | `/exit` |
 | Interrupt | Single Escape stops the active turn without exiting the session. |
 | Skill invocation | `/skill:<name>`, for example `/skill:no-mistakes`. |
