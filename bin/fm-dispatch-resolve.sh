@@ -62,9 +62,9 @@
 #   boosts the candidate instead of deepening a negative deficit. An adjusted
 #   candidate line carries `offpeak=x<multiplier>`.
 #   The adjustment never changes eligibility, floors, exhausted-runway
-#   refusals, approvals, or the genuine-tie rule, which all read the same
-#   unadjusted evidence as an undeclared run. A malformed `peak_pricing` is an
-#   actionable configuration error (exit 2).
+#   refusals, or approvals, which all read the same unadjusted evidence as an
+#   undeclared run. Equal adjusted ranking weights still escalate as a genuine
+#   tie. A malformed `peak_pricing` is an actionable configuration error (exit 2).
 #   Tests pin the clock with FM_DISPATCH_CLOCK_UTC=YYYY-MM-DDTHH:MM:SSZ; the
 #   override is test-only, malformed values exit 2, and unset means the system
 #   UTC clock.

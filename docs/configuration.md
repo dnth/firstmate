@@ -556,7 +556,7 @@ A profile `peak_pricing` declares when that provider costs more and how much mor
 A window covers `start` up to but not including `end`.
 Outside every declared window, the resolver multiplies that candidate's ranking weight by `multiplier` before the argmax; inside a declared window it ranks the candidate unadjusted, exactly as when the field is absent.
 For example, `multiplier: 2` with Monday-Friday windows `01:00`-`04:00` and `06:00`-`10:00` doubles the weight at all other weekday hours and throughout the weekend, including weekend hours inside those clock ranges.
-The adjustment changes only ranking: eligibility floors, exhausted-runway refusals, approvals, and the genuine-tie rule read the same evidence as without the field.
+The adjustment changes only ranking: eligibility floors, exhausted-runway refusals, and approvals read the same evidence as without the field.
 An adjusted candidate line shows `offpeak=x<multiplier>` so a higher rank is explainable.
 A malformed `peak_pricing` is an actionable configuration error, never silently ignored.
 The [`fm-dispatch-resolve.sh` header](../bin/fm-dispatch-resolve.sh) owns the exact ranking weight and the test-only clock override.
