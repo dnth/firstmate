@@ -546,7 +546,6 @@ It is a confidence floor on the model's support for the rule, unrelated to the q
 A rule `floor` names the quota-axi `provider` and `scope` whose `effectivePercentRemaining` must be at least `min_percent` for the rule's profiles to apply.
 A known percentage below it makes the tool resolve among `default` instead; an absent or unknown row or unmeasured provider makes the floor unverifiable and escalates without authorizing default routing.
 A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, its ID and any rule-floor provider ID must each match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
-Bootstrap validates resolver-only `approval`, `min_confidence`, `floor`, `peak_pricing`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 The opted-in resolver has authoritative single-provider mappings for `claude`, `codex`, `grok`, `kimi`, `hermes`, and `devin`; every other dispatch-verified harness must declare `provider` explicitly on each profile: the multi-provider `pi`, `pi-signed`, `omp`, and `opencode`.
 Its single-provider table is owned by `bin/fm-quota-axi-lib.sh` and is separate from the model-prefix resolution in `fm_quota_provider_for_profile`, so typed-resolution additions cannot alter no-key routing.
 The resolver returns an actionable configuration error before any request when such a profile omits `provider`.
@@ -555,7 +554,8 @@ An absent or unknown named row also makes the candidate unrankable and is report
 A profile `peak_pricing` declares when that provider costs more and how much more, and only typed dispatch resolution applies it.
 `multiplier` is a number above 1, and `windows` is a non-empty array of objects whose `weekdays` is a non-empty array of `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`, and whose `start` and `end` are UTC `HH:MM` clock times with `start` before `end`.
 A window covers `start` up to but not including `end`.
-Outside every declared window, including weekend hours inside a window's clock times, the resolver multiplies that candidate's ranking weight by `multiplier` before the argmax; inside a declared window it ranks the candidate unadjusted, exactly as when the field is absent.
+Outside every declared window, the resolver multiplies that candidate's ranking weight by `multiplier` before the argmax; inside a declared window it ranks the candidate unadjusted, exactly as when the field is absent.
+For example, `multiplier: 2` with Monday-Friday windows `01:00`-`04:00` and `06:00`-`10:00` doubles the weight at all other weekday hours and throughout the weekend, including weekend hours inside those clock ranges.
 The adjustment changes only ranking: eligibility floors, exhausted-runway refusals, approvals, and the genuine-tie rule read the same evidence as without the field.
 An adjusted candidate line shows `offpeak=x<multiplier>` so a higher rank is explainable.
 A malformed `peak_pricing` is an actionable configuration error, never silently ignored.
@@ -587,7 +587,7 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, an effort value unsupported by that harness, or `prewalk_into` on a non-OMP profile is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
-While typed resolution is active, malformed `approval`, `min_confidence`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
+While typed resolution is active, malformed `approval`, `min_confidence`, `floor`, `peak_pricing`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
@@ -613,7 +613,6 @@ When sections are extracted, a ship brief's delivery mode is deliberately omitte
 The scaffold's standard setup, rules, inbox, and definition-of-done text is the same in every brief, so leaving it out keeps its safety language from reading as a signal about the task.
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
 Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider`, `floor`, and `peak_pricing`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric ranking-weight argmax over candidates using each candidate's limiting row.
-A declared `peak_pricing` multiplier adjusts that candidate's ranking weight off-peak before the argmax, as [Crew dispatch profiles](#crew-dispatch-profiles-configcrew-dispatchjson) documents; the script header owns the weight and the clock override.
 A rule that declares `min_confidence` is checked against that rule's own probability, whether it is the picked option or a runner-up, so a runner-up never needs weaker support than it would as the pick.
 A picked rule without `min_confidence`, and the neutral option, keep the global 0.6 floor on the answer's confidence exactly as before, so a file with no declared floors behaves as it did.
 When the picked rule declares its own floor and its probability is below it, the tool takes the most probable other option whose probability clears that option's floor (a rule's `min_confidence`, otherwise 0.6), prints a `fallback:` line naming both floors, and resolves that rule as though it had been picked; no qualifying option, or two equally probable ones, is `ambiguous`.
@@ -631,7 +630,7 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific credential setting.
 Typed resolution validates and reads `quota-axi --json` according to the schema-version and account-lane contract in the [`fm-dispatch-resolve.sh` header](../bin/fm-dispatch-resolve.sh); an incompatible snapshot is an ordinary `error` outcome that returns the intake to firstmate, so the `FM_QUOTA_AXI_MIN` floor is unchanged.
 `config/quota-account-lanes.json` is an optional local, gitignored file that turns one profile on a multi-account provider into one candidate per account, so a dispatch can spend whichever of the captain's accounts has the most headroom instead of whichever account its single credential happens to be.
 It maps a quota-axi provider family to the concrete provider ids that spend each of that family's accounts, keyed by the `accountKey` the snapshot reports:

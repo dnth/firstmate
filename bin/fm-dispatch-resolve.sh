@@ -50,16 +50,13 @@
 #   or missing jq), which is
 #   actionable, never selected around.
 #
-# Peak pricing: a profile may carry the optional `peak_pricing` declaration,
-#   the UTC clock windows when that provider charges more, shaped
-#   {"multiplier": <number above 1>,
-#    "windows": [{"weekdays": ["mon", ...], "start": "HH:MM", "end": "HH:MM"}]}.
+# Peak pricing: docs/configuration.md "Crew dispatch profiles" owns the optional
+#   `peak_pricing` schema for declared UTC peak windows and their multiplier.
 #   The resolver reads the UTC clock once per run and, for a declared candidate
-#   outside every declared window - all other weekday hours and all weekend,
-#   including weekend hours inside a window's clock times - multiplies that
-#   candidate's ranking weight by `multiplier` before the argmax. Inside a
-#   declared window it uses the unadjusted weight, so peak ranks and prints
-#   exactly as a run with no declaration.
+#   outside every declared window - including days absent from its weekdays -
+#   multiplies that candidate's ranking weight by `multiplier` before the argmax.
+#   Inside a declared window it uses the unadjusted weight, so peak ranks and
+#   prints exactly as a run with no declaration.
 #   The ranking weight is exp(spendPriority): the positive, order-preserving
 #   recoding of quota-axi's signed pace scalar, so a multiplier above 1 always
 #   boosts the candidate instead of deepening a negative deficit. An adjusted
@@ -482,7 +479,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def day_name($n): ["mon","tue","wed","thu","fri","sat","sun"][$n - 1];
   # Peak pricing adjusts only the ranking weight: outside every declared window
-  # (weekday off-peak and all weekend) the positive weight exp(spendPriority)
+  # (including days absent from their weekdays) the weight exp(spendPriority)
   # is multiplied by the declared cost multiplier; inside a window it is not.
   # exp is order-preserving with the signed scalar, so the multiplier boosts
   # rather than deepening a negative deficit, and eligibility never changes.
