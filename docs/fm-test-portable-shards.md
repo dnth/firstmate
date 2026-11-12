@@ -57,7 +57,8 @@ The per-shard membership snapshot below records the generated assignment for the
 ## Portable serial CI shards
 
 The current hints are the per-script maximum measured across the three most recent green CI runs: main [42768866128](https://github.com/dnth/firstmate/actions/runs/42768866128), main [42557971268](https://github.com/dnth/firstmate/actions/runs/42557971268), and PR [42756772678](https://github.com/dnth/firstmate/actions/runs/42756772678).
-Each run completed the same 178 serial scripts, totaling 102m39.455s, 102m06.361s, and 101m57.902s respectively.
+Runs 42768866128 and 42756772678 each completed all 178 current serial scripts, totaling 102m39.455s and 101m57.902s respectively.
+Run 42557971268 completed 177 scripts totaling 102m06.361s; it omits `tests/fm-remote-herdr-launch.test.sh`, whose hint comes from the other two runs.
 Taking each script's maximum puts the hint sum at 6,461,201 ms (107m41.201s), so the projected shard totals sit at or above every observed run.
 `portable-serial-<k>of<n>` splits that remainder across `n` separate CI runners.
 Each shard is still strictly serial in itself, and separate runners mean no two of these stateful scripts ever share a machine, so the split needs no concurrency isolation proof.
@@ -93,7 +94,8 @@ The fix preserves the assertions and changes only which captured reply is handle
 ### Rebalanced duration profile
 
 The eight-shard LPT assignment spreads 1.649s across the eight bins under the refreshed hints.
-The per-run columns below replay the same membership against each source run's own measurements, so they show what each shard actually cost on that run rather than a projection.
+The per-run columns below replay the same membership against each source run's own measurements.
+Run 42557971268's shard-7 value and total are partial observed sums, excluding the missing `tests/fm-remote-herdr-launch.test.sh` measurement; the projections use measurements across all three runs and cover all 178 scripts.
 
 | Shard | Scripts | Projected script sum | 42768866128 | 42557971268 | 42756772678 |
 |---|---:|---:|---:|---:|---:|
@@ -103,9 +105,9 @@ The per-run columns below replay the same membership against each source run's o
 | 4 of 8 | 27 | 13m27.443s | 13m04.737s | 11m58.559s | 13m18.846s |
 | 5 of 8 | 27 | 13m27.441s | 12m13.634s | 12m36.273s | 12m35.718s |
 | 6 of 8 | 28 | 13m27.443s | 12m53.088s | 12m23.964s | 13m01.901s |
-| 7 of 8 | 29 | 13m27.452s | 12m51.760s | 12m41.121s | 12m57.059s |
+| 7 of 8 | 29 | 13m27.452s | 12m51.760s | 12m41.121s (partial) | 12m57.059s |
 | 8 of 8 | 27 | 13m27.445s | 13m04.174s | 13m03.278s | 12m50.348s |
-| Total | 178 | 107m41.201s | 102m39.455s | 102m06.361s | 101m57.902s |
+| Total | 178 | 107m41.201s | 102m39.455s | 102m06.361s (177 scripts) | 101m57.902s |
 
 The longest measured script is `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` at 809,087 ms (13m29.087s).
 It sets shard 1 and is the single-script lower bound for any shard count, so finer splits cannot push the maximum below it.
