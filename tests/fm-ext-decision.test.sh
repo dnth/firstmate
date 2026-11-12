@@ -1922,6 +1922,156 @@ SH
   pass "22 replacement needs a strictly newer post that still carries buttons"
 }
 
+# --- 23. a click finds Firstmate's tools without them on the hosting PATH ---
+
+# The gateway is a systemd user service, so the processes that run a click
+# inherit the unit's PATH, not the captain's login-shell PATH: neither
+# tasks-axi nor jq need be there. The plugin resolves Firstmate's own tool
+# directories and must name a tool it genuinely cannot find.
+test_23_clicks_find_firstmate_tools_off_the_hosting_path() {
+  local home id out record toolbin jqbin hostbin partial shell noshell real_tasks real_node real_jq
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: 23 needs an installed tasks-axi"; return 0; }
+  command -v node >/dev/null 2>&1 || { echo "skip: 23 needs node for tasks-axi"; return 0; }
+  real_tasks=$(command -v tasks-axi)
+  real_node=$(command -v node)
+  real_jq=$(command -v jq)
+  home="$TMP_ROOT/c23-tools"
+  setup_home "$home"
+  toolbin="$home/toolbin"
+  jqbin="$home/jqbin"
+  hostbin="$home/hostbin"
+  partial="$home/partial"
+  mkdir -p "$home/.home" "$toolbin" "$jqbin" "$partial" "$hostbin"
+
+  # hostbin is the hosting PATH: this machine's ordinary tools, without the
+  # Firstmate toolchain. The other bins hold only what the plugin must find.
+  for name in /usr/bin/*; do
+    case "${name##*/}" in jq|tasks-axi|node) continue ;; esac
+    ln -sfn "$name" "$hostbin/${name##*/}"
+  done
+  ln -sfn "$real_jq" "$jqbin/jq"
+  ln -sfn "$real_tasks" "$toolbin/tasks-axi"
+  ln -sfn "$real_node" "$toolbin/node"
+  ln -sfn "$real_jq" "$partial/jq"
+  ln -sfn "$real_node" "$partial/node"
+
+  # The account's login shell, stood in for by a shell that reports the
+  # captain's PATH; the second one reports nothing the click cannot get itself.
+  shell="$home/shell"
+  printf '#!/bin/bash\nPATH="%s:%s:%s"\nexport PATH\nexec /bin/bash "$@"\n' \
+    "$toolbin" "$jqbin" "$hostbin" > "$shell"
+  noshell="$home/shell-no-tools"
+  printf '#!/bin/bash\nPATH="%s:%s"\nexport PATH\nexec /bin/bash "$@"\n' \
+    "$partial" "$hostbin" > "$noshell"
+  chmod +x "$shell" "$noshell"
+
+  # Fixtures run with the toolchain available, like Firstmate's own session;
+  # only the clicks below get the hosting PATH.
+  BASE_PATH="$toolbin:$BASE_PATH"
+  plugin23() {  # <hosting-path> <shell> [python args...]; stdin is the snippet
+    local path=$1 sh=$2
+    shift 2
+    PATH="$path" SHELL="$sh" HOME="$home/.home" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      PYTHONPATH="$PLUGIN:$FIXTURES" GUILD="$GUILD" CHANNEL="$CHANNEL" \
+      "$PYTHON_BIN" - "$home" "$ROOT" "$@"
+  }
+  click23() {  # <hosting-path> <shell> <custom_id> <author> <interaction> <message-id>
+    local path=$1 sh=$2
+    shift 2
+    plugin23 "$path" "$sh" "$@" 2>"$home/click.err" <<'PY'
+import json, sys, fmdecide
+fmdecide.setup()
+args = sys.argv[3:] + [None] * 6
+print(json.dumps(fmdecide.click(args[0], args[1], args[2], args[3], args[4]), ensure_ascii=False))
+PY
+  }
+
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  mkdir -p "$home/data"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  fm_fake_exit0 "$home/fakebin" treehouse no-mistakes gh gh-axi
+  id=pick-route-offpath
+  c23_call() {  # <call-id> <generation> <message-id>
+    (cd "$home" && "$real_tasks" add "$1" "Pick the route" --kind captain --repo sample >/dev/null) \
+      || fail "could not create captain call $1"
+    home_env "$home" "$ROOT/bin/fm-captain-hold.sh" hold "$1" --reason "route pending" --repo sample \
+      >/dev/null || fail "could not hold captain call $1"
+    emit_decision "$home" "$2" '{"key":"hold:'"$1"'","options":[{"label":"North"},{"label":"South"}]}' >/dev/null
+    deliver "$home" "$3"
+  }
+  open_request "$home"
+  c23_call "$id" 1 "$POST"
+
+  # A still-open post: the click records the choice even though nothing on the
+  # hosting PATH can run it.
+  out=$(click23 "$hostbin" "$shell" "fmd:hold:$id:2" "$CAPTAIN" 880000000000000002 "$POST")
+  assert_contains "$out" "Sent: South." "a click must reach tasks-axi off the hosting PATH: $out"
+  record=$(button_request "$home" option)
+  printf '%s' "$record" | jq -e --arg key "hold:$id" \
+    '.decision.key == $key and .decision.option_id == 2' >/dev/null \
+    || fail "the off-PATH click lost the chosen option: $record"
+
+  # An already-decided post: the click reads the board through the same tools
+  # and says so instead of failing to read the decision.
+  c23_call "$id-2" 2 700000000000000006
+  printf 'South, please.\n' > "$home/answer.txt"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" answer "$id-2" --decision-file "$home/answer.txt" \
+    || fail "could not answer the second off-PATH captain call"
+  out=$(click23 "$hostbin" "$shell" "fmd:hold:$id-2:1" "$CAPTAIN" 880000000000000007 700000000000000006)
+  assert_contains "$out" "Already decided" "a settled post must settle off the hosting PATH: $out"
+
+  # No tool anywhere: the click and the log name tasks-axi, and nothing is
+  # filed. A generic "cannot read whether it is open" would hide the cause.
+  c23_call "$id-3" 3 700000000000000008
+  out=$(click23 "$partial:$hostbin" "$noshell" \
+    "fmd:hold:$id-3:1" "$CAPTAIN" 880000000000000009 700000000000000008)
+  [ "$(button_requests "$home")" = 1 ] || fail "an unreadable decision must file nothing"
+  assert_contains "$out" "tasks-axi" "a missing tool must be named to the clicker: $out"
+  assert_not_contains "$out" "still open" "a missing tool must not read as an unreadable decision: $out"
+  assert_contains "$(cat "$home/click.err")" "settle_if_closed failed at read-decision-state" \
+    "the log must name the settle_if_closed step that failed: $(cat "$home/click.err")"
+  assert_contains "$(cat "$home/click.err")" "tasks-axi" \
+    "the log must name the missing tool: $(cat "$home/click.err")"
+
+  # FM_EXT_TOOL_PATH is the operator's answer for a host whose shell cannot
+  # report anything: naming the directories is enough, with no shell involved.
+  out=$(FM_EXT_TOOL_PATH="$toolbin:$jqbin" \
+    click23 "$hostbin" "$noshell" "fmd:hold:$id-3:1" "$CAPTAIN" 880000000000000010 700000000000000008)
+  assert_contains "$out" "Sent: North." "FM_EXT_TOOL_PATH must supply the tool directories: $out"
+
+  # One shared resolution covers the plugin's other subprocesses too: both the
+  # intake script and the outbox drain need jq, which hostbin does not have.
+  out=$(plugin23 "$hostbin" "$shell" <<'PY'
+import os
+import intake
+print(intake.handle_fm_command("check the build", {
+    "guild_id": os.environ["GUILD"], "channel_id": os.environ["CHANNEL"],
+    "thread_id": os.environ["CHANNEL"], "message_id": "444444444444444450",
+    "user_id": "555555555555555555",
+}))
+PY
+  )
+  assert_contains "$out" "Firstmate has it" "the intake script must reach jq off the hosting PATH: $out"
+  printf 'plain reply\n' > "$home/reply.txt"
+  home_env "$home" "$EMIT" --request-id "discord:$GUILD:$CHANNEL:$CHANNEL:$REQUEST_MESSAGE" \
+    --kind followup --generation 9 --text-file "$home/reply.txt" >/dev/null \
+    || fail "could not emit a plain followup for the outbox drain"
+  out=$(plugin23 "$hostbin" "$shell" <<'PY'
+import sys
+from pathlib import Path
+import outbox_poster
+posted = []
+def send(payload):
+    posted.append(payload.get("text", ""))
+    return {"ok": True, "discord_message_id": "910000000000000001"}
+outbox_poster.drain_outbox(send=send, home=Path(sys.argv[1]))
+print("POSTED %d" % len(posted))
+PY
+  )
+  assert_contains "$out" "POSTED 1" "the outbox drain must reach jq off the hosting PATH: $out"
+  pass "23 the plugin finds Firstmate's tools off the hosting PATH, and names a missing one"
+}
+
 test_1_buttons_carry_key_and_option_ids_in_the_thread
 test_2_standing_click_files_one_request_for_a_worker_key
 test_3_captain_call_click_is_a_request_the_board_records

@@ -42,6 +42,17 @@ A `<guild>` rule does **not** hand every member of that Discord server command a
 A rule with an empty component (`<guild>:`) or a fourth component is malformed and is ignored, so a typo cannot widen a grant.
 The allowlist decision lives in `bin/fm-ext-intake.sh`, which this plugin calls; the plugin keeps no copy of the rule grammar and reports the refusal that script returns.
 
+## Finding Firstmate's tools
+
+The plugin runs Firstmate's `bin/` scripts as subprocesses of the gateway process, so they inherit the gateway's `PATH` - which, under the shared `hermes-gateway.service` unit, is the unit's fixed value rather than your own shell's.
+Firstmate's required tools (`tasks-axi`, `jq`, and whatever those scripts call) are installed wherever your shell puts them, so on a host where the unit's `PATH` lacks that directory, a decision click could not read the board it was made on.
+
+The plugin closes that gap itself, in one place for every script it runs: a launch keeps the gateway's own `PATH` first, adds the directories `FM_EXT_TOOL_PATH` names, and, only when a tool that launch needs is still missing, appends the directories your login shell reports.
+That last step asks the account's shell once per gateway process, bounded in time, with no terminal attached.
+Nothing is guessed from a hard-coded user path, and a tool that genuinely cannot be found is not hidden: the click names it (for example "compatible tasks-axi is required"), the journal names the failing step, and nothing is recorded or sent.
+
+Set `FM_EXT_TOOL_PATH` (a `PATH`-style list) in the gateway profile's `.env` when the account's shell cannot answer, such as a service container with no login shell.
+
 ## Sending a request
 
 In the [dedicated Firstmate channel](#dedicated-firstmate-channel), just write the request as an ordinary message; every message an allowlisted author sends there, or in a thread under it, is a request.

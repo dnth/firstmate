@@ -632,6 +632,13 @@ fm_ext_decision_key_occurrence() {
   printf '%s\n' "$out"
 }
 
+# fm_ext_decision_diag <text>: the last non-empty line of a failed ledger read,
+# so an unreadable decision can say why - a tool it cannot find, a wedged
+# backend - instead of only that it is unreadable.
+fm_ext_decision_diag() {
+  printf '%s\n' "$1" | awk 'NF { line = $0 } END { if (line != "") print line }'
+}
+
 # fm_ext_decision_key_outcome <key> [occurrence]: print "<state>\t<answer>" for
 # the decision right now, asking the authoritative ledgers rather than keeping
 # a copy - `fm-captain-hold.sh open` and `answered` for a captain call, and
@@ -646,19 +653,26 @@ fm_ext_decision_key_occurrence() {
 #   superseded  closed with no captain answer: by its task's terminal outcome,
 #               moved to a captain call, reconciled as moot, gone with its task,
 #               or replaced by a later lifecycle of the same key
-#   unknown     its state cannot be read
+#   unknown     its state cannot be read; <answer> carries the failed read's own
+#               last message, empty when it failed without one
 # Returns 1 only for a malformed key.
 fm_ext_decision_key_outcome() {
-  local key=$1 occurrence=${2:-} rest task slug file rc out mode answer count current stamp
+  local key=$1 occurrence=${2:-} rest task slug file rc out mode answer count current stamp detail
   fm_ext_decision_key_valid "$key" || return 1
   case "$key" in
     hold:*)
       task=${key#hold:}
       current=$("$_FM_EXT_LIB_DIR/fm-captain-hold.sh" open "$task" --identity 2>/dev/null)
       rc=$?
+      detail=
       if [ "$rc" = 1 ]; then
-        "$_FM_EXT_LIB_DIR/fm-captain-hold.sh" open "$task" --distinguish-absent >/dev/null 2>&1
+        # Not held: tell a genuinely absent call from a read that could not
+        # finish, and keep what a failed read said for an `unknown` answer.
+        detail=$("$_FM_EXT_LIB_DIR/fm-captain-hold.sh" open "$task" --distinguish-absent 2>&1 >/dev/null)
         rc=$?
+        current=
+      elif [ "$rc" != 0 ]; then
+        detail=$("$_FM_EXT_LIB_DIR/fm-captain-hold.sh" open "$task" --identity 2>&1 >/dev/null)
       fi
       case "$rc" in
         0)
@@ -674,7 +688,11 @@ fm_ext_decision_key_outcome() {
           case "$rc" in
             0) ;;
             1) printf 'superseded\t\n'; return 0 ;;
-            *) printf 'unknown\t\n'; return 0 ;;
+            *)
+              detail=$("$_FM_EXT_LIB_DIR/fm-captain-hold.sh" answered "$task" 2>&1 >/dev/null)
+              printf 'unknown\t%s\n' "$(fm_ext_decision_diag "$detail")"
+              return 0
+              ;;
           esac
           stamp=$(printf '%s\n' "$out" | sed -n '4p')
           mode=${out%%$'\n'*}
@@ -698,7 +716,7 @@ fm_ext_decision_key_outcome() {
           printf 'decided\t%s\n' "$answer"
           ;;
         3) printf 'superseded\t\n' ;;
-        *) printf 'unknown\t\n' ;;
+        *) printf 'unknown\t%s\n' "$(fm_ext_decision_diag "$detail")" ;;
       esac
       return 0
       ;;

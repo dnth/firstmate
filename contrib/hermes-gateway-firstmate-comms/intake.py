@@ -17,6 +17,11 @@ import threading
 from contextvars import ContextVar
 from pathlib import Path
 
+try:
+    from .tool_path import firstmate_env
+except ImportError:  # loaded from sys.path in hermetic tests
+    from tool_path import firstmate_env
+
 # bin/fm-ext-intake.sh exits 3 when the allowlist refuses the request, which is
 # how a refusal is told apart from a broken bridge without parsing its message.
 INTAKE_REFUSED = 3
@@ -545,9 +550,7 @@ def _run_intake(
     """
     intake = firstmate_root() / "bin" / "fm-ext-intake.sh"
     secret = secret_path(home)
-    env = os.environ.copy()
-    env["FM_HOME"] = str(home)
-    env["FM_ROOT_OVERRIDE"] = str(firstmate_root())
+    env = firstmate_env(home, firstmate_root(), ("jq",))
     # Deliberately no FM_EXT_BRIDGE here. config/ext-bridge is the single
     # activation authority, so installing this plugin cannot switch the intake
     # half of a home on while its bootstrap and watcher still believe the
