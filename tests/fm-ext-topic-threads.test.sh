@@ -1237,7 +1237,7 @@ os.environ["DISCORD_BOT_TOKEN"] = "fixture"
 context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
 payload = dict(context, origin="message", slug=slug)
 thread_id = payload["message_id"]
-poster._BOT_USER_ID = "111111111111111111"
+poster._bot_user_id = lambda: "111111111111111111"
 poster.save_request_thread(payload, thread_id, home, topic_name="ship the login fix")
 
 def legacy(state, owner):
@@ -1253,7 +1253,7 @@ def legacy(state, owner):
     return renames
 
 # The bot owns the thread, so the marker lands and the record gains provenance.
-assert legacy("done", lambda tid: poster._BOT_USER_ID) == ["✅ ship the login fix"]
+assert legacy("done", lambda tid: "111111111111111111") == ["✅ ship the login fix"]
 record = json.loads(poster.request_progress_path(payload, home).read_text())
 assert record["creator"] == "firstmate" and record["topic_name"] == "✅ ship the login fix"
 # Another user's thread is never renamed.
@@ -1273,7 +1273,7 @@ path.write_text(json.dumps(data))
 asked = []
 def counted(tid):
     asked.append(tid)
-    return poster._BOT_USER_ID
+    return "111111111111111111"
 def refuse(tid, name):
     raise AssertionError("an adopted thread must never be renamed")
 assert poster.maybe_rename_topic_thread(dict(payload, thread_state="done"), thread_id, home,

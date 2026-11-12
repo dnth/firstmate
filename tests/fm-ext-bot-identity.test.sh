@@ -52,17 +52,24 @@ auth = []
 
 def fake_urlopen(request, timeout):
     auth.append(request.get_header("Authorization"))
-    return io.BytesIO(json.dumps({"id": "700000000000000009"}).encode())
+    user_id = {
+        "Bot fmcomms-token": "700000000000000009",
+        "Bot replacement-token": "700000000000000011",
+        "Bot restored-token": "700000000000000012",
+        "Bot hermes-default-token": "700000000000000013",
+    }[request.get_header("Authorization")]
+    return io.BytesIO(json.dumps({"id": user_id}).encode())
 
 stderr = io.StringIO()
-poster._BOT_USER_ID = ""
 with patch.object(poster.urllib.request, "urlopen", side_effect=fake_urlopen), \
         contextlib.redirect_stderr(stderr):
     user_id = poster._bot_user_id()
     if mode == "owning-profile-token":
         (fmcomms / ".env").write_text("DISCORD_BOT_TOKEN=replacement-token\n", encoding="utf-8")
+        assert poster._bot_user_id() == "700000000000000011"
         poster.discord_rename_thread("700000000000000010", "renamed")
         (fmcomms / ".env").unlink()
+        assert poster._bot_user_id() == ""
         try:
             poster.discord_rename_thread("700000000000000010", "missing")
         except poster.DiscordSendError as exc:
@@ -71,6 +78,7 @@ with patch.object(poster.urllib.request, "urlopen", side_effect=fake_urlopen), \
         else:
             raise AssertionError("removed profile token still authorized a request")
         (fmcomms / ".env").write_text("HERMES_DISCORD_TOKEN=restored-token\n", encoding="utf-8")
+        assert poster._bot_user_id() == "700000000000000012"
         poster.discord_rename_thread("700000000000000010", "restored")
 
 print(json.dumps({"user_id": user_id, "auth": auth, "stderr": stderr.getvalue()}))
@@ -81,7 +89,8 @@ out=$(run_identity owning owning-profile-token) || fail "owning-profile token ca
 "$PYTHON_BIN" - "$out" <<'PY' || fail "a multi-profile poster must authenticate as the owning profile's bot"
 import json, sys
 got = json.loads(sys.argv[1])
-assert got["auth"] == ["Bot fmcomms-token", "Bot replacement-token", "Bot restored-token"], got
+assert got["auth"] == ["Bot fmcomms-token", "Bot replacement-token", "Bot replacement-token",
+                       "Bot restored-token", "Bot restored-token"], got
 assert got["user_id"] == "700000000000000009", got
 assert "hermes-default-token" not in got["stderr"], got
 assert "fmcomms-token" not in got["stderr"], got
@@ -107,6 +116,7 @@ out=$(run_identity dedicated dedicated-process-env) || fail "dedicated gateway c
 import json, sys
 got = json.loads(sys.argv[1])
 assert got["auth"] == ["Bot hermes-default-token"], got
+assert got["user_id"] == "700000000000000013", got
 assert "process-env" in got["stderr"], got
 assert "hermes-default-token" not in got["stderr"], got
 PY

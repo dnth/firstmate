@@ -115,9 +115,6 @@ DECISION_OUTCOME_HEADER_RESERVE = 256
 # topic-thread record beside its payload is named "<slug>.thread.json".
 _SLUG = re.compile(r"^[0-9a-f]{64}$")
 _THREAD_RECORD_SUFFIX = ".thread.json"
-# This bot's own Discord user id, read once per process for the thread
-# ownership check a record without stored provenance needs.
-_BOT_USER_ID = ""
 # How often the watcher sweeps decision posts for decisions closed on another
 # channel, which reads Firstmate's ledgers; click outcomes show within a cycle.
 DECISION_SWEEP_SECS = 30.0
@@ -1184,14 +1181,7 @@ def discord_rename_thread(thread_id: str, name: str) -> dict:
 
 
 def _bot_user_id() -> str:
-    """This bot's own Discord user id, or "" when it cannot be read.
-
-    Cached for the process: the id never changes for a token, and an
-    ownership check must not pay a round trip per thread.
-    """
-    global _BOT_USER_ID
-    if _BOT_USER_ID:
-        return _BOT_USER_ID
+    """This bot's own Discord user id, or "" when it cannot be read."""
     token = _bot_token()
     if not token:
         return ""
@@ -1209,7 +1199,6 @@ def _bot_user_id() -> str:
     user_id = str(data.get("id") or "")
     if not _SNOWFLAKE.fullmatch(user_id):
         return ""
-    _BOT_USER_ID = user_id
     return user_id
 
 
