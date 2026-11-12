@@ -628,8 +628,6 @@ def _mktemp() -> tuple[int, str]:
 _TOKEN_KEYS = ("DISCORD_BOT_TOKEN", "HERMES_DISCORD_TOKEN")
 # Profile home whose bot this poster speaks as. None means unconfigured: process env only.
 _BOT_PROFILE_HOME = None
-# Resolved (token, source) for a configured profile, cached once non-empty.
-_BOT_IDENTITY = None
 _BOT_IDENTITY_LOGGED = ""
 
 
@@ -650,9 +648,8 @@ def configure_bot_identity(profile_home) -> None:
     register() passes the home Hermes loaded this plugin for. Pass None to
     keep the process environment alone (standalone runs and tests).
     """
-    global _BOT_PROFILE_HOME, _BOT_IDENTITY, _BOT_IDENTITY_LOGGED
+    global _BOT_PROFILE_HOME, _BOT_IDENTITY_LOGGED
     _BOT_PROFILE_HOME = Path(profile_home) if profile_home else None
-    _BOT_IDENTITY = None
     _BOT_IDENTITY_LOGGED = ""
     decisions.set_owner_profile(_owner_profile_name(_BOT_PROFILE_HOME))
 
@@ -724,16 +721,12 @@ def _bot_identity() -> tuple:
 
 def _bot_token() -> str:
     """Discord bot token REST calls authenticate with. Empty when unresolved (transient)."""
-    global _BOT_IDENTITY, _BOT_IDENTITY_LOGGED
-    if _BOT_IDENTITY is not None:
-        return _BOT_IDENTITY[0]
+    global _BOT_IDENTITY_LOGGED
     token, source = _bot_identity()
     label = source if token else f"no token ({source})"
     if label != _BOT_IDENTITY_LOGGED:
         _BOT_IDENTITY_LOGGED = label
         print(f"fm-ext-poster: bot identity {label}", file=sys.stderr)
-    if token and _BOT_PROFILE_HOME is not None:
-        _BOT_IDENTITY = (token, source)
     return token
 
 

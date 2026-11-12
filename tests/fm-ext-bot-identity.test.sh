@@ -59,6 +59,19 @@ poster._BOT_USER_ID = ""
 with patch.object(poster.urllib.request, "urlopen", side_effect=fake_urlopen), \
         contextlib.redirect_stderr(stderr):
     user_id = poster._bot_user_id()
+    if mode == "owning-profile-token":
+        (fmcomms / ".env").write_text("DISCORD_BOT_TOKEN=replacement-token\n", encoding="utf-8")
+        poster.discord_rename_thread("700000000000000010", "renamed")
+        (fmcomms / ".env").unlink()
+        try:
+            poster.discord_rename_thread("700000000000000010", "missing")
+        except poster.DiscordSendError as exc:
+            assert poster.classify_send_failure(exc) == "transient", exc
+            assert "missing DISCORD_BOT_TOKEN" in str(exc), exc
+        else:
+            raise AssertionError("removed profile token still authorized a request")
+        (fmcomms / ".env").write_text("HERMES_DISCORD_TOKEN=restored-token\n", encoding="utf-8")
+        poster.discord_rename_thread("700000000000000010", "restored")
 
 print(json.dumps({"user_id": user_id, "auth": auth, "stderr": stderr.getvalue()}))
 PY
@@ -68,12 +81,15 @@ out=$(run_identity owning owning-profile-token) || fail "owning-profile token ca
 "$PYTHON_BIN" - "$out" <<'PY' || fail "a multi-profile poster must authenticate as the owning profile's bot"
 import json, sys
 got = json.loads(sys.argv[1])
-assert got["auth"] == ["Bot fmcomms-token"], got
+assert got["auth"] == ["Bot fmcomms-token", "Bot replacement-token", "Bot restored-token"], got
 assert got["user_id"] == "700000000000000009", got
 assert "hermes-default-token" not in got["stderr"], got
 assert "fmcomms-token" not in got["stderr"], got
+assert "replacement-token" not in got["stderr"], got
+assert "restored-token" not in got["stderr"], got
+assert "no token (tried profile-env)" in got["stderr"], got
 PY
-pass "multi-profile poster authenticates as the owning profile's bot"
+pass "multi-profile poster uses current owner credentials across replacement, removal and recovery"
 
 out=$(run_identity missing owning-profile-missing) || fail "owning-profile missing case crashed"
 "$PYTHON_BIN" - "$out" <<'PY' || fail "a profile without a token must not borrow another profile's token"
