@@ -9,19 +9,33 @@
 // scoping to the real primary checkout lives in the bin/fm-cd-pretool-check.sh
 // transport, not here. See docs/cd-guard.md for the full contract.
 //
+// One shape is harmless: a top-level `cd` whose single literal target resolves
+// to the home or to a directory inside the home that is outside `projects/` and
+// outside every git checkout except the home's own. The transport passes the
+// physical primary checkout as --home and the effective home as --fm-home
+// (FM_HOME, else the repo root); a target may also be spelled relatively, with
+// `~`, or with `$FM_HOME`/`$HOME`, and is resolved the same way as its absolute
+// equivalent. Both path rules must stay inside the home: logical (a `..` is
+// collapsed lexically, Bash's default) and physical (symlinks are followed
+// component by component, as under `set -P`). A target either rule resolves
+// outside the home, or that cannot be resolved at all, stays denied, as does
+// every pushd and popd. Without --home no target is exempt.
+//
 // The shell tokenizer and command-position analysis are imported from
 // bin/fm-arm-command-policy.mjs, the sole owner of firstmate's shell
 // classification, so this guard never duplicates shell lexing. This policy
 // never evaluates, expands, sources, or runs any byte of the submitted command;
-// it inspects lexical command positions only.
+// it inspects lexical command positions only, and resolves the single literal or
+// variable-prefixed path it compares against the home.
 
 import { Lexer, splitProgram, commandPosition } from "./fm-arm-command-policy.mjs";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REASONS = {
   "persistent-cd":
-    "a persistent top-level directory change in the primary firstmate checkout is blocked; it would move the shell out of the home so a later firstmate-owned command runs inside a project clone. Reach the target without moving the shell - use git -C <dir> or an absolute path on the command itself - or scope the cd to a subshell like (cd <dir> && ...).",
+    "a persistent top-level directory change that would leave the primary firstmate home is blocked; it would move the shell out of the home so a later firstmate-owned command runs inside a project clone. A cd that stays inside the home is allowed. Reach any other target without moving the shell - use git -C <dir> or an absolute path on the command itself - or scope the cd to a subshell like (cd <dir> && ...).",
 };
 
 // Directory-changing builtins that mutate the calling shell's own cwd.
@@ -68,7 +82,103 @@ function hasCommandQueryPrefix(position) {
   return false;
 }
 
-function decision(command) {
+// Resolve one target under both path rules. Logical collapses `..` lexically
+// first, like Bash's default `cd`; physical follows symlinks component by
+// component, like `cd -P`. Either failure means the target cannot be resolved.
+function resolvedPaths(home, target) {
+  const physicalInput = target.startsWith("/") ? target : `${home}/${target}`;
+  try {
+    return {
+      logical: realpathSync(resolve(home, target)),
+      physical: realpathSync.native(physicalInput),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isInside(home, path) {
+  return path === home || path.startsWith(`${home}/`);
+}
+
+function isProjectsTree(home, path) {
+  return path === `${home}/projects` || path.startsWith(`${home}/projects/`);
+}
+
+// The home's own checkout is the only git worktree a shell may sit in, so a
+// nested checkout below the home (a vendored clone or a linked worktree) is
+// still out of bounds.
+function isForeignCheckout(home, path) {
+  let dir = path;
+  while (dir !== home) {
+    if (existsSync(join(dir, ".git"))) return true;
+    const parent = dirname(dir);
+    if (parent === dir) return true;
+    dir = parent;
+  }
+  return false;
+}
+
+function targetStaysHome(home, target) {
+  const resolved = resolvedPaths(home, target);
+  if (resolved === null) return false;
+  return [resolved.logical, resolved.physical].every(
+    (path) => isInside(home, path) && !isProjectsTree(home, path) && !isForeignCheckout(home, path),
+  );
+}
+
+function expandTilde(value, userHome) {
+  if (!value.startsWith("~")) return value;
+  if (!userHome) return null;
+  if (value === "~") return userHome;
+  if (value.startsWith("~/")) return userHome + value.slice(1);
+  return null; // ~user names a directory this policy cannot know.
+}
+
+const VARIABLE_WORD = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(.*)$/;
+
+// The exempt argument is one word: a literal path, `~/...`, or a single
+// `$FM_HOME` / `$HOME` prefix this policy can expand from its own inputs. Any
+// substitution, glob, or further expansion is a value this policy cannot know,
+// so it is never resolved.
+function expandTarget(word, context) {
+  if (word.subs.length > 0) return null;
+  if (word.literal) {
+    if (word.unquotedExpansion) return null;
+    return expandTilde(word.value, context.userHome);
+  }
+  const match = VARIABLE_WORD.exec(word.value);
+  if (!match) return null;
+  // The matched variable form is the only brace or expansion syntax the word
+  // may carry; the remainder must be literal path text.
+  const rest = match[3];
+  if (rest.includes("$") || /[*?[\]{}]/.test(rest)) return null;
+  const name = match[1] ?? match[2];
+  const base =
+    name === "FM_HOME" ? context.fmHome : name === "HOME" ? context.userHome : "";
+  if (!base) return null;
+  return base + rest;
+}
+
+function cdStaysHome(command, position, wordIndex, context) {
+  if (!context.home || command.value !== "cd") return false;
+  const args = position.words.slice(wordIndex + 1);
+  if (args[0]?.value === "--" && args[0].literal && args[0].subs.length === 0) args.shift();
+  if (args.length !== 1) return false;
+  const target = expandTarget(args[0], context);
+  if (target === null) return false;
+  return targetStaysHome(context.home, target);
+}
+
+function decision(command, context = {}) {
+  // The transport supplies absolute physical paths; normalizing keeps a
+  // trailing slash or a relative spelling from escaping the containment test.
+  const userHome = context.userHome ?? process.env.HOME ?? "";
+  const settings = {
+    home: context.home ? resolve(context.home) : "",
+    fmHome: context.fmHome ? resolve(context.fmHome) : "",
+    userHome: userHome ? resolve(userHome) : "",
+  };
   const lexed = new Lexer(command).tokenize();
   // Fail open on syntax this classifier cannot tokenize. The cd-guard's threat
   // model is agent mistakes - an accidental bare `cd projects/foo` always
@@ -94,13 +204,14 @@ function decision(command) {
     if (!command) continue;
     if (!CD_BUILTINS.has(command.value)) continue;
     if (position.wrappers.some((wrapper) => FORKING_WRAPPERS.has(wrapper))) continue;
+    if (cdStaysHome(command, position, wordIndex, settings)) continue;
     return deny("persistent-cd");
   }
   return { decision: "allow" };
 }
 
 function parseArguments(argv) {
-  const result = { command: "", commandSet: false };
+  const result = { command: "", commandSet: false, home: "", fmHome: "" };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
     if (name === "--command") {
@@ -113,6 +224,26 @@ function parseArguments(argv) {
     if (name.startsWith("--command=")) {
       result.command = name.slice("--command=".length);
       result.commandSet = true;
+      continue;
+    }
+    if (name === "--home") {
+      if (i + 1 >= argv.length) throw new Error("--home requires a value");
+      result.home = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (name.startsWith("--home=")) {
+      result.home = name.slice("--home=".length);
+      continue;
+    }
+    if (name === "--fm-home") {
+      if (i + 1 >= argv.length) throw new Error("--fm-home requires a value");
+      result.fmHome = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (name.startsWith("--fm-home=")) {
+      result.fmHome = name.slice("--fm-home=".length);
       continue;
     }
     throw new Error(`unknown argument: ${name}`);
@@ -137,7 +268,7 @@ if (invokedDirectly()) {
     if (!args.commandSet || !args.command) {
       process.stdout.write("allow\n");
     } else {
-      const result = decision(args.command);
+      const result = decision(args.command, { home: args.home, fmHome: args.fmHome });
       if (result.decision === "allow") {
         process.stdout.write("allow\n");
       } else {

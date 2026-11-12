@@ -20,6 +20,10 @@
 # Claude and Codex. CLI mode is used by OpenCode, Pi, and OMP after their adapters
 # extract the exact command string.
 #
+# The policy receives this checkout as --home and the effective home as
+# --fm-home (FM_HOME, else this checkout), so a top-level cd that stays inside
+# the home is allowed while a cd that would leave it stays denied.
+#
 # Exit/output contract (identical shape to bin/fm-arm-pretool-check.sh):
 #   ALLOW - exit 0 and no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
@@ -143,7 +147,7 @@ POLICY="$FM_ROOT/bin/fm-cd-command-policy.mjs"
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" 2>/dev/null) || exit 0
+POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --home "$FM_ROOT" --fm-home "${FM_HOME:-$FM_ROOT}" 2>/dev/null) || exit 0
 [ -n "$POLICY_OUTPUT" ] || exit 0
 
 TAB=$(printf '\t')

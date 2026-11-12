@@ -38,6 +38,11 @@ make_primary_fixture() {
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
   install_cd_scripts "$dir"
+  # Targets the home carve-out must allow, and hazards it must keep denying.
+  mkdir -p "$dir/data" "$dir/state" "$dir/projects/foo" "$dir/projects/bar"
+  ln -s data "$dir/link-to-data"
+  ln -s projects/foo "$dir/link-to-project"
+  ln -s /tmp "$dir/outside-link"
   printf '%s\n' "$dir"
 }
 
@@ -104,6 +109,18 @@ matrix_case B25 deny 'builtin command cd projects/foo'
 matrix_case B26 deny 'command -p cd projects/foo'
 matrix_case B27 deny 'command -- cd projects/foo'
 
+# BLOCK: a persistent cd that can leave the home - anything in the projects
+# tree, a link that resolves out of the home, /tmp, and an unresolvable target.
+matrix_case B28 deny "cd $PRIMARY/projects"
+matrix_case B29 deny "cd $PRIMARY/projects/foo"
+matrix_case B30 deny 'cd data/../projects/foo'
+matrix_case B31 deny "cd $PRIMARY/link-to-project"
+matrix_case B32 deny "cd $PRIMARY/link-to-project/.."
+matrix_case B33 deny "cd $PRIMARY/outside-link"
+matrix_case B34 deny 'cd /tmp'
+matrix_case B35 deny "cd $TMP_ROOT"
+matrix_case B36 deny "cd $PRIMARY/does-not-exist"
+
 # ALLOW: not a persistent top-level cwd change (scoped, data, or non-cd).
 matrix_case A01 allow 'git -C projects/foo status'
 matrix_case A02 allow 'cat /abs/path/file'
@@ -141,6 +158,20 @@ matrix_case A33 allow 'command -v cd'
 matrix_case A34 allow 'command -V cd'
 matrix_case A35 allow 'command -pv cd'
 matrix_case A36 allow 'command -vp cd'
+
+# ALLOW: a persistent cd that cannot leave the home - the home itself, or a
+# directory inside it outside projects/ and outside any foreign git checkout.
+matrix_case A37 allow "cd $PRIMARY"
+matrix_case A38 allow "cd $PRIMARY/"
+matrix_case A39 allow "cd $PRIMARY/data"
+matrix_case A40 allow 'cd data'
+matrix_case A41 allow 'cd data/'
+matrix_case A42 allow 'cd data/..'
+matrix_case A43 allow "cd -- $PRIMARY/state"
+matrix_case A44 allow "cd \"$PRIMARY/data\""
+matrix_case A45 allow "cd $PRIMARY/link-to-data"
+matrix_case A46 allow 'cd ./state'
+matrix_case A47 allow "cd $PRIMARY/data && tasks-axi add x"
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -201,6 +232,78 @@ test_full_acceptance_matrix() {
     done
   done
   pass "cd-guard acceptance matrix: ${#MATRIX_IDS[@]} cases x 5 harness entry forms, block/allow all correct"
+}
+
+# --- home carve-out: expansion forms ---------------------------------------
+
+# $FM_HOME, ~, and relative targets must resolve exactly like the absolute
+# spelling of the same directory; only the resolved location decides.
+test_home_forms_resolve_like_absolute() {
+  local elsewhere out rc
+
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd $FM_HOME' 2>&1); rc=$?
+  expect_code 0 "$rc" 'cd $FM_HOME must resolve to the home and be allowed'
+  [ -z "$out" ] || fail "cd \$FM_HOME produced output: $out"
+
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd ${FM_HOME}/state' 2>&1); rc=$?
+  expect_code 0 "$rc" 'cd ${FM_HOME}/state must resolve inside the home and be allowed'
+
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd "$FM_HOME/data"' 2>&1); rc=$?
+  expect_code 0 "$rc" 'a quoted $FM_HOME target must resolve the same way'
+
+  # An unset FM_HOME means the repo root is the home (docs/configuration.md).
+  out=$(env -u FM_HOME "$CHECK" --claude --command 'cd $FM_HOME/data' 2>&1); rc=$?
+  expect_code 0 "$rc" 'an unset FM_HOME must resolve to the repo root, the effective home'
+
+  elsewhere="$TMP_ROOT/elsewhere"
+  mkdir -p "$elsewhere/data"
+  out=$(FM_HOME="$elsewhere" "$CHECK" --claude --command 'cd $FM_HOME/data' 2>&1); rc=$?
+  expect_code 2 "$rc" 'an FM_HOME outside the checkout must not become an extra allowed root'
+  assert_contains "$out" '[persistent-cd]' 'outside-FM_HOME deny must carry the reason code'
+
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd $FM_HOME/projects/foo' 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd $FM_HOME/projects/foo must stay denied'
+
+  out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~' 2>&1); rc=$?
+  expect_code 0 "$rc" 'cd ~ must be allowed when ~ resolves to the home'
+
+  out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~/data' 2>&1); rc=$?
+  expect_code 0 "$rc" 'cd ~/data must be allowed when it resolves inside the home'
+
+  out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~/link-to-project' 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd ~/link-to-project must stay denied because it resolves into projects/'
+
+  out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~nobody' 2>&1); rc=$?
+  expect_code 2 "$rc" 'a ~user target this policy cannot resolve must stay denied'
+
+  pass 'cd-guard: $FM_HOME, ~, and relative forms resolve like their absolute spellings'
+}
+
+# --- home carve-out: kept hazards ------------------------------------------
+
+test_denies_foreign_worktree_target() {
+  local base dir out rc
+  base="$TMP_ROOT/foreign-base"
+  dir="$TMP_ROOT/foreign-wt"
+  make_child_worktree_fixture "$base" "$dir" >/dev/null
+  mkdir -p "$dir/data"
+  out=$("$CHECK" --claude --command "cd $dir/data" 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd-guard must deny a cd into a treehouse-shaped task worktree outside the home'
+  assert_contains "$out" '[persistent-cd]' 'foreign-worktree deny must carry the reason code'
+  pass 'cd-guard: still denies a cd into a foreign worktree'
+}
+
+test_denies_nested_checkout_inside_home() {
+  local dir nested out rc
+  dir="$TMP_ROOT/nested-home"
+  make_primary_fixture "$dir" >/dev/null
+  nested="$dir/vendor/other-repo"
+  mkdir -p "$nested/sub"
+  git init -q "$nested"
+  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command "cd $nested/sub" 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd-guard must deny a cd into a nested git checkout inside the home'
+  assert_contains "$out" '[persistent-cd]' 'nested-checkout deny must carry the reason code'
+  pass 'cd-guard: still denies a cd into a nested checkout other than the home checkout'
 }
 
 # --- primary-checkout scoping ----------------------------------------------
@@ -380,6 +483,9 @@ test_scripts_are_shellcheck_clean() {
 }
 
 test_full_acceptance_matrix
+test_home_forms_resolve_like_absolute
+test_denies_foreign_worktree_target
+test_denies_nested_checkout_inside_home
 test_fires_in_secondmate_home
 test_inert_in_child_worktree
 test_inert_when_not_firstmate_repo
