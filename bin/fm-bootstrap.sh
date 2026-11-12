@@ -1130,6 +1130,22 @@ crew_dispatch_validate() {
           end);
     def malformed_profile_floors($items):
       ($items | any(has("floor") and floor_bad(.floor; false)));
+    def clock_ok($t): ($t | type) == "string" and ($t | test("^([01][0-9]|2[0-3]):[0-5][0-9]$"));
+    def weekday_ok($d): ($d | type) == "string" and (["mon","tue","wed","thu","fri","sat","sun"] | index($d)) != null;
+    def pricing_window_bad($w):
+      ($w | type) != "object"
+      or (($w.weekdays | type) != "array") or (($w.weekdays | length) == 0)
+      or any($w.weekdays[]; weekday_ok(.) | not)
+      or (clock_ok($w.start) | not) or (clock_ok($w.end) | not)
+      or ($w.start >= $w.end);
+    def pricing_problem($p):
+      if ($p | type) != "object" then "profile peak_pricing must be an object"
+      elif (($p.multiplier | type) != "number") or ($p.multiplier <= 1) then "profile peak_pricing.multiplier must be a number above 1"
+      elif (($p.windows | type) != "array") or (($p.windows | length) == 0) then "profile peak_pricing.windows must be a non-empty array"
+      elif any($p.windows[]; pricing_window_bad(.)) then "each profile peak_pricing window needs weekdays from mon,tue,wed,thu,fri,sat,sun and an HH:MM start before its end"
+      else empty end;
+    def pricing_problems($items):
+      [$items[] | select(has("peak_pricing")) | pricing_problem(.peak_pricing)];
     def bad_efforts:
       configured_profiles
       | map({h: .harness, e: .effort})
@@ -1159,6 +1175,8 @@ crew_dispatch_validate() {
     elif $typed and ([(.rules // [])[]? | select(has("approval") and .approval != "captain")] | length > 0) then "approval must be \"captain\" when present"
     elif $typed and ([(.rules // [])[]? | select(has("min_confidence") and ((.min_confidence | type) != "number" or .min_confidence < 0 or .min_confidence > 1))] | length > 0) then "min_confidence must be a number from 0 through 1 when present"
     elif $typed and ([(.rules // [])[]? | select(has("floor") and floor_bad(.floor; true))] | length > 0) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
+    elif $typed and (pricing_problems([(.rules // [])[]? | profiles(.use?)[]?]) | length > 0) then
+      (pricing_problems([(.rules // [])[]? | profiles(.use?)[]?]) | first)
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
@@ -1171,6 +1189,8 @@ crew_dispatch_validate() {
       else "default profile model, effort, and prewalk_into must be non-empty strings when present"
       end
     elif $typed and has("default") and malformed_profile_floors([profiles(.default)[]?]) then "default profile floor needs scope and min_percent 0..100"
+    elif $typed and has("default") and (pricing_problems([profiles(.default)[]?]) | length > 0) then
+      (pricing_problems([profiles(.default)[]?]) | first)
     else
       (configured_profiles
         | map(.harness)

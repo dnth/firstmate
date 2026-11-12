@@ -23,11 +23,12 @@
 #   after that is jq: the confidence floor (0.6 on the answer confidence, or a
 #   rule's declared `min_confidence` on that rule's probability, falling to the
 #   most probable other option that clears its own floor), the rule's declared
-#   `approval` and `floor`, each profile's declared `provider` and `floor`, the
-#   quota rows from ONE quota-axi --json snapshot, and the spendPriority argmax
-#   over the eligible candidates. The model never sees quota, catalogs,
-#   approvals, confidence floors, `why`, or `use`. With no rules, it returns a
-#   non-clear result so firstmate keeps using the existing intake.
+#   `approval` and `floor`, each profile's declared `provider`, `floor`, and
+#   `peak_pricing`, the quota rows from ONE quota-axi --json snapshot, and the
+#   ranking-weight argmax over the eligible candidates. The model never sees
+#   quota, catalogs, approvals, confidence floors, `why`, or `use`. With no
+#   rules, it returns a non-clear result so firstmate keeps using the existing
+#   intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
@@ -37,7 +38,7 @@
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
 #     fallback: <runner-up rule taken when the picked rule missed its own floor>
 #     reason: <why the status is not clear>
-#     candidate: <harness>:<model> provider=.. [account=..] scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
+#     candidate: <harness>:<model> provider=.. [account=..] scope=.. remaining=..% spendPriority=.. [offpeak=xN] runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor and no runner-up taken; decide as today
@@ -48,6 +49,28 @@
 #   existing unreadable rules or account-lane file, malformed configuration,
 #   or missing jq), which is
 #   actionable, never selected around.
+#
+# Peak pricing: a profile may carry the optional `peak_pricing` declaration,
+#   the UTC clock windows when that provider charges more, shaped
+#   {"multiplier": <number above 1>,
+#    "windows": [{"weekdays": ["mon", ...], "start": "HH:MM", "end": "HH:MM"}]}.
+#   The resolver reads the UTC clock once per run and, for a declared candidate
+#   outside every declared window - all other weekday hours and all weekend,
+#   including weekend hours inside a window's clock times - multiplies that
+#   candidate's ranking weight by `multiplier` before the argmax. Inside a
+#   declared window it uses the unadjusted weight, so peak ranks and prints
+#   exactly as a run with no declaration.
+#   The ranking weight is exp(spendPriority): the positive, order-preserving
+#   recoding of quota-axi's signed pace scalar, so a multiplier above 1 always
+#   boosts the candidate instead of deepening a negative deficit. An adjusted
+#   candidate line carries `offpeak=x<multiplier>`.
+#   The adjustment never changes eligibility, floors, exhausted-runway
+#   refusals, approvals, or the genuine-tie rule, which all read the same
+#   unadjusted evidence as an undeclared run. A malformed `peak_pricing` is an
+#   actionable configuration error (exit 2).
+#   Tests pin the clock with FM_DISPATCH_CLOCK_UTC=YYYY-MM-DDTHH:MM:SSZ; the
+#   override is test-only, malformed values exit 2, and unset means the system
+#   UTC clock.
 #
 # Quota snapshot versions: quota-axi --json schemaVersion 5 and 6 are accepted
 #   (fm_quota_json_valid owns the check); any other version is refused as an
@@ -94,7 +117,9 @@
 #   refer to.
 #
 # Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   TYPESAFE_API_KEY is the only resolver-specific credential setting.
+#   FM_DISPATCH_CLOCK_UTC is the test-only UTC clock override described under
+#   "Peak pricing".
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -237,6 +262,22 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
         then (provider_id($f.provider) | not)
         else ($f | has("provider"))
         end);
+  def clock_ok($t): ($t | type) == "string" and ($t | test("^([01][0-9]|2[0-3]):[0-5][0-9]$"));
+  def weekday_ok($d): ($d | type) == "string" and (["mon","tue","wed","thu","fri","sat","sun"] | index($d)) != null;
+  def pricing_window_bad($w):
+    ($w | type) != "object"
+    or (($w.weekdays | type) != "array") or (($w.weekdays | length) == 0)
+    or any($w.weekdays[]; weekday_ok(.) | not)
+    or (clock_ok($w.start) | not) or (clock_ok($w.end) | not)
+    or ($w.start >= $w.end);
+  def pricing_problem($p):
+    if ($p | type) != "object" then "profile peak_pricing must be an object"
+    elif (($p.multiplier | type) != "number") or ($p.multiplier <= 1) then "profile peak_pricing.multiplier must be a number above 1"
+    elif (($p.windows | type) != "array") or (($p.windows | length) == 0) then "profile peak_pricing.windows must be a non-empty array"
+    elif any($p.windows[]; pricing_window_bad(.)) then "each profile peak_pricing window needs weekdays from mon,tue,wed,thu,fri,sat,sun and an HH:MM start before its end"
+    else empty end;
+  def pricing_problems($items):
+    [$items[] | select(has("peak_pricing")) | pricing_problem(.peak_pricing)] | first // null;
   def profile_bad($p):
     ($p | type) != "object"
     or (($p.harness | type) != "string") or (($p.harness | length) == 0)
@@ -259,12 +300,14 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   elif any((.rules // [])[]; has("select") and .select != "quota-balanced") then
     "unknown select: " + ([.rules[] | select(has("select") and .select != "quota-balanced") | .select] | unique | join(", "))
   elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
+  elif pricing_problems([(.rules // [])[] | profiles(.use)[]]) != null then pricing_problems([(.rules // [])[] | profiles(.use)[]])
   elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, prewalk_into, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
   elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
   elif any((.rules // [])[] | profiles(.use)[]; (.prewalk_into != null and .harness != "omp")) then "prewalk_into requires harness=omp"
   elif any((.rules // [])[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
   elif any((.rules // [])[] | profiles(.use)[]; (effort_ok(.harness; .effort) | not)) then "each use profile effort must be supported by its harness"
   elif has("default") and (profiles(.default) | length) == 0 then "default must be a profile object or non-empty profile array"
+  elif has("default") and pricing_problems(profiles(.default)) != null then pricing_problems(profiles(.default))
   elif has("default") and any(profiles(.default)[]; profile_bad(.)) then "each default profile needs harness; model, effort, prewalk_into, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
   elif has("default") and duplicate_profiles(profiles(.default)) then "default must not contain duplicate harness, model, and effort profiles"
   elif has("default") and any(profiles(.default)[]; (.prewalk_into != null and .harness != "omp")) then "prewalk_into requires harness=omp"
@@ -311,6 +354,29 @@ emit_error() {
 
 if [ "$RULE_COUNT" -eq 0 ]; then
   no_rules
+fi
+
+# ---- one UTC clock read for peak pricing --------------------------------------
+# The clock is read once, here, and every declared window is evaluated against
+# this single weekday and HH:MM. FM_DISPATCH_CLOCK_UTC pins it for tests.
+UTC_DOW='' UTC_HHMM=''
+clock_field() {  # <instant> <date format>
+  date -u -d "$1" "$2" 2>/dev/null \
+    || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" "$2" 2>/dev/null
+}
+if [ -n "${FM_DISPATCH_CLOCK_UTC:-}" ]; then
+  case "$FM_DISPATCH_CLOCK_UTC" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+    *) die "FM_DISPATCH_CLOCK_UTC must be YYYY-MM-DDTHH:MM:SSZ (UTC): $FM_DISPATCH_CLOCK_UTC" ;;
+  esac
+  UTC_DOW=$(clock_field "$FM_DISPATCH_CLOCK_UTC" +%u)
+  UTC_HHMM=$(clock_field "$FM_DISPATCH_CLOCK_UTC" +%H:%M)
+  if [ -z "$UTC_DOW" ] || [ -z "$UTC_HHMM" ]; then
+    die "FM_DISPATCH_CLOCK_UTC is not a valid UTC instant: $FM_DISPATCH_CLOCK_UTC"
+  fi
+else
+  UTC_DOW=$(date -u +%u) || die "could not read the UTC weekday"
+  UTC_HHMM=$(date -u +%H:%M) || die "could not read the UTC clock"
 fi
 
 RESP_FILE=$(mktemp) || die "mktemp failed"
@@ -415,11 +481,24 @@ fi
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
-  --argjson catalog_ok "$CATALOG_OK" \
+  --argjson catalog_ok "$CATALOG_OK" --argjson dow "$UTC_DOW" --arg hhmm "$UTC_HHMM" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" --slurpfile lanes "$LANES" --slurpfile catalog "$CATALOG" "$FM_QUOTA_LANES_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0] | collapse_lanes) as $q | ($r.answers.rule) as $a |
   ($quota[0].providers // []) as $rawl | ($lanes[0].providers // {}) as $lmap | ($catalog[0]) as $cat |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+  def day_name($n): ["mon","tue","wed","thu","fri","sat","sun"][$n - 1];
+  # Peak pricing adjusts only the ranking weight: outside every declared window
+  # (weekday off-peak and all weekend) the positive weight exp(spendPriority)
+  # is multiplied by the declared cost multiplier; inside a window it is not.
+  # exp is order-preserving with the signed scalar, so the multiplier boosts
+  # rather than deepening a negative deficit, and eligibility never changes.
+  def in_peak_window($pp):
+    any($pp.windows[]; ((.weekdays | index(day_name($dow))) != null)
+      and ($hhmm >= .start) and ($hhmm < .end));
+  def rank_weight($sp; $pp):
+    if $pp != null and (in_peak_window($pp) | not)
+    then {weight: (($sp | exp) * $pp.multiplier), adjustment: "offpeak=x\($pp.multiplier)"}
+    else {weight: ($sp | exp)} end;
   def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
   def bare($m): ($m | split("/") | last);
   def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
@@ -529,8 +608,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: true, unranked: true, reason: "spendPriority missing or non-numeric at \($bad.scope): not rankable"}
       else
         ($rows | min_by(.selection.spendPriority)) as $limiting |
+        ($limiting.selection.spendPriority) as $sp |
+        (rank_weight($sp; ($c.peak_pricing // null))) as $rank |
         {profile: $c, provider: $p, bounds: $bounds, scope: $limiting.scope, pct: $limiting.effectivePercentRemaining,
-         spendPriority: $limiting.selection.spendPriority, runway: $limiting.runway.status, eligible: true, reason: "ok"}
+         spendPriority: $sp, weight: $rank.weight, adjustment: ($rank.adjustment // null),
+         runway: $limiting.runway.status, eligible: true, reason: "ok"}
       end
     end
     | if ($c.account // null) != null then . + {account: $c.account} else . end;
@@ -601,8 +683,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     ([$cands[] | select(.unranked)]) as $unranked |
     if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
     else
-      ($elig | max_by(.spendPriority)) as $best |
-      ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
+      ($elig | max_by(.weight)) as $best |
+      ([$elig[] | select(.weight == $best.weight)] | length) as $ties |
       if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
       else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
         + (if ($unranked | length) > 0 then
@@ -628,7 +710,9 @@ TEXT=$(jq -r '
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .account then "  account=\(.account | flat)" else "" end)
-      + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
+      + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))"
+          + (if .adjustment then "  \(.adjustment | flat)" else "" end)
+          + "  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
