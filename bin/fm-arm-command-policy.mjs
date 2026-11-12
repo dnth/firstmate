@@ -295,7 +295,7 @@ export class Lexer {
   }
 
   readWord() {
-    const word = { type: "word", value: "", literal: true, subs: [], quoted: false, escaped: false, firstProtected: false, unquotedExpansion: false };
+    const word = { type: "word", value: "", literal: true, subs: [], quoted: false, firstProtected: false, unquotedVariable: false, unquotedExpansion: false };
     let consumed = false;
     while (this.index < this.source.length) {
       const char = this.source[this.index];
@@ -329,7 +329,6 @@ export class Lexer {
           this.index += 2;
           continue;
         }
-        word.escaped = true;
         if (word.value === "") word.firstProtected = true;
         word.value += this.source[this.index + 1];
         this.index += 2;
@@ -387,7 +386,10 @@ export class Lexer {
         this.index = backticks.next;
         continue;
       }
-      if (char === "$") word.literal = false;
+      if (char === "$") {
+        word.literal = false;
+        word.unquotedVariable = true;
+      }
       if ("*?[]{}".includes(char)) word.unquotedExpansion = true;
       word.value += char;
       this.index += 1;
@@ -409,7 +411,6 @@ export class Lexer {
           this.index += 2;
           continue;
         }
-        word.escaped = true;
         word.value += this.source[this.index + 1];
         this.index += 2;
         continue;

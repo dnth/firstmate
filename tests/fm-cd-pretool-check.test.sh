@@ -133,6 +133,17 @@ matrix_case B40 deny 'cd data || cd ..'
 matrix_case B41 deny 'cd -'
 matrix_case B42 deny 'cd -P data'
 matrix_case B43 deny 'cd -- -'
+matrix_case B44 deny 'printf x | cat; cd data'
+matrix_case B45 deny 'sleep 1 & cd data'
+matrix_case B46 deny '(true); cd data'
+matrix_case B47 deny '{ true; }; cd data'
+matrix_case B48 deny 'if true; then cd data; fi'
+matrix_case B49 deny 'for x in a; do cd data; done'
+matrix_case B50 deny 'if cd data; then pwd; fi'
+matrix_case B51 deny 'while false; do cd data; done'
+matrix_case B52 deny 'until true; do cd data; done'
+matrix_case B53 deny 'time cd data'
+matrix_case B54 deny '! cd data'
 
 # ALLOW: not a persistent top-level cwd change (scoped, data, or non-cd).
 matrix_case A01 allow 'git -C projects/foo status'
@@ -190,6 +201,8 @@ matrix_case A48 allow 'cd data && cd ..'
 matrix_case A49 allow 'cd data && cd ../state'
 # A semicolon chain of exempt cds stays provable.
 matrix_case A50 allow 'cd data; cd ..'
+matrix_case A51 allow 'X=1 cd data'
+matrix_case A52 allow 'cd data >/dev/null'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -371,6 +384,34 @@ test_reachable_cwd_and_expansion_regressions() {
     expect_code 0 "$rc" 'ordinary safe directory changes must remain allowed'
   done
   pass 'cd-guard: reachable cwd and expansion regressions match Bash' 
+}
+
+test_exemption_proof_regressions() {
+  local dir outside command actual out rc
+  dir="$TMP_ROOT/proof-home"
+  outside="$TMP_ROOT/proof-outside"
+  make_primary_fixture "$dir" >/dev/null
+  mkdir -p "$dir/data space/state" "$outside/data"
+  git init -q "$dir/state"
+
+  for command in 'cd $FM_HOME; cd state' 'cd ${FM_HOME}; cd state' 'cd $FM_HOME""; cd state' 'cd ""$FM_HOME; cd state'; do
+    actual=$(cd "$dir" && FM_HOME="$dir/data space" bash --noprofile --norc -c "$command; pwd -P" 2>/dev/null)
+    [ "$actual" = "$dir/state" ] || fail 'Bash rejects the split operand and reaches the checkout from home'
+    out=$(FM_HOME="$dir/data space" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'an unquoted expansion that splits cannot prove a cd succeeds'
+  done
+  for command in 'cd "$FM_HOME"' 'cd "${FM_HOME}/state"'; do
+    out=$(FM_HOME="$dir/data space" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 0 "$rc" 'quoting the expansion preserves a single safe operand containing spaces'
+  done
+
+  for command in "cd data >\"\${CDPATH:=$outside}/cd-log\"" "X=\${CDPATH:=$outside} cd data"; do
+    actual=$(cd "$dir" && CDPATH='' bash --noprofile --norc -c "$command >/dev/null; pwd -P")
+    [ "$actual" = "$outside/data" ] || fail 'Bash expands the side effect before resolving cd through CDPATH'
+    out=$(CDPATH='' "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'non-literal assignment and redirection words withdraw the exemption'
+  done
+  pass 'cd-guard: split operands and expansion side effects cannot prove a home exemption'
 }
 
 test_denies_special_cd_operands() {
@@ -589,6 +630,7 @@ test_scripts_are_shellcheck_clean() {
   pass "bin/fm-cd-pretool-check.sh is shellcheck-clean"
 }
 
+test_exemption_proof_regressions
 test_reachable_cwd_and_expansion_regressions
 test_full_acceptance_matrix
 test_home_forms_resolve_like_absolute

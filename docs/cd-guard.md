@@ -70,6 +70,10 @@ This is a deliberate fail-closed boundary, and these shapes are refused even tho
 
 - `cmd; cd data` and `cmd && cd data` after any non-`cd` command.
 - `cd a || cd b`.
+- A pipeline, background job, subshell, or brace group before the `cd`.
+- A `cd` inside a shell-keyword compound, including conditionals and loops.
+- An unquoted `$FM_HOME` expansion that produces whitespace and splits into multiple operands.
+- A non-literal redirection target or leading assignment on the `cd` node.
 - A `cd` carrying more than one operand, any option, or the special `-` operand (which uses `OLDPWD`).
 - A glob, a command substitution, a variable other than `$FM_HOME`, or a target spelled with a quoted or escaped leading `~`, which stays literal path text.
 

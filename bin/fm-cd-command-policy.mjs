@@ -141,7 +141,9 @@ function expandTarget(word, context) {
   // A relative FM_HOME resolves against the tracked directories in Bash, which
   // this policy does not model, so only an absolute value is expandable.
   if (!context.fmHome.startsWith("/")) return null;
-  return context.fmHome + rest;
+  const target = context.fmHome + rest;
+  if (word.unquotedVariable && /\s/.test(target)) return null;
+  return target;
 }
 
 function cdpathValue(position, context) {
@@ -188,8 +190,11 @@ function cdOperand(position, wordIndex, context) {
 
 // One exempt cd, resolved from every directory the shell may currently sit in.
 // Returns the possible destinations, or null when the cd is not exempt.
-function cdDestinations(position, wordIndex, context, reachable) {
+function cdDestinations(node, position, wordIndex, context, reachable) {
   if (!context.home) return null;
+  const operand = position.words.at(-1);
+  if (node.some((word) => word.type === "word" && word !== operand &&
+    (!word.literal || word.subs.length > 0 || word.unquotedExpansion))) return null;
   const target = cdOperand(position, wordIndex, context);
   if (target === null) return null;
   const destinations = [];
@@ -230,7 +235,10 @@ function decision(command, context = {}) {
   // reassigned those variables, which this lexical policy cannot enumerate.
   let provable = true;
   for (let index = 0; index < nodes.length; index += 1) {
-    if (!nodePersists(separators, index)) continue;
+    if (!nodePersists(separators, index)) {
+      provable = false;
+      continue;
+    }
     // commandPosition ignores subshell/brace groups, quoted data, comments, and
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
@@ -241,6 +249,11 @@ function decision(command, context = {}) {
     }
     let command = position.command;
     let wordIndex = position.index;
+    while (command && ["if", "then", "else", "elif", "fi", "for", "do", "done", "while", "until", "case", "esac", "select", "function", "time", "!"].includes(command.value)) {
+      provable = false;
+      wordIndex += 1;
+      command = position.words[wordIndex];
+    }
     while (command && (command.value === "builtin" || command.value === "command")) {
       wordIndex += 1;
       command = position.words[wordIndex];
@@ -257,7 +270,7 @@ function decision(command, context = {}) {
     // predecessor never fails, so that cd cannot run and its destination is
     // unprovable.
     if (!provable || separators[index - 1] === "||") return deny("persistent-cd");
-    const destinations = command.value === "cd" ? cdDestinations(position, wordIndex, settings, reachable) : null;
+    const destinations = command.value === "cd" ? cdDestinations(nodes[index], position, wordIndex, settings, reachable) : null;
     if (destinations === null) return deny("persistent-cd");
     // A redirection can fail before the builtin runs, leaving the shell where
     // it was, so both the previous and the new directories stay reachable.
