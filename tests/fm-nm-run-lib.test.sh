@@ -774,6 +774,71 @@ FIXTURE
   pass "readable mixed partial fixes preserve same-round implicit declines without authorizing absent or ambiguous findings"
 }
 
+test_mixed_finding_directives_use_full_round_context() {
+  local tmp step origin field scenario answer expected out rc events_expected
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  for step in review test; do
+    FM_TEST_STATUS_DOC=${RUN_STATUS/review,completed/$step,completed}
+    for origin in unknown interactive auto_yes; do
+      for field in findings user_findings; do
+        for scenario in agreeing labeled mismatch auto-authority noop-authority unknown-id qualified conflicting-auto conflicting-noop; do
+          answer='FIX A1 R1; IGNORE N1 R2'
+          expected=1
+          case "$scenario" in
+            agreeing) expected=0 ;;
+            labeled) answer='A1: FIX; R1: FIX; N1: IGNORE; R2: IGNORE'; expected=0 ;;
+            mismatch|auto-authority|noop-authority) ;;
+            unknown-id) answer='FIX Z1 R1; IGNORE N1 R2' ;;
+            qualified) answer='FIX A1 R1 (if approved); IGNORE N1 R2' ;;
+            conflicting-auto) answer='FIX A1 R1; IGNORE A1; IGNORE N1 R2' ;;
+            conflicting-noop) answer='FIX A1 R1; FIX N1; IGNORE N1 R2' ;;
+          esac
+          FM_TEST_ROUNDS_JSON=$(python3 - "$origin" "$field" "$scenario" <<'FIXTURE'
+import json
+import sys
+origin, field, scenario = sys.argv[1:]
+findings = [dict(id=fid, action=action, description=f"finding {fid}", severity="error") for fid, action in [("A1", "auto-fix"), ("N1", "no-op"), ("R1", "ask-user"), ("R2", "ask-user")]]
+first = dict(round=1, selection_source="user", response_origin=origin, selected_finding_ids=["A1", "R1"], **{field: findings})
+second = dict(round=2, selection_source="user_declined", response_origin="unknown", findings=[findings[3]])
+if scenario == "mismatch":
+    second.update(selection_source="user", selected_finding_ids=["R2"])
+elif scenario in ("auto-authority", "noop-authority"):
+    index = 0 if scenario == "auto-authority" else 1
+    second["findings"] = [dict(findings[index], action="ask-user")]
+    if scenario == "auto-authority":
+        second.update(selection_source="user", selected_finding_ids=["A1"])
+print(json.dumps(dict(schema_version=1, rounds=[first, second])))
+FIXTURE
+)
+          write_status "$tmp/status" "resolved [key=nm-01TEST-$step]: answered: $answer"
+          out=$(decisions "$tmp/status")
+          rc=$?
+          expect_code "$expected" "$rc" "mixed finding context: $step/$origin/$field/$scenario: $out"
+          if [ "$scenario" = auto-authority ]; then
+            assert_contains "$out" 'finding A1' "an auto-fix id acquired carried authority"
+            assert_contains "$out" 'missing matching resolved' "an auto-fix id was treated as previously authorized"
+          elif [ "$scenario" = noop-authority ]; then
+            assert_contains "$out" 'finding N1' "a no-op id acquired carried authority"
+            assert_contains "$out" 'missing matching resolved' "a no-op id was treated as previously authorized"
+          elif [ "$scenario" = agreeing ]; then
+            events_expected=$(printf '%s\tround 1\tR1\tfix\t%s\n' "$step" "$origin")
+            if [ "$step" = test ]; then
+              events_expected+=$(printf '\n%s\tround 1\tR2\tskip\t%s' "$step" "$origin")
+            fi
+            events_expected+=$(printf '\n%s\tround 2\tR2\tdeclined\tunknown' "$step")
+            out=$(fm_nm_ask_user_resolutions "${TMPDIR:-/tmp}" 5 01TEST)
+            [ "$out" = "$events_expected" ] || fail "non-ask-user siblings changed decision events: $out"
+          fi
+        done
+      done
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "all round IDs parse mixed directives while only ask-user findings emit events and retain authority"
+}
+
 test_all_checks_passed_is_green
 test_no_ci_checks_reported_is_no_checks_not_green
 test_no_ci_declared_is_no_checks_despite_its_wording
@@ -800,5 +865,6 @@ test_action_mentions_do_not_authorize_decisions
 test_unresolved_only_review_rounds_do_not_bind_answers
 test_new_covered_answers_supersede_carried_authority
 test_mixed_partial_fixes_preserve_implicit_declines
+test_mixed_finding_directives_use_full_round_context
 
 echo "all fm-nm-run-lib tests passed"

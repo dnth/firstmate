@@ -394,11 +394,14 @@ for rnd in rounds:
         fid: next(iter(identities[fid])) if len(identities.get(fid, set())) == 1 else "null"
         for fid in ask_user
     }
-    unresolved = json.dumps({fid: identity for fid, identity in round_identities.items() if fid not in resolved})
+    context = json.dumps({
+        "ids": parked,
+        "unresolved": {fid: identity for fid, identity in round_identities.items() if fid not in resolved},
+    })
     for fid, action in resolved.items():
         event = f"{step}\t{where}\t{fid}\t{action}\t{origin}"
         if include_unresolved == "1":
-            event += f"\t{round_identities[fid]}\t{unresolved}"
+            event += f"\t{round_identities[fid]}\t{context}"
         events.append(event)
 # Buffered so a failure part-way through the document prints only what is
 # missing, never a partial event list a caller could mistake for the audit.
@@ -602,9 +605,8 @@ def decided_actions(answer, finding_ids):
         for fid, pattern in id_patterns.items():
             if re.search(pattern, clause, re.IGNORECASE):
                 if fid in explicit and decided[fid] != value:
-                    decided[fid] = None
-                else:
-                    decided[fid] = value
+                    return {}, set()
+                decided[fid] = value
                 explicit.add(fid)
     if len(defaults) == 1:
         for fid in finding_ids:
@@ -620,11 +622,14 @@ def agrees(decided, recorded):
 
 by_round = {}
 round_findings = {}
-for _, rnd, fid, action, origin, identity, unresolved in events:
+round_context = {}
+for _, rnd, fid, action, origin, identity, context in events:
     number = int(rnd[len("round "):])
+    context = json.loads(context)
     by_round.setdefault(number, []).append((fid, action, origin, identity))
-    round_findings.setdefault(number, {}).update(json.loads(unresolved))
+    round_findings.setdefault(number, {}).update(context["unresolved"])
     round_findings[number][fid] = identity
+    round_context[number] = context["ids"]
 
 decisions = {}
 missing = []
@@ -636,11 +641,11 @@ for rnd in rounds:
     origin = round_events[0][2]
     decided, explicit = {}, set()
     if rnd in covered:
-        decided, explicit = decided_actions(round_answer[rnd], round_findings[rnd])
+        decided, explicit = decided_actions(round_answer[rnd], round_context[rnd])
         resolved_ids = {fid for fid, _, _, _ in round_events}
         decided = {fid: value for fid, value in decided.items() if fid in explicit or fid in resolved_ids}
     for fid, action, _, identity in round_events:
-        if fid not in explicit and action == "skip" and decided and all(value is not None for value in decided.values()):
+        if fid not in explicit and action == "skip" and decided:
             decided[fid] = "nonfix"
         if origin != "unknown":
             if rnd not in covered:
