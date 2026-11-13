@@ -234,6 +234,30 @@ test_reopened_keys_bind_new_gate_occurrences() {
   pass "reopened bare keys and detail aliases bind to their gate occurrence"
 }
 
+test_recovery_answers_do_not_move_implicit_gate_binding() {
+  local tmp first last suffix
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_ROUNDS_JSON=$ROUNDS_TWO_DECISIONS
+  for suffix in '' '-detail'; do
+    for first in 30 31; do
+      if [ "$first" = 31 ]; then last=30; else last=31; fi
+      if [ "$first" = 31 ]; then
+        write_status "$tmp/status" \
+          'resolved [key=nm-01TEST-review-r31]: answered: approve' \
+          "resolved [key=nm-01TEST-review$suffix]: answered: fix"
+      else
+        write_status "$tmp/status" \
+          "resolved [key=nm-01TEST-review$suffix]: answered: fix" \
+          'resolved [key=nm-01TEST-review-r31]: answered: approve'
+      fi
+      decisions "$tmp/status" >/dev/null || fail "round $first then round $last recovery answers did not cover both gates ($suffix)"
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "round and bare or detail recovery answers authorize both gates in either append order"
+}
+
 test_large_rounds_document_is_read_without_environment_limits() {
   local tmp round
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
@@ -293,6 +317,7 @@ test_suffixed_firstmate_keys_cover_their_events
 test_grouped_findings_share_one_gate_response_record
 test_surplus_records_stay_bound_when_finding_ids_repeat
 test_reopened_keys_bind_new_gate_occurrences
+test_recovery_answers_do_not_move_implicit_gate_binding
 test_large_rounds_document_is_read_without_environment_limits
 test_unreadable_or_originless_rounds_refuse_naming_what_is_missing
 

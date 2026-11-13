@@ -483,7 +483,8 @@ covered = set()
 for kind, record_key in records:
     if record_key.startswith(key + "-r"):
         bound = int(record_key[len(key + "-r"):])
-        current = max(current, bound)
+        if kind == "open":
+            current = bound
     elif kind == "open":
         if pending is not None:
             current = pending

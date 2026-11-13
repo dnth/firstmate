@@ -400,7 +400,7 @@ test_crew_state_agrees_with_pr_ready_decision_gate() {
   assert_contains "$crew" "state: parked" "crew-state accepted a worker-answered decision"
   assert_contains "$crew" "source: decision-gate" "crew-state did not name the decision gate"
   assert_contains "$crew" "RUN-agree" "crew-state refusal did not name the run"
-  printf 'resolved [key=nm-RUN-agree-review-r31]: answered: a bounded approval excerpt [truncated]\n' >> "$HOME_DIR/state/$id.status"
+  printf 'done: PR %s checks green\nresolved [key=nm-RUN-agree-review-r31]: answered: approve\nresolved [key=nm-RUN-agree-review]: answered: fix\n' "$url" > "$HOME_DIR/state/$id.status"
   FM_FAKE_GH_HEAD=$head FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
   expect_code 0 "$PR_RC" "PR-ready refused a firstmate-decided run: $PR_OUT"
   crew=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_NM_STATUS="$status" \
