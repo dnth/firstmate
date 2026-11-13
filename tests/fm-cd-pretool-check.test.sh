@@ -13,6 +13,10 @@
 # spawned; live per-harness evidence lives in docs/cd-guard.md.
 set -u
 
+# CDPATH redirects a relative cd, so a caller's value must not leak into these
+# fixtures; the CDPATH cases set it explicitly.
+unset CDPATH
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -38,6 +42,13 @@ make_primary_fixture() {
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
   install_cd_scripts "$dir"
+  # Targets the home carve-out must allow, and hazards it must keep denying.
+  mkdir -p "$dir/data" "$dir/state" "$dir/projects/foo" "$dir/projects/bar"
+  mkdir -p "$dir/datadir" "$dir/data\dir"
+  git init -q "$dir/data\dir"
+  ln -s data "$dir/link-to-data"
+  ln -s projects/foo "$dir/link-to-project"
+  ln -s /tmp "$dir/outside-link"
   printf '%s\n' "$dir"
 }
 
@@ -104,6 +115,54 @@ matrix_case B25 deny 'builtin command cd projects/foo'
 matrix_case B26 deny 'command -p cd projects/foo'
 matrix_case B27 deny 'command -- cd projects/foo'
 
+# BLOCK: a persistent cd that can leave the home - anything in the projects
+# tree, a link that resolves out of the home, /tmp, and an unresolvable target.
+matrix_case B28 deny "cd $PRIMARY/projects"
+matrix_case B29 deny "cd $PRIMARY/projects/foo"
+matrix_case B30 deny 'cd data/../projects/foo'
+matrix_case B31 deny "cd $PRIMARY/link-to-project"
+matrix_case B32 deny "cd $PRIMARY/link-to-project/.."
+matrix_case B33 deny "cd $PRIMARY/outside-link"
+matrix_case B34 deny 'cd /tmp'
+matrix_case B35 deny "cd $TMP_ROOT"
+matrix_case B36 deny "cd $PRIMARY/does-not-exist"
+matrix_case B37 deny 'cd data && cd state'
+matrix_case B38 deny 'CDPATH=/tmp cd data'
+# A later node makes the context unprovable, so the exemption stops.
+matrix_case B39 deny 'echo hi; cd data'
+matrix_case B40 deny 'cd data || cd ..'
+# The special - (OLDPWD) and every option stay denied.
+matrix_case B41 deny 'cd -'
+matrix_case B42 deny 'cd -P data'
+matrix_case B43 deny 'cd -- -'
+matrix_case B44 deny 'printf x | cat; cd data'
+matrix_case B45 deny 'sleep 1 & cd data'
+matrix_case B46 deny '(true); cd data'
+matrix_case B47 deny '{ true; }; cd data'
+matrix_case B48 deny 'if true; then cd data; fi'
+matrix_case B49 deny 'for x in a; do cd data; done'
+matrix_case B50 deny 'if cd data; then pwd; fi'
+matrix_case B51 deny 'while false; do cd data; done'
+matrix_case B52 deny 'until true; do cd data; done'
+matrix_case B53 deny 'time cd data'
+matrix_case B54 deny '! cd data'
+# Redirections, heredocs, and leading assignments can expand before the builtin.
+matrix_case B55 deny 'X=1 cd data'
+matrix_case B56 deny 'cd data >/dev/null'
+matrix_case B57 deny $'cd data <<EOF\necho\nEOF'
+matrix_case B58 deny 'if CDPATH=/tmp cd data; then pwd; fi'
+matrix_case B59 deny 'cd ""'
+matrix_case B60 deny 'cd data && cd "" && cd ..; cd state'
+matrix_case B61 deny 'cd "data\dir"'
+matrix_case B62 deny 'cd "$FM_HOME/data\dir"'
+matrix_case B63 deny 'if "cd" /tmp; then :; fi'
+matrix_case B64 deny 'cd data; if true; then :; fi'
+matrix_case B65 deny 'if command -v cd; then :; fi'
+matrix_case B66 deny 'cd data*'
+matrix_case B67 deny 'cd "$(printf data)"'
+matrix_case B68 deny 'cd "$OTHER"'
+matrix_case B69 deny 'cd data state'
+
 # ALLOW: not a persistent top-level cwd change (scoped, data, or non-cd).
 matrix_case A01 allow 'git -C projects/foo status'
 matrix_case A02 allow 'cat /abs/path/file'
@@ -141,6 +200,25 @@ matrix_case A33 allow 'command -v cd'
 matrix_case A34 allow 'command -V cd'
 matrix_case A35 allow 'command -pv cd'
 matrix_case A36 allow 'command -vp cd'
+
+# ALLOW: a persistent cd that cannot leave the home - the home itself, or a
+# directory inside it outside projects/ and outside any foreign git checkout.
+matrix_case A37 allow "cd $PRIMARY"
+matrix_case A38 allow "cd $PRIMARY/"
+matrix_case A39 allow "cd $PRIMARY/data"
+matrix_case A40 allow 'cd data'
+matrix_case A41 allow 'cd data/'
+matrix_case A42 allow 'cd data/..'
+matrix_case A43 allow "cd -- $PRIMARY/state"
+matrix_case A44 allow "cd \"$PRIMARY/data\""
+matrix_case A45 allow "cd $PRIMARY/link-to-data"
+matrix_case A46 allow 'cd ./state'
+matrix_case A47 allow "cd $PRIMARY/data && tasks-axi add x"
+# An allowed cd updates the tracked cwd, so later nodes resolve from there.
+matrix_case A48 allow 'cd data && cd ..'
+matrix_case A49 allow 'cd data && cd ../state'
+# A semicolon chain of exempt cds stays provable.
+matrix_case A50 allow 'cd data; cd ..'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -201,6 +279,219 @@ test_full_acceptance_matrix() {
     done
   done
   pass "cd-guard acceptance matrix: ${#MATRIX_IDS[@]} cases x 5 harness entry forms, block/allow all correct"
+}
+
+# --- home carve-out: expansion forms ---------------------------------------
+
+# $FM_HOME, ~, and relative targets must resolve exactly like the absolute
+# spelling of the same directory; only the resolved location decides.
+test_home_forms_resolve_like_absolute() {
+  local elsewhere out rc
+
+  # An unquoted expansion can be word-split or pathname-expanded, so only the
+  # quoted spelling is exempt.
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd $FM_HOME' 2>&1); rc=$?
+  expect_code 2 "$rc" 'an unquoted $FM_HOME operand must stay denied'
+  assert_contains "$out" '[persistent-cd]' 'unquoted-FM_HOME deny must carry the reason code'
+
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd ${FM_HOME}/state' 2>&1); rc=$?
+  expect_code 2 "$rc" 'an unquoted ${FM_HOME}/state operand must stay denied'
+
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd "$FM_HOME"' 2>&1); rc=$?
+  expect_code 0 "$rc" 'a quoted $FM_HOME target must resolve to the home and be allowed'
+
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd "$FM_HOME/data"' 2>&1); rc=$?
+  expect_code 0 "$rc" 'a quoted $FM_HOME target must resolve the same way'
+
+  # Bash expands an unset variable to the empty string, so this becomes
+  # `cd /data`: the policy must not invent a value that widens beyond the home.
+  out=$(env -u FM_HOME "$CHECK" --claude --command 'cd "$FM_HOME/data"' 2>&1); rc=$?
+  expect_code 2 "$rc" 'an unset FM_HOME must stay denied rather than resolve to a made-up home'
+  assert_contains "$out" '[persistent-cd]' 'unset-FM_HOME deny must carry the reason code'
+  out=$(env -u FM_HOME "$CHECK" --claude --command 'cd "$FM_HOME"' 2>&1); rc=$?
+  expect_code 2 "$rc" 'an empty $FM_HOME must not become a return to the home'
+
+  elsewhere="$TMP_ROOT/elsewhere"
+  mkdir -p "$elsewhere/data"
+  out=$(FM_HOME="$elsewhere" "$CHECK" --claude --command 'cd "$FM_HOME/data"' 2>&1); rc=$?
+  expect_code 2 "$rc" 'an FM_HOME outside the checkout must not become an extra allowed root'
+  assert_contains "$out" '[persistent-cd]' 'outside-FM_HOME deny must carry the reason code'
+
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd "$FM_HOME/projects/foo"' 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd $FM_HOME/projects/foo must stay denied'
+
+  out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~' 2>&1); rc=$?
+  expect_code 0 "$rc" 'cd ~ must be allowed when ~ resolves to the home'
+
+  out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~/data' 2>&1); rc=$?
+  expect_code 0 "$rc" 'cd ~/data must be allowed when it resolves inside the home'
+
+  # Only the tilde prefix decides expansion, so a quoted suffix still expands.
+  out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~/"data"' 2>&1); rc=$?
+  expect_code 0 "$rc" 'an unquoted tilde prefix expands even when the suffix is quoted'
+
+  out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~/link-to-project' 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd ~/link-to-project must stay denied because it resolves into projects/'
+
+  out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~nobody' 2>&1); rc=$?
+  expect_code 2 "$rc" 'a ~user target this policy cannot resolve must stay denied'
+
+  pass 'cd-guard: $FM_HOME, ~, and relative forms resolve like their absolute spellings'
+}
+
+# --- home carve-out: CDPATH cannot redirect a relative target --------------
+
+# An inherited CDPATH can send an exempted relative target out of the home.
+test_cdpath_denies_relative_targets() {
+  local out rc
+
+  out=$(CDPATH=/tmp "$CHECK" --claude --command 'cd data' 2>&1); rc=$?
+  expect_code 2 "$rc" 'an inherited CDPATH must deny the relative target it could redirect'
+  assert_contains "$out" '[persistent-cd]' 'CDPATH deny must carry the reason code'
+
+  out=$(CDPATH=/tmp "$CHECK" --claude --command 'cd ./data' 2>&1); rc=$?
+  expect_code 0 "$rc" 'a ./ target never consults CDPATH and must stay allowed'
+
+  out=$(CDPATH='' "$CHECK" --claude --command 'cd data' 2>&1); rc=$?
+  expect_code 0 "$rc" 'an empty CDPATH must not deny a home-relative target'
+
+  pass 'cd-guard: CDPATH denies a relative target that it could redirect out of the home'
+}
+
+test_reachable_cwd_and_expansion_regressions() {
+  local dir outside command actual out rc
+  dir="$TMP_ROOT/reachable-home"
+  outside="$TMP_ROOT/cdpath-outside"
+  make_primary_fixture "$dir" >/dev/null
+  mkdir -p "$dir/data/state" "$dir/data/sub" "$dir/~/data" "$dir/.cache" "$outside/.cache" "$outside/data"
+  git init -q "$dir/state"
+  git init -q "$dir/~/data"
+  ln -s data/sub "$dir/link"
+
+  for command in 'true || cd data; cd state' 'true && cd data; cd state' 'cd link && cd ../state' 'cd data >missing/output; cd state'; do
+    actual=$(cd "$dir" && bash --noprofile --norc -c "$command; pwd -P" 2>/dev/null)
+    case "$command" in
+      'true && cd data; cd state') [ "$dir/data/state" = "$actual" ] || fail 'Bash executes the conditional cd' ;;
+      *) [ "$dir/state" = "$actual" ] || fail 'Bash reaches the nested checkout' ;;
+    esac
+    out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'every reachable cwd must be safe, including skipped conditional paths'
+  done
+
+  for command in "CDPATH=$outside cd .cache" "CDPATH=$outside; cd data" "CDPATH=\$(printf %s $outside) cd data"; do
+    actual=$(cd "$dir" && bash --noprofile --norc -c "$command >/dev/null; pwd -P")
+    case "$actual" in "$outside/"*) ;; *) fail "Bash CDPATH oracle did not leave the home: $actual" ;; esac
+    out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'CDPATH redirection must deny dot names and changed or unresolved values'
+  done
+
+  for command in "FM_HOME=$outside; cd \"\$FM_HOME\"" "HOME=$outside; cd ~/data"; do
+    actual=$(cd "$dir" && bash --noprofile --norc -c "$command; pwd -P" 2>/dev/null)
+    case "$actual" in "$outside"|"$outside/"*) ;; *) fail "Bash variable oracle did not leave the home: $actual" ;; esac
+    out=$(HOME="$dir" FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'earlier assignments must invalidate expansion context'
+  done
+
+  for command in "cd '~/data'" 'cd "~/data"' 'cd \~/data'; do
+    actual=$(cd "$dir" && HOME="$dir" bash --noprofile --norc -c "$command; pwd -P" 2>/dev/null)
+    [ "$dir/~/data" = "$actual" ] || fail 'Bash keeps quoted and escaped tildes literal'
+    out=$(HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'literal tilde paths into a checkout must deny'
+  done
+  out=$(CDPATH="$outside" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd .cache' 2>&1); rc=$?
+  expect_code 2 "$rc" 'inherited CDPATH must also deny dot-prefixed names'
+  for command in 'cd data && cd ..' 'cd data; cd state' 'cd ~/data' 'cd ./data'; do
+    out=$(HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 0 "$rc" 'ordinary safe directory changes must remain allowed'
+  done
+  pass 'cd-guard: reachable cwd and expansion regressions match Bash' 
+}
+
+test_quoted_operand_regressions() {
+  local dir command actual out rc
+  dir="$TMP_ROOT/quoted-operand-home"
+  make_primary_fixture "$dir" >/dev/null
+  for command in 'cd "data\dir"' 'cd "$FM_HOME/data\dir"' 'cd "${FM_HOME}/data\dir"'; do
+    actual=$(cd "$dir" && FM_HOME="$dir" bash --noprofile --norc -c "$command; pwd -P")
+    [ "$actual" = "$dir/data\dir" ] || fail 'Bash preserves a double-quoted backslash before an ordinary character'
+    out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'a cooked operand must not hide the checkout Bash actually enters'
+  done
+  actual=$(cd "$dir" && bash --noprofile --norc -c 'if "cd" data; then pwd -P; fi')
+  [ "$actual" = "$dir/data" ] || fail 'Bash executes a quoted cd inside a keyword compound'
+  actual=$(cd "$dir" && bash --noprofile --norc -c 'cd data; if true; then pwd -P; fi')
+  [ "$actual" = "$dir/data" ] || fail 'Bash permits a keyword compound after a cd'
+  actual=$(bash --noprofile --norc -c 'if command -v cd; then :; fi')
+  [ "$actual" = cd ] || fail 'Bash treats the builtin as query data inside the compound'
+  pass 'cd-guard: quoted operands match Bash and keyword compounds remain refused'
+}
+
+test_exemption_proof_regressions() {
+  local dir outside command actual out rc
+  dir="$TMP_ROOT/proof-home"
+  outside="$TMP_ROOT/proof-outside"
+  make_primary_fixture "$dir" >/dev/null
+  mkdir -p "$dir/data space/state" "$outside/data"
+  git init -q "$dir/state"
+
+  for command in 'cd $FM_HOME; cd state' 'cd ${FM_HOME}; cd state' 'cd $FM_HOME""; cd state' 'cd ""$FM_HOME; cd state'; do
+    actual=$(cd "$dir" && FM_HOME="$dir/data space" bash --noprofile --norc -c "$command; pwd -P" 2>/dev/null)
+    [ "$actual" = "$dir/state" ] || fail 'Bash rejects the split operand and reaches the checkout from home'
+    out=$(FM_HOME="$dir/data space" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'an unquoted expansion that splits cannot prove a cd succeeds'
+  done
+  for command in 'cd "$FM_HOME"' 'cd "${FM_HOME}/state"'; do
+    out=$(FM_HOME="$dir/data space" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 0 "$rc" 'quoting the expansion preserves a single safe operand containing spaces'
+  done
+
+  for command in "cd data >\"\${CDPATH:=$outside}/cd-log\"" "X=\${CDPATH:=$outside} cd data"; do
+    actual=$(cd "$dir" && CDPATH='' bash --noprofile --norc -c "$command >/dev/null; pwd -P")
+    [ "$actual" = "$outside/data" ] || fail 'Bash expands the side effect before resolving cd through CDPATH'
+    out=$(CDPATH='' "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'non-literal assignment and redirection words withdraw the exemption'
+  done
+  pass 'cd-guard: split operands and expansion side effects cannot prove a home exemption'
+}
+
+test_denies_special_cd_operands() {
+  local dir out rc
+  dir="$TMP_ROOT/special-operand-home"
+  make_primary_fixture "$dir" >/dev/null
+  mkdir -p "$dir/-" "$dir/-P"
+  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd -' 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd - must deny even when a directory named - exists in the home'
+  assert_contains "$out" '[persistent-cd]' 'special-operand deny must carry the reason code'
+  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd -P' 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd -P must deny even when a directory named -P exists in the home'
+  pass 'cd-guard: special cd operands stay denied regardless of same-named directories'
+}
+
+# --- home carve-out: kept hazards ------------------------------------------
+
+test_denies_foreign_worktree_target() {
+  local base dir out rc
+  base="$TMP_ROOT/foreign-base"
+  dir="$TMP_ROOT/foreign-wt"
+  make_child_worktree_fixture "$base" "$dir" >/dev/null
+  mkdir -p "$dir/data"
+  out=$("$CHECK" --claude --command "cd $dir/data" 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd-guard must deny a cd into a treehouse-shaped task worktree outside the home'
+  assert_contains "$out" '[persistent-cd]' 'foreign-worktree deny must carry the reason code'
+  pass 'cd-guard: still denies a cd into a foreign worktree'
+}
+
+test_denies_nested_checkout_inside_home() {
+  local dir nested out rc
+  dir="$TMP_ROOT/nested-home"
+  make_primary_fixture "$dir" >/dev/null
+  nested="$dir/vendor/other-repo"
+  mkdir -p "$nested/sub"
+  git init -q "$nested"
+  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command "cd $nested/sub" 2>&1); rc=$?
+  expect_code 2 "$rc" 'cd-guard must deny a cd into a nested git checkout inside the home'
+  assert_contains "$out" '[persistent-cd]' 'nested-checkout deny must carry the reason code'
+  pass 'cd-guard: still denies a cd into a nested checkout other than the home checkout'
 }
 
 # --- primary-checkout scoping ----------------------------------------------
@@ -379,7 +670,15 @@ test_scripts_are_shellcheck_clean() {
   pass "bin/fm-cd-pretool-check.sh is shellcheck-clean"
 }
 
+test_quoted_operand_regressions
+test_exemption_proof_regressions
+test_reachable_cwd_and_expansion_regressions
 test_full_acceptance_matrix
+test_home_forms_resolve_like_absolute
+test_cdpath_denies_relative_targets
+test_denies_special_cd_operands
+test_denies_foreign_worktree_target
+test_denies_nested_checkout_inside_home
 test_fires_in_secondmate_home
 test_inert_in_child_worktree
 test_inert_when_not_firstmate_repo

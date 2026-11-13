@@ -295,7 +295,7 @@ export class Lexer {
   }
 
   readWord() {
-    const word = { type: "word", value: "", literal: true, subs: [], quoted: false, unquotedExpansion: false };
+    const word = { type: "word", value: "", literal: true, subs: [], quoted: false, droppedDoubleQuoteBackslash: false, firstProtected: false, unquotedVariable: false, unquotedExpansion: false };
     let consumed = false;
     while (this.index < this.source.length) {
       const char = this.source[this.index];
@@ -304,6 +304,7 @@ export class Lexer {
       consumed = true;
       if (char === "'") {
         word.quoted = true;
+        if (word.value === "") word.firstProtected = true;
         const end = this.source.indexOf("'", this.index + 1);
         if (end === -1) {
           this.error = "unclosed single quote";
@@ -315,6 +316,7 @@ export class Lexer {
       }
       if (char === '"') {
         word.quoted = true;
+        if (word.value === "") word.firstProtected = true;
         if (!this.readDoubleQuoted(word)) return null;
         continue;
       }
@@ -327,6 +329,7 @@ export class Lexer {
           this.index += 2;
           continue;
         }
+        if (word.value === "") word.firstProtected = true;
         word.value += this.source[this.index + 1];
         this.index += 2;
         continue;
@@ -338,12 +341,14 @@ export class Lexer {
           return null;
         }
         word.quoted = true;
+        if (word.value === "") word.firstProtected = true;
         word.value += ansi.value;
         this.index = ansi.next;
         continue;
       }
       if (this.source.startsWith('$"', this.index)) {
         word.quoted = true;
+        if (word.value === "") word.firstProtected = true;
         this.index += 1;
         if (!this.readDoubleQuoted(word)) return null;
         continue;
@@ -381,7 +386,10 @@ export class Lexer {
         this.index = backticks.next;
         continue;
       }
-      if (char === "$") word.literal = false;
+      if (char === "$") {
+        word.literal = false;
+        word.unquotedVariable = true;
+      }
       if ("*?[]{}".includes(char)) word.unquotedExpansion = true;
       word.value += char;
       this.index += 1;
@@ -403,6 +411,7 @@ export class Lexer {
           this.index += 2;
           continue;
         }
+        if (!'$`"\\'.includes(this.source[this.index + 1])) word.droppedDoubleQuoteBackslash = true;
         word.value += this.source[this.index + 1];
         this.index += 2;
         continue;
