@@ -11,7 +11,9 @@
 # hides a genuinely parked run, and a false positive lets teardown act on a run
 # it does not own. No helper here reconstructs what the pipeline validated
 # from the worker's object store: run identity is the branch, PR URL, full
-# head SHA, status, and outcome that `axi status --run` reports.
+# head SHA, status, and outcome that `axi status --run` reports, and each
+# ask-user decision event with its answering origin is what
+# `axi rounds --json` reports.
 #
 # Bounded command in dir $1, timeout $2 seconds. The bounded form preserves
 # stdout, stderr, and exit status; the checked form discards stderr, while
@@ -211,6 +213,34 @@ fm_nm_run_is_pr_ready() {  # <worktree> <timeout-secs> <status-out> <run-id>
   [ "$(fm_nm_ci_checks_state "$1" "$2" "$4")" = green ]
 }
 
+# Step names from a captured `axi status` document $1, in pipeline order.
+# `axi rounds --step` requires a step name and no `axi` command lists them, so
+# the run's own steps table is the enumeration source for the decision audit.
+fm_nm_status_steps() {  # <toon-output>
+  awk '
+    function lead(s) { match(s, /^ */); return RLENGTH }
+    /^[ ]*steps\[[0-9]+\]\{[^}]*\}:[ ]*$/ {
+      header = $0
+      sub(/.*\{/, "", header)
+      sub(/\}.*/, "", header)
+      n = split(header, cols, ",")
+      step_col = 1
+      for (i = 1; i <= n; i++) if (cols[i] == "step") step_col = i
+      block = lead($0)
+      in_steps = 1
+      next
+    }
+    in_steps {
+      if ($0 == "" || lead($0) <= block) { in_steps = 0; next }
+      line = $0
+      sub(/^ */, "", line)
+      if (index(line, ",") == 0) next
+      m = split(line, f, ",")
+      if (step_col <= m && f[step_col] != "") print f[step_col]
+    }
+  ' <<<"$1"
+}
+
 # The canonical status-ledger key for a parked no-mistakes ask-user gate:
 # nm-<run>-<step>. A worker escalates such a gate as
 # `needs-decision [key=nm-<run>-<step>]` (the generated ship brief owns that
@@ -218,240 +248,220 @@ fm_nm_run_is_pr_ready() {  # <worktree> <timeout-secs> <status-out> <run-id>
 # through `fm-send --resolve-key`. When retroactively deciding a finding with
 # no open record left to close, firstmate appends
 # `resolved [key=nm-<run>-<step>]: answered: <action> <finding-ids>` itself.
-# fm_nm_ask_user_decisions below compares the run's recorded gate resolutions
-# against those resolved records at PR-ready (bin/fm-pr-check.sh) and at
-# done acceptance (bin/fm-crew-state.sh).
+# A re-parked gate or a finding-specific decision may key on a suffixed form
+# (`-r<round>` or `-detail`), which bin/fm-classify-lib.sh accepts for the
+# same step. fm_nm_ask_user_decisions below compares the pipeline's recorded
+# decision events against those resolved records at PR-ready
+# (bin/fm-pr-check.sh) and at done acceptance (bin/fm-crew-state.sh).
 fm_nm_ask_user_key() {  # <run-id> <step>
   printf 'nm-%s-%s' "$1" "$2"
 }
 
-# Read a bound run's recorded ask-user gate resolutions from the daemon's
-# state database and print one TAB-separated row per finding each
-# response resolved: <step>\t<event>\t<finding-id>\t<action>.
+# One step's ask-user decision events from the `axi rounds --json` document in
+# FM_NM_ROUNDS_DOC (passed by environment because the python program needs the
+# script on stdin). Prints one TAB-separated row per decision event:
+# <step>\t<round N>\t<finding-id>\t<action>\t<response-origin>.
 #
-# No `axi` read command exposes per-finding gate decisions, so this is a
-# bounded read-only sqlite3 evidence query (mode=ro) rather than a CLI call.
-# NM_HOME selects the no-mistakes home; it defaults to
-# ~/.no-mistakes, and a relative NM_HOME resolves against dir $1.
+# The pipeline records a gate response on the answered round: a `fix` response
+# stores selection_source=user with the selected finding ids, an approve, skip,
+# or abort stores selection_source=user_declined with an empty selection, and
+# auto-fix rounds carry selection_source=auto_fix and are the pipeline's own
+# work, never a decision event. A finding whose stored action is ask-user, or
+# empty (the pipeline default), is an ask-user finding; on review an unselected
+# one stays outstanding and re-parks, while on every other step it is
+# implicitly declined.
 #
-# Resolution model (internal/pipeline/executor.go): a `fix` response records
-# selection_source=user and the selected finding ids on the gate's last round;
-# an approve, skip, or abort records selection_source=user_declined with an
-# empty selection. On review, an unselected ask-user finding stays outstanding
-# and re-parks; on every other step it is implicitly declined. A completed or
-# skipped step that still reports an ask-user finding no recorded decision
-# covered is emitted as a step-level event so a decision write failure or a
-# reconciled gate can never read as a clean pass.
+# response_origin is the pipeline's record of who answered the gate:
+# interactive and auto_yes are recorded answers, and unknown means the run
+# predates or lost that record. A decision event whose origin is unknown or
+# unrecognized refuses rather than guessing, so the audit never silently falls
+# back to counting constituted text alone.
 #
-# Exit 0 prints the resolutions (possibly none). Any other exit means the run
-# data could not be read; the concrete missing requirement is written to
-# stderr so callers can fail closed without inventing an unrelated refusal.
-fm_nm_ask_user_resolutions() {  # <dir> <timeout_secs> <run-id>
-  local dir=$1 timeout_secs=$2 run_id=$3
-  command -v python3 >/dev/null 2>&1 \
-    || { echo "error: python3 with sqlite3 is required to read no-mistakes gate decisions" >&2; return 1; }
-  fm_nm_cmd_bounded "$dir" "$timeout_secs" python3 - "$run_id" "$dir" <<'PY'
+# Exit 0 prints the events (possibly none). Any other exit prints the concrete
+# missing requirement on stdout and means the run data could not be read.
+fm_nm_rounds_events() {  # <run-id> <step>
+  local run_id=$1 step=$2
+  python3 - "$run_id" "$step" <<'PY'
 import json
 import os
-import sqlite3
 import sys
-from contextlib import closing
-from pathlib import Path
 
-run_id, worktree = sys.argv[1], sys.argv[2]
+run_id, step = sys.argv[1], sys.argv[2]
 
-root = Path(os.environ.get("NM_HOME") or Path.home() / ".no-mistakes")
-if not root.is_absolute():
-    root = Path(worktree) / root
-db_path = root / "state.sqlite"
-if not db_path.is_file():
-    sys.stderr.write(f"missing no-mistakes state database at {db_path}\n")
+
+def unreadable(msg):
+    print(f"no-mistakes axi rounds --run {run_id} --step {step}: {msg}")
     sys.exit(1)
 
 
-def missing(msg):
-    sys.stderr.write(f"no-mistakes run data for {run_id} is unreadable: {msg}\n")
-    sys.exit(1)
-
-
+raw = os.environ.get("FM_NM_ROUNDS_DOC", "")
+if not raw.strip():
+    unreadable("returned no data, so its ask-user decisions cannot be read")
 try:
-    db = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=30)
-    with closing(db):
-        tables = {r[0] for r in db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
-        for table in ("runs", "step_results", "step_rounds"):
-            if table not in tables:
-                missing(f"table {table} is absent")
-        if not db.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone():
-            missing(f"run {run_id} is absent")
-        s_cols = {r[1] for r in db.execute("PRAGMA table_info(step_results)")}
-        if not {"id", "run_id", "step_name", "step_order", "status", "findings_json"} <= s_cols:
-            missing("step_results lacks its base columns")
-        opt = ",".join(c if c in s_cols else "NULL" for c in
-                       ("approval_reason", "override_reason", "skip_reason"))
-        steps = db.execute(
-            "SELECT id, step_name, step_order, status, findings_json, " + opt +
-            " FROM step_results WHERE run_id = ? ORDER BY step_order",
-            (run_id,)).fetchall()
-        r_cols = {r[1] for r in db.execute("PRAGMA table_info(step_rounds)")}
-        if not {"step_result_id", "round", "selection_source",
-                "selected_finding_ids", "findings_json", "user_findings_json"} <= r_cols:
-            missing("step_rounds lacks its gate-decision columns")
-        rounds = db.execute(
-            "SELECT step_result_id, round, selection_source, selected_finding_ids,"
-            " findings_json, user_findings_json FROM step_rounds"
-            " WHERE step_result_id IN (SELECT id FROM step_results WHERE run_id = ?)"
-            " ORDER BY step_result_id, round",
-            (run_id,)).fetchall()
-except sqlite3.Error as exc:
-    missing(str(exc))
+    doc = json.loads(raw)
+except ValueError as exc:
+    unreadable(f"returned unparseable JSON ({exc})")
+if not isinstance(doc, dict):
+    unreadable("did not return a JSON document")
+if doc.get("schema_version") != 1:
+    unreadable(f"reports schema_version {doc.get('schema_version')!r}, not the supported 1")
+rounds = doc.get("rounds")
+if not isinstance(rounds, list):
+    unreadable("reports no rounds array, so its ask-user decisions cannot be read")
 
 
-def serialized(js, step, field):
-    if js is None or js == "":
-        return None
-    try:
-        return json.loads(js)
-    except (TypeError, ValueError) as exc:
-        missing(f"step {step} field {field}: invalid JSON ({exc})")
-
-
-def finding_actions(js, step, field):
-    data = serialized(js, step, field)
-    if data is None:
-        return {}
-    items = data.get("findings") if isinstance(data, dict) else data
+def finding_actions(items, where):
     if items is None:
         return {}
     if not isinstance(items, list):
-        missing(f"step {step} field {field}: findings must be an array")
+        unreadable(f"{where} is not an array")
     actions = {}
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
-            missing(f"step {step} field {field}: finding requires a nonempty string id")
+            unreadable(f"{where} has a finding without a nonempty string id")
         action = item.get("action")
         if action in (None, ""):
             action = None
         elif action not in ("ask-user", "auto-fix", "no-op"):
             action = "ask-user"
         if item["id"] in actions:
-            missing(f"step {step} field {field}: duplicate finding id {item['id']}")
+            unreadable(f"{where} repeats finding id {item['id']}")
         actions[item["id"]] = action
     return actions
 
 
-def selected_ids(js, step, field):
-    data = serialized(js, step, field)
-    if data is None:
+def selected_ids(value, where):
+    if value is None:
         return []
-    if not isinstance(data, list) or any(not isinstance(i, str) or not i.strip() for i in data):
-        missing(f"step {step} field {field}: selection must be an array of nonempty string ids")
-    return data
+    if not isinstance(value, list) or any(not isinstance(i, str) or not i.strip() for i in value):
+        unreadable(f"{where} is not an array of nonempty string ids")
+    return value
 
 
-rounds_by_step = {}
-for row in rounds:
-    rounds_by_step.setdefault(row[0], []).append(row)
-
-for (step_result_id, step, _order, status, step_findings,
-     approval, override, skip_reason) in steps:
-    step_actions = finding_actions(step_findings, step, "step_results.findings_json")
-    resolved = {}
-    events = []
-    for (_sr, rnd, src, sel_js, fj, ufj) in rounds_by_step.get(step_result_id, []):
-        presented = finding_actions(fj, step, f"step_rounds.findings_json round {rnd}")
-        captured = finding_actions(ufj, step, f"step_rounds.user_findings_json round {rnd}")
-        selection = selected_ids(sel_js, step, f"step_rounds.selected_finding_ids round {rnd}")
-        if src not in ("user", "user_declined"):
-            continue
-        # A finding recorded at a parked decision gate is ask-user when its
-        # stored action is explicitly ask-user or unknown (mapped above), or
-        # when it carries no action: ActionOrDefault resolves empty/missing to
-        # ask-user, so the gate parked for a decision on it. auto-fix and
-        # no-op findings stay routine even when parked; empty actions absent
-        # from every gate record (step_results leftovers) stay routine too.
-        parked = list(presented) + [i for i in captured if i not in presented]
-        parked += [i for i in selection if i not in presented and i not in captured]
-        ask_user = []
-        for fid in parked:
-            pa, ca = presented.get(fid), captured.get(fid)
-            if "ask-user" in (pa, ca) \
-                    or (fid in presented and pa is None) \
-                    or (fid not in presented and fid in captured and ca is None) \
-                    or (fid not in presented and fid not in captured):
-                ask_user.append(fid)
-        if not ask_user:
-            continue
-        resolved_now = {}
-        if src == "user":
-            sel = set(selection)
+events = []
+for rnd in rounds:
+    if not isinstance(rnd, dict):
+        unreadable("has a round that is not an object")
+    label = rnd.get("round")
+    source = rnd.get("selection_source")
+    if source not in ("user", "user_declined"):
+        continue
+    where = f"round {label}"
+    presented = finding_actions(rnd.get("findings"), f"{where} findings")
+    captured = finding_actions(rnd.get("user_findings"), f"{where} user_findings")
+    selection = selected_ids(rnd.get("selected_finding_ids"), f"{where} selected_finding_ids")
+    parked = list(presented) + [i for i in captured if i not in presented]
+    parked += [i for i in selection if i not in presented and i not in captured]
+    ask_user = []
+    for fid in parked:
+        pa, ca = presented.get(fid), captured.get(fid)
+        if "ask-user" in (pa, ca) \
+                or (fid in presented and pa is None) \
+                or (fid not in presented and fid in captured and ca is None) \
+                or (fid not in presented and fid not in captured):
+            ask_user.append(fid)
+    if not ask_user:
+        continue
+    origin = rnd.get("response_origin")
+    if origin in (None, "", "unknown"):
+        unreadable(f"{where} records an ask-user decision with no response_origin, so who answered it cannot be verified")
+    if origin not in ("interactive", "auto_yes"):
+        unreadable(f"{where} records an unrecognized response_origin {origin!r}, so who answered it cannot be verified")
+    if source == "user":
+        chosen = set(selection)
+        resolved = {fid: "fix" for fid in ask_user if fid in chosen}
+        if step != "review":
             for fid in ask_user:
-                if fid in sel:
-                    resolved_now[fid] = "fix"
-            if step != "review":
-                for fid in ask_user:
-                    resolved_now.setdefault(fid, "skip")
-        else:
-            if approval or override:
-                action = "approve"
-            elif status == "skipped" or skip_reason:
-                action = "skip"
-            elif status == "failed":
-                action = "abort"
-            else:
-                action = "approve"
-            for fid in ask_user:
-                resolved_now[fid] = action
-        if resolved_now:
-            events.append((f"round {rnd}", resolved_now))
-            resolved.update(resolved_now)
-    leftovers = [fid for fid, action in step_actions.items()
-                 if action == "ask-user" and fid not in resolved]
-    if leftovers and status in ("completed", "skipped"):
-        if approval or override:
-            action = "approve"
-        elif status == "skipped" or skip_reason:
-            action = "skip"
-        else:
-            action = "unresolved"
-        events.append(("step", {fid: action for fid in leftovers}))
-    for marker, res in events:
-        for fid, action in res.items():
-            print(f"{step}\t{marker}\t{fid}\t{action}")
+                resolved.setdefault(fid, "skip")
+    else:
+        resolved = {fid: "declined" for fid in ask_user}
+    for fid, action in resolved.items():
+        events.append(f"{step}\t{where}\t{fid}\t{action}\t{origin}")
+# Buffered so a failure part-way through the document prints only what is
+# missing, never a partial event list a caller could mistake for the audit.
+for line in events:
+    print(line)
+sys.exit(0)
 PY
 }
 
-# Verify that every ask-user resolution event recorded in run $3 has a matching
-# status record in task status file $4, one record per gate response: each
-# parked gate must be escalated and decided again, so presence alone is not
-# enough. bin/fm-classify-lib.sh owns the canonical record grammar and its
-# process-evidence limitation; the count does not authenticate authorship or
-# compare the answer text with finding IDs and actions.
+# Read a bound run's recorded ask-user decision events from the pipeline's own
+# `axi rounds --json` record, one bounded call per step the run's status
+# document lists. The status document may be passed as arg 4 when the caller
+# already captured the same run's `axi status`; otherwise it is read here with
+# `axi status --run`. Prints one TAB-separated row per event:
+# <step>\t<round N>\t<finding-id>\t<action>\t<response-origin>.
 #
-# Returns 0 silently when the run resolved no ask-user findings or every
-# decision is matched. Returns 1 and prints a per-step refusal detail (finding
-# id and action) on stdout when the task status file holds too few matching
-# resolved records. Returns 2 when the run's decision data cannot be read;
-# fm_nm_ask_user_resolutions then names the concrete missing requirement on
-# stderr. Callers must source bin/fm-classify-lib.sh for the status grammar.
-fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file>
-  local dir=$1 timeout_secs=$2 run_id=$3 status_file=$4
+# Exit 0 prints the events (possibly none). Any other exit prints the concrete
+# missing requirement on stdout - failed status or rounds call, a status
+# document with no steps table, empty or unparseable rounds JSON, an
+# unsupported schema_version, or an origin-less decision event - so callers
+# fail closed naming exactly what is missing. It never falls back to the
+# status-log text audit.
+fm_nm_ask_user_resolutions() {  # <dir> <timeout_secs> <run-id> [<status-doc>]
+  local dir=$1 timeout_secs=$2 run_id=$3 status=${4:-} steps step json out rc acc=''
+  command -v python3 >/dev/null 2>&1 \
+    || { echo "python3 is required to read no-mistakes ask-user decisions"; return 1; }
+  if [ -z "$status" ]; then
+    status=$(fm_nm_run_checked "$dir" "$timeout_secs" axi status --run "$run_id") \
+      || { echo "no-mistakes axi status --run $run_id failed, so its steps and ask-user decisions cannot be read"; return 1; }
+  fi
+  steps=$(fm_nm_status_steps "$status")
+  [ -n "$steps" ] \
+    || { echo "no-mistakes axi status --run $run_id reports no steps table, so its ask-user decisions cannot be read"; return 1; }
+  while IFS= read -r step; do
+    [ -n "$step" ] || continue
+    json=$(fm_nm_run_checked "$dir" "$timeout_secs" axi rounds --run "$run_id" --step "$step" --json) \
+      || { echo "no-mistakes axi rounds --run $run_id --step $step failed, so its ask-user decisions cannot be read"; return 1; }
+    rc=0
+    out=$(FM_NM_ROUNDS_DOC="$json" fm_nm_rounds_events "$run_id" "$step") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      [ -n "$out" ] || out="no-mistakes axi rounds --run $run_id --step $step produced no readable output, so its ask-user decisions cannot be read"
+      printf '%s\n' "$out"
+      return 1
+    fi
+    [ -z "$out" ] || acc+=$out$'\n'
+  done <<EOF
+$steps
+EOF
+  [ -z "$acc" ] || printf '%s' "$acc"
+}
+
+# Verify that every ask-user decision event the pipeline recorded for run $3
+# has a matching status record in task status file $4, one record per event:
+# each parked gate must be escalated and decided again, so presence alone is
+# not enough. bin/fm-classify-lib.sh owns the canonical record grammar, its
+# accepted step-key suffixes, and its process-evidence limitation; the count
+# does not authenticate authorship.
+#
+# Returns 0 silently when the run recorded no ask-user decision events or every
+# event is matched. Returns 1 and prints a per-step refusal detail (run, step,
+# finding, and answering origin) on stdout when the task status file holds too
+# few matching resolved records. Returns 2 and prints the concrete missing
+# requirement on stdout when the run's decision data cannot be read; callers
+# must surface that detail rather than substituting a generic refusal.
+# Callers must source bin/fm-classify-lib.sh for the status grammar.
+fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file> [<status-doc>]
+  local dir=$1 timeout_secs=$2 run_id=$3 status_file=$4 status_doc=${5:-}
   local rows steps step need have bad=
-  declare -F status_resolved_key_count >/dev/null 2>&1 \
-    || { echo "error: bin/fm-classify-lib.sh is required to read firstmate decision records" >&2; return 2; }
-  rows=$(fm_nm_ask_user_resolutions "$dir" "$timeout_secs" "$run_id") || return 2
+  declare -F status_resolved_step_count >/dev/null 2>&1 \
+    || { echo "bin/fm-classify-lib.sh is required to read firstmate decision records" >&2; return 2; }
+  rows=$(fm_nm_ask_user_resolutions "$dir" "$timeout_secs" "$run_id" "$status_doc") || {
+    [ -z "$rows" ] || printf '%s\n' "$rows"
+    return 2
+  }
   [ -n "$rows" ] || return 0
   steps=$(printf '%s\n' "$rows" | cut -f1 | sort -u)
   while IFS= read -r step; do
     [ -n "$step" ] || continue
     need=$(printf '%s\n' "$rows" | awk -F '\t' -v s="$step" \
       '$1 == s { if (!($2 in m)) { m[$2] = 1; n++ } } END { print n + 0 }')
-    have=$(status_resolved_key_count "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")")
+    have=$(status_resolved_step_count "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")")
     if [ "$have" -lt "$need" ] 2>/dev/null; then
-      printf 'step %s: %d recorded ask-user gate decision(s) but only %s resolved [key=%s] record(s):\n' \
-        "$step" "$need" "$have" "$(fm_nm_ask_user_key "$run_id" "$step")"
+      printf 'run %s step %s: %d recorded ask-user gate decision(s) but only %s matching resolved [key=%s] record(s):\n' \
+        "$run_id" "$step" "$need" "$have" "$(fm_nm_ask_user_key "$run_id" "$step")"
       printf '%s\n' "$rows" | awk -F '\t' -v s="$step" \
-        '$1 == s { print "  finding " $3 " resolved as " $4 " (" $2 ")" }' | sort -u
+        '$1 == s { print "  finding " $3 " resolved as " $4 " (" $2 ", answered " $5 ")" }' | sort -u
       bad=1
     fi
   done <<EOF

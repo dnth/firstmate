@@ -697,15 +697,30 @@ EOF
   printf '%s\n' "$count"
 }
 
-# Count canonical `resolved [key=<key>]: answered:` records from fm-send.
-# This is process evidence, not tamper-proof provenance; same-user forgery risk is accepted.
-# Each recorded gate response requires its own matching status record.
-status_resolved_key_count() {  # <status-file> <key>
-  local f=$1 want=$2 line count=0
+# Count canonical `resolved [key=<key>]: answered:` records that decide <key>
+# itself or one of its decision-event forms: <key>, <key>-r<N> (a re-parked
+# gate's round), or <key>-detail (a finding-specific decision). Each still
+# evidences exactly one firstmate decision, so the caller compares this count
+# with the pipeline's own recorded decision-event count. This is process
+# evidence, not tamper-proof provenance; same-user forgery risk is accepted.
+status_resolved_step_count() {  # <status-file> <key>
+  local f=$1 want=$2 line key count=0
   { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || { printf '0\n'; return 0; }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      "resolved [key=$want]: answered: "*) count=$((count + 1)) ;;
+      "resolved [key="*"]: answered: "*) ;;
+      *) continue ;;
+    esac
+    key=${line#resolved \[key=}
+    key=${key%%\]*}
+    case "$key" in
+      "$want"|"$want"-detail)
+        count=$((count + 1))
+        ;;
+      "$want"-r*)
+        key=${key#"$want"-r}
+        case "$key" in ''|*[!0-9]*) ;; *) count=$((count + 1)) ;; esac
+        ;;
     esac
   done < "$f"
   printf '%s\n' "$count"
