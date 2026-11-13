@@ -419,7 +419,7 @@ test_finding_clauses_bind_their_own_actions() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
   FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
   FM_TEST_ROUNDS_JSON='{"schema_version":1,"rounds":[{"round":1,"selection_source":"user_declined","response_origin":"unknown","findings":[{"id":"R1","action":"ask-user"},{"id":"R2","action":"ask-user"}]}]}'
-  for answer in 'R1: IGNORE; R2: FIX' 'IGNORE R1; FIX R2' 'R1: IGNORE R2: FIX'; do
+  for answer in 'IGNORE R1; FIX R2' 'IGNORE R1, FIX R2' 'IGNORE R1 and FIX R2'; do
     write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
     out=$(decisions "$tmp/status")
     rc=$?
@@ -429,11 +429,11 @@ test_finding_clauses_bind_their_own_actions() {
     assert_contains "$out" 'recorded declined' "clause mismatch lost the recorded decline"
   done
   FM_TEST_ROUNDS_JSON='{"schema_version":1,"rounds":[{"round":1,"selection_source":"user","response_origin":"unknown","selected_finding_ids":["R2"],"findings":[{"id":"R1","action":"ask-user"},{"id":"R2","action":"ask-user"}]}]}'
-  for answer in 'R1: IGNORE; R2: FIX' 'IGNORE R1; FIX R2' 'R1: IGNORE R2: FIX'; do
+  for answer in 'IGNORE R1; FIX R2' 'IGNORE R1, FIX R2' 'IGNORE R1 and FIX R2'; do
     write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
     decisions "$tmp/status" >/dev/null || fail "an agreeing mixed decision was refused: $answer"
   done
-  for answer in 'IGNORE R1 FIX R2' 'IGNORE R1; FIX R1' 'IGNORE; FIX R2 (if approved)'; do
+  for answer in 'R1: IGNORE; R2: FIX' 'R1: IGNORE R2: FIX' 'IGNORE R1 FIX R2' 'IGNORE R1; FIX R1' 'IGNORE; FIX R2 (if approved)'; do
     write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
     out=$(decisions "$tmp/status")
     rc=$?
@@ -759,10 +759,10 @@ test_gatewide_prose_cannot_hide_unparsed_directives() {
   for step in review test; do
     FM_TEST_STATUS_DOC=${RUN_STATUS/review,completed/$step,completed}
     for verb in IGNORE APPROVE DECLINE SKIP; do
-      for answer in "$verb R99; FIX R1" "$verb test-99, FIX R1" "$verb review-99" "$verb A1" "$verb proceeding; further instructions" "$verb proceeding without live validation for PR 305" "$verb documentation-only changes" "$verb unknown-label: FIX R1" "$verb proceeding; FIX R1" "$verb proceeding without live validation" "$verb without live validation, CONDITIONAL on approval"; do
+      for answer in "$verb R99; FIX R1" "$verb test-99, FIX R1" "$verb review-99" "$verb A1" "$verb proceeding; FIX" "$verb proceeding, FIX R1" "$verb proceeding FIX R1" "$verb proceeding without a fix" "$verb fix" "$verb proceeding; more context" "$verb R1 proceeding without a fix" "$verb R1 fix" "$verb R1 proceeding FIX R1" "$verb R1 proceeding FIX R99" "$verb R1 proceeding; FIX" "$verb proceeding without live validation for PR 305" "$verb documentation-only changes" "$verb unknown-label: FIX R1" "$verb proceeding; FIX R1" "$verb proceeding without live validation" "$verb without live validation, CONDITIONAL on approval"; do
         expected=1
         case "$answer" in
-          "$verb proceeding without live validation"|"$verb without live validation, CONDITIONAL on approval"|"$verb proceeding without live validation for PR 305"|"$verb documentation-only changes") expected=0 ;;
+          "$verb proceeding without live validation"|"$verb without live validation, CONDITIONAL on approval"|"$verb proceeding without live validation for PR 305"|"$verb documentation-only changes"|"$verb proceeding without a fix"|"$verb fix"|"$verb proceeding; more context"|"$verb R1 proceeding without a fix"|"$verb R1 fix") expected=0 ;;
         esac
         first='{"round":1,"selection_source":"user_declined","response_origin":"unknown","findings":[{"id":"R1","action":"ask-user","description":"same finding"}]}'
         FM_TEST_ROUNDS_JSON="{\"schema_version\":1,\"rounds\":[$first]}"
@@ -971,7 +971,7 @@ test_mixed_finding_directives_use_full_round_context() {
           expected=1
           case "$scenario" in
             agreeing) expected=0 ;;
-            labeled) answer='A1: FIX; R1: FIX; N1: IGNORE; R2: IGNORE'; expected=0 ;;
+            labeled) answer='A1: FIX; R1: FIX; N1: IGNORE; R2: IGNORE' ;;
             mismatch|auto-authority|noop-authority) ;;
             unknown-id) answer='FIX Z1 R1; IGNORE N1 R2' ;;
             qualified) answer='If approved, FIX A1 R1; IGNORE N1 R2' ;;
@@ -1046,8 +1046,8 @@ FIXTURE
         out=$(decisions "$tmp/status")
         rc=$?
         expect_code "$expected" "$rc" "selection granted unnamed FIX authority: $step/$field/$answer: $out"
-        if [ "$answer" = FIX ]; then
-          assert_contains "$out" 'no readable action' "a bare FIX was read as a directive"
+        if [ "$answer" = FIX ] || [[ "$answer" == *:* ]]; then
+          assert_contains "$out" 'no readable action' "a bare FIX or label-first answer was read as a directive"
         elif [ "$expected" -ne 0 ]; then
           assert_contains "$out" 'finding R2' "over-selection refusal did not name R2"
           assert_contains "$out" 'firstmate decided decline' "unnamed R2 was not derived as a decline"
@@ -1068,13 +1068,13 @@ print(json.dumps(doc))
 FIXTURE
 )
             expected=0
-            if [ "$answer" = FIX ] || [ "$later" = fix ]; then
+            if [ "$answer" = FIX ] || [[ "$answer" == *:* ]] || [ "$later" = fix ]; then
               expected=1
             fi
             out=$(decisions "$tmp/status")
             rc=$?
             expect_code "$expected" "$rc" "carried authority followed the selection: $step/$origin/$field/$answer/$later: $out"
-            if [ "$expected" -ne 0 ] && [ "$answer" != FIX ]; then
+            if [ "$expected" -ne 0 ] && [ "$answer" != FIX ] && [[ "$answer" != *:* ]]; then
               assert_contains "$out" 'finding R2 (round 2)' "carried mismatch did not name R2 and its round"
             fi
           done
@@ -1121,6 +1121,15 @@ test_real_firstmate_record_lines_parse_canonically() {
   parse_case 'real test approval with named id and prose' test \
     'APPROVE test-1 without live validation. Reason: the acceptance signal is satisfied out of pipeline' \
     user_declined '[]' '[{"id":"test-1","action":"ask-user","description":"d3","severity":"warning"}]' 0
+  parse_case 'named decline with prose action mention' test \
+    'APPROVE test-1 proceeding without a fix' \
+    user_declined '[]' '[{"id":"test-1","action":"ask-user","description":"d3","severity":"warning"}]' 0
+  parse_case 'named decline with detached directive refuses' test \
+    'APPROVE test-1 proceeding FIX test-1' \
+    user_declined '[]' '[{"id":"test-1","action":"ask-user","description":"d3","severity":"warning"}]' 1
+  parse_case 'named decline with semicolon directive refuses' test \
+    'APPROVE test-1 proceeding; FIX' \
+    user_declined '[]' '[{"id":"test-1","action":"ask-user","description":"d3","severity":"warning"}]' 1
   parse_case 'FIX with trailing prose stays unreadable' test \
     'FIX test-1 is not what I want' \
     user '["test-1"]' '[{"id":"test-1","action":"ask-user","description":"d3","severity":"warning"}]' 1

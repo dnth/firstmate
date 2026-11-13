@@ -701,7 +701,7 @@ The check reads firstmate's `resolved [key=nm-<run>-<step>...]: answered:` excer
 `VERB` is `FIX`, `IGNORE`, `DECLINE`, `SKIP`, or `APPROVE`, and ids are finding ids the gate round presented.
 The clause ends at the first `(`, `.`, ` Reason`, or end of text; everything after it is reason prose and is ignored, so parenthesised asides never change the decision.
 A bare `APPROVE`, `IGNORE`, `DECLINE`, or `SKIP` with no ids declines every finding the round presented, while a bare `FIX` is prose and refuses.
-In this gate-wide decline form, ordinary reason prose may contain bare numbers or hyphenated words, such as `APPROVE proceeding without live validation for PR 305` and `APPROVE documentation-only changes`; unknown finding-id-shaped labels such as `R99`, `A1`, or `test-1` and additional directives refuse.
+In this gate-wide decline form, ordinary reason prose may contain action words, bare numbers, or hyphenated words, such as `APPROVE proceeding without live validation for PR 305` and `APPROVE documentation-only changes`; unknown finding-id-shaped labels such as `R99`, `A1`, or `test-1` and additional directives refuse.
 After a decline-class verb the id list ends at the first token that is not a finding id or list separator, and the rest of the first clause is prose, so `APPROVE test-1 without live validation` declines `test-1`; after `FIX`, trailing prose makes the record unreadable.
 Binding one finding to both fix and decline refuses as ambiguous; `IGNORE`, `DECLINE`, `SKIP`, and `APPROVE` are equivalent decline verbs.
 Firstmate must keep writing this form; [`bin/fm-nm-run-lib.sh`](../bin/fm-nm-run-lib.sh) owns the parser and the refusal rules.

@@ -495,13 +495,12 @@ EOF
 #   [<prefix ending in ':'>] <VERB> <ids> [{';'|','|'and'} <VERB> <ids>]...
 # VERB is FIX, IGNORE, DECLINE, SKIP, or APPROVE (case-insensitive) and ids are
 # finding ids the gate round presented. A canonical prefix is the firstmate
-# decision sentence ending in `:`; a bare finding label (`R1: IGNORE`) may start
-# the clause. The first clause ends at the first '(', '.', ' Reason', or end of
-# text, and everything after it is reason prose that is ignored, including
+# decision sentence ending in `:`. The first clause ends at the first '(',
+# '.', ' Reason', or end of text, and everything after it is reason prose that is ignored, including
 # parenthesised asides like "(with R1 and R2 as auto-fix)". A bare APPROVE,
 # IGNORE, DECLINE, or SKIP with no ids declines every finding the round
-# presented; ordinary reason prose may contain numbers or hyphenated words,
-# but unknown finding-id-shaped labels and additional directives refuse.
+# presented; ordinary reason prose may contain action words, numbers, or
+# hyphenated words, but unknown finding-id-shaped labels and additional directives refuse.
 # A bare FIX is prose and refuses. Named findings bind their own
 # verb, every other presented finding is the pipeline's implicit decline, and
 # one finding bound to fix and decline classes is ambiguous and refuses;
@@ -597,24 +596,18 @@ def decided_actions(answer, finding_ids):
     if not first:
         return {}
     prefix = text[:first.start()]
-    clause_start = first.start()
-    if prefix.strip():
-        if id_alts and re.fullmatch(r"(?:" + "|".join(id_alts) + r")\s*:", prefix.strip()):
-            # A bare finding label starts the clause (`R1: IGNORE; R2: FIX`).
-            clause_start = len(prefix) - len(prefix.lstrip())
-        elif not re.match(r"(?is)^(?:firstmate|captain)\s+decision\b[^:]*:\s*$", prefix.strip()):
-            # Any other prose before the directive is not a record prefix.
-            return {}
+    if prefix.strip() and not re.match(r"(?is)^(?:firstmate|captain)\s+decision\b[^:]*:\s*$", prefix.strip()):
+        return {}
     clause_end = len(text)
     for pattern in (r"\(", r"\.", r"(?i:\breason\b)"):
         match = re.search(pattern, text[first.start():])
         if match:
             clause_end = min(clause_end, first.start() + match.start())
-    clause = text[clause_start:clause_end]
+    clause = text[first.start():clause_end]
 
     id_re = re.compile(r"(?<![\w-])(?P<id>" + "|".join(id_alts) + r")(?![\w-])") if id_alts else None
     joiner_re = re.compile(r"(?:[;,]|\band\b)\s*", re.IGNORECASE)
-    label_re = re.compile(r"\s*:\s*") if id_alts else None
+    finding_label_re = re.compile(r"\b(?=[A-Za-z0-9-]*\d)[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*\b")
 
     pos = 0
     groups = []
@@ -626,17 +619,6 @@ def decided_actions(answer, finding_ids):
             pos += 1
             continue
         match = id_re.match(clause, pos) if id_re else None
-        if match and label_re.match(clause, match.end()):
-            # Label form: the named finding takes the verb that follows.
-            label_id = match.group("id")
-            pos = label_re.match(clause, match.end()).end()
-            match = verb_re.match(clause, pos)
-            if not match:
-                return {}
-            current = [action_of(match.group("verb")), [label_id]]
-            groups.append(current)
-            pos = match.end()
-            continue
         if match:
             if current is None:
                 return {}
@@ -652,8 +634,6 @@ def decided_actions(answer, finding_ids):
                 groups.append(current)
                 pos = match.end()
             continue
-        if current is not None and verb_re.match(clause, pos):
-            return {}
         match = verb_re.match(clause, pos) if current is None else None
         if not match:
             trailing = True
@@ -668,6 +648,14 @@ def decided_actions(answer, finding_ids):
 
     if not groups:
         return {}
+    if trailing and trailing_prose_ok:
+        remainder = clause[pos:]
+        for match in verb_re.finditer(remainder):
+            suffix = remainder[match.end():].lstrip()
+            if (id_re and id_re.match(suffix)) or finding_label_re.match(suffix):
+                return {}
+        if any(verb_re.match(part.lstrip()) for part in remainder.split(";")[1:]):
+            return {}
     if len(groups) == 1 and not groups[0][1]:
         # A single decline verb with no ids is the gate-wide form; prose after
         # it is the reason (`APPROVE proceeding without live validation ...`).
@@ -676,7 +664,7 @@ def decided_actions(answer, finding_ids):
         if gate != "nonfix":
             return {}
         remainder = clause[pos:]
-        if verb_re.search(remainder) or re.search(r"\b(?=[A-Za-z0-9-]*\d)[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*\b|;", remainder):
+        if finding_label_re.search(remainder):
             return {}
         return {fid: gate for fid in finding_ids}
     if trailing and not trailing_prose_ok:
