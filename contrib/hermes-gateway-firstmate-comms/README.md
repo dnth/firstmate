@@ -10,9 +10,9 @@ That command is not this Discord gateway.
 ## Gateway layouts
 
 This plugin runs under one of two Hermes gateway layouts.
-A dedicated gateway runs with its process `HERMES_HOME` set to a profile home, for example `~/.hermes/profiles/fmcomms`, under its own service unit.
+A dedicated gateway serves one profile, for example `~/.hermes/profiles/fmcomms`, under its own service unit; its process `HERMES_HOME` may name the profile home or the base Hermes home.
 A multi-profile gateway runs one `hermes-gateway.service` that serves several profiles, and each profile loads this plugin under its own home.
-In both layouts, inbound attachment admission uses the home Hermes loaded the plugin for, not the process `HERMES_HOME`, because a profile caches inbound media under its own `cache/images`; the [local bridge reference](../../docs/configuration.md#discord-attachments) owns the admitted cache roots.
+For the plugin's attachment environment and cache admission rules in both layouts, see the [local bridge reference](../../docs/configuration.md#discord-attachments).
 Check which layout a profile runs under, because a Hermes update can leave a profile served by the default `hermes-gateway.service` instead of its own unit.
 Installing a gateway from an arbitrary `HERMES_HOME` path reuses and rewrites the default `hermes-gateway.service` on Hermes 0.20.5, so prefer the profile path.
 Copy or symlink this plugin into the profile's `plugins/firstmate-comms/` directory.
