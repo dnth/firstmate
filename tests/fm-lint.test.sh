@@ -471,9 +471,11 @@ SH
 test_rejects_wrong_shellcheck_version() {
   # Version-independent: a fake shellcheck reporting a different version must be
   # refused before any lint, proving local and CI cannot silently diverge.
-  local tmp fakebin out rc
+  local tmp fakebin fixture out rc
   tmp=$(fm_test_tmproot fm-lint-ver)
   fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture"
   cat > "$fakebin/shellcheck" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "--version" ]; then
@@ -484,7 +486,7 @@ exit 0
 SH
   chmod +x "$fakebin/shellcheck"
   rc=0
-  out=$(PATH="$fakebin:$PATH" "$LINT" 2>&1) || rc=$?
+  out=$(PATH="$fakebin:$PATH" "$LINT" "$fixture" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm-lint.sh accepted a shellcheck version other than the pin"$'\n'"$out"
   assert_contains "$out" "$REQUIRED" "fm-lint.sh did not name the required version on mismatch"
   assert_contains "$out" "0.9.9" "fm-lint.sh did not report the resolved (wrong) version"
