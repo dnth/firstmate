@@ -759,10 +759,10 @@ test_gatewide_prose_cannot_hide_unparsed_directives() {
   for step in review test; do
     FM_TEST_STATUS_DOC=${RUN_STATUS/review,completed/$step,completed}
     for verb in IGNORE APPROVE DECLINE SKIP; do
-      for answer in "$verb R99; FIX R1" "$verb test-99, FIX R1" "$verb review-missing" "$verb unknown-label: FIX R1" "$verb proceeding; FIX R1" "$verb proceeding without live validation" "$verb without live validation, CONDITIONAL on approval"; do
+      for answer in "$verb R99; FIX R1" "$verb test-99, FIX R1" "$verb review-99" "$verb A1" "$verb proceeding; further instructions" "$verb proceeding without live validation for PR 305" "$verb documentation-only changes" "$verb unknown-label: FIX R1" "$verb proceeding; FIX R1" "$verb proceeding without live validation" "$verb without live validation, CONDITIONAL on approval"; do
         expected=1
         case "$answer" in
-          "$verb proceeding without live validation"|"$verb without live validation, CONDITIONAL on approval") expected=0 ;;
+          "$verb proceeding without live validation"|"$verb without live validation, CONDITIONAL on approval"|"$verb proceeding without live validation for PR 305"|"$verb documentation-only changes") expected=0 ;;
         esac
         first='{"round":1,"selection_source":"user_declined","response_origin":"unknown","findings":[{"id":"R1","action":"ask-user","description":"same finding"}]}'
         FM_TEST_ROUNDS_JSON="{\"schema_version\":1,\"rounds\":[$first]}"
@@ -793,6 +793,64 @@ FIXTURE
   FM_TEST_STATUS_DOC=$RUN_STATUS
   FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
   pass "gate-wide prose declines refuse unknown labels and additional directives"
+}
+
+test_covered_nonask_siblings_invalidate_carried_authority() {
+  local tmp step field action layout prior origin expected out rc answer
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  for step in review test; do
+    FM_TEST_STATUS_DOC=${RUN_STATUS/review,completed/$step,completed}
+    for field in findings user_findings; do
+      for action in auto-fix no-op; do
+        for layout in mixed only; do
+          for prior in FIX IGNORE; do
+            for origin in interactive auto_yes unknown; do
+              FM_TEST_ROUNDS_JSON=$(python3 - "$field" "$action" "$layout" "$prior" "$origin" <<'FIXTURE'
+import json
+import sys
+field, action, layout, prior, origin = sys.argv[1:]
+finding = dict(id="R1", action="ask-user", description="same finding", severity="error")
+first = dict(round=1, selection_source="user" if prior == "FIX" else "user_declined", response_origin="interactive", selected_finding_ids=["R1"] if prior == "FIX" else [], findings=[finding])
+siblings = [dict(finding, action=action)]
+if layout == "mixed":
+    siblings.append(dict(id="R2", action="ask-user", description="other finding", severity="error"))
+second = dict(round=2, selection_source="user" if action == "auto-fix" else "user_declined", response_origin=origin, selected_finding_ids=[item["id"] for item in siblings] if action == "auto-fix" else [], **{field: siblings})
+third = dict(first, round=3, response_origin="unknown")
+print(json.dumps(dict(schema_version=1, rounds=[first, second, third])))
+FIXTURE
+)
+              answer="IGNORE R1"
+              [ "$action" != auto-fix ] || answer="FIX R1"
+              [ "$layout" != mixed ] || answer+=" R2"
+              write_status "$tmp/status" \
+                "resolved [key=nm-01TEST-$step]: answered: $prior R1" \
+                "resolved [key=nm-01TEST-$step-r2]: answered: $answer"
+              out=$(decisions "$tmp/status")
+              rc=$?
+              expect_code 1 "$rc" "non-ask-user sibling retained authority: $step/$field/$action/$layout/$prior/$origin: $out"
+              assert_contains "$out" 'finding R1 resolved as' 'stale-authority refusal omitted R1'
+              assert_contains "$out" 'round 3' 'stale-authority refusal omitted round 3'
+              write_status "$tmp/status" \
+                "resolved [key=nm-01TEST-$step]: answered: $prior R1" \
+                "needs-decision [key=nm-01TEST-$step]: next gate" \
+                "resolved [key=nm-01TEST-$step]: answered: $prior R1"
+              expected=0
+              if [ "$layout" = mixed ]; then
+                expected=1
+              fi
+              out=$(decisions "$tmp/status")
+              rc=$?
+              expect_code "$expected" "$rc" "non-ask-user-only round consumed an occurrence: $step/$field/$action/$layout/$prior/$origin: $out"
+            done
+          done
+        done
+      done
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "covered auto-fix and no-op siblings lose authority without consuming non-decision occurrences"
 }
 
 test_new_covered_answers_supersede_carried_authority() {
@@ -1110,6 +1168,7 @@ test_unresolved_only_review_rounds_do_not_bind_answers
 test_context_only_answers_update_carried_authority
 test_gatewide_prose_cannot_hide_unparsed_directives
 test_new_covered_answers_supersede_carried_authority
+test_covered_nonask_siblings_invalidate_carried_authority
 test_mixed_partial_fixes_preserve_implicit_declines
 test_mixed_finding_directives_use_full_round_context
 test_partial_fix_authority_is_independent_of_selection

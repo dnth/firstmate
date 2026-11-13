@@ -366,12 +366,12 @@ for rnd in rounds:
                 or (fid not in presented and fid in captured and ca is None) \
                 or (fid not in presented and fid not in captured):
             ask_user.append(fid)
-    if not ask_user:
+    if not ask_user and include_unresolved != "1":
         continue
     origin = rnd.get("response_origin")
     if origin in (None, ""):
         origin = "unknown"
-    if origin not in ("interactive", "auto_yes", "unknown"):
+    if ask_user and origin not in ("interactive", "auto_yes", "unknown"):
         unreadable(f"{where} records an unrecognized response_origin {origin!r}, so who answered it cannot be verified")
     if source == "user":
         chosen = set(selection)
@@ -483,8 +483,9 @@ EOF
 #      SKIP, or DECLINE requires a recorded decline or skip.
 # Carry-forward requires matching description, severity, file, and line, with
 # a nonempty description and no conflicting identity for that id in the round.
-# A newer covered answer supersedes earlier authority for its presented ask-user
-# findings, including unresolved findings, even when the new answer is unreadable.
+# A newer covered answer supersedes earlier authority for every presented id,
+# including auto-fix, no-op, and unresolved findings, even when unreadable.
+# Only eligible ask-user findings acquire new carried authority.
 # A disagreement refuses naming the finding, the decided action, and the
 # recorded action; an excerpt with no readable decision refuses as unverifiable.
 # Interactive and auto_yes rounds keep the record-only rule: their origin is
@@ -499,7 +500,9 @@ EOF
 # text, and everything after it is reason prose that is ignored, including
 # parenthesised asides like "(with R1 and R2 as auto-fix)". A bare APPROVE,
 # IGNORE, DECLINE, or SKIP with no ids declines every finding the round
-# presented; a bare FIX is prose and refuses. Named findings bind their own
+# presented; ordinary reason prose may contain numbers or hyphenated words,
+# but unknown finding-id-shaped labels and additional directives refuse.
+# A bare FIX is prose and refuses. Named findings bind their own
 # verb, every other presented finding is the pipeline's implicit decline, and
 # one finding bound to fix and decline classes is ambiguous and refuses;
 # IGNORE, DECLINE, SKIP, and APPROVE are equivalent decline verbs. Firstmate
@@ -673,7 +676,7 @@ def decided_actions(answer, finding_ids):
         if gate != "nonfix":
             return {}
         remainder = clause[pos:]
-        if verb_re.search(remainder) or re.search(r"\b[\w-]*\d[\w-]*\b|\b\w+-[\w-]+\b|[;:]", remainder):
+        if verb_re.search(remainder) or re.search(r"\b(?=[A-Za-z0-9-]*\d)[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*\b|;", remainder):
             return {}
         return {fid: gate for fid in finding_ids}
     if trailing and not trailing_prose_ok:
@@ -735,8 +738,9 @@ for rnd in sorted(round_context):
         elif not agrees(verdict, action):
             problems.append((fid, rnd, verdict, action))
     if rnd in covered:
-        for fid, identity in round_findings[rnd].items():
+        for fid in round_context[rnd]:
             decisions.pop(fid, None)
+        for fid, identity in round_findings[rnd].items():
             if decided.get(fid) is not None and identity != "null":
                 decisions[fid] = (identity, decided[fid])
 
