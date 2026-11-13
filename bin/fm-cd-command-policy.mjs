@@ -29,6 +29,14 @@ const REASONS = {
 // Directory-changing builtins that mutate the calling shell's own cwd.
 const CD_BUILTINS = new Set(["cd", "pushd", "popd"]);
 
+// Shell keywords introduce a compound whose command position this lexical
+// classifier does not model.
+const SHELL_KEYWORDS = new Set([
+  "if", "then", "else", "elif", "fi",
+  "for", "do", "done", "while", "until",
+  "case", "esac", "select", "function", "time", "!",
+]);
+
 // Wrappers that fork or exec a child before reaching the builtin, so a cd behind
 // them never persists to the parent shell (and generally just fails, since cd is
 // a builtin with no external program). `command` is deliberately NOT here: it
@@ -132,8 +140,10 @@ function expandTarget(word, context) {
   }
   const match = VARIABLE_WORD.exec(word.value);
   if (!match) return null;
-  // The matched variable form is the only brace or expansion syntax the word
-  // may carry; the remainder must be literal path text.
+  // A variable operand is exempt only when the expansion is quoted: a quoted
+  // expansion is neither word-split nor pathname-expanded, so its value reaches
+  // cd as one literal path.
+  if (!word.quoted || word.unquotedVariable) return null;
   const rest = match[3];
   if (rest.includes("$") || /[*?[\]{}]/.test(rest)) return null;
   const name = match[1] ?? match[2];
@@ -141,9 +151,7 @@ function expandTarget(word, context) {
   // A relative FM_HOME resolves against the tracked directories in Bash, which
   // this policy does not model, so only an absolute value is expandable.
   if (!context.fmHome.startsWith("/")) return null;
-  const target = context.fmHome + rest;
-  if (word.unquotedVariable && /\s/.test(target)) return null;
-  return target;
+  return context.fmHome + rest;
 }
 
 function cdpathValue(position, context) {
@@ -192,9 +200,11 @@ function cdOperand(position, wordIndex, context) {
 // Returns the possible destinations, or null when the cd is not exempt.
 function cdDestinations(node, position, wordIndex, context, reachable) {
   if (!context.home) return null;
-  const operand = position.words.at(-1);
-  if (node.some((word) => word.type === "word" && word !== operand &&
-    (!word.literal || word.subs.length > 0 || word.unquotedExpansion))) return null;
+  // A redirection, heredoc body, or leading assignment can expand something
+  // before the builtin runs and change what a later relative target means, so
+  // an exempt cd carries none of them.
+  if (position.prefixAssignments > 0) return null;
+  if (node.some((token) => token.type === "redir")) return null;
   const target = cdOperand(position, wordIndex, context);
   if (target === null) return null;
   const destinations = [];
@@ -249,10 +259,15 @@ function decision(command, context = {}) {
     }
     let command = position.command;
     let wordIndex = position.index;
-    while (command && ["if", "then", "else", "elif", "fi", "for", "do", "done", "while", "until", "case", "esac", "select", "function", "time", "!"].includes(command.value)) {
+    if (command && SHELL_KEYWORDS.has(command.value)) {
+      // A compound's command position is not modelled, so a cd inside it cannot
+      // be checked: deny it instead of skipping past it, and withdraw the
+      // exemption for anything after it.
+      if (position.words.some((word) => !word.quoted && CD_BUILTINS.has(word.value))) {
+        return deny("persistent-cd");
+      }
       provable = false;
-      wordIndex += 1;
-      command = position.words[wordIndex];
+      continue;
     }
     while (command && (command.value === "builtin" || command.value === "command")) {
       wordIndex += 1;

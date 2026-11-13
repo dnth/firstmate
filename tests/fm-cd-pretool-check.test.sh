@@ -144,6 +144,11 @@ matrix_case B51 deny 'while false; do cd data; done'
 matrix_case B52 deny 'until true; do cd data; done'
 matrix_case B53 deny 'time cd data'
 matrix_case B54 deny '! cd data'
+# Redirections, heredocs, and leading assignments can expand before the builtin.
+matrix_case B55 deny 'X=1 cd data'
+matrix_case B56 deny 'cd data >/dev/null'
+matrix_case B57 deny $'cd data <<EOF\necho\nEOF'
+matrix_case B58 deny 'if CDPATH=/tmp cd data; then pwd; fi'
 
 # ALLOW: not a persistent top-level cwd change (scoped, data, or non-cd).
 matrix_case A01 allow 'git -C projects/foo status'
@@ -201,8 +206,6 @@ matrix_case A48 allow 'cd data && cd ..'
 matrix_case A49 allow 'cd data && cd ../state'
 # A semicolon chain of exempt cds stays provable.
 matrix_case A50 allow 'cd data; cd ..'
-matrix_case A51 allow 'X=1 cd data'
-matrix_case A52 allow 'cd data >/dev/null'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -272,31 +275,36 @@ test_full_acceptance_matrix() {
 test_home_forms_resolve_like_absolute() {
   local elsewhere out rc
 
+  # An unquoted expansion can be word-split or pathname-expanded, so only the
+  # quoted spelling is exempt.
   out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd $FM_HOME' 2>&1); rc=$?
-  expect_code 0 "$rc" 'cd $FM_HOME must resolve to the home and be allowed'
-  [ -z "$out" ] || fail "cd \$FM_HOME produced output: $out"
+  expect_code 2 "$rc" 'an unquoted $FM_HOME operand must stay denied'
+  assert_contains "$out" '[persistent-cd]' 'unquoted-FM_HOME deny must carry the reason code'
 
   out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd ${FM_HOME}/state' 2>&1); rc=$?
-  expect_code 0 "$rc" 'cd ${FM_HOME}/state must resolve inside the home and be allowed'
+  expect_code 2 "$rc" 'an unquoted ${FM_HOME}/state operand must stay denied'
+
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd "$FM_HOME"' 2>&1); rc=$?
+  expect_code 0 "$rc" 'a quoted $FM_HOME target must resolve to the home and be allowed'
 
   out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd "$FM_HOME/data"' 2>&1); rc=$?
   expect_code 0 "$rc" 'a quoted $FM_HOME target must resolve the same way'
 
   # Bash expands an unset variable to the empty string, so this becomes
   # `cd /data`: the policy must not invent a value that widens beyond the home.
-  out=$(env -u FM_HOME "$CHECK" --claude --command 'cd $FM_HOME/data' 2>&1); rc=$?
+  out=$(env -u FM_HOME "$CHECK" --claude --command 'cd "$FM_HOME/data"' 2>&1); rc=$?
   expect_code 2 "$rc" 'an unset FM_HOME must stay denied rather than resolve to a made-up home'
   assert_contains "$out" '[persistent-cd]' 'unset-FM_HOME deny must carry the reason code'
-  out=$(env -u FM_HOME "$CHECK" --claude --command 'cd $FM_HOME' 2>&1); rc=$?
+  out=$(env -u FM_HOME "$CHECK" --claude --command 'cd "$FM_HOME"' 2>&1); rc=$?
   expect_code 2 "$rc" 'an empty $FM_HOME must not become a return to the home'
 
   elsewhere="$TMP_ROOT/elsewhere"
   mkdir -p "$elsewhere/data"
-  out=$(FM_HOME="$elsewhere" "$CHECK" --claude --command 'cd $FM_HOME/data' 2>&1); rc=$?
+  out=$(FM_HOME="$elsewhere" "$CHECK" --claude --command 'cd "$FM_HOME/data"' 2>&1); rc=$?
   expect_code 2 "$rc" 'an FM_HOME outside the checkout must not become an extra allowed root'
   assert_contains "$out" '[persistent-cd]' 'outside-FM_HOME deny must carry the reason code'
 
-  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd $FM_HOME/projects/foo' 2>&1); rc=$?
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd "$FM_HOME/projects/foo"' 2>&1); rc=$?
   expect_code 2 "$rc" 'cd $FM_HOME/projects/foo must stay denied'
 
   out=$(HOME="$PRIMARY" "$CHECK" --claude --command 'cd ~' 2>&1); rc=$?

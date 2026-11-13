@@ -52,30 +52,33 @@ The guard **allows** everything else, including these safe scoped forms that mus
 
 ### The home exemption
 
-A top-level `cd` is allowed when its single target resolves into the home - the home itself, or a directory inside the home that is outside the `projects/` tree and outside any git checkout other than the home's own - and when everything before it in the command is already proven.
-The target may be spelled absolutely, relatively, with `~`, or with a `$FM_HOME` prefix, and resolves exactly like the absolute spelling of the same directory.
-Relative targets resolve from every reachable directory, retaining both logical and physical spellings: the set starts at the home and advances through allowed directory changes, keeping the previous entries whenever a redirection could have failed.
-`bin/fm-cd-pretool-check.sh` passes the physical primary checkout as `--home` and the shell's actual `FM_HOME` value as `--fm-home`; without `--home` no target is exempt, and an empty or relative `--fm-home` denies every `$FM_HOME` form rather than inventing a value Bash would not expand to.
-Bash consults `CDPATH` for every relative operand except those whose first component is exactly `.` or `..`, so a non-empty or unknown `CDPATH` - inherited or assigned on the command - denies such a target.
+A top-level `cd` is allowed when its single target resolves into the home - the home itself, or a directory inside the home that is outside the `projects/` tree and outside any git checkout other than the home's own - and when the `cd` needs no expansion the policy cannot prove.
+An exempt operand is one of exactly these forms:
+
+- A literal path, absolute or relative.
+- A leading `~` or `~/...` whose tilde prefix is unquoted and unescaped, expanded from `HOME`.
+- A quoted `$FM_HOME` or `${FM_HOME}` prefix, expanded from the shell's own value.
+
+A quoted expansion is neither word-split nor pathname-expanded, which is why only that spelling of the variable form is exempt; the unquoted `cd $FM_HOME` shape is a documented refusal below.
+Relative targets resolve from every reachable directory, retaining both logical and physical spellings: the set starts at the home and advances through allowed directory changes.
+`bin/fm-cd-pretool-check.sh` passes the physical primary checkout as `--home` and the shell's actual `FM_HOME` value as `--fm-home`; without `--home` no target is exempt, and an empty or relative `--fm-home` denies every `$FM_HOME` form.
+Bash consults `CDPATH` for every relative operand except those whose first component is exactly `.` or `..`, so a non-empty `CDPATH` denies such a target.
 Both path rules must land inside the home: logical, where a `..` is collapsed lexically first as under Bash's default `cd`, and physical, where symlinks are followed component by component as under `cd -P`.
 The destination must also be an existing, searchable directory, so an exempt `cd` is certain to succeed; a symlink inside the home that points into `projects/`, at a nested checkout, or out of the home is therefore denied, and so is any target that cannot be resolved.
 
 #### The proof requirement
 
-An exemption is granted only when the command before the `cd` cannot change what it means.
-That holds for the first node of a command and for a chain of exempt `cd`s joined by `;`, a newline, or `&&`: an exempt `cd` always succeeds and mutates nothing, so no earlier command ran that could have reassigned `HOME`, `FM_HOME`, or `CDPATH`, and no conditional could have skipped a node.
-Any other earlier node withdraws the exemption, because a builtin, function, or alias could have reassigned those variables and a lexical policy cannot enumerate every way.
-A `cd` reached through `||` stays denied, because an exempt predecessor never fails, so that `cd` would not run.
+An exemption is granted only when nothing about the `cd` depends on shell behaviour the policy cannot prove.
+The command before it must be empty or an exempt `cd` chain joined by `;`, a newline, or `&&`, and the `cd` node itself must carry no redirection, heredoc, or leading assignment, so no expansion can run before the builtin or change what a later relative target means.
 This is a deliberate fail-closed boundary, and these shapes are refused even though their target may be safe:
 
-- `cmd; cd data` and `cmd && cd data` after any non-`cd` command.
-- `cd a || cd b`.
+- `cmd; cd data` and `cmd && cd data` after any non-`cd` command, and `cd a || cd b`.
 - A pipeline, background job, subshell, or brace group before the `cd`.
 - A `cd` inside a shell-keyword compound, including conditionals and loops.
-- An unquoted `$FM_HOME` expansion that produces whitespace and splits into multiple operands.
-- A non-literal redirection target or leading assignment on the `cd` node.
+- Any redirection, heredoc, or leading assignment on the `cd` node.
+- The unquoted `$FM_HOME` and `${FM_HOME}` forms, which could be split or pathname-expanded.
 - A `cd` carrying more than one operand, any option, or the special `-` operand (which uses `OLDPWD`).
-- A glob, a command substitution, a variable other than `$FM_HOME`, or a target spelled with a quoted or escaped leading `~`, which stays literal path text.
+- A glob, a command substitution, a variable other than a quoted `$FM_HOME`, or a quoted or escaped leading `~`, which stays literal path text.
 
 A leading tilde expands only when its prefix is unquoted and unescaped, so `~/data` and `~/"data"` expand while `'~/data'`, `"~/data"`, and `\~/data` do not.
 `/tmp` stays denied on purpose: a firstmate command run from there resolves the wrong home.
