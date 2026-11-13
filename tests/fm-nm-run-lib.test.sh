@@ -688,6 +688,113 @@ FIXTURE
   pass "unresolved-only review rounds consume no bare, detail, or explicit answer occurrence"
 }
 
+test_context_only_answers_update_carried_authority() {
+  local tmp origin field answer later expected out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  for origin in interactive auto_yes unknown; do
+    for field in findings user_findings; do
+      for answer in 'FIX A1; IGNORE R1' 'unreadable answer'; do
+        for later in fix declined; do
+          FM_TEST_ROUNDS_JSON=$(python3 - "$origin" "$field" "$later" <<'FIXTURE'
+import json
+import sys
+origin, field, later = sys.argv[1:]
+finding = dict(id="R1", action="ask-user", description="same review finding", severity="error")
+rounds = [
+    dict(round=1, selection_source="user", response_origin="interactive", selected_finding_ids=["R1"], findings=[finding]),
+    dict(round=2, selection_source="user", response_origin=origin, selected_finding_ids=["A1"], **{field: [finding, dict(id="A1", action="auto-fix")]}),
+    dict(round=3, selection_source="user" if later == "fix" else "user_declined", response_origin="unknown", selected_finding_ids=["R1"] if later == "fix" else [], findings=[finding]),
+]
+print(json.dumps(dict(schema_version=1, rounds=rounds)))
+FIXTURE
+)
+          write_status "$tmp/status" \
+            'resolved [key=nm-01TEST-review]: answered: FIX R1' \
+            'needs-decision [key=nm-01TEST-review-r2]: context-only gate' \
+            "resolved [key=nm-01TEST-review-r2]: answered: $answer"
+          expected=1
+          if [ "$later" = declined ] && [ "$answer" != 'unreadable answer' ]; then
+            expected=0
+          fi
+          out=$(decisions "$tmp/status")
+          rc=$?
+          expect_code "$expected" "$rc" "context-only answer did not supersede old authority: $origin/$field/$answer/$later: $out"
+          if [ "$expected" -eq 1 ]; then
+            assert_contains "$out" 'finding R1' 'superseded refusal omitted the finding'
+            assert_contains "$out" 'round 3' 'superseded refusal omitted the round'
+          fi
+          write_status "$tmp/status" \
+            'resolved [key=nm-01TEST-review]: answered: FIX R1' \
+            'needs-decision [key=nm-01TEST-review-r2]: context-only gate' \
+            'needs-decision [key=nm-01TEST-review]: actual gate' \
+            "resolved [key=nm-01TEST-review]: answered: ${later/declined/DECLINE} R1"
+          out=$(decisions "$tmp/status")
+          rc=$?
+          expect_code 0 "$rc" "context-only opening consumed a bare occurrence: $out"
+          FM_TEST_ROUNDS_JSON=$(python3 - "$FM_TEST_ROUNDS_JSON" <<'FIXTURE'
+import json
+import sys
+doc = json.loads(sys.argv[1])
+doc["rounds"] = doc["rounds"][1:]
+print(json.dumps(doc))
+FIXTURE
+)
+          write_status "$tmp/status" "resolved [key=nm-01TEST-review-r2]: answered: $answer"
+          out=$(decisions "$tmp/status")
+          rc=$?
+          expect_code "$expected" "$rc" "first context-only answer failed carry-forward: $origin/$field/$answer/$later: $out"
+        done
+      done
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "explicit context-only answers establish and supersede carried authority"
+}
+
+test_gatewide_prose_cannot_hide_unparsed_directives() {
+  local tmp step verb answer origin expected out rc first
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  for step in review test; do
+    FM_TEST_STATUS_DOC=${RUN_STATUS/review,completed/$step,completed}
+    for verb in IGNORE APPROVE DECLINE SKIP; do
+      for answer in "$verb R99; FIX R1" "$verb test-99, FIX R1" "$verb review-missing" "$verb unknown-label: FIX R1" "$verb proceeding; FIX R1" "$verb proceeding without live validation" "$verb without live validation, CONDITIONAL on approval"; do
+        expected=1
+        case "$answer" in
+          "$verb proceeding without live validation"|"$verb without live validation, CONDITIONAL on approval") expected=0 ;;
+        esac
+        first='{"round":1,"selection_source":"user_declined","response_origin":"unknown","findings":[{"id":"R1","action":"ask-user","description":"same finding"}]}'
+        FM_TEST_ROUNDS_JSON="{\"schema_version\":1,\"rounds\":[$first]}"
+        write_status "$tmp/status" "resolved [key=nm-01TEST-$step]: answered: $answer"
+        out=$(decisions "$tmp/status")
+        rc=$?
+        expect_code "$expected" "$rc" "gate-wide fallback misread $answer: $out"
+        for origin in interactive auto_yes; do
+          FM_TEST_ROUNDS_JSON="{\"schema_version\":1,\"rounds\":[${first/unknown/$origin}]}"
+          decisions "$tmp/status" >/dev/null || fail "unreadable prose changed record-only acceptance"
+          FM_TEST_ROUNDS_JSON=$(python3 - "$FM_TEST_ROUNDS_JSON" <<'FIXTURE'
+import json
+import sys
+doc = json.loads(sys.argv[1])
+later = dict(doc["rounds"][0], round=2, response_origin="unknown")
+doc["rounds"].append(later)
+print(json.dumps(doc))
+FIXTURE
+)
+          out=$(decisions "$tmp/status")
+          rc=$?
+          expect_code "$expected" "$rc" "gate-wide fallback carried invalid authority: $answer/$origin: $out"
+        done
+      done
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "gate-wide prose declines refuse unknown labels and additional directives"
+}
+
 test_new_covered_answers_supersede_carried_authority() {
   local tmp step origin shape answer out rc initial
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
@@ -994,6 +1101,8 @@ test_review_carries_explicit_unselected_decisions
 test_carried_decisions_require_matching_finding_identity
 test_action_mentions_do_not_authorize_decisions
 test_unresolved_only_review_rounds_do_not_bind_answers
+test_context_only_answers_update_carried_authority
+test_gatewide_prose_cannot_hide_unparsed_directives
 test_new_covered_answers_supersede_carried_authority
 test_mixed_partial_fixes_preserve_implicit_declines
 test_mixed_finding_directives_use_full_round_context

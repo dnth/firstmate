@@ -398,6 +398,8 @@ for rnd in rounds:
         "ids": parked,
         "unresolved": {fid: identity for fid, identity in round_identities.items() if fid not in resolved},
     })
+    if include_unresolved == "1" and not resolved:
+        events.append(f"{step}\t{where}\t-\tcontext\t{origin}\tnull\t{context}")
     for fid, action in resolved.items():
         event = f"{step}\t{where}\t{fid}\t{action}\t{origin}"
         if include_unresolved == "1":
@@ -493,7 +495,8 @@ EOF
 # IGNORE, DECLINE, or SKIP with no ids declines every finding the round
 # presented; a bare FIX is prose and refuses. Named findings bind their own
 # verb, every other presented finding is the pipeline's implicit decline, and
-# one finding bound to two action classes is ambiguous and refuses. Firstmate
+# one finding bound to fix and decline classes is ambiguous and refuses;
+# IGNORE, DECLINE, SKIP, and APPROVE are equivalent decline verbs. Firstmate
 # must keep writing this form; docs/configuration.md states it for operators.
 #
 # Returns 0 silently when the run recorded no ask-user decision events or every
@@ -537,8 +540,8 @@ for line in sys.stdin:
 if not events:
     sys.exit(0)
 
-rounds = sorted({int(event[1][len("round "):]) for event in events})
-current = rounds[0]
+rounds = sorted({int(event[1][len("round "):]) for event in events if event[3] != "context"})
+current = rounds[0] if rounds else 1
 pending = None
 bindings = {}
 covered = set()
@@ -548,7 +551,7 @@ for fields in records:
     answer = fields[2] if len(fields) > 2 else ""
     if record_key.startswith(key + "-r"):
         bound = int(record_key[len(key + "-r"):])
-        if kind == "open":
+        if kind == "open" and bound in rounds:
             current = bound
     elif kind == "open":
         if pending is not None:
@@ -560,7 +563,8 @@ for fields in records:
         bound = bindings.get(record_key, current)
     bindings[record_key] = bound
     if kind == "open":
-        pending = bound
+        if bound in rounds:
+            pending = bound
     else:
         covered.add(bound)
         round_answer[bound] = answer
@@ -665,6 +669,9 @@ def decided_actions(answer, finding_ids):
         gate = groups[0][0]
         if gate != "nonfix":
             return {}
+        remainder = clause[pos:]
+        if verb_re.search(remainder) or re.search(r"\b[\w-]*\d[\w-]*\b|\b\w+-[\w-]+\b|[;:]", remainder):
+            return {}
         return {fid: gate for fid in finding_ids}
     if trailing:
         return {}
@@ -693,24 +700,22 @@ round_context = {}
 for _, rnd, fid, action, origin, identity, context in events:
     number = int(rnd[len("round "):])
     context = json.loads(context)
-    by_round.setdefault(number, []).append((fid, action, origin, identity))
     round_findings.setdefault(number, {}).update(context["unresolved"])
-    round_findings[number][fid] = identity
+    if action != "context":
+        by_round.setdefault(number, []).append((fid, action, origin, identity))
+        round_findings[number][fid] = identity
     round_context[number] = context["ids"]
 
 decisions = {}
 missing = []
 problems = []
-for rnd in rounds:
+for rnd in sorted(round_context):
     round_events = by_round.get(rnd, [])
-    if not round_events:
-        continue
-    origin = round_events[0][2]
     decided = {}
     if rnd in covered:
         decided = decided_actions(round_answer[rnd], round_context[rnd])
         decided = {fid: value for fid, value in decided.items() if fid in round_findings[rnd]}
-    for fid, action, _, identity in round_events:
+    for fid, action, origin, identity in round_events:
         if origin != "unknown":
             if rnd not in covered:
                 missing.append((fid, rnd, action, origin))

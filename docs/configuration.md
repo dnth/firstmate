@@ -701,6 +701,7 @@ The check reads firstmate's `resolved [key=nm-<run>-<step>...]: answered:` excer
 `VERB` is `FIX`, `IGNORE`, `DECLINE`, `SKIP`, or `APPROVE`, and ids are finding ids the gate round presented.
 The clause ends at the first `(`, `.`, ` Reason`, or end of text; everything after it is reason prose and is ignored, so parenthesised asides never change the decision.
 A bare `APPROVE`, `IGNORE`, `DECLINE`, or `SKIP` with no ids declines every finding the round presented, while a bare `FIX` is prose and refuses.
+Binding one finding to both fix and decline refuses as ambiguous; `IGNORE`, `DECLINE`, `SKIP`, and `APPROVE` are equivalent decline verbs.
 Firstmate must keep writing this form; [`bin/fm-nm-run-lib.sh`](../bin/fm-nm-run-lib.sh) owns the parser and the refusal rules.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
 That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
