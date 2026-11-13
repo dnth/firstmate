@@ -617,6 +617,7 @@ def decided_actions(answer, finding_ids):
     groups = []
     current = None
     trailing = False
+    trailing_prose_ok = False
     while pos < len(clause):
         if clause[pos].isspace():
             pos += 1
@@ -653,6 +654,10 @@ def decided_actions(answer, finding_ids):
         match = verb_re.match(clause, pos) if current is None else None
         if not match:
             trailing = True
+            # After a decline-class verb the id list ends at the first
+            # non-list token and the rest of the clause is prose; after FIX the
+            # same shape stays unreadable, so a qualified fix never authorizes.
+            trailing_prose_ok = current is not None and current[0] == "nonfix"
             break
         current = [action_of(match.group("verb")), []]
         groups.append(current)
@@ -671,7 +676,7 @@ def decided_actions(answer, finding_ids):
         if verb_re.search(remainder) or re.search(r"\b[\w-]*\d[\w-]*\b|\b\w+-[\w-]+\b|[;:]", remainder):
             return {}
         return {fid: gate for fid in finding_ids}
-    if trailing:
+    if trailing and not trailing_prose_ok:
         return {}
     decided = {}
     for value, ids in groups:

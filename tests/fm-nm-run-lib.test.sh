@@ -1060,6 +1060,12 @@ test_real_firstmate_record_lines_parse_canonically() {
   parse_case 'kcc APPROVE with recorded fix refuses' test \
     'APPROVE proceeding without live validation. Reason: the PR is documentation only; the [truncated]' \
     user '["test-1"]' '[{"id":"test-1","action":"ask-user","description":"d3","severity":"warning"}]' 1
+  parse_case 'real test approval with named id and prose' test \
+    'APPROVE test-1 without live validation. Reason: the acceptance signal is satisfied out of pipeline' \
+    user_declined '[]' '[{"id":"test-1","action":"ask-user","description":"d3","severity":"warning"}]' 0
+  parse_case 'FIX with trailing prose stays unreadable' test \
+    'FIX test-1 is not what I want' \
+    user '["test-1"]' '[{"id":"test-1","action":"ask-user","description":"d3","severity":"warning"}]' 1
   parse_case 'FIX R3 with auto-fix sibling aside' test \
     'FIX R3 (with R1 and R2 as auto-fix). Reason: the parser contract' \
     user '["R3"]' \

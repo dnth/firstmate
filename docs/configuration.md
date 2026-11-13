@@ -701,6 +701,7 @@ The check reads firstmate's `resolved [key=nm-<run>-<step>...]: answered:` excer
 `VERB` is `FIX`, `IGNORE`, `DECLINE`, `SKIP`, or `APPROVE`, and ids are finding ids the gate round presented.
 The clause ends at the first `(`, `.`, ` Reason`, or end of text; everything after it is reason prose and is ignored, so parenthesised asides never change the decision.
 A bare `APPROVE`, `IGNORE`, `DECLINE`, or `SKIP` with no ids declines every finding the round presented, while a bare `FIX` is prose and refuses.
+After a decline-class verb the id list ends at the first token that is not a finding id or list separator, and the rest of the first clause is prose, so `APPROVE test-1 without live validation` declines `test-1`; after `FIX`, trailing prose makes the record unreadable.
 Binding one finding to both fix and decline refuses as ambiguous; `IGNORE`, `DECLINE`, `SKIP`, and `APPROVE` are equivalent decline verbs.
 Firstmate must keep writing this form; [`bin/fm-nm-run-lib.sh`](../bin/fm-nm-run-lib.sh) owns the parser and the refusal rules.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
