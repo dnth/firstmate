@@ -563,7 +563,7 @@ def action_of(keyword):
 def decided_actions(answer, finding_ids):
     keywords = list(ACTION_PATTERN.finditer(answer or ""))
     decided, explicit = {}, set()
-    if not keywords or re.search(r"[`\"“”‘’]|(?<!\w)'|'(?!\w)", answer):
+    if not keywords or re.search(r"[()`\"“”‘’]|(?<!\w)'|'(?!\w)", answer):
         return decided, explicit
     id_patterns = {
         fid: r"(?<![\w-])" + re.escape(fid) + r"(?![\w-])"
@@ -572,7 +572,7 @@ def decided_actions(answer, finding_ids):
     labels = "|".join(id_patterns.values())
     answer = re.sub(r"^\s*Firstmate decision for run [\w.-]+ [\w.-]+:\s*", "", answer, flags=re.IGNORECASE)
     clauses = []
-    for clause in re.split(r"[;\n()]", answer):
+    for clause in re.split(r"[;\n]", answer):
         parts = re.split(r"(?=(?:" + labels + r")\s*:)", clause, flags=re.IGNORECASE)
         if len(parts) > 1 and parts[0].strip() and not ACTION_PATTERN.search(parts[0]):
             return {}, set()
@@ -581,26 +581,23 @@ def decided_actions(answer, finding_ids):
         r"^\s*(?:(?:" + labels + r")\s*:\s*)?" + ACTION_PATTERN.pattern,
         re.IGNORECASE,
     )
-    id_list = re.compile(r"(?:\s|,|:|\band\b|" + labels + r")*", re.IGNORECASE)
+    id_list = re.compile(r"(?:" + labels + r")(?:(?:\s+|\s*,\s*|\s+and\s+)(?:" + labels + r"))*", re.IGNORECASE)
     defaults = set()
-    ambiguous = False
     for clause in clauses:
         mentions = list(ACTION_PATTERN.finditer(clause))
         if not mentions:
+            if clause.strip():
+                return {}, set()
             continue
         match = directive.match(clause)
         value = None
         if match and len(mentions) == 1:
             tail = clause[match.end():].strip()
-            if id_list.fullmatch(tail) or (
-                action_of(match.group("action")) == "nonfix"
-                and re.fullmatch(r"proceeding\s+without\s+live\s+validation", tail, re.IGNORECASE)
-            ):
+            if not tail or id_list.fullmatch(tail):
                 value = action_of(match.group("action"))
         if value is None:
-            ambiguous = True
-        else:
-            defaults.add(value)
+            return {}, set()
+        defaults.add(value)
         for fid, pattern in id_patterns.items():
             if re.search(pattern, clause, re.IGNORECASE):
                 if fid in explicit and decided[fid] != value:
@@ -608,7 +605,7 @@ def decided_actions(answer, finding_ids):
                 else:
                     decided[fid] = value
                 explicit.add(fid)
-    if not ambiguous and len(defaults) == 1:
+    if len(defaults) == 1:
         for fid in finding_ids:
             decided.setdefault(fid, next(iter(defaults)))
     return decided, explicit

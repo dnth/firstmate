@@ -392,7 +392,7 @@ test_origin_unproven_rounds_need_a_matching_decision_at_pr_ready() {
   assert_contains "$PR_OUT" "finding lint-1" "refusal did not name the finding"
   assert_contains "$PR_OUT" "round 1" "refusal did not name the round"
   assert_not_armed "$id" "origin-unproven undecided"
-  printf 'resolved [key=nm-RUN-origin-review]: answered: APPROVE proceeding without live validation\n' >> "$HOME_DIR/state/$id.status"
+  printf 'resolved [key=nm-RUN-origin-review]: answered: APPROVE lint-1\n' >> "$HOME_DIR/state/$id.status"
   FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
   expect_code 0 "$PR_RC" "an origin-unproven round covered by a matching decision was refused: $PR_OUT"
   assert_grep "nm_run_id=RUN-origin" "$HOME_DIR/state/$id.meta" "origin-unproven run id was not recorded"

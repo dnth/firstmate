@@ -338,7 +338,7 @@ test_unknown_origin_rounds_need_a_matching_firstmate_decision() {
   assert_contains "$out" "round 1" "refusal did not name the round"
   assert_contains "$out" "finding test-1" "refusal did not name the finding"
   write_status "$tmp/status" \
-    'resolved [key=nm-01TEST-test]: answered: Firstmate decision for run 01TEST test-1: APPROVE proceeding without live validation'
+    'resolved [key=nm-01TEST-test]: answered: Firstmate decision for run 01TEST test: APPROVE test-1'
   decisions "$tmp/status" >/dev/null \
     || fail "an origin-unproven approve covered by a firstmate decision was refused"
   rm -rf "$tmp"
@@ -357,7 +357,7 @@ test_repeated_unknown_round_carries_forward_a_decided_finding() {
   expect_code 1 "$rc" "the re-raised round passed without any firstmate decision"
   assert_contains "$out" "round 2" "the first refusal did not name the re-raised round"
   write_status "$tmp/status" \
-    'resolved [key=nm-01TEST-review]: answered: Firstmate decision for run 01TEST review: IGNORE R1 (keep the docstring change; respond --action fix with no findings selected)'
+    'resolved [key=nm-01TEST-review]: answered: Firstmate decision for run 01TEST review: IGNORE R1'
   decisions "$tmp/status" >/dev/null \
     || fail "the round-1 decision did not cover the re-raised round-2 finding"
   write_status "$tmp/status" \
@@ -570,7 +570,13 @@ test_action_mentions_do_not_authorize_decisions() {
     'A command example: test-1: FIX' 'The previous answer was FIX test-1' 'Run no-mistakes axi respond --action fix test-1' \
     'If needed, FIX test-1' 'FIX test-1 is not what I want' 'FIX means changing code' 'Do not test-1: FIX' \
     '"FIX test-1"' '`FIX test-1`' "'FIX test-1'" \
-    '"example; test-1: FIX; end"' 'Do not FIX; APPROVE' ; do
+    '"example; test-1: FIX; end"' 'Do not FIX; APPROVE' \
+    'Do not (FIX test-1)' 'Never (IGNORE test-1)' \
+    'FIX test-1 (only after approval)' 'IGNORE test-1 (unless it is needed)' \
+    'If approved (test-1: FIX)' 'Do not; FIX test-1' \
+    'FIX test-1; only after approval' '(FIX test-1)' \
+    'FIX test-1; note that this requires approval' 'FIX test-1 (plain rationale)' \
+    'If FIX test-2; FIX test-1' 'FIX test-1; APPROVE only after confirmation' ; do
     for action in fix declined; do
       FM_TEST_ROUNDS_JSON=$(python3 - "$action" <<'FIXTURE'
 import json
