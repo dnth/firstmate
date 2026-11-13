@@ -258,8 +258,7 @@ fm_nm_ask_user_key() {  # <run-id> <step>
 }
 
 # One step's ask-user decision events from the `axi rounds --json` document in
-# FM_NM_ROUNDS_DOC (passed by environment because the python program needs the
-# script on stdin). Prints one TAB-separated row per decision event:
+# stdin. Prints one TAB-separated row per decision event:
 # <step>\t<round N>\t<finding-id>\t<action>\t<response-origin>.
 #
 # The pipeline records a gate response on the answered round: a `fix` response
@@ -281,9 +280,8 @@ fm_nm_ask_user_key() {  # <run-id> <step>
 # missing requirement on stdout and means the run data could not be read.
 fm_nm_rounds_events() {  # <run-id> <step>
   local run_id=$1 step=$2
-  python3 - "$run_id" "$step" <<'PY'
+  python3 -c "$(cat <<'PY'
 import json
-import os
 import sys
 
 run_id, step = sys.argv[1], sys.argv[2]
@@ -294,7 +292,7 @@ def unreadable(msg):
     sys.exit(1)
 
 
-raw = os.environ.get("FM_NM_ROUNDS_DOC", "")
+raw = sys.stdin.read()
 if not raw.strip():
     unreadable("returned no data, so its ask-user decisions cannot be read")
 try:
@@ -346,6 +344,8 @@ for rnd in rounds:
     source = rnd.get("selection_source")
     if source not in ("user", "user_declined"):
         continue
+    if not isinstance(label, int) or isinstance(label, bool) or label < 1:
+        unreadable("records a decision without a positive integer round")
     where = f"round {label}"
     presented = finding_actions(rnd.get("findings"), f"{where} findings")
     captured = finding_actions(rnd.get("user_findings"), f"{where} user_findings")
@@ -383,6 +383,7 @@ for line in events:
     print(line)
 sys.exit(0)
 PY
+)" "$run_id" "$step"
 }
 
 # Read a bound run's recorded ask-user decision events from the pipeline's own
@@ -414,7 +415,7 @@ fm_nm_ask_user_resolutions() {  # <dir> <timeout_secs> <run-id> [<status-doc>]
     json=$(fm_nm_run_checked "$dir" "$timeout_secs" axi rounds --run "$run_id" --step "$step" --json) \
       || { echo "no-mistakes axi rounds --run $run_id --step $step failed, so its ask-user decisions cannot be read"; return 1; }
     rc=0
-    out=$(FM_NM_ROUNDS_DOC="$json" fm_nm_rounds_events "$run_id" "$step") || rc=$?
+    out=$(fm_nm_rounds_events "$run_id" "$step" <<<"$json") || rc=$?
     if [ "$rc" -ne 0 ]; then
       [ -n "$out" ] || out="no-mistakes axi rounds --run $run_id --step $step produced no readable output, so its ask-user decisions cannot be read"
       printf '%s\n' "$out"
@@ -431,20 +432,21 @@ EOF
 # has a matching status record in task status file $4, one record per event:
 # each parked gate must be escalated and decided again, so presence alone is
 # not enough. bin/fm-classify-lib.sh owns the canonical record grammar, its
-# accepted step-key suffixes, and its process-evidence limitation; the count
-# does not authenticate authorship.
+# accepted step-key suffixes, and its process-evidence limitation. Records
+# match finding ids in their answers and any explicit round suffix; each
+# record covers only one event and does not authenticate authorship.
 #
 # Returns 0 silently when the run recorded no ask-user decision events or every
 # event is matched. Returns 1 and prints a per-step refusal detail (run, step,
-# finding, and answering origin) on stdout when the task status file holds too
-# few matching resolved records. Returns 2 and prints the concrete missing
+# finding, and answering origin) on stdout when an event has no distinct
+# matching resolved record. Returns 2 and prints the concrete missing
 # requirement on stdout when the run's decision data cannot be read; callers
 # must surface that detail rather than substituting a generic refusal.
 # Callers must source bin/fm-classify-lib.sh for the status grammar.
 fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file> [<status-doc>]
   local dir=$1 timeout_secs=$2 run_id=$3 status_file=$4 status_doc=${5:-}
-  local rows steps step need have bad=
-  declare -F status_resolved_step_count >/dev/null 2>&1 \
+  local rows steps step report rc bad=
+  declare -F status_resolved_step_records >/dev/null 2>&1 \
     || { echo "bin/fm-classify-lib.sh is required to read firstmate decision records" >&2; return 2; }
   rows=$(fm_nm_ask_user_resolutions "$dir" "$timeout_secs" "$run_id" "$status_doc") || {
     [ -z "$rows" ] || printf '%s\n' "$rows"
@@ -454,14 +456,56 @@ fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file> [<st
   steps=$(printf '%s\n' "$rows" | cut -f1 | sort -u)
   while IFS= read -r step; do
     [ -n "$step" ] || continue
-    need=$(printf '%s\n' "$rows" | awk -F '\t' -v s="$step" \
-      '$1 == s { if (!($2 in m)) { m[$2] = 1; n++ } } END { print n + 0 }')
-    have=$(status_resolved_step_count "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")")
-    if [ "$have" -lt "$need" ] 2>/dev/null; then
-      printf 'run %s step %s: %d recorded ask-user gate decision(s) but only %s matching resolved [key=%s] record(s):\n' \
-        "$run_id" "$step" "$need" "$have" "$(fm_nm_ask_user_key "$run_id" "$step")"
-      printf '%s\n' "$rows" | awk -F '\t' -v s="$step" \
-        '$1 == s { print "  finding " $3 " resolved as " $4 " (" $2 ", answered " $5 ")" }' | sort -u
+    rc=0
+    report=$({
+      printf '%s\n' "$rows" | awk -F '\t' -v s="$step" '$1 == s { print "event\t" $0 }'
+      status_resolved_step_records "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")"
+    } | python3 -c "$(cat <<'PY'
+import re
+import sys
+
+run_id, step, key = sys.argv[1:]
+events, records = [], []
+for line in sys.stdin:
+    fields = line.rstrip("\n").split("\t")
+    if fields[0] == "event":
+        events.append(fields[1:])
+    elif fields[0] == "record":
+        records.append((fields[1], "\t".join(fields[2:])))
+candidates = []
+for _, rnd, fid, action, origin in events:
+    eligible = []
+    for index, (record_key, answer) in enumerate(records):
+        if record_key.startswith(key + "-r") and record_key != key + "-r" + rnd[len("round "):]:
+            continue
+        if re.search(r"(?<![\w.-])" + re.escape(fid) + r"(?![\w.-])", answer):
+            eligible.append(index)
+    candidates.append(eligible)
+assigned = {}
+
+
+def match(event, seen):
+    for record in candidates[event]:
+        if record in seen:
+            continue
+        seen.add(record)
+        if record not in assigned or match(assigned[record], seen):
+            assigned[record] = event
+            return True
+    return False
+
+
+missing = [event for event in range(len(events)) if not match(event, set())]
+if missing:
+    print(f"run {run_id} step {step}: missing matching resolved [key={key}] record(s):")
+    for event in missing:
+        _, rnd, fid, action, origin = events[event]
+        print(f"  finding {fid} resolved as {action} ({rnd}, answered {origin})")
+    sys.exit(1)
+PY
+)" "$run_id" "$step" "$(fm_nm_ask_user_key "$run_id" "$step")") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      printf '%s\n' "$report"
       bad=1
     fi
   done <<EOF

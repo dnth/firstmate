@@ -697,15 +697,12 @@ EOF
   printf '%s\n' "$count"
 }
 
-# Count canonical `resolved [key=<key>]: answered:` records that decide <key>
-# itself or one of its decision-event forms: <key>, <key>-r<N> (a re-parked
-# gate's round), or <key>-detail (a finding-specific decision). Each still
-# evidences exactly one firstmate decision, so the caller compares this count
-# with the pipeline's own recorded decision-event count. This is process
-# evidence, not tamper-proof provenance; same-user forgery risk is accepted.
-status_resolved_step_count() {  # <status-file> <key>
-  local f=$1 want=$2 line key count=0
-  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || { printf '0\n'; return 0; }
+# Emit canonical decision records as TAB-separated record, key, answer rows.
+# Accept the step key, its round suffix, and its finding-specific detail suffix.
+# This is process evidence, not tamper-proof provenance; same-user forgery risk is accepted.
+status_resolved_step_records() {  # <status-file> <key>
+  local f=$1 want=$2 line key
+  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "resolved [key="*"]: answered: "*) ;;
@@ -714,20 +711,18 @@ status_resolved_step_count() {  # <status-file> <key>
     key=${line#resolved \[key=}
     key=${key%%\]*}
     case "$key" in
-      "$want"|"$want"-detail)
-        count=$((count + 1))
-        ;;
+      "$want"|"$want"-detail) ;;
       "$want"-r*)
-        key=${key#"$want"-r}
-        case "$key" in ''|*[!0-9]*) ;; *) count=$((count + 1)) ;; esac
+        case "${key#"$want"-r}" in ''|*[!0-9]*) continue ;; esac
         ;;
+      *) continue ;;
     esac
+    printf 'record\t%s\t%s\n' "$key" "${line#*: answered: }"
   done < "$f"
-  printf '%s\n' "$count"
 }
 
 # The answer excerpt of the newest canonical `resolved [key=<key>]: answered:`
-# record from fm-send, or nothing when the key has none. Like the count above,
+# record from fm-send, or nothing when the key has none. Like the records above,
 # this reads process evidence of what was sent, not tamper-proof provenance.
 status_resolved_key_answer() {  # <status-file> <key>
   local f=$1 want=$2 line answer=''

@@ -337,6 +337,10 @@ test_round_suffixed_decision_keys_count_per_event() {
   # The remaining decisions are recorded under their round and detail suffixes;
   # the old bare-key count ignored both forms.
   printf 'resolved [key=nm-RUN-suffix-review-r30]: answered: fix R1\n' >> "$HOME_DIR/state/$id.status"
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
+  expect_code 1 "$PR_RC" "overlapping R1 records covered the worker decision for R2"
+  assert_contains "$PR_OUT" "finding R2" "overlap refusal did not name the unmatched finding"
+  assert_not_armed "$id" "overlapping decision records"
   printf 'resolved [key=nm-RUN-suffix-review-detail]: answered: approve R2\n' >> "$HOME_DIR/state/$id.status"
   FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
   expect_code 0 "$PR_RC" "suffix-keyed firstmate decisions did not cover their decision events: $PR_OUT"

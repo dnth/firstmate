@@ -155,19 +155,63 @@ test_suffixed_firstmate_keys_cover_their_events() {
   decisions "$tmp/status" >/dev/null && fail "one bare-key record covered two decision events"
   write_status "$tmp/status" \
     'resolved [key=nm-01TEST-review]: answered: fix R1' \
-    'resolved [key=nm-01TEST-review-r30]: answered: fix R1' \
-    'resolved [key=nm-01TEST-review-detail]: answered: approve R2'
+    'resolved [key=nm-01TEST-review-r30]: answered: fix R1'
+  out=$(decisions "$tmp/status")
+  rc=$?
+  expect_code 1 "$rc" "overlapping R1 records covered the worker decision for R2"
+  assert_contains "$out" "finding R2" "overlap refusal did not name the unmatched finding"
+  printf '%s\n' 'resolved [key=nm-01TEST-review-detail]: answered: approve R2' >> "$tmp/status"
   decisions "$tmp/status" >/dev/null || fail "suffix-keyed firstmate decisions did not cover their events"
   rm -rf "$tmp"
   FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
   pass "decision events match bare, -r<N>, and -detail firstmate records, one record each"
 }
 
+test_each_finding_and_round_needs_its_own_record() {
+  local tmp rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_ROUNDS_JSON='{"schema_version":1,"rounds":[{"round":30,"selection_source":"user_declined","response_origin":"interactive","findings":[{"id":"R1","action":"ask-user"},{"id":"R2","action":"ask-user"}]},{"round":31,"selection_source":"user_declined","response_origin":"interactive","findings":[{"id":"R1","action":"ask-user"}]}]}'
+  write_status "$tmp/status" \
+    'resolved [key=nm-01TEST-review-r30]: answered: approve R1 R2' \
+    'resolved [key=nm-01TEST-review-r31]: answered: approve R1'
+  decisions "$tmp/status" >/dev/null
+  rc=$?
+  expect_code 1 "$rc" "one round-30 record covered two findings"
+  printf '%s\n' 'resolved [key=nm-01TEST-review-r31]: answered: approve R2' >> "$tmp/status"
+  decisions "$tmp/status" >/dev/null
+  rc=$?
+  expect_code 1 "$rc" "a record for the wrong round covered R2"
+  printf '%s\n' 'resolved [key=nm-01TEST-review-r30]: answered: approve R2' >> "$tmp/status"
+  decisions "$tmp/status" >/dev/null || fail "distinct finding and round records did not pass"
+  rm -rf "$tmp"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "every finding and round requires a distinct matching decision record"
+}
+
+test_large_rounds_document_is_read_without_environment_limits() {
+  local tmp round
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_ROUNDS_JSON=$(python3 -c '
+import json
+print(json.dumps({"schema_version": 1, "rounds": [
+    {"round": n, "summary": "x" * 6000, "selection_source": "user_declined",
+     "response_origin": "interactive", "findings": [{"id": "R9", "action": "ask-user"}]}
+    for n in range(1, 31)]}))')
+  write_status "$tmp/status"
+  for round in {1..30}; do
+    printf 'resolved [key=nm-01TEST-review-r%s]: answered: approve R9\n' "$round" >> "$tmp/status"
+  done
+  decisions "$tmp/status" >/dev/null || fail "valid rounds evidence over 128 KiB did not pass"
+  rm -rf "$tmp"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "rounds documents over 128 KiB retain all matching decisions"
+}
+
 test_unreadable_or_originless_rounds_refuse_naming_what_is_missing() {
   local tmp out rc variant
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
   write_status "$tmp/status" 'resolved [key=nm-01TEST-review]: answered: approve R9'
-  for variant in rounds-failed no-steps unparseable no-origin no-schema; do
+  for variant in rounds-failed no-steps unparseable no-origin no-schema no-round; do
     FM_TEST_STATUS_RC=0
     FM_TEST_STATUS_DOC=$RUN_STATUS
     FM_TEST_ROUNDS_RC=0
@@ -178,13 +222,14 @@ test_unreadable_or_originless_rounds_refuse_naming_what_is_missing() {
       unparseable) FM_TEST_ROUNDS_JSON='not json' ;;
       no-origin) FM_TEST_ROUNDS_JSON=${ROUNDS_ONE_DECISION/,\"response_origin\":\"interactive\"/} ;;
       no-schema) FM_TEST_ROUNDS_JSON='{"rounds":[]}' ;;
+      no-round) FM_TEST_ROUNDS_JSON=${ROUNDS_ONE_DECISION/\"round\":7/\"round\":null} ;;
     esac
     out=$(decisions "$tmp/status")
     rc=$?
     expect_code 2 "$rc" "$variant decision data was read as a decision verdict"
     assert_contains "$out" "01TEST" "$variant refusal did not name the run"
   done
-  assert_contains "$out" "schema_version" "an unsupported document version was not named"
+  assert_contains "$out" "round" "a missing decision round was not named"
   rm -rf "$tmp"
   FM_TEST_STATUS_DOC=$RUN_STATUS
   FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
@@ -199,6 +244,8 @@ test_unregistered_checks_and_failures_are_not_ready
 test_no_recognized_marker_is_unknown
 test_decision_events_carry_step_round_finding_origin
 test_suffixed_firstmate_keys_cover_their_events
+test_each_finding_and_round_needs_its_own_record
+test_large_rounds_document_is_read_without_environment_limits
 test_unreadable_or_originless_rounds_refuse_naming_what_is_missing
 
 echo "all fm-nm-run-lib tests passed"
