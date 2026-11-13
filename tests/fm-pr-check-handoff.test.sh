@@ -348,23 +348,23 @@ test_round_suffixed_decision_keys_count_per_event() {
   pass "decision events match bare, -r<N>, and -detail firstmate records"
 }
 
-test_unreadable_or_originless_decision_data_fails_closed() {
-  local id=nmunread url=https://github.com/o/r/pull/16 status rounds variant originless
+test_unreadable_or_unrecognized_decision_data_fails_closed() {
+  local id=nmunread url=https://github.com/o/r/pull/16 status rounds variant badorigin
   make_task "$id" no-mistakes >/dev/null
   receipt "$id" AC1
   receipt "$id" AC2
   status=$(nm_status RUN-unread "fm/$id" "$HEAD_A" completed passed "$url")
-  originless=$(ask_round 1 interactive user_declined '[]' "$ASK_LINT")
-  originless=${originless/,\"response_origin\":\"interactive\"/}
-  seed_rounds RUN-unread review "$originless"
+  badorigin=$(ask_round 1 interactive user_declined '[]' "$ASK_LINT")
+  badorigin=${badorigin/\"response_origin\":\"interactive\"/\"response_origin\":\"mystery\"}
+  seed_rounds RUN-unread review "$badorigin"
   rounds="$ROUNDS_ROOT/RUN-unread"
-  for variant in rounds-down unparseable originless; do
+  for variant in rounds-down unparseable bad-origin; do
     case "$variant" in
       rounds-down) FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DOWN=1 \
           run_pr_check "$id" "$url" ;;
       unparseable) FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_RAW='not json' \
           run_pr_check "$id" "$url" ;;
-      originless) FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds \
+      bad-origin) FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds \
           run_pr_check "$id" "$url" ;;
     esac
     expect_code 1 "$PR_RC" "$variant decision data armed the poll"
@@ -373,8 +373,30 @@ test_unreadable_or_originless_decision_data_fails_closed() {
     assert_contains "$PR_OUT" "review" "$variant refusal did not name the step"
     assert_not_armed "$id" "$variant"
   done
-  assert_contains "$PR_OUT" "response_origin" "origin-less refusal did not name the missing field"
-  pass "missing, unparseable, and origin-less rounds output refuses PR-ready naming what is missing"
+  assert_contains "$PR_OUT" "response_origin" "unrecognized-origin refusal did not name the field"
+  pass "missing, unparseable, and unrecognized-origin rounds output refuses PR-ready naming what is missing"
+}
+
+test_origin_unproven_rounds_need_a_matching_decision_at_pr_ready() {
+  local id=nmorigin url=https://github.com/o/r/pull/19 status rounds
+  make_task "$id" no-mistakes >/dev/null
+  receipt "$id" AC1
+  receipt "$id" AC2
+  seed_run RUN-origin "$HEAD_A" "$url"
+  seed_rounds RUN-origin review "$(ask_round 1 unknown user_declined '[]' "$ASK_LINT")"
+  rounds="$ROUNDS_ROOT/RUN-origin"
+  status=$(nm_status RUN-origin "fm/$id" "$HEAD_A" completed passed "$url")
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
+  expect_code 1 "$PR_RC" "an origin-unproven round armed the poll without a firstmate decision"
+  assert_contains "$PR_OUT" "RUN-origin" "refusal did not name the run"
+  assert_contains "$PR_OUT" "finding lint-1" "refusal did not name the finding"
+  assert_contains "$PR_OUT" "round 1" "refusal did not name the round"
+  assert_not_armed "$id" "origin-unproven undecided"
+  printf 'resolved [key=nm-RUN-origin-review]: answered: APPROVE lint-1\n' >> "$HOME_DIR/state/$id.status"
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
+  expect_code 0 "$PR_RC" "an origin-unproven round covered by a matching decision was refused: $PR_OUT"
+  assert_grep "nm_run_id=RUN-origin" "$HOME_DIR/state/$id.meta" "origin-unproven run id was not recorded"
+  pass "an origin-unproven round passes PR-ready only with a matching firstmate decision"
 }
 
 test_crew_state_agrees_with_pr_ready_decision_gate() {
@@ -415,5 +437,6 @@ test_ci_green_active_run_is_pr_ready
 test_wrong_or_foreign_runs_are_refused
 test_pr_ready_requires_firstmate_decisions_for_ask_user_findings
 test_round_suffixed_decision_keys_count_per_event
-test_unreadable_or_originless_decision_data_fails_closed
+test_unreadable_or_unrecognized_decision_data_fails_closed
+test_origin_unproven_rounds_need_a_matching_decision_at_pr_ready
 test_crew_state_agrees_with_pr_ready_decision_gate
