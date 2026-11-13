@@ -284,13 +284,13 @@ fm_nm_ask_user_key() {  # <run-id> <step>
 #
 # Exit 0 prints the events (possibly none). Any other exit prints the concrete
 # missing requirement on stdout and means the run data could not be read.
-fm_nm_rounds_events() {  # <run-id> <step>
-  local run_id=$1 step=$2
+fm_nm_rounds_events() {  # <run-id> <step> [<include-unresolved>]
+  local run_id=$1 step=$2 include_unresolved=${3:-0}
   python3 -c "$(cat <<'PY'
 import json
 import sys
 
-run_id, step = sys.argv[1], sys.argv[2]
+run_id, step, include_unresolved = sys.argv[1:]
 
 
 def unreadable(msg):
@@ -379,6 +379,9 @@ for rnd in rounds:
         if step != "review":
             for fid in ask_user:
                 resolved.setdefault(fid, "skip")
+        elif include_unresolved == "1":
+            for fid in ask_user:
+                resolved.setdefault(fid, "unresolved")
     else:
         resolved = {fid: "declined" for fid in ask_user}
     for fid, action in resolved.items():
@@ -389,7 +392,7 @@ for line in events:
     print(line)
 sys.exit(0)
 PY
-)" "$run_id" "$step"
+)" "$run_id" "$step" "$include_unresolved"
 }
 
 # Read a bound run's recorded ask-user decision events from the pipeline's own
@@ -405,8 +408,8 @@ PY
 # unsupported schema_version, or an unrecognized response_origin - so callers
 # fail closed naming exactly what is missing. It never falls back to the
 # status-log text audit.
-fm_nm_ask_user_resolutions() {  # <dir> <timeout_secs> <run-id> [<status-doc>]
-  local dir=$1 timeout_secs=$2 run_id=$3 status=${4:-} steps step json out rc acc=''
+fm_nm_ask_user_resolutions() {  # <dir> <timeout_secs> <run-id> [<status-doc>] [<include-unresolved>]
+  local dir=$1 timeout_secs=$2 run_id=$3 status=${4:-} include_unresolved=${5:-0} steps step json out rc acc=''
   command -v python3 >/dev/null 2>&1 \
     || { echo "python3 is required to read no-mistakes ask-user decisions"; return 1; }
   if [ -z "$status" ]; then
@@ -421,7 +424,7 @@ fm_nm_ask_user_resolutions() {  # <dir> <timeout_secs> <run-id> [<status-doc>]
     json=$(fm_nm_run_checked "$dir" "$timeout_secs" axi rounds --run "$run_id" --step "$step" --json) \
       || { echo "no-mistakes axi rounds --run $run_id --step $step failed, so its ask-user decisions cannot be read"; return 1; }
     rc=0
-    out=$(fm_nm_rounds_events "$run_id" "$step" <<<"$json") || rc=$?
+    out=$(fm_nm_rounds_events "$run_id" "$step" "$include_unresolved" <<<"$json") || rc=$?
     if [ "$rc" -ne 0 ]; then
       [ -n "$out" ] || out="no-mistakes axi rounds --run $run_id --step $step produced no readable output, so its ask-user decisions cannot be read"
       printf '%s\n' "$out"
@@ -475,7 +478,7 @@ fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file> [<st
   local rows steps step report rc bad=
   declare -F status_resolved_step_records >/dev/null 2>&1 \
     || { echo "bin/fm-classify-lib.sh is required to read firstmate decision records" >&2; return 2; }
-  rows=$(fm_nm_ask_user_resolutions "$dir" "$timeout_secs" "$run_id" "$status_doc") || {
+  rows=$(fm_nm_ask_user_resolutions "$dir" "$timeout_secs" "$run_id" "$status_doc" 1) || {
     [ -z "$rows" ] || printf '%s\n' "$rows"
     return 2
   }
@@ -595,6 +598,10 @@ for rnd in rounds:
     if rnd in covered:
         decided, explicit = decided_actions(round_answer[rnd], [fid for fid, _, _ in round_events])
     for fid, action, _ in round_events:
+        if action == "unresolved":
+            if fid not in explicit:
+                decided.pop(fid, None)
+            continue
         if decided.get(fid) == "fix" and fid not in explicit and action == "skip":
             decided[fid] = "nonfix"
         if origin != "unknown":

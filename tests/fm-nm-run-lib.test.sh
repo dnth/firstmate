@@ -467,6 +467,54 @@ test_partial_fix_carries_effective_declines() {
   pass "partial fixes carry implicit declines and refuse contradictory later fixes"
 }
 
+test_review_carries_explicit_unselected_decisions() {
+  local tmp origin field presentation scenario answer source selection expected out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  for origin in unknown interactive auto_yes; do
+    for field in findings user_findings; do
+      if [ "$field" = findings ]; then
+        presentation='"findings":[{"id":"R1","action":"ask-user"},{"id":"R2","action":"ask-user"}]'
+      else
+        presentation='"findings":[{"id":"R1","action":"ask-user"}],"user_findings":[{"id":"R2","action":"ask-user"}]'
+      fi
+      for scenario in decline skip fix mismatch-decline mismatch-fix ambiguous unnamed absent; do
+        source=user_declined
+        selection='[]'
+        expected=0
+        case "$scenario" in
+          decline) answer='FIX R1; IGNORE R2' ;;
+          skip) answer='FIX R1; IGNORE R2'; source=user ;;
+          fix) answer='FIX R1; FIX R2'; source=user; selection='["R2"]' ;;
+          mismatch-decline) answer='FIX R1; FIX R2'; expected=1 ;;
+          mismatch-fix) answer='FIX R1; IGNORE R2'; source=user; selection='["R2"]'; expected=1 ;;
+          ambiguous) answer='FIX R1; IGNORE R2; FIX R2'; expected=1 ;;
+          unnamed) answer='FIX R1'; expected=1 ;;
+          absent) answer=''; expected=1 ;;
+        esac
+        FM_TEST_ROUNDS_JSON=$(cat <<EOF
+{"schema_version":1,"rounds":[{"round":1,"selection_source":"user","response_origin":"$origin","selected_finding_ids":["R1"],$presentation},{"round":2,"selection_source":"$source","response_origin":"unknown","selected_finding_ids":$selection,"findings":[{"id":"R2","action":"ask-user"}]}]}
+EOF
+)
+        write_status "$tmp/status"
+        if [ -n "$answer" ]; then
+          write_status "$tmp/status" "resolved [key=nm-01TEST-review]: answered: $answer"
+        fi
+        out=$(decisions "$tmp/status")
+        rc=$?
+        expect_code "$expected" "$rc" "unselected review decision: $origin/$field/$scenario: $out"
+        if [ "$expected" -ne 0 ]; then
+          assert_contains "$out" 'finding R2' "unselected review refusal did not name R2"
+          assert_contains "$out" 'round 2' "unselected review refusal did not name round 2"
+        fi
+      done
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "review carries only explicit unselected decisions and checks later actions"
+}
+
 test_all_checks_passed_is_green
 test_no_ci_checks_reported_is_no_checks_not_green
 test_no_ci_declared_is_no_checks_despite_its_wording
@@ -487,5 +535,6 @@ test_unknown_origin_mismatch_refuses_naming_both_actions
 test_partial_fix_implicit_skip_is_not_a_mismatch
 test_finding_clauses_bind_their_own_actions
 test_partial_fix_carries_effective_declines
+test_review_carries_explicit_unselected_decisions
 
 echo "all fm-nm-run-lib tests passed"
