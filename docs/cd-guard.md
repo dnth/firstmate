@@ -60,7 +60,7 @@ An exempt operand is one of exactly these forms:
 - A quoted `$FM_HOME` or `${FM_HOME}` prefix, expanded from the shell's own value.
 
 A quoted expansion is neither word-split nor pathname-expanded, which is why only that spelling of the variable form is exempt; the unquoted `cd $FM_HOME` shape is a documented refusal below.
-Relative targets resolve from every reachable directory, retaining both logical and physical spellings: the set starts at the home and advances through allowed directory changes.
+Relative targets resolve from a tracked logical/physical directory pair that starts at the home and advances through allowed directory changes.
 `bin/fm-cd-pretool-check.sh` passes the physical primary checkout as `--home` and the shell's actual `FM_HOME` value as `--fm-home`; without `--home` no target is exempt, and an empty or relative `--fm-home` denies every `$FM_HOME` form.
 Bash consults `CDPATH` for every relative operand except those whose first component is exactly `.` or `..`, so a non-empty `CDPATH` denies such a target.
 Both path rules must land inside the home: logical, where a `..` is collapsed lexically first as under Bash's default `cd`, and physical, where symlinks are followed component by component as under `cd -P`.
@@ -74,10 +74,11 @@ This is a deliberate fail-closed boundary, and these shapes are refused even tho
 
 - `cmd; cd data` and `cmd && cd data` after any non-`cd` command, and `cd a || cd b`.
 - A pipeline, background job, subshell, or brace group before the `cd`.
-- A `cd` inside a shell-keyword compound, including conditionals and loops.
+- Any command containing a shell keyword at a command position and a `cd`, `pushd`, or `popd` word, including quoted builtin words, keywords after the `cd`, and queries such as `if command -v cd; then :; fi`.
 - Any redirection, heredoc, or leading assignment on the `cd` node.
 - The unquoted `$FM_HOME` and `${FM_HOME}` forms, which could be split or pathname-expanded.
-- A `cd` carrying more than one operand, any option, or the special `-` operand (which uses `OLDPWD`).
+- A `cd` carrying an empty operand, more than one operand, any option, or the special `-` operand (which uses `OLDPWD`).
+- An operand containing a double-quoted backslash before an ordinary character, including in a quoted `$FM_HOME` suffix, because the shared lexer drops that backslash while Bash preserves it.
 - A glob, a command substitution, a variable other than a quoted `$FM_HOME`, or a quoted or escaped leading `~`, which stays literal path text.
 
 A leading tilde expands only when its prefix is unquoted and unescaped, so `~/data` and `~/"data"` expand while `'~/data'`, `"~/data"`, and `\~/data` do not.
@@ -87,7 +88,7 @@ The exemption widens nothing beyond the home: an `FM_HOME` that points somewhere
 
 ### Known limit
 
-The reachable directory set starts at the home for every tool call, because the guard cannot observe the shell's cwd from an earlier call.
+The tracked directory pair starts at the home for every tool call, because the guard cannot observe the shell's cwd from an earlier call.
 If the primary shell already sits in a subdirectory of the home when a command arrives, a relative target is still resolved from the home, so a nested checkout reachable only from that deeper directory is not detected.
 Passing the hook process's own cwd is deliberately not used: whether it equals the persistent shell's cwd is harness-dependent and unproven, and a wrong value would allow rather than deny.
 A cross-call cwd fact needs live per-harness evidence before the guard may rely on it.

@@ -44,6 +44,8 @@ make_primary_fixture() {
   install_cd_scripts "$dir"
   # Targets the home carve-out must allow, and hazards it must keep denying.
   mkdir -p "$dir/data" "$dir/state" "$dir/projects/foo" "$dir/projects/bar"
+  mkdir -p "$dir/datadir" "$dir/data\dir"
+  git init -q "$dir/data\dir"
   ln -s data "$dir/link-to-data"
   ln -s projects/foo "$dir/link-to-project"
   ln -s /tmp "$dir/outside-link"
@@ -149,6 +151,17 @@ matrix_case B55 deny 'X=1 cd data'
 matrix_case B56 deny 'cd data >/dev/null'
 matrix_case B57 deny $'cd data <<EOF\necho\nEOF'
 matrix_case B58 deny 'if CDPATH=/tmp cd data; then pwd; fi'
+matrix_case B59 deny 'cd ""'
+matrix_case B60 deny 'cd data && cd "" && cd ..; cd state'
+matrix_case B61 deny 'cd "data\dir"'
+matrix_case B62 deny 'cd "$FM_HOME/data\dir"'
+matrix_case B63 deny 'if "cd" /tmp; then :; fi'
+matrix_case B64 deny 'cd data; if true; then :; fi'
+matrix_case B65 deny 'if command -v cd; then :; fi'
+matrix_case B66 deny 'cd data*'
+matrix_case B67 deny 'cd "$(printf data)"'
+matrix_case B68 deny 'cd "$OTHER"'
+matrix_case B69 deny 'cd data state'
 
 # ALLOW: not a persistent top-level cwd change (scoped, data, or non-cd).
 matrix_case A01 allow 'git -C projects/foo status'
@@ -392,6 +405,25 @@ test_reachable_cwd_and_expansion_regressions() {
     expect_code 0 "$rc" 'ordinary safe directory changes must remain allowed'
   done
   pass 'cd-guard: reachable cwd and expansion regressions match Bash' 
+}
+
+test_quoted_operand_regressions() {
+  local dir command actual out rc
+  dir="$TMP_ROOT/quoted-operand-home"
+  make_primary_fixture "$dir" >/dev/null
+  for command in 'cd "data\dir"' 'cd "$FM_HOME/data\dir"' 'cd "${FM_HOME}/data\dir"'; do
+    actual=$(cd "$dir" && FM_HOME="$dir" bash --noprofile --norc -c "$command; pwd -P")
+    [ "$actual" = "$dir/data\dir" ] || fail 'Bash preserves a double-quoted backslash before an ordinary character'
+    out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command "$command" 2>&1); rc=$?
+    expect_code 2 "$rc" 'a cooked operand must not hide the checkout Bash actually enters'
+  done
+  actual=$(cd "$dir" && bash --noprofile --norc -c 'if "cd" data; then pwd -P; fi')
+  [ "$actual" = "$dir/data" ] || fail 'Bash executes a quoted cd inside a keyword compound'
+  actual=$(cd "$dir" && bash --noprofile --norc -c 'cd data; if true; then pwd -P; fi')
+  [ "$actual" = "$dir/data" ] || fail 'Bash permits a keyword compound after a cd'
+  actual=$(bash --noprofile --norc -c 'if command -v cd; then :; fi')
+  [ "$actual" = cd ] || fail 'Bash treats the builtin as query data inside the compound'
+  pass 'cd-guard: quoted operands match Bash and keyword compounds remain refused'
 }
 
 test_exemption_proof_regressions() {
@@ -638,6 +670,7 @@ test_scripts_are_shellcheck_clean() {
   pass "bin/fm-cd-pretool-check.sh is shellcheck-clean"
 }
 
+test_quoted_operand_regressions
 test_exemption_proof_regressions
 test_reachable_cwd_and_expansion_regressions
 test_full_acceptance_matrix

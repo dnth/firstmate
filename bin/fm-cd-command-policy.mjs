@@ -132,7 +132,7 @@ const VARIABLE_WORD = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]
 // substitution, glob, or further expansion is a value this policy cannot know,
 // so it is never resolved.
 function expandTarget(word, context) {
-  if (word.subs.length > 0) return null;
+  if (word.subs.length > 0 || word.droppedDoubleQuoteBackslash) return null;
   if (word.literal) {
     if (word.unquotedExpansion) return null;
     if (!word.value.startsWith("~") || word.firstProtected) return word.value;
@@ -152,17 +152,6 @@ function expandTarget(word, context) {
   // this policy does not model, so only an absolute value is expandable.
   if (!context.fmHome.startsWith("/")) return null;
   return context.fmHome + rest;
-}
-
-function cdpathValue(position, context) {
-  let value = context.cdpath;
-  for (const word of position.words.slice(0, position.prefixAssignments)) {
-    const match = /^CDPATH(\+?=)(.*)$/.exec(word.value);
-    if (!match) continue;
-    if (!word.literal || word.subs.length > 0 || word.unquotedExpansion) return null;
-    value = match[1] === "+=" ? (value === null ? null : `${value}${match[2]}`) : match[2];
-  }
-  return value;
 }
 
 // An exempt cd must be certain to succeed: Bash's logical and physical rules
@@ -189,16 +178,15 @@ function cdOperand(position, wordIndex, context) {
   if (args[0]?.value === "--" && args[0].literal && args[0].subs.length === 0) args.shift();
   if (args.length !== 1) return null;
   const target = expandTarget(args[0], context);
-  if (target === null || target.startsWith("-")) return null;
+  if (target === null || target === "" || target.startsWith("-")) return null;
   const first = target.split("/")[0];
-  const cdpath = cdpathValue(position, context);
-  if (!target.startsWith("/") && first !== "." && first !== ".." && cdpath !== "") return null;
+  if (!target.startsWith("/") && first !== "." && first !== ".." && context.cdpath !== "") return null;
   return target;
 }
 
-// One exempt cd, resolved from every directory the shell may currently sit in.
-// Returns the possible destinations, or null when the cd is not exempt.
-function cdDestinations(node, position, wordIndex, context, reachable) {
+// One exempt cd, resolved under both path rules.
+// Returns the destination pair, or null when the cd is not exempt.
+function cdDestination(node, position, wordIndex, context, cwd) {
   if (!context.home) return null;
   // A redirection, heredoc body, or leading assignment can expand something
   // before the builtin runs and change what a later relative target means, so
@@ -207,16 +195,12 @@ function cdDestinations(node, position, wordIndex, context, reachable) {
   if (node.some((token) => token.type === "redir")) return null;
   const target = cdOperand(position, wordIndex, context);
   if (target === null) return null;
-  const destinations = [];
-  for (const cwd of reachable) {
-    const resolved = resolvedPaths(cwd, target);
-    if (resolved === null) return null;
-    for (const path of [resolved.logical, resolved.logicalDestination, resolved.physical]) {
-      if (!exemptDirectory(context.home, path)) return null;
-    }
-    destinations.push({ logical: resolved.logical, physical: resolved.physical });
+  const resolved = resolvedPaths(cwd, target);
+  if (resolved === null) return null;
+  for (const path of [resolved.logical, resolved.logicalDestination, resolved.physical]) {
+    if (!exemptDirectory(context.home, path)) return null;
   }
-  return destinations;
+  return { logical: resolved.logical, physical: resolved.physical };
 }
 
 function decision(command, context = {}) {
@@ -237,7 +221,12 @@ function decision(command, context = {}) {
   if (lexed.error) return { decision: "allow" };
 
   const { nodes, separators } = splitProgram(lexed.tokens);
-  let reachable = [{ logical: settings.home, physical: settings.home }];
+  const positions = nodes.map(commandPosition);
+  const hasKeyword = positions.some(({ command }) => command && command.literal && !command.quoted && !command.firstProtected && SHELL_KEYWORDS.has(command.value));
+  if (hasKeyword && positions.some(({ words }) => words.some((word) => CD_BUILTINS.has(word.value)))) {
+    return deny("persistent-cd");
+  }
+  let cwd = { logical: settings.home, physical: settings.home };
   // True while every earlier node is an exempt cd. Such a cd always succeeds
   // and mutates nothing, so nothing earlier can have changed HOME, FM_HOME, or
   // CDPATH, and no conditional separator can have skipped a node. Any other
@@ -252,23 +241,13 @@ function decision(command, context = {}) {
     // commandPosition ignores subshell/brace groups, quoted data, comments, and
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
-    const position = commandPosition(nodes[index]);
+    const position = positions[index];
     if (hasPathQualifiedCommandPrefix(position) || hasCommandQueryPrefix(position)) {
       provable = false;
       continue;
     }
     let command = position.command;
     let wordIndex = position.index;
-    if (command && SHELL_KEYWORDS.has(command.value)) {
-      // A compound's command position is not modelled, so a cd inside it cannot
-      // be checked: deny it instead of skipping past it, and withdraw the
-      // exemption for anything after it.
-      if (position.words.some((word) => !word.quoted && CD_BUILTINS.has(word.value))) {
-        return deny("persistent-cd");
-      }
-      provable = false;
-      continue;
-    }
     while (command && (command.value === "builtin" || command.value === "command")) {
       wordIndex += 1;
       command = position.words[wordIndex];
@@ -285,13 +264,9 @@ function decision(command, context = {}) {
     // predecessor never fails, so that cd cannot run and its destination is
     // unprovable.
     if (!provable || separators[index - 1] === "||") return deny("persistent-cd");
-    const destinations = command.value === "cd" ? cdDestinations(nodes[index], position, wordIndex, settings, reachable) : null;
-    if (destinations === null) return deny("persistent-cd");
-    // A redirection can fail before the builtin runs, leaving the shell where
-    // it was, so both the previous and the new directories stay reachable.
-    const canFail = nodes[index].some((token) => token.type === "redir");
-    const next = canFail ? [...reachable, ...destinations] : destinations;
-    reachable = [...new Map(next.map((cwd) => [JSON.stringify(cwd), cwd])).values()];
+    const destination = command.value === "cd" ? cdDestination(nodes[index], position, wordIndex, settings, cwd) : null;
+    if (destination === null) return deny("persistent-cd");
+    cwd = destination;
   }
   return { decision: "allow" };
 }
