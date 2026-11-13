@@ -414,6 +414,59 @@ test_partial_fix_implicit_skip_is_not_a_mismatch() {
   pass "a partial fix's implicit decline agrees with firstmate while a named mismatch still refuses"
 }
 
+test_finding_clauses_bind_their_own_actions() {
+  local tmp answer out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
+  FM_TEST_ROUNDS_JSON='{"schema_version":1,"rounds":[{"round":1,"selection_source":"user_declined","response_origin":"unknown","findings":[{"id":"R1","action":"ask-user"},{"id":"R2","action":"ask-user"}]}]}'
+  for answer in 'R1: IGNORE; R2: FIX' 'IGNORE R1; FIX R2' 'R1: IGNORE R2: FIX'; do
+    write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
+    out=$(decisions "$tmp/status")
+    rc=$?
+    expect_code 1 "$rc" "finding R2 inherited the preceding finding's decline: $answer"
+    assert_contains "$out" 'finding R2' "clause mismatch did not name R2"
+    assert_contains "$out" 'firstmate decided fix' "clause mismatch lost R2's FIX"
+    assert_contains "$out" 'recorded declined' "clause mismatch lost the recorded decline"
+  done
+  FM_TEST_ROUNDS_JSON='{"schema_version":1,"rounds":[{"round":1,"selection_source":"user","response_origin":"unknown","selected_finding_ids":["R2"],"findings":[{"id":"R1","action":"ask-user"},{"id":"R2","action":"ask-user"}]}]}'
+  for answer in 'R1: IGNORE; R2: FIX' 'IGNORE R1; FIX R2' 'R1: IGNORE R2: FIX'; do
+    write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
+    decisions "$tmp/status" >/dev/null || fail "an agreeing mixed decision was refused: $answer"
+  done
+  for answer in 'IGNORE R1 FIX R2' 'IGNORE R1; FIX R1' 'IGNORE; FIX R2'; do
+    write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
+    out=$(decisions "$tmp/status")
+    rc=$?
+    expect_code 1 "$rc" "an ambiguous finding action was guessed: $answer"
+    assert_contains "$out" 'no readable action' "ambiguous decision was not reported as unverifiable"
+  done
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "finding clauses bind their own actions and ambiguous bindings refuse"
+}
+
+test_partial_fix_carries_effective_declines() {
+  local tmp origin out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
+  for origin in unknown interactive; do
+    FM_TEST_ROUNDS_JSON="{\"schema_version\":1,\"rounds\":[{\"round\":1,\"selection_source\":\"user\",\"response_origin\":\"$origin\",\"selected_finding_ids\":[\"test-1\"],\"findings\":[{\"id\":\"test-1\",\"action\":\"ask-user\"},{\"id\":\"test-2\",\"action\":\"ask-user\"}]},{\"round\":2,\"selection_source\":\"user_declined\",\"response_origin\":\"unknown\",\"findings\":[{\"id\":\"test-2\",\"action\":\"ask-user\"}]}]}"
+    write_status "$tmp/status" 'resolved [key=nm-01TEST-test]: answered: FIX test-1'
+    decisions "$tmp/status" >/dev/null || fail "a partial fix's implicit decline was lost after an $origin round"
+    FM_TEST_ROUNDS_JSON=${FM_TEST_ROUNDS_JSON/\"selection_source\":\"user_declined\"/\"selection_source\":\"user\",\"selected_finding_ids\":[\"test-2\"]}
+    out=$(decisions "$tmp/status")
+    rc=$?
+    expect_code 1 "$rc" "an implicitly declined finding covered a later fix after an $origin round"
+    assert_contains "$out" 'finding test-2 (round 2)' "carried mismatch did not name the repeated finding"
+    assert_contains "$out" 'firstmate decided decline' "carried implicit skip was not a decline"
+  done
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "partial fixes carry implicit declines and refuse contradictory later fixes"
+}
+
 test_all_checks_passed_is_green
 test_no_ci_checks_reported_is_no_checks_not_green
 test_no_ci_declared_is_no_checks_despite_its_wording
@@ -432,5 +485,7 @@ test_unknown_origin_rounds_need_a_matching_firstmate_decision
 test_repeated_unknown_round_carries_forward_a_decided_finding
 test_unknown_origin_mismatch_refuses_naming_both_actions
 test_partial_fix_implicit_skip_is_not_a_mismatch
+test_finding_clauses_bind_their_own_actions
+test_partial_fix_carries_effective_declines
 
 echo "all fm-nm-run-lib tests passed"

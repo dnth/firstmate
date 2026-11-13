@@ -532,11 +532,6 @@ for fields in records:
         if pending == bound:
             pending = None
 
-# Firstmate's decision vocabulary in a bounded `answered:` excerpt: FIX asks for
-# the code change, while IGNORE, APPROVE, SKIP, ABORT, and DECLINE all decline
-# it. A keyword followed by a finding id in the same clause binds that finding;
-# the first keyword is the gate-wide verdict for findings the excerpt does not
-# bind. Anything else states no decision this audit can verify.
 ACTION_PATTERN = re.compile(
     r"\b(?P<action>fix(?:es|ed)?|ignore[sd]?|approve[sd]?|skip(?:ped)?|abort(?:ed)?|declin(?:e|ed|es))\b",
     re.IGNORECASE,
@@ -553,27 +548,34 @@ def decided_actions(answer, finding_ids):
     decided, explicit = {}, set()
     if not keywords:
         return decided, explicit
-    for index, match in enumerate(keywords):
-        end = keywords[index + 1].start() if index + 1 < len(keywords) else len(answer)
-        clause = answer[match.end():end]
-        action = action_of(match.group("action"))
-        for fid in finding_ids:
-            if fid in decided:
-                continue
-            if re.search(r"(?<![\w-])" + re.escape(fid) + r"(?![\w-])", clause, re.IGNORECASE):
-                decided[fid] = action
+    id_patterns = {
+        fid: r"(?<![\w-])" + re.escape(fid) + r"(?![\w-])"
+        for fid in finding_ids
+    }
+    labels = "|".join(id_patterns.values())
+    clauses = re.split(r"[;\n()]|(?=(?:" + labels + r")\s*:)", answer, flags=re.IGNORECASE)
+    for clause in clauses:
+        actions = {action_of(match.group("action")) for match in ACTION_PATTERN.finditer(clause)}
+        if not actions:
+            continue
+        value = next(iter(actions)) if len(actions) == 1 else None
+        for fid, pattern in id_patterns.items():
+            if re.search(pattern, clause, re.IGNORECASE):
+                if fid in explicit and decided[fid] != value:
+                    decided[fid] = None
+                else:
+                    decided[fid] = value
                 explicit.add(fid)
-    gate_wide = action_of(keywords[0].group("action"))
-    for fid in finding_ids:
-        decided.setdefault(fid, gate_wide)
+    actions = {action_of(match.group("action")) for match in keywords}
+    if len(actions) == 1:
+        for fid in finding_ids:
+            decided.setdefault(fid, next(iter(actions)))
     return decided, explicit
 
 
-def agrees(decided, recorded, explicit, fix_response):
+def agrees(decided, recorded):
     if decided == "fix":
-        # A fix response declines every finding it does not select, so an
-        # unnamed finding's implicit skip does not contradict the decision.
-        return recorded == "fix" or (not explicit and fix_response and recorded == "skip")
+        return recorded == "fix"
     return recorded in ("declined", "skip")
 
 
@@ -593,21 +595,23 @@ for rnd in rounds:
     if rnd in covered:
         decided, explicit = decided_actions(round_answer[rnd], [fid for fid, _, _ in round_events])
     for fid, action, _ in round_events:
+        if decided.get(fid) == "fix" and fid not in explicit and action == "skip":
+            decided[fid] = "nonfix"
         if origin != "unknown":
             if rnd not in covered:
                 missing.append((fid, rnd, action, origin))
             continue
-        verdict = (decided.get(fid), fid in explicit) if rnd in covered else decisions.get(fid)
-        if verdict is None or verdict[0] is None:
+        verdict = decided.get(fid) if rnd in covered else decisions.get(fid)
+        if verdict is None:
             if rnd in covered:
                 problems.append((fid, rnd, "unreadable", action))
             else:
                 missing.append((fid, rnd, action, origin))
-        elif not agrees(verdict[0], action, verdict[1], action != "declined"):
-            problems.append((fid, rnd, verdict[0], action))
+        elif not agrees(verdict, action):
+            problems.append((fid, rnd, verdict, action))
     if rnd in covered:
         for fid, value in decided.items():
-            decisions[fid] = (value, fid in explicit)
+            decisions[fid] = value
 
 
 def report_problems(out):
