@@ -3968,6 +3968,43 @@ test_54_pending_skips_terminal_markers
 test_55_retention_prune_completes_without_starving_the_claim
 test_56_overdue_request_reminds_once_per_cadence_until_removed
 test_57_ack_only_request_waits_for_a_live_linked_task
+
+# --- 61. a refused attachment is presented with its name and reason --------
+#
+# An attachment the staging helper refuses is recorded in skipped_attachments
+# and was never shown, so Firstmate told the captain no image was attached.
+# The drain must present every refusal where Firstmate answers the request.
+
+test_61_drain_presents_rejected_attachments() {
+  local home slug out
+  home="$TMP_ROOT/c61"
+  setup_home "$home"
+  mkdir -p "$home/cache/images"
+  printf 'IMG' > "$home/cache/images/pic.png"
+  write_text "$home/text.txt" "look at this"
+  "$PYTHON_BIN" - "$home/manifest.json" <<'PY'
+import json, sys
+json.dump([
+  {"path": "https://cdn.discordapp.com/remote.png", "media_type": "image/png", "name": "remote.png"},
+], open(sys.argv[1], "w"))
+PY
+  slug=$(home_env "$home" env HERMES_HOME="$home" "$INTAKE" \
+    --request-id "discord:${GUILD}:${CHANNEL}:${THREAD}:610000000000000001" \
+    --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$THREAD" \
+    --message-id 610000000000000001 --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" \
+    --text-file "$home/text.txt" --attachment-manifest "$home/manifest.json")
+  [ -n "$slug" ] || fail "the attachment request must be filed"
+  [ "$(jq -r '.skipped_attachments[0].reason' "$home/state/ext-inbox/$slug.json")" = uncached ] \
+    || fail "the fixture must record the remote URL as uncached"
+  out=$(home_env "$home" env -u FM_SUPERVISION_ACTOR "$DRAIN" 2>/dev/null \
+    | grep -v -E '^[0-9]{10}\s')
+  assert_contains "$out" "Rejected attachment: remote.png (reason: uncached)" \
+    "the drain must show a refused attachment with its name and reason"
+  pass "61 a refused attachment is presented in the drain with its name and reason"
+}
+
+test_61_drain_presents_rejected_attachments
 echo "all fm-ext-bridge tests passed"
 
 test_58_check_payloads_preserve_every_pending_request

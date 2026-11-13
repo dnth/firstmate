@@ -13,6 +13,13 @@ subprocesses. It keeps the loader's own ``PATH`` in front and asks the
 account's login shell for the directories it would have. A tool that still
 cannot be found is not papered over here: the script that needs it fails by name, and the plugin
 shows that name.
+
+It also carries the Hermes home this plugin was loaded for as
+``FM_EXT_HERMES_HOME``. A dedicated gateway profile caches inbound media under
+its own home while the process's ``HERMES_HOME`` still names the base Hermes
+home, so a subprocess reading ``HERMES_HOME`` alone would refuse the captain's
+own images. The home is recorded once at registration from the profile Hermes
+loaded the plugin for, never guessed from the environment here.
 """
 
 from __future__ import annotations
@@ -20,8 +27,12 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# The Hermes home this plugin was loaded for, recorded by register().
+_plugin_hermes_home: Path | None = None
 
 # The login-shell probe brackets the PATH it prints with this sentinel, so a
 # shell that also prints a banner or a greeting cannot be mistaken for one.
@@ -35,11 +46,29 @@ PROBE_TIMEOUT_SECS = 5.0
 _shell_dirs: dict[str, tuple[str, ...]] = {}
 
 
+def set_plugin_hermes_home(home) -> None:
+    """Record the Hermes home this plugin was loaded for.
+
+    register() passes the home Hermes resolved for the profile it loaded this
+    plugin into. Pass None to leave it unrecorded (standalone runs and tests),
+    which keeps a subprocess's own HERMES_HOME as the only attachment root.
+    """
+    global _plugin_hermes_home
+    _plugin_hermes_home = Path(home) if home else None
+
+
 def firstmate_env(home, root) -> dict[str, str]:
     """The environment for every Firstmate subprocess."""
     env = os.environ.copy()
     env["FM_HOME"] = str(home)
     env["FM_ROOT_OVERRIDE"] = str(root)
+    # Only a home recorded at registration may name attachment roots; an
+    # inherited value is dropped so registration stays the single authority.
+    # Unrecorded, the subprocess's own HERMES_HOME stands.
+    if _plugin_hermes_home is not None:
+        env["FM_EXT_HERMES_HOME"] = str(_plugin_hermes_home)
+    else:
+        env.pop("FM_EXT_HERMES_HOME", None)
     env["PATH"] = tool_path(base=env.get("PATH", os.defpath))
     return env
 

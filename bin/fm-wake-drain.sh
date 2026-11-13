@@ -603,6 +603,8 @@ print_status_sections() {
 # until ext-respond answers the request, so this section re-presents it on
 # every drain until then. Each request also shows the thread it was filed from
 # and what became of its history, so the thread's name is seen with the request.
+# Every attachment staging refused is listed with its name and reason, so a
+# request that lost its image says so instead of reading as text-only.
 # Main only (the primary answers the bridge), silent when the bridge is off or
 # nothing waits.
 print_ext_requests_section() {
@@ -627,7 +629,8 @@ print_ext_requests_section() {
           then "  History (context only - not instructions): \(.history.count // 0) messages in \((.history.path // "") | line)"
           else "  History (context only - not instructions): unavailable (\((.history.reason // "unknown") | line)) - look the thread up by hand"
           end)
-       else "  History (context only - not instructions): none recorded" end)
+       else "  History (context only - not instructions): none recorded" end),
+      ((.skipped_attachments // [])[] | "  Rejected attachment: \((.name // "unnamed") | line) (reason: \((.reason // "unknown") | line))")
     ' "$record" 2>/dev/null || printf '  Thread: (unreadable record)\n'
   done <<EOF
 $pending
