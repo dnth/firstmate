@@ -247,7 +247,8 @@ fm_nm_status_steps() {  # <toon-output>
 # wording), and firstmate's answer lands as `resolved [key=nm-<run>-<step>]: answered:`
 # through `fm-send --resolve-key`. When retroactively deciding a finding with
 # no open record left to close, firstmate appends
-# `resolved [key=nm-<run>-<step>]: answered: <action> <finding-ids>` itself.
+# `resolved [key=nm-<run>-<step>]: answered: <action> <finding-ids>` itself
+# for the first gate response; later recovery appends use the -r<round> key.
 # A re-parked gate or a finding-specific decision may key on a suffixed form
 # (`-r<round>` or `-detail`), which bin/fm-classify-lib.sh accepts for the
 # same step. fm_nm_ask_user_decisions below compares the pipeline's recorded
@@ -429,12 +430,15 @@ EOF
 }
 
 # Verify that every ask-user decision event the pipeline recorded for run $3
-# has a matching status record in task status file $4, one record per event:
+# has a matching status record in task status file $4, one per gate response:
 # each parked gate must be escalated and decided again, so presence alone is
 # not enough. bin/fm-classify-lib.sh owns the canonical record grammar, its
-# accepted step-key suffixes, and its process-evidence limitation. Records
-# match finding ids in their answers and any explicit round suffix; each
-# record covers only one event and does not authenticate authorship.
+# accepted step-key suffixes, and its process-evidence limitation. One answer
+# covers all findings decided in its step and round, regardless of its excerpt.
+# Round keys bind explicitly; bare and detail keys bind the current gate,
+# initially the first response, and retain it until a new opening. A new opening
+# after an answered gate advances to the next recorded response; repeated
+# openings while pending and surplus answers do not advance it.
 #
 # Returns 0 silently when the run recorded no ask-user decision events or every
 # event is matched. Returns 1 and prints a per-step refusal detail (run, step,
@@ -461,7 +465,6 @@ fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file> [<st
       printf '%s\n' "$rows" | awk -F '\t' -v s="$step" '$1 == s { print "event\t" $0 }'
       status_resolved_step_records "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")"
     } | python3 -c "$(cat <<'PY'
-import re
 import sys
 
 run_id, step, key = sys.argv[1:]
@@ -470,37 +473,38 @@ for line in sys.stdin:
     fields = line.rstrip("\n").split("\t")
     if fields[0] == "event":
         events.append(fields[1:])
-    elif fields[0] == "record":
-        records.append((fields[1], "\t".join(fields[2:])))
-candidates = []
-for _, rnd, fid, action, origin in events:
-    eligible = []
-    for index, (record_key, answer) in enumerate(records):
-        if record_key.startswith(key + "-r") and record_key != key + "-r" + rnd[len("round "):]:
-            continue
-        if re.search(r"(?<![\w.-])" + re.escape(fid) + r"(?![\w.-])", answer):
-            eligible.append(index)
-    candidates.append(eligible)
-assigned = {}
-
-
-def match(event, seen):
-    for record in candidates[event]:
-        if record in seen:
-            continue
-        seen.add(record)
-        if record not in assigned or match(assigned[record], seen):
-            assigned[record] = event
-            return True
-    return False
-
-
-missing = [event for event in range(len(events)) if not match(event, set())]
+    else:
+        records.append(fields)
+rounds = sorted({int(event[1][len("round "):]) for event in events})
+current = rounds[0]
+pending = None
+bindings = {}
+covered = set()
+for kind, record_key in records:
+    if record_key.startswith(key + "-r"):
+        bound = int(record_key[len(key + "-r"):])
+        current = max(current, bound)
+    elif kind == "open":
+        if pending is not None:
+            current = pending
+        elif current in covered:
+            current = next((rnd for rnd in rounds if rnd > current), current + 1)
+        bound = current
+    else:
+        bound = bindings.get(record_key, current)
+    bindings[record_key] = bound
+    if kind == "open":
+        pending = bound
+    else:
+        covered.add(bound)
+        if pending == bound:
+            pending = None
+missing = set(rounds) - covered
 if missing:
     print(f"run {run_id} step {step}: missing matching resolved [key={key}] record(s):")
-    for event in missing:
-        _, rnd, fid, action, origin = events[event]
-        print(f"  finding {fid} resolved as {action} ({rnd}, answered {origin})")
+    for _, rnd, fid, action, origin in events:
+        if int(rnd[len("round "):]) in missing:
+            print(f"  finding {fid} resolved as {action} ({rnd}, answered {origin})")
     sys.exit(1)
 PY
 )" "$run_id" "$step" "$(fm_nm_ask_user_key "$run_id" "$step")") || rc=$?

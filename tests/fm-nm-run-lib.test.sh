@@ -160,32 +160,78 @@ test_suffixed_firstmate_keys_cover_their_events() {
   rc=$?
   expect_code 1 "$rc" "overlapping R1 records covered the worker decision for R2"
   assert_contains "$out" "finding R2" "overlap refusal did not name the unmatched finding"
-  printf '%s\n' 'resolved [key=nm-01TEST-review-detail]: answered: approve R2' >> "$tmp/status"
+  printf '%s\n' \
+    'needs-decision [key=nm-01TEST-review-detail]: next gate' \
+    'resolved [key=nm-01TEST-review-detail]: answered: approve R2' >> "$tmp/status"
   decisions "$tmp/status" >/dev/null || fail "suffix-keyed firstmate decisions did not cover their events"
   rm -rf "$tmp"
   FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
   pass "decision events match bare, -r<N>, and -detail firstmate records, one record each"
 }
 
-test_each_finding_and_round_needs_its_own_record() {
-  local tmp rc
+test_grouped_findings_share_one_gate_response_record() {
+  local tmp
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
   FM_TEST_ROUNDS_JSON='{"schema_version":1,"rounds":[{"round":30,"selection_source":"user_declined","response_origin":"interactive","findings":[{"id":"R1","action":"ask-user"},{"id":"R2","action":"ask-user"}]},{"round":31,"selection_source":"user_declined","response_origin":"interactive","findings":[{"id":"R1","action":"ask-user"}]}]}'
   write_status "$tmp/status" \
     'resolved [key=nm-01TEST-review-r30]: answered: approve R1 R2' \
     'resolved [key=nm-01TEST-review-r31]: answered: approve R1'
-  decisions "$tmp/status" >/dev/null
-  rc=$?
-  expect_code 1 "$rc" "one round-30 record covered two findings"
-  printf '%s\n' 'resolved [key=nm-01TEST-review-r31]: answered: approve R2' >> "$tmp/status"
-  decisions "$tmp/status" >/dev/null
-  rc=$?
-  expect_code 1 "$rc" "a record for the wrong round covered R2"
-  printf '%s\n' 'resolved [key=nm-01TEST-review-r30]: answered: approve R2' >> "$tmp/status"
-  decisions "$tmp/status" >/dev/null || fail "distinct finding and round records did not pass"
+  decisions "$tmp/status" >/dev/null || fail "one grouped firstmate approval did not cover its gate response"
+  write_status "$tmp/status" \
+    'resolved [key=nm-01TEST-review-r30]: answered: a bounded answer excerpt [truncated]' \
+    'resolved [key=nm-01TEST-review-r31]: answered: another bounded excerpt [truncated]'
+  decisions "$tmp/status" >/dev/null || fail "truncated finding IDs invalidated firstmate authority"
   rm -rf "$tmp"
   FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
-  pass "every finding and round requires a distinct matching decision record"
+  pass "one answer covers grouped findings without requiring IDs in bounded excerpts"
+}
+
+test_surplus_records_stay_bound_when_finding_ids_repeat() {
+  local tmp out rc key
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_ROUNDS_JSON=${ROUNDS_TWO_DECISIONS/\"id\":\"R2\"/\"id\":\"R1\"}
+  for key in review review-detail; do
+    write_status "$tmp/status" \
+      "resolved [key=nm-01TEST-$key]: answered: fix R1" \
+      'resolved [key=nm-01TEST-review-r30]: answered: fix R1' \
+      "resolved [key=nm-01TEST-$key]: answered: fix R1"
+    out=$(decisions "$tmp/status")
+    rc=$?
+    expect_code 1 "$rc" "surplus $key records migrated to a later repeated finding"
+    assert_contains "$out" 'round 31' "refusal did not name the unmatched gate occurrence"
+    assert_contains "$out" 'finding R1' "refusal did not name the repeated finding"
+    printf '%s\n' 'resolved [key=nm-01TEST-review-r32]: answered: approve' >> "$tmp/status"
+    decisions "$tmp/status" >/dev/null && fail "a wrong-round answer covered round 31"
+    printf '%s\n' 'resolved [key=nm-01TEST-review-r31]: answered: approve' >> "$tmp/status"
+    decisions "$tmp/status" >/dev/null || fail "a recovery append bound to round 31 was refused"
+  done
+  rm -rf "$tmp"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "bare and detail surplus records cannot authorize a repeated finding in a later round"
+}
+
+test_reopened_keys_bind_new_gate_occurrences() {
+  local tmp opening
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_ROUNDS_JSON=$ROUNDS_TWO_DECISIONS
+  for opening in \
+    'needs-decision [key=nm-01TEST-review]: next gate' \
+    'blocked: [key=nm-01TEST-review] next gate' \
+    'needs-decision [corr=test] [key=nm-01TEST-review]: next gate'; do
+    write_status "$tmp/status" \
+      'resolved [key=nm-01TEST-review]: answered: first answer' \
+      "$opening" "$opening" \
+      'resolved [key=nm-01TEST-review]: answered: second answer'
+    decisions "$tmp/status" >/dev/null || fail "a reopened bare key did not authorize its next gate response"
+  done
+  write_status "$tmp/status" \
+    'resolved [key=nm-01TEST-review]: answered: first answer' \
+    'needs-decision [key=nm-01TEST-review-r31]: next gate' \
+    'resolved [key=nm-01TEST-review-detail]: answered: second answer'
+  decisions "$tmp/status" >/dev/null || fail "a detail answer did not bind to the explicitly opened round"
+  rm -rf "$tmp"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "reopened bare keys and detail aliases bind to their gate occurrence"
 }
 
 test_large_rounds_document_is_read_without_environment_limits() {
@@ -244,7 +290,9 @@ test_unregistered_checks_and_failures_are_not_ready
 test_no_recognized_marker_is_unknown
 test_decision_events_carry_step_round_finding_origin
 test_suffixed_firstmate_keys_cover_their_events
-test_each_finding_and_round_needs_its_own_record
+test_grouped_findings_share_one_gate_response_record
+test_surplus_records_stay_bound_when_finding_ids_repeat
+test_reopened_keys_bind_new_gate_occurrences
 test_large_rounds_document_is_read_without_environment_limits
 test_unreadable_or_originless_rounds_refuse_naming_what_is_missing
 

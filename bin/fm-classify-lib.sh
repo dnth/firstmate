@@ -697,19 +697,21 @@ EOF
   printf '%s\n' "$count"
 }
 
-# Emit canonical decision records as TAB-separated record, key, answer rows.
+# Emit step gate openings and canonical answers as TAB-separated kind, key rows.
 # Accept the step key, its round suffix, and its finding-specific detail suffix.
 # This is process evidence, not tamper-proof provenance; same-user forgery risk is accepted.
 status_resolved_step_records() {  # <status-file> <key>
-  local f=$1 want=$2 line key
+  local f=$1 want=$2 line key kind verb
   { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      "resolved [key="*"]: answered: "*) ;;
-      *) continue ;;
+      "resolved [key="*"]: answered: "*) kind=record ;;
+      *)
+        verb=$(status_line_verb "$line")
+        case "$verb" in needs-decision|blocked) kind=open ;; *) continue ;; esac
+        ;;
     esac
-    key=${line#resolved \[key=}
-    key=${key%%\]*}
+    key=$(_fm_decision_key "$line") || continue
     case "$key" in
       "$want"|"$want"-detail) ;;
       "$want"-r*)
@@ -717,7 +719,7 @@ status_resolved_step_records() {  # <status-file> <key>
         ;;
       *) continue ;;
     esac
-    printf 'record\t%s\t%s\n' "$key" "${line#*: answered: }"
+    printf '%s\t%s\n' "$kind" "$key"
   done < "$f"
 }
 

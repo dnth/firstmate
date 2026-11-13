@@ -341,7 +341,7 @@ test_round_suffixed_decision_keys_count_per_event() {
   expect_code 1 "$PR_RC" "overlapping R1 records covered the worker decision for R2"
   assert_contains "$PR_OUT" "finding R2" "overlap refusal did not name the unmatched finding"
   assert_not_armed "$id" "overlapping decision records"
-  printf 'resolved [key=nm-RUN-suffix-review-detail]: answered: approve R2\n' >> "$HOME_DIR/state/$id.status"
+  printf 'needs-decision [key=nm-RUN-suffix-review-detail]: next gate\nresolved [key=nm-RUN-suffix-review-detail]: answered: approve R2\n' >> "$HOME_DIR/state/$id.status"
   FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
   expect_code 0 "$PR_RC" "suffix-keyed firstmate decisions did not cover their decision events: $PR_OUT"
   assert_grep "nm_run_id=RUN-suffix" "$HOME_DIR/state/$id.meta" "suffix-decided run was not recorded"
@@ -384,21 +384,23 @@ test_crew_state_agrees_with_pr_ready_decision_gate() {
   receipt "$id" AC2
   head=$(git -C "$wt" rev-parse HEAD)
   seed_run RUN-agree "$head" "$url"
-  seed_rounds RUN-agree review "$(ask_round 1 interactive user_declined '[]' "$ASK_LINT")"
+  seed_rounds RUN-agree review \
+    "$(ask_round 30 interactive user '["R1"]' "$ASK_FIX"),$(ask_round 31 interactive user_declined '[]' "$ASK_FIX")"
   rounds="$ROUNDS_ROOT/RUN-agree"
   status=$(nm_status RUN-agree "fm/$id" "$head" completed passed "$url")
   # The done report can only reach the decision audit once PR registration is
   # present, so the fixture records the accepted PR as a live done would.
   printf 'pr=%s\n' "$url" >> "$HOME_DIR/state/$id.meta"
-  printf 'done: PR %s checks green\n' "$url" > "$HOME_DIR/state/$id.status"
+  printf 'done: PR %s checks green\nresolved [key=nm-RUN-agree-review]: answered: fix R1\nresolved [key=nm-RUN-agree-review-r30]: answered: fix R1\n' "$url" > "$HOME_DIR/state/$id.status"
   FM_FAKE_GH_HEAD=$head FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
-  expect_code 1 "$PR_RC" "PR-ready accepted a worker-answered decision"
+  expect_code 1 "$PR_RC" "PR-ready accepted a repeated finding using surplus authority records"
+  assert_contains "$PR_OUT" "round 31" "PR-ready did not name the unmatched occurrence"
   crew=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_NM_STATUS="$status" \
     FM_FAKE_NM_ROUNDS_DIR=$rounds "$ROOT/bin/fm-crew-state.sh" "$id" 2>&1)
   assert_contains "$crew" "state: parked" "crew-state accepted a worker-answered decision"
   assert_contains "$crew" "source: decision-gate" "crew-state did not name the decision gate"
   assert_contains "$crew" "RUN-agree" "crew-state refusal did not name the run"
-  printf 'resolved [key=nm-RUN-agree-review]: answered: approve lint-1\n' >> "$HOME_DIR/state/$id.status"
+  printf 'resolved [key=nm-RUN-agree-review-r31]: answered: a bounded approval excerpt [truncated]\n' >> "$HOME_DIR/state/$id.status"
   FM_FAKE_GH_HEAD=$head FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
   expect_code 0 "$PR_RC" "PR-ready refused a firstmate-decided run: $PR_OUT"
   crew=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_NM_STATUS="$status" \

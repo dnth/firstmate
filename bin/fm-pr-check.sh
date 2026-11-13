@@ -199,7 +199,7 @@ if [ "$ALREADY_REGISTERED" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" = no-mista
     if [ "$ASK_USER_RC" -eq 1 ]; then
       echo "error: No-Mistakes run $NM_RUN_ID resolved ask-user findings without matching firstmate decisions" >&2
       printf '%s\n' "$ASK_USER_REPORT" >&2
-      echo "error: firstmate must record one resolved [key=nm-$NM_RUN_ID-<step>] line naming the finding per recorded decision event in state/$ID.status (a -r<round> suffix binds that round; -detail also counts)" >&2
+      echo "error: firstmate must record one resolved [key=nm-$NM_RUN_ID-<step>] line per gate response in state/$ID.status (use -r<round> for later recovery appends; bare and -detail keys follow gate openings)" >&2
     else
       echo "error: No-Mistakes run $NM_RUN_ID ask-user decision evidence could not be read" >&2
       [ -z "$ASK_USER_REPORT" ] || printf '%s\n' "$ASK_USER_REPORT" >&2
