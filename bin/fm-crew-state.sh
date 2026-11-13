@@ -97,7 +97,7 @@ SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local state=$1 source=$2 detail=${3:-} gate_detail line mode pr audit_run audit_rc
+  local state=$1 source=$2 detail=${3:-} gate_detail line mode pr audit_run audit_rc audit_status audit_out audit_reason
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
     if ! fm_worktree_is_clean "${WT:-}"; then
       state=parked
@@ -154,16 +154,22 @@ emit() {  # <state> <source> [detail]
       audit_run=$(strip_quotes "$(nm_field id)")
     fi
     if [ -n "$audit_run" ]; then
+      audit_status=
+      if [ "${HAVE_RUN:-0}" = 1 ] && [ "${RUN_SOURCE:-}" = full ] \
+        && [ "$(strip_quotes "$(nm_field id)")" = "$audit_run" ]; then
+        audit_status=$RUN_OUT
+      fi
       audit_rc=0
-      fm_nm_ask_user_decisions "$WT" "$NM_TIMEOUT" "$audit_run" "$LOG" >/dev/null || audit_rc=$?
+      audit_out=$(fm_nm_ask_user_decisions "$WT" "$NM_TIMEOUT" "$audit_run" "$LOG" "$audit_status") || audit_rc=$?
       if [ "$audit_rc" -eq 1 ]; then
         state=parked
         source=decision-gate
         detail="run $audit_run resolved ask-user findings without matching firstmate decisions"
       elif [ "$audit_rc" -ne 0 ]; then
+        audit_reason=${audit_out%%$'\n'*}
         state=parked
         source=decision-gate
-        detail="run $audit_run ask-user decision evidence could not be read"
+        detail="run $audit_run ask-user decision evidence could not be read${audit_reason:+: $audit_reason}"
       fi
     fi
   fi

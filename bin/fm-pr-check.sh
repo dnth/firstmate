@@ -18,9 +18,9 @@
 # head, and the run must be passed or CI-green (fm_nm_run_is_pr_ready). That
 # run id is recorded as nm_run_id=<id>; the decision-evidence audit owned by
 # bin/fm-nm-run-lib.sh then runs against it as that guarantee's single
-# PR-ready owner, and unreadable run data or insufficient decision records
-# refuse registration. Nothing here reconstructs what the pipeline validated
-# from the worker's object store.
+# PR-ready owner. Its `axi rounds --json` audit refuses registration naming
+# missing firstmate decisions or unreadable pipeline decision evidence;
+# bin/fm-nm-run-lib.sh owns origin requirements and gate-response matching.
 # Re-registering the recorded pr= URL refreshes pr_head= and re-arms the poll
 # without re-running the evidence and run-identity handoff gates, provided a
 # no-mistakes ship also has nm_run_id= recorded. Ship re-registration still
@@ -191,15 +191,16 @@ if [ "$ALREADY_REGISTERED" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" = no-mista
   fm_nm_run_is_pr_ready "$WT" "$NM_TIMEOUT" "$NM_OUT" "$NM_RUN_ID" \
     || { echo "error: No-Mistakes run $NM_RUN_ID is neither passed nor CI-green" >&2; exit 1; }
   ASK_USER_RC=0
-  ASK_USER_REPORT=$(fm_nm_ask_user_decisions "$WT" "$NM_TIMEOUT" "$NM_RUN_ID" "$STATE/$ID.status") \
+  ASK_USER_REPORT=$(fm_nm_ask_user_decisions "$WT" "$NM_TIMEOUT" "$NM_RUN_ID" "$STATE/$ID.status" "$NM_OUT") \
     || ASK_USER_RC=$?
   if [ "$ASK_USER_RC" -ne 0 ]; then
     if [ "$ASK_USER_RC" -eq 1 ]; then
       echo "error: No-Mistakes run $NM_RUN_ID resolved ask-user findings without matching firstmate decisions" >&2
       printf '%s\n' "$ASK_USER_REPORT" >&2
-      echo "error: firstmate must record one resolved [key=nm-$NM_RUN_ID-<step>] line per decision event in state/$ID.status" >&2
+      echo "error: firstmate must record one resolved [key=nm-$NM_RUN_ID-<step>] line per gate response in state/$ID.status (use -r<round> for later recovery appends; bare and -detail keys follow gate openings)" >&2
     else
       echo "error: No-Mistakes run $NM_RUN_ID ask-user decision evidence could not be read" >&2
+      [ -z "$ASK_USER_REPORT" ] || printf '%s\n' "$ASK_USER_REPORT" >&2
     fi
     exit 1
   fi

@@ -697,22 +697,34 @@ EOF
   printf '%s\n' "$count"
 }
 
-# Count canonical `resolved [key=<key>]: answered:` records from fm-send.
+# Emit step gate openings and canonical answers as TAB-separated kind, key rows.
+# Accept the step key, its round suffix, and its finding-specific detail suffix.
 # This is process evidence, not tamper-proof provenance; same-user forgery risk is accepted.
-# Each recorded gate response requires its own matching status record.
-status_resolved_key_count() {  # <status-file> <key>
-  local f=$1 want=$2 line count=0
-  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || { printf '0\n'; return 0; }
+status_resolved_step_records() {  # <status-file> <key>
+  local f=$1 want=$2 line key kind verb
+  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      "resolved [key=$want]: answered: "*) count=$((count + 1)) ;;
+      "resolved [key="*"]: answered: "*) kind=record ;;
+      *)
+        verb=$(status_line_verb "$line")
+        case "$verb" in needs-decision|blocked) kind=open ;; *) continue ;; esac
+        ;;
     esac
+    key=$(_fm_decision_key "$line") || continue
+    case "$key" in
+      "$want"|"$want"-detail) ;;
+      "$want"-r*)
+        case "${key#"$want"-r}" in ''|*[!0-9]*) continue ;; esac
+        ;;
+      *) continue ;;
+    esac
+    printf '%s\t%s\n' "$kind" "$key"
   done < "$f"
-  printf '%s\n' "$count"
 }
 
 # The answer excerpt of the newest canonical `resolved [key=<key>]: answered:`
-# record from fm-send, or nothing when the key has none. Like the count above,
+# record from fm-send, or nothing when the key has none. Like the records above,
 # this reads process evidence of what was sent, not tamper-proof provenance.
 status_resolved_key_answer() {  # <status-file> <key>
   local f=$1 want=$2 line answer=''

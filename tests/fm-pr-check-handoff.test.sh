@@ -38,7 +38,27 @@ cat > "$FAKEBIN/no-mistakes" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$NM_CALL_LOG"
 [ "\${FM_FAKE_NM_DOWN:-0}" = 0 ] || exit 1
+# The 'axi rounds --json' call serves one recorded step document. Default: a
+# well-formed empty-rounds document (the shape the real CLI always returns for
+# a real step), so a run with no ask-user decision needs no fixture. The
+# decision-audit cases override it with FM_FAKE_NM_ROUNDS_DIR, raw bytes, or a
+# forced failure.
+step=
+prev=
+for a in "\$@"; do
+  [ "\$prev" = --step ] && step=\$a
+  prev=\$a
+done
 case "\$*" in
+  *"axi rounds"*)
+    [ "\${FM_FAKE_NM_ROUNDS_DOWN:-0}" = 0 ] || exit 1
+    if [ -n "\${FM_FAKE_NM_ROUNDS_RAW:-}" ]; then printf '%s\n' "\$FM_FAKE_NM_ROUNDS_RAW"; exit 0; fi
+    if [ -n "\${FM_FAKE_NM_ROUNDS_DIR:-}" ] && [ -f "\$FM_FAKE_NM_ROUNDS_DIR/\$step.json" ]; then
+      cat "\$FM_FAKE_NM_ROUNDS_DIR/\$step.json"
+    else
+      printf '{"schema_version":1,"run_id":"","step":"%s","rounds":[{"round":1,"trigger":"initial","summary":null,"findings":null,"selected_finding_ids":null,"selection_source":null,"response_origin":"unknown","user_findings":null,"fix_summary":null,"duration_ms":1,"created_at":1}]}\n' "\$step"
+    fi
+    ;;
   *"axi logs --step ci"*) printf '%s\n' "\${FM_FAKE_NM_CI_LOG:-}" ;;
   *) printf '%s\n' "\${FM_FAKE_NM_STATUS:-}" ;;
 esac
@@ -92,6 +112,7 @@ if db.execute("SELECT 1 FROM runs WHERE id = ?", (sys.argv[2],)).fetchone() and 
 db.commit()
 PYDB
   printf 'run:\n  id: "%s"\n  branch: %s\n  status: %s\n  head: %s\n  head_sha: %s\n' "$1" "$2" "$4" "${3:0:8}" "$3"
+  printf '  steps[1]{step,status,findings,duration_ms}:\n    review,completed,1,1\n'
   [ -z "${6:-}" ] || printf '  pr: "%s"\n' "$6"
   [ -z "${5:-}" ] || printf 'outcome: %s\n' "$5"
 }
@@ -232,53 +253,160 @@ test_wrong_or_foreign_runs_are_refused() {
   pass "runs on another branch or PR, foreign heads, failed, unfinished, or unobservable runs never arm"
 }
 
-seed_ask_user_run() {  # <run-id>
-  nm_db "
-    INSERT INTO runs (id) VALUES ('$1');
-    INSERT INTO step_results (id, run_id, step_name, step_order, status, findings_json)
-    VALUES ('sr-$1', '$1', 'review', 3, 'completed',
-      '{\"findings\":[{\"id\":\"R9\",\"action\":\"ask-user\",\"severity\":\"error\"}]}');
-    INSERT INTO step_rounds (id, step_result_id, round, selection_source, selected_finding_ids, findings_json)
-    VALUES ('sr-$1-1', 'sr-$1', 1, 'user_declined', '[]',
-      '{\"findings\":[{\"id\":\"R9\",\"action\":\"ask-user\"}]}');
-  " || fail "ask-user fixture seeding failed"
+ROUNDS_ROOT="$TMP_ROOT/rounds"
+
+# A real-shaped `axi rounds --json` document for one step, written where the
+# fake CLI serves it (see the fixture note in the fake's header). The shape
+# mirrors a captured document from a finished run: versioned envelope, one
+# object per round carrying findings, user_findings, selected_finding_ids,
+# selection_source, and response_origin.
+seed_rounds() {  # <run-id> <step> <rounds-array-json>
+  mkdir -p "$ROUNDS_ROOT/$1"
+  printf '{"schema_version":1,"run_id":"%s","step":"%s","rounds":[%s]}\n' "$1" "$2" "$3" \
+    > "$ROUNDS_ROOT/$1/$2.json"
 }
+
+# The local run record that bin/fm-pipeline-verify.py matches the PR body's
+# Pipeline attestation against (head_sha, PR URL, and step names). It is
+# unrelated to the decision audit, which reads the pipeline's rounds record.
+seed_run() {  # <run-id> <head> <url>
+  nm_db "
+    INSERT OR REPLACE INTO runs (id, head_sha, pr_url) VALUES ('$1', '$2', '$3');
+    INSERT INTO step_results (id, run_id, step_name, step_order, status, findings_json)
+    VALUES ('sr-$1', '$1', 'review', 1, 'completed', '{}');
+  " || fail "run record fixture seeding failed"
+}
+
+# One recorded gate-response round in the document's field order.
+# <round> <response-origin> <selection-source> <selected-ids-json> <findings-json>
+ask_round() {
+  printf '{"round":%s,"trigger":"initial","summary":null,"findings":%s,"selected_finding_ids":%s,"selection_source":"%s","response_origin":"%s","user_findings":null,"fix_summary":null,"duration_ms":10,"created_at":1}' \
+    "$1" "$5" "$4" "$3" "$2"
+}
+
+# Findings whose stored action is empty default to ask-user in the pipeline
+# (ActionOrDefault), so an empty action is the realistic gate shape.
+ASK_LINT='[{"action":"","description":"linter found issues","id":"lint-1","severity":"warning"}]'
+ASK_FIX='[{"action":"","description":"changed behavior without a test","id":"R1","severity":"error"}]'
+ASK_DOC='[{"action":"","description":"documented unsupported behavior","id":"R2","severity":"warning"}]'
 
 test_pr_ready_requires_firstmate_decisions_for_ask_user_findings() {
-  local id=nmask url=https://github.com/o/r/pull/15 status
+  local id=nmask url=https://github.com/o/r/pull/15 status rounds
   make_task "$id" no-mistakes >/dev/null
   receipt "$id" AC1
   receipt "$id" AC2
-  seed_ask_user_run RUN-ask
+  seed_run RUN-ask "$HEAD_A" "$url"
+  seed_rounds RUN-ask review "$(ask_round 1 interactive user_declined '[]' "$ASK_LINT")"
+  rounds="$ROUNDS_ROOT/RUN-ask"
   status=$(nm_status RUN-ask "fm/$id" "$HEAD_A" completed passed "$url")
-  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" run_pr_check "$id" "$url"
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
   expect_code 1 "$PR_RC" "a worker-answered ask-user finding reached PR-ready"
-  assert_contains "$PR_OUT" "finding R9 resolved as approve" "refusal did not name the finding and action"
+  assert_contains "$PR_OUT" "run RUN-ask" "refusal did not name the run"
+  assert_contains "$PR_OUT" "step review" "refusal did not name the step"
+  assert_contains "$PR_OUT" "finding lint-1" "refusal did not name the finding"
+  assert_contains "$PR_OUT" "interactive" "refusal did not name who answered the gate"
   assert_contains "$PR_OUT" "resolved [key=nm-RUN-ask-review]" "refusal did not name the missing decision key"
   assert_not_armed "$id" "undecided ask-user"
-  printf 'resolved [key=nm-RUN-ask-review]: decided: approve R9\n' >> "$HOME_DIR/state/$id.status"
-  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" run_pr_check "$id" "$url"
+  printf 'resolved [key=nm-RUN-ask-review]: decided: approve lint-1\n' >> "$HOME_DIR/state/$id.status"
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
   expect_code 1 "$PR_RC" "a noncanonical decision record was counted"
-  printf 'resolved [key=nm-RUN-ask-review]: answered: approve R9\n' >> "$HOME_DIR/state/$id.status"
-  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" run_pr_check "$id" "$url"
+  printf 'resolved [key=nm-RUN-ask-review]: answered: approve lint-1\n' >> "$HOME_DIR/state/$id.status"
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
   expect_code 0 "$PR_RC" "a firstmate-decided finding was still refused: $PR_OUT"
   assert_grep "nm_run_id=RUN-ask" "$HOME_DIR/state/$id.meta" "decided run was not recorded"
-  pass "PR-ready refuses a self-answered ask-user finding until a firstmate decision record exists"
+  pass "PR-ready refuses a worker-answered ask-user decision until a firstmate decision record exists"
 }
 
-test_unreadable_decision_data_fails_closed() {
-  local id=nmunread url=https://github.com/o/r/pull/16 status empty
+test_round_suffixed_decision_keys_count_per_event() {
+  local id=nmsuffix url=https://github.com/o/r/pull/17 status rounds
   make_task "$id" no-mistakes >/dev/null
   receipt "$id" AC1
   receipt "$id" AC2
-  empty="$TMP_ROOT/nm-empty"
-  mkdir -p "$empty"
+  seed_run RUN-suffix "$HEAD_A" "$url"
+  seed_rounds RUN-suffix review \
+    "$(ask_round 30 interactive user '["R1"]' "$ASK_FIX"),$(ask_round 31 interactive user_declined '[]' "$ASK_DOC")"
+  rounds="$ROUNDS_ROOT/RUN-suffix"
+  status=$(nm_status RUN-suffix "fm/$id" "$HEAD_A" completed passed "$url")
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
+  expect_code 1 "$PR_RC" "two worker-answered decisions reached PR-ready with no decision records"
+  assert_not_armed "$id" "undecided round-suffixed"
+  # One bare-key record covers one of the two decision events, never both.
+  printf 'resolved [key=nm-RUN-suffix-review]: answered: fix R1\n' >> "$HOME_DIR/state/$id.status"
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
+  expect_code 1 "$PR_RC" "one bare-key record covered two recorded decision events"
+  # The remaining decisions are recorded under their round and detail suffixes;
+  # the old bare-key count ignored both forms.
+  printf 'resolved [key=nm-RUN-suffix-review-r30]: answered: fix R1\n' >> "$HOME_DIR/state/$id.status"
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
+  expect_code 1 "$PR_RC" "overlapping R1 records covered the worker decision for R2"
+  assert_contains "$PR_OUT" "finding R2" "overlap refusal did not name the unmatched finding"
+  assert_not_armed "$id" "overlapping decision records"
+  printf 'needs-decision [key=nm-RUN-suffix-review-detail]: next gate\nresolved [key=nm-RUN-suffix-review-detail]: answered: approve R2\n' >> "$HOME_DIR/state/$id.status"
+  FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
+  expect_code 0 "$PR_RC" "suffix-keyed firstmate decisions did not cover their decision events: $PR_OUT"
+  assert_grep "nm_run_id=RUN-suffix" "$HOME_DIR/state/$id.meta" "suffix-decided run was not recorded"
+  pass "decision events match bare, -r<N>, and -detail firstmate records"
+}
+
+test_unreadable_or_originless_decision_data_fails_closed() {
+  local id=nmunread url=https://github.com/o/r/pull/16 status rounds variant originless
+  make_task "$id" no-mistakes >/dev/null
+  receipt "$id" AC1
+  receipt "$id" AC2
   status=$(nm_status RUN-unread "fm/$id" "$HEAD_A" completed passed "$url")
-  NM_HOME="$empty" FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" run_pr_check "$id" "$url"
-  expect_code 1 "$PR_RC" "unreadable decision data armed the poll"
-  assert_contains "$PR_OUT" "decision evidence could not be read" "unreadable refusal did not name the requirement"
-  assert_not_armed "$id" "unreadable decisions"
-  pass "unreadable No-Mistakes decision data refuses PR-ready with its own reason"
+  originless=$(ask_round 1 interactive user_declined '[]' "$ASK_LINT")
+  originless=${originless/,\"response_origin\":\"interactive\"/}
+  seed_rounds RUN-unread review "$originless"
+  rounds="$ROUNDS_ROOT/RUN-unread"
+  for variant in rounds-down unparseable originless; do
+    case "$variant" in
+      rounds-down) FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DOWN=1 \
+          run_pr_check "$id" "$url" ;;
+      unparseable) FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_RAW='not json' \
+          run_pr_check "$id" "$url" ;;
+      originless) FM_FAKE_GH_HEAD=$HEAD_A FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds \
+          run_pr_check "$id" "$url" ;;
+    esac
+    expect_code 1 "$PR_RC" "$variant decision data armed the poll"
+    assert_contains "$PR_OUT" "decision evidence could not be read" "$variant refusal did not name the requirement"
+    assert_contains "$PR_OUT" "RUN-unread" "$variant refusal did not name the run"
+    assert_contains "$PR_OUT" "review" "$variant refusal did not name the step"
+    assert_not_armed "$id" "$variant"
+  done
+  assert_contains "$PR_OUT" "response_origin" "origin-less refusal did not name the missing field"
+  pass "missing, unparseable, and origin-less rounds output refuses PR-ready naming what is missing"
+}
+
+test_crew_state_agrees_with_pr_ready_decision_gate() {
+  local id=nmagree url=https://github.com/o/r/pull/18 status rounds wt head crew
+  wt=$(make_task "$id" no-mistakes)
+  receipt "$id" AC1
+  receipt "$id" AC2
+  head=$(git -C "$wt" rev-parse HEAD)
+  seed_run RUN-agree "$head" "$url"
+  seed_rounds RUN-agree review \
+    "$(ask_round 30 interactive user '["R1"]' "$ASK_FIX"),$(ask_round 31 interactive user_declined '[]' "$ASK_FIX")"
+  rounds="$ROUNDS_ROOT/RUN-agree"
+  status=$(nm_status RUN-agree "fm/$id" "$head" completed passed "$url")
+  # The done report can only reach the decision audit once PR registration is
+  # present, so the fixture records the accepted PR as a live done would.
+  printf 'pr=%s\n' "$url" >> "$HOME_DIR/state/$id.meta"
+  printf 'done: PR %s checks green\nresolved [key=nm-RUN-agree-review]: answered: fix R1\nresolved [key=nm-RUN-agree-review-r30]: answered: fix R1\n' "$url" > "$HOME_DIR/state/$id.status"
+  FM_FAKE_GH_HEAD=$head FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
+  expect_code 1 "$PR_RC" "PR-ready accepted a repeated finding using surplus authority records"
+  assert_contains "$PR_OUT" "round 31" "PR-ready did not name the unmatched occurrence"
+  crew=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_NM_STATUS="$status" \
+    FM_FAKE_NM_ROUNDS_DIR=$rounds "$ROOT/bin/fm-crew-state.sh" "$id" 2>&1)
+  assert_contains "$crew" "state: parked" "crew-state accepted a worker-answered decision"
+  assert_contains "$crew" "source: decision-gate" "crew-state did not name the decision gate"
+  assert_contains "$crew" "RUN-agree" "crew-state refusal did not name the run"
+  printf 'done: PR %s checks green\nresolved [key=nm-RUN-agree-review-r31]: answered: approve\nresolved [key=nm-RUN-agree-review]: answered: fix\n' "$url" > "$HOME_DIR/state/$id.status"
+  FM_FAKE_GH_HEAD=$head FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_ROUNDS_DIR=$rounds run_pr_check "$id" "$url"
+  expect_code 0 "$PR_RC" "PR-ready refused a firstmate-decided run: $PR_OUT"
+  crew=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_NM_STATUS="$status" \
+    FM_FAKE_NM_ROUNDS_DIR=$rounds "$ROOT/bin/fm-crew-state.sh" "$id" 2>&1)
+  assert_contains "$crew" "state: done" "crew-state refused a firstmate-decided run: $crew"
+  pass "PR-ready and crew-state report the same decision-gate verdict for one run"
 }
 
 test_direct_pr_handoff_requires_complete_evidence
@@ -286,4 +414,6 @@ test_no_mistakes_handoff_proves_run_from_pipeline_status
 test_ci_green_active_run_is_pr_ready
 test_wrong_or_foreign_runs_are_refused
 test_pr_ready_requires_firstmate_decisions_for_ask_user_findings
-test_unreadable_decision_data_fails_closed
+test_round_suffixed_decision_keys_count_per_event
+test_unreadable_or_originless_decision_data_fails_closed
+test_crew_state_agrees_with_pr_ready_decision_gate

@@ -37,37 +37,32 @@ TMP_ROOT=$(fm_test_tmproot fm-crew-state)
 fm_git_identity fmtest fmtest@example.invalid
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (done-time ask-user audit)"; exit 0; }
 
-# The done-time ask-user audit reads the no-mistakes state database read-only;
-# the suite gets an isolated fixture with every fake run id it reports, so a
-# fixture done never reads the operator's real daemon state.
-NM_DIR="$TMP_ROOT/nm-home"
-mkdir -p "$NM_DIR"
-python3 - "$NM_DIR" <<'PY'
-import os, sqlite3, sys
-db = sqlite3.connect(os.path.join(sys.argv[1], "state.sqlite"))
-db.executescript("""
-CREATE TABLE runs (id TEXT PRIMARY KEY);
-CREATE TABLE step_results (
-  id TEXT PRIMARY KEY, run_id TEXT, step_name TEXT, step_order INTEGER, status TEXT,
-  findings_json TEXT, approval_reason TEXT, override_reason TEXT, skip_reason TEXT
-);
-CREATE TABLE step_rounds (
-  id TEXT PRIMARY KEY, step_result_id TEXT, round INTEGER, selection_source TEXT,
-  selected_finding_ids TEXT, findings_json TEXT, user_findings_json TEXT
-);
-INSERT INTO runs VALUES ('01RUN'), ('01RUNLIVE');
-""")
-db.commit()
-PY
-export NM_HOME="$NM_DIR"
+# The done-time ask-user audit reads the pipeline's own `axi rounds --json`
+# decision record through the fake no-mistakes below; the suite seeds identical
+# real-shaped documents per run and step, so a fixture done never reads the
+# operator's real daemon state.
+ROUNDS_ROOT="$TMP_ROOT/rounds"
+export FM_FAKE_NM_ROUNDS_DIR="$ROUNDS_ROOT/01RUN"
 
-nm_db() {  # <sql>
-  python3 - "$NM_DIR" "$1" <<'PY'
-import os, sqlite3, sys
-db = sqlite3.connect(os.path.join(sys.argv[1], "state.sqlite"))
-db.executescript(sys.argv[2])
-db.commit()
-PY
+# <run-id> <step> <rounds-array-json>: the envelope mirrors a captured real
+# document (versioned envelope; per-round findings, selections, source, origin).
+seed_rounds() {
+  mkdir -p "$ROUNDS_ROOT/$1"
+  printf '{"schema_version":1,"run_id":"%s","step":"%s","rounds":[%s]}\n' "$1" "$2" "$3" \
+    > "$ROUNDS_ROOT/$1/$2.json"
+}
+
+# One recorded gate-response round in the document's field order.
+# <round> <response-origin> <selection-source> <selected-ids-json> <findings-json>
+ask_round() {
+  printf '{"round":%s,"trigger":"initial","summary":null,"findings":%s,"selected_finding_ids":%s,"selection_source":"%s","response_origin":"%s","user_findings":null,"fix_summary":null,"duration_ms":10,"created_at":1}' \
+    "$1" "$5" "$4" "$3" "$2"
+}
+
+# A status document for one recorded run, so the audit can enumerate its steps.
+nm_run_status() {  # <run-id> <step> [extra-status-lines]
+  printf 'run:\n  id: "%s"\n  status: completed\n  steps[1]{step,status,findings,duration_ms}:\n    %s,completed,1,1\noutcome: passed\n' \
+    "$1" "$2"
 }
 
 # A real git repo checked out on <branch>, so the helper's branch attribution
@@ -107,6 +102,21 @@ case "${1:-}" in
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+      rounds)
+        shift
+        step= prev=
+        for a in "$@"; do
+          [ "$prev" = --step ] && step=$a
+          prev=$a
+        done
+        [ "${FM_FAKE_NM_ROUNDS_DOWN:-0}" = 0 ] || exit 1
+        if [ -n "${FM_FAKE_NM_ROUNDS_RAW:-}" ]; then printf '%s\n' "$FM_FAKE_NM_ROUNDS_RAW"; exit 0; fi
+        if [ -n "${FM_FAKE_NM_ROUNDS_DIR:-}" ] && [ -f "$FM_FAKE_NM_ROUNDS_DIR/$step.json" ]; then
+          cat "$FM_FAKE_NM_ROUNDS_DIR/$step.json"
+        else
+          printf '{"schema_version":1,"run_id":"","step":"%s","rounds":[{"round":1,"trigger":"initial","summary":null,"findings":null,"selected_finding_ids":null,"selection_source":null,"response_origin":"unknown","user_findings":null,"fix_summary":null,"duration_ms":1,"created_at":1}]}\n' "$step"
+        fi
+        ;;
     esac
     ;;
   runs)
@@ -274,6 +284,9 @@ run:
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: "https://github.com/o/r/pull/2"
   findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    review,completed,0,0
+    ci,running,0,0
 EOF
 }
 
@@ -422,6 +435,8 @@ run:
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: "https://github.com/o/r/pull/1"
   findings: none
+  steps[1]{step,status,findings,duration_ms}:
+    review,completed,0,0
 outcome: passed
 EOF
 }
@@ -1960,26 +1975,22 @@ test_local_only_done_requires_clean_task_branch() {
 
 test_done_time_ask_user_audit_uses_recorded_run() {
   reset_fakes
-  local d out id=done-ask-audit
+  local d out id=done-ask-audit rounds
   d=$(new_case "$id")
   make_repo_on_branch "$d/wt" "fm/$id"
   make_fakebin "$d" >/dev/null
-  nm_db "
-    INSERT INTO runs VALUES ('RUN-done-ask');
-    INSERT INTO step_results (id, run_id, step_name, step_order, status, findings_json)
-    VALUES ('sr-done', 'RUN-done-ask', 'review', 3, 'completed',
-      '{\"findings\":[{\"id\":\"R9\",\"action\":\"ask-user\"}]}');
-    INSERT INTO step_rounds (id, step_result_id, round, selection_source, selected_finding_ids, findings_json)
-    VALUES ('sr-done-1', 'sr-done', 1, 'user_declined', '[]', '{\"findings\":[{\"id\":\"R9\",\"action\":\"ask-user\"}]}');
-  "
+  seed_rounds RUN-done-ask review \
+    "$(ask_round 1 interactive user_declined '[]' '[{"action":"ask-user","description":"changes product behavior","id":"R9","severity":"error"}]')"
+  rounds="$ROUNDS_ROOT/RUN-done-ask"
   fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=no-mistakes" \
     "pr=https://github.com/o/r/pull/1" "nm_run_id=RUN-done-ask"
   printf 'done: PR https://github.com/o/r/pull/1 checks green\n' > "$d/state/$id.status"
   FM_FAKE_AXI_STATUS=
+  FM_FAKE_AXI_STATUS_RUN=$(nm_run_status RUN-done-ask review)
   FM_FAKE_RUNS_LIST=
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" "$id"
-  out=$(run_crew_state "$d" "$id")
+  out=$(FM_FAKE_NM_ROUNDS_DIR="$rounds" run_crew_state "$d" "$id")
   assert_contains "$out" "state: parked" "a self-answered ask-user finding was accepted as done"
   assert_contains "$out" "source: decision-gate" "ask-user refusal did not name the decision gate"
   assert_contains "$out" "RUN-done-ask" "ask-user refusal did not name the run"
@@ -1988,11 +1999,12 @@ test_done_time_ask_user_audit_uses_recorded_run() {
   # reports); a resolved event alone is never current state.
   printf 'resolved [key=nm-RUN-done-ask-review]: answered: approve R9\ndone: PR https://github.com/o/r/pull/1 checks green\n' \
     > "$d/state/$id.status"
-  out=$(run_crew_state "$d" "$id")
+  out=$(FM_FAKE_NM_ROUNDS_DIR="$rounds" run_crew_state "$d" "$id")
   assert_contains "$out" "state: done" "a firstmate-decided finding was still refused: $out"
-  out=$(NM_HOME="$TMP_ROOT/nm-missing" run_crew_state "$d" "$id")
+  out=$(FM_FAKE_NM_ROUNDS_DOWN=1 FM_FAKE_NM_ROUNDS_DIR="$rounds" run_crew_state "$d" "$id")
   assert_contains "$out" "state: parked" "unreadable decision data was accepted as done"
   assert_contains "$out" "decision evidence could not be read" "unreadable decision data did not say so"
+  assert_contains "$out" "axi rounds" "unreadable decision data did not name what is missing"
   pass "done acceptance applies the ask-user decision audit to the recorded run"
 }
 
