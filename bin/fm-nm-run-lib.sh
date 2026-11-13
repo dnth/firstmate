@@ -275,7 +275,7 @@ fm_nm_ask_user_key() {  # <run-id> <step>
 # interactive and auto_yes are recorded answers, and unknown means the run
 # predates or lost that record. A decision event whose origin is unknown or
 # unrecognized refuses rather than guessing, so the audit never silently falls
-# back to counting constituted text alone.
+# back to counting status-ledger text alone.
 #
 # Exit 0 prints the events (possibly none). Any other exit prints the concrete
 # missing requirement on stdout and means the run data could not be read.
@@ -439,10 +439,11 @@ EOF
 # initially the first response, and retain it until a new opening. A new opening
 # after an answered gate advances to the next recorded response; repeated
 # openings while pending and surplus answers do not advance it.
+# Explicit round recovery answers do not change the current implicit gate.
 #
 # Returns 0 silently when the run recorded no ask-user decision events or every
 # event is matched. Returns 1 and prints a per-step refusal detail (run, step,
-# finding, and answering origin) on stdout when an event has no distinct
+# finding, and answering origin) on stdout when a gate response has no
 # matching resolved record. Returns 2 and prints the concrete missing
 # requirement on stdout when the run's decision data cannot be read; callers
 # must surface that detail rather than substituting a generic refusal.

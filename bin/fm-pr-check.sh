@@ -18,11 +18,9 @@
 # head, and the run must be passed or CI-green (fm_nm_run_is_pr_ready). That
 # run id is recorded as nm_run_id=<id>; the decision-evidence audit owned by
 # bin/fm-nm-run-lib.sh then runs against it as that guarantee's single
-# PR-ready owner. The audit reads every step's ask-user decision events and
-# who answered each from the pipeline's own `axi rounds --json` record, and
-# refuses when a decision has no matching firstmate resolved record or when
-# that record is missing, unparseable, or origin-less; unreadable run data or
-# insufficient decision records refuse registration naming what is missing.
+# PR-ready owner. Its `axi rounds --json` audit refuses registration naming
+# missing firstmate decisions or unreadable pipeline decision evidence;
+# bin/fm-nm-run-lib.sh owns origin requirements and gate-response matching.
 # Re-registering the recorded pr= URL refreshes pr_head= and re-arms the poll
 # without re-running the evidence and run-identity handoff gates, provided a
 # no-mistakes ship also has nm_run_id= recorded. Ship re-registration still
