@@ -261,6 +261,9 @@ fm_nm_ask_user_key() {  # <run-id> <step>
 # One step's ask-user decision events from the `axi rounds --json` document in
 # stdin. Prints one TAB-separated row per decision event:
 # <step>\t<round N>\t<finding-id>\t<action>\t<response-origin>.
+# With include-unresolved=1, rows also carry finding identity and round-context
+# JSON for the decision audit below; rounds without decision events emit a
+# context row so a newer covered answer can supersede carried authority.
 #
 # The pipeline records a gate response on the answered round: a `fix` response
 # stores selection_source=user with the selected finding ids, an approve, skip,
@@ -420,6 +423,8 @@ PY
 # already captured the same run's `axi status`; otherwise it is read here with
 # `axi status --run`. Prints one TAB-separated row per event:
 # <step>\t<round N>\t<finding-id>\t<action>\t<response-origin>.
+# The optional include-unresolved argument requests the extended rows owned by
+# fm_nm_rounds_events above.
 #
 # Exit 0 prints the events (possibly none). Any other exit prints the concrete
 # missing requirement on stdout - failed status or rounds call, a status
@@ -492,15 +497,21 @@ EOF
 # the pipeline's own record of a real answer, and requirement 2 is skipped.
 #
 # A firstmate `resolved` record's answer is read in its canonical form:
-#   [<prefix ending in ':'>] <VERB> <ids> [{';'|','|'and'} <VERB> <ids>]...
+#   [Firstmate decision ...: | Captain decision ...:] <VERB> <ids>
+#     [{';'|','|'and'} <VERB> <ids>]...
 # VERB is FIX, IGNORE, DECLINE, SKIP, or APPROVE (case-insensitive) and ids are
-# finding ids the gate round presented. A canonical prefix is the firstmate
-# decision sentence ending in `:`. The first clause ends at the first '(',
+# finding ids the gate round presented. Other prose prefixes authorize nothing.
+# The first clause ends at the first '(',
 # '.', ' Reason', or end of text, and everything after it is reason prose that is ignored, including
 # parenthesised asides like "(with R1 and R2 as auto-fix)". A bare APPROVE,
 # IGNORE, DECLINE, or SKIP with no ids declines every finding the round
 # presented; ordinary reason prose may contain action words, numbers, or
 # hyphenated words, but unknown finding-id-shaped labels and additional directives refuse.
+# After a decline-class verb, the id list ends at the first token that is not
+# a finding id or list separator, and the remaining first-clause text is prose:
+# `APPROVE test-1 without live validation` declines test-1.
+# After FIX ids, trailing prose remains unreadable, so
+# `FIX test-1 is not what I want` authorizes nothing.
 # A bare FIX is prose and refuses. Named findings bind their own
 # verb, every other presented finding is the pipeline's implicit decline, and
 # one finding bound to fix and decline classes is ambiguous and refuses;
