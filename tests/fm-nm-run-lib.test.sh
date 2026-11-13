@@ -619,6 +619,108 @@ FIXTURE
   pass "negated, quoted, conditional, and prose action mentions authorize neither current nor carried decisions"
 }
 
+test_unresolved_only_review_rounds_do_not_bind_answers() {
+  local tmp layout origin field suffix last out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  for layout in first gap; do
+    last=2
+    [ "$layout" != gap ] || last=3
+    for origin in interactive auto_yes unknown; do
+      for field in findings user_findings; do
+        FM_TEST_ROUNDS_JSON=$(python3 - "$layout" "$origin" "$field" <<'FIXTURE'
+import json
+import sys
+layout, origin, field = sys.argv[1:]
+finding = dict(id="R1", action="ask-user", description="unselected review finding", severity="error")
+pending = dict(round=1, selection_source="user", response_origin=origin, selected_finding_ids=["A1"], **{field: [finding, dict(id="A1", action="auto-fix")]})
+last = dict(round=2, selection_source="user_declined", response_origin=origin, findings=[finding])
+rounds = [pending, last]
+if layout == "gap":
+    pending["round"], last["round"] = 2, 3
+    rounds.insert(0, dict(round=1, selection_source="user_declined", response_origin=origin, findings=[dict(id="R0", action="ask-user")]))
+print(json.dumps(dict(schema_version=1, rounds=rounds)))
+FIXTURE
+)
+        write_status "$tmp/status"
+        out=$(decisions "$tmp/status")
+        rc=$?
+        expect_code 1 "$rc" "unresolved context supplied authority without a record"
+        assert_contains "$out" "round $last" "unanswered actual round was not named"
+        for suffix in '' -detail "-r$last"; do
+          write_status "$tmp/status"
+          if [ "$layout" = gap ]; then
+            write_status "$tmp/status" \
+              'needs-decision [key=nm-01TEST-review]: first gate' \
+              'resolved [key=nm-01TEST-review]: answered: IGNORE R0'
+          fi
+          printf '%s\n' \
+            "needs-decision [key=nm-01TEST-review$suffix]: actual decision" \
+            "resolved [key=nm-01TEST-review$suffix]: answered: IGNORE R1" >> "$tmp/status"
+          out=$(decisions "$tmp/status")
+          rc=$?
+          expect_code 0 "$rc" "an unresolved-only round consumed an occurrence: $layout/$origin/$field/$suffix: $out"
+        done
+      done
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "unresolved-only review rounds consume no bare, detail, or explicit answer occurrence"
+}
+
+test_new_covered_answers_supersede_carried_authority() {
+  local tmp step origin shape answer out rc initial
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  for step in review test; do
+    FM_TEST_STATUS_DOC=${RUN_STATUS/review,completed/$step,completed}
+    for origin in interactive auto_yes; do
+      for shape in fix decline partial; do
+        for answer in 'a bounded excerpt' 'FIX R1 (plain rationale)' 'Do not (FIX R1)'; do
+          initial=$(python3 - "$origin" "$shape" <<'FIXTURE'
+import json
+import sys
+origin, shape = sys.argv[1:]
+finding = dict(id="R1", action="ask-user", description="same finding", severity="error")
+first = dict(round=1, selection_source="user_declined", response_origin=origin, findings=[finding])
+second = dict(round=2, selection_source="user", response_origin=origin, selected_finding_ids=["R1"], findings=[finding])
+if shape == "decline":
+    second["selection_source"] = "user_declined"
+    second["selected_finding_ids"] = []
+elif shape == "partial":
+    second["selected_finding_ids"] = ["R2"]
+    second["findings"].append(dict(id="R2", action="ask-user", description="sibling", severity="error"))
+print(json.dumps(dict(schema_version=1, rounds=[first, second])))
+FIXTURE
+)
+          write_status "$tmp/status" \
+            "resolved [key=nm-01TEST-$step]: answered: IGNORE R1" \
+            "resolved [key=nm-01TEST-$step-r2]: answered: $answer"
+          FM_TEST_ROUNDS_JSON=$initial
+          decisions "$tmp/status" >/dev/null || fail "an unreadable $origin answer changed record-only acceptance"
+          FM_TEST_ROUNDS_JSON=$(python3 - "$initial" <<'FIXTURE'
+import json
+import sys
+doc = json.loads(sys.argv[1])
+doc["rounds"].append(dict(round=3, selection_source="user_declined", response_origin="unknown", findings=doc["rounds"][0]["findings"]))
+print(json.dumps(doc))
+FIXTURE
+)
+          out=$(decisions "$tmp/status")
+          rc=$?
+          expect_code 1 "$rc" "superseded authority survived: $step/$origin/$shape/$answer"
+          assert_contains "$out" 'finding R1' "superseded refusal did not name R1"
+          assert_contains "$out" 'round 3' "superseded refusal did not name round 3"
+        done
+      done
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "covered unreadable answers invalidate earlier authority for actual and unresolved sibling findings"
+}
+
 test_all_checks_passed_is_green
 test_no_ci_checks_reported_is_no_checks_not_green
 test_no_ci_declared_is_no_checks_despite_its_wording
@@ -642,5 +744,7 @@ test_partial_fix_carries_effective_declines
 test_review_carries_explicit_unselected_decisions
 test_carried_decisions_require_matching_finding_identity
 test_action_mentions_do_not_authorize_decisions
+test_unresolved_only_review_rounds_do_not_bind_answers
+test_new_covered_answers_supersede_carried_authority
 
 echo "all fm-nm-run-lib tests passed"

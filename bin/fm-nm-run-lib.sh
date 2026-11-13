@@ -379,9 +379,6 @@ for rnd in rounds:
         if step != "review":
             for fid in ask_user:
                 resolved.setdefault(fid, "skip")
-        elif include_unresolved == "1":
-            for fid in ask_user:
-                resolved.setdefault(fid, "unresolved")
     else:
         resolved = {fid: "declined" for fid in ask_user}
     identities = {}
@@ -393,12 +390,15 @@ for rnd in rounds:
                     ensure_ascii=True,
                 )
                 identities.setdefault(item["id"], set()).add(identity)
+    round_identities = {
+        fid: next(iter(identities[fid])) if len(identities.get(fid, set())) == 1 else "null"
+        for fid in ask_user
+    }
+    unresolved = json.dumps({fid: identity for fid, identity in round_identities.items() if fid not in resolved})
     for fid, action in resolved.items():
         event = f"{step}\t{where}\t{fid}\t{action}\t{origin}"
         if include_unresolved == "1":
-            candidates = identities.get(fid, set())
-            identity = next(iter(candidates)) if len(candidates) == 1 else "null"
-            event += f"\t{identity}"
+            event += f"\t{round_identities[fid]}\t{unresolved}"
         events.append(event)
 # Buffered so a failure part-way through the document prints only what is
 # missing, never a partial event list a caller could mistake for the audit.
@@ -505,6 +505,7 @@ fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file> [<st
       printf '%s\n' "$rows" | awk -F '\t' -v s="$step" '$1 == s { print "event\t" $0 }'
       status_resolved_step_records "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")"
     } | python3 -c "$(cat <<'PY'
+import json
 import re
 import sys
 
@@ -618,8 +619,12 @@ def agrees(decided, recorded):
 
 
 by_round = {}
-for _, rnd, fid, action, origin, identity in events:
-    by_round.setdefault(int(rnd[len("round "):]), []).append((fid, action, origin, identity))
+round_findings = {}
+for _, rnd, fid, action, origin, identity, unresolved in events:
+    number = int(rnd[len("round "):])
+    by_round.setdefault(number, []).append((fid, action, origin, identity))
+    round_findings.setdefault(number, {}).update(json.loads(unresolved))
+    round_findings[number][fid] = identity
 
 decisions = {}
 missing = []
@@ -631,19 +636,20 @@ for rnd in rounds:
     origin = round_events[0][2]
     decided, explicit = {}, set()
     if rnd in covered:
-        decided, explicit = decided_actions(round_answer[rnd], [fid for fid, _, _, _ in round_events])
+        decided, explicit = decided_actions(round_answer[rnd], round_findings[rnd])
+        resolved_ids = {fid for fid, _, _, _ in round_events}
+        decided = {fid: value for fid, value in decided.items() if fid in explicit or fid in resolved_ids}
     for fid, action, _, identity in round_events:
-        if action == "unresolved":
-            if fid not in explicit:
-                decided.pop(fid, None)
-            continue
         if decided.get(fid) == "fix" and fid not in explicit and action == "skip":
             decided[fid] = "nonfix"
         if origin != "unknown":
             if rnd not in covered:
                 missing.append((fid, rnd, action, origin))
             continue
-        verdict = decided.get(fid) if rnd in covered else decisions.get((fid, identity))
+        verdict = decided.get(fid)
+        if rnd not in covered:
+            previous_identity, previous_verdict = decisions.get(fid, (None, None))
+            verdict = previous_verdict if previous_identity == identity else None
         if verdict is None:
             if rnd in covered:
                 problems.append((fid, rnd, "unreadable", action))
@@ -652,9 +658,10 @@ for rnd in rounds:
         elif not agrees(verdict, action):
             problems.append((fid, rnd, verdict, action))
     if rnd in covered:
-        for fid, _, _, identity in round_events:
-            if fid in decided and identity != "null":
-                decisions[(fid, identity)] = decided[fid]
+        for fid, identity in round_findings[rnd].items():
+            decisions.pop(fid, None)
+            if decided.get(fid) is not None and identity != "null":
+                decisions[fid] = (identity, decided[fid])
 
 
 def report_problems(out):
