@@ -320,7 +320,7 @@ TEST_STEP_STATUS='run:
 outcome: passed'
 
 ROUNDS_KCC_UNKNOWN='{"schema_version":1,"run_id":"01TEST","step":"test","rounds":[{"round":1,"trigger":"initial","selection_source":"user_declined","response_origin":"unknown","selected_finding_ids":[],"findings":[{"id":"test-1","action":"ask-user"}],"user_findings":null}]}'
-ROUNDS_ACEH_UNKNOWN='{"schema_version":1,"run_id":"01TEST","step":"review","rounds":[{"round":1,"trigger":"initial","selection_source":"user_declined","response_origin":"interactive","selected_finding_ids":[],"findings":[{"id":"R1","action":"ask-user"}],"user_findings":null},{"round":2,"trigger":"auto_fix","selection_source":"user_declined","response_origin":"unknown","selected_finding_ids":[],"findings":[{"id":"R1","action":"ask-user"}],"user_findings":null}]}'
+ROUNDS_ACEH_UNKNOWN='{"schema_version":1,"run_id":"01TEST","step":"review","rounds":[{"round":1,"trigger":"initial","selection_source":"user_declined","response_origin":"interactive","selected_finding_ids":[],"findings":[{"id":"R1","description":"documentation finding","severity":"error","action":"ask-user"}],"user_findings":null},{"round":2,"trigger":"auto_fix","selection_source":"user_declined","response_origin":"unknown","selected_finding_ids":[],"findings":[{"id":"R1","description":"documentation finding","severity":"error","action":"ask-user"}],"user_findings":null}]}'
 ROUNDS_UNKNOWN_FIX='{"schema_version":1,"rounds":[{"round":1,"selection_source":"user","response_origin":"unknown","selected_finding_ids":["test-1"],"findings":[{"id":"test-1","action":"ask-user"}]}]}'
 ROUNDS_PARTIAL_FIX='{"schema_version":1,"rounds":[{"round":1,"selection_source":"user","response_origin":"unknown","selected_finding_ids":["test-1"],"findings":[{"id":"test-1","action":"ask-user"},{"id":"test-2","action":"ask-user"}]}]}'
 
@@ -451,7 +451,7 @@ test_partial_fix_carries_effective_declines() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
   FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
   for origin in unknown interactive; do
-    FM_TEST_ROUNDS_JSON="{\"schema_version\":1,\"rounds\":[{\"round\":1,\"selection_source\":\"user\",\"response_origin\":\"$origin\",\"selected_finding_ids\":[\"test-1\"],\"findings\":[{\"id\":\"test-1\",\"action\":\"ask-user\"},{\"id\":\"test-2\",\"action\":\"ask-user\"}]},{\"round\":2,\"selection_source\":\"user_declined\",\"response_origin\":\"unknown\",\"findings\":[{\"id\":\"test-2\",\"action\":\"ask-user\"}]}]}"
+    FM_TEST_ROUNDS_JSON="{\"schema_version\":1,\"rounds\":[{\"round\":1,\"selection_source\":\"user\",\"response_origin\":\"$origin\",\"selected_finding_ids\":[\"test-1\"],\"findings\":[{\"id\":\"test-1\",\"description\":\"finding test-1\",\"severity\":\"error\",\"action\":\"ask-user\"},{\"id\":\"test-2\",\"description\":\"finding test-2\",\"severity\":\"error\",\"action\":\"ask-user\"}]},{\"round\":2,\"selection_source\":\"user_declined\",\"response_origin\":\"unknown\",\"findings\":[{\"id\":\"test-2\",\"description\":\"finding test-2\",\"severity\":\"error\",\"action\":\"ask-user\"}]}]}"
     write_status "$tmp/status" 'resolved [key=nm-01TEST-test]: answered: FIX test-1'
     decisions "$tmp/status" >/dev/null || fail "a partial fix's implicit decline was lost after an $origin round"
     FM_TEST_ROUNDS_JSON=${FM_TEST_ROUNDS_JSON/\"selection_source\":\"user_declined\"/\"selection_source\":\"user\",\"selected_finding_ids\":[\"test-2\"]}
@@ -474,9 +474,9 @@ test_review_carries_explicit_unselected_decisions() {
   for origin in unknown interactive auto_yes; do
     for field in findings user_findings; do
       if [ "$field" = findings ]; then
-        presentation='"findings":[{"id":"R1","action":"ask-user"},{"id":"R2","action":"ask-user"}]'
+        presentation='"findings":[{"id":"R1","description":"finding R1","severity":"error","action":"ask-user"},{"id":"R2","description":"finding R2","severity":"error","action":"ask-user"}]'
       else
-        presentation='"findings":[{"id":"R1","action":"ask-user"}],"user_findings":[{"id":"R2","action":"ask-user"}]'
+        presentation='"findings":[{"id":"R1","description":"finding R1","severity":"error","action":"ask-user"}],"user_findings":[{"id":"R2","description":"finding R2","severity":"error","action":"ask-user"}]'
       fi
       for scenario in decline skip fix mismatch-decline mismatch-fix ambiguous unnamed absent; do
         source=user_declined
@@ -493,7 +493,7 @@ test_review_carries_explicit_unselected_decisions() {
           absent) answer=''; expected=1 ;;
         esac
         FM_TEST_ROUNDS_JSON=$(cat <<EOF
-{"schema_version":1,"rounds":[{"round":1,"selection_source":"user","response_origin":"$origin","selected_finding_ids":["R1"],$presentation},{"round":2,"selection_source":"$source","response_origin":"unknown","selected_finding_ids":$selection,"findings":[{"id":"R2","action":"ask-user"}]}]}
+{"schema_version":1,"rounds":[{"round":1,"selection_source":"user","response_origin":"$origin","selected_finding_ids":["R1"],$presentation},{"round":2,"selection_source":"$source","response_origin":"unknown","selected_finding_ids":$selection,"findings":[{"id":"R2","description":"finding R2","severity":"error","action":"ask-user"}]}]}
 EOF
 )
         write_status "$tmp/status"
@@ -513,6 +513,104 @@ EOF
   rm -rf "$tmp"
   FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
   pass "review carries only explicit unselected decisions and checks later actions"
+}
+
+test_carried_decisions_require_matching_finding_identity() {
+  local tmp step origin field variant out rc expected
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  for step in review test; do
+    FM_TEST_STATUS_DOC=${RUN_STATUS/review,completed/$step,completed}
+    for origin in unknown interactive auto_yes; do
+      for field in findings user_findings; do
+        for variant in same description severity file line missing conflicting; do
+          expected=1
+          [ "$variant" != same ] || expected=0
+          FM_TEST_ROUNDS_JSON=$(python3 - "$origin" "$field" "$variant" <<'FIXTURE'
+import json
+import sys
+origin, field, variant = sys.argv[1:]
+original = dict(id="R1", action="ask-user", description="documentation", severity="error", file="docs.md", line=1)
+repeated = dict(original)
+if variant in ("description", "severity", "file", "line"):
+    repeated[variant] = dict(description="different issue", severity="warning", file="other.md", line=2)[variant]
+elif variant == "missing":
+    repeated.pop("description")
+first = dict(round=1, selection_source="user_declined", response_origin=origin, **{field: [original]})
+second = dict(round=2, selection_source="user_declined", response_origin="unknown", **{field: [repeated]})
+if variant == "conflicting":
+    second["user_findings" if field == "findings" else "findings"] = [dict(original, description="different issue")]
+print(json.dumps(dict(schema_version=1, rounds=[first, second])))
+FIXTURE
+)
+          write_status "$tmp/status" "resolved [key=nm-01TEST-$step]: answered: IGNORE R1"
+          out=$(decisions "$tmp/status")
+          rc=$?
+          expect_code "$expected" "$rc" "carried identity: $step/$origin/$field/$variant: $out"
+          if [ "$expected" -ne 0 ]; then
+            assert_contains "$out" 'finding R1' "identity refusal did not name R1"
+            assert_contains "$out" 'round 2' "identity refusal did not name round 2"
+            printf '%s\n' "resolved [key=nm-01TEST-$step-r2]: answered: IGNORE R1" >> "$tmp/status"
+            decisions "$tmp/status" >/dev/null || fail "a current-round record could not cover a changed identity"
+          fi
+        done
+      done
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "carried authority requires the same finding identity; a new round record can cover a new identity"
+}
+
+test_action_mentions_do_not_authorize_decisions() {
+  local tmp answer action out rc origin
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
+  for answer in 'Do not FIX test-1; APPROVE the exception' 'Never IGNORE test-1' \
+    'A command example: test-1: FIX' 'The previous answer was FIX test-1' 'Run no-mistakes axi respond --action fix test-1' \
+    'If needed, FIX test-1' 'FIX test-1 is not what I want' 'FIX means changing code' 'Do not test-1: FIX' \
+    '"FIX test-1"' '`FIX test-1`' "'FIX test-1'" \
+    '"example; test-1: FIX; end"' 'Do not FIX; APPROVE' ; do
+    for action in fix declined; do
+      FM_TEST_ROUNDS_JSON=$(python3 - "$action" <<'FIXTURE'
+import json
+import sys
+finding = dict(id="test-1", action="ask-user", description="documentation", severity="error")
+rnd = dict(round=1, selection_source="user" if sys.argv[1] == "fix" else "user_declined", response_origin="unknown", selected_finding_ids=["test-1"] if sys.argv[1] == "fix" else [], findings=[finding])
+print(json.dumps(dict(schema_version=1, rounds=[rnd])))
+FIXTURE
+)
+      write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
+      out=$(decisions "$tmp/status")
+      rc=$?
+      expect_code 1 "$rc" "an action mention authorized $action: $answer"
+      assert_contains "$out" 'no readable action' "an action mention did not refuse as unverifiable"
+      for origin in interactive auto_yes; do
+        FM_TEST_ROUNDS_JSON=$(python3 - "$FM_TEST_ROUNDS_JSON" "$origin" <<'FIXTURE'
+import copy
+import json
+import sys
+doc = json.loads(sys.argv[1])
+first = doc["rounds"][0]
+second = copy.deepcopy(first)
+first["response_origin"] = sys.argv[2]
+second["round"] = 2
+second["response_origin"] = "unknown"
+doc["rounds"] = [first, second]
+print(json.dumps(doc))
+FIXTURE
+)
+        out=$(decisions "$tmp/status")
+        rc=$?
+        expect_code 1 "$rc" "an ambiguous $origin answer carried authority: $answer"
+        assert_contains "$out" 'round 2' "carried action mention did not refuse round 2"
+      done
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "negated, quoted, conditional, and prose action mentions authorize neither current nor carried decisions"
 }
 
 test_all_checks_passed_is_green
@@ -536,5 +634,7 @@ test_partial_fix_implicit_skip_is_not_a_mismatch
 test_finding_clauses_bind_their_own_actions
 test_partial_fix_carries_effective_declines
 test_review_carries_explicit_unselected_decisions
+test_carried_decisions_require_matching_finding_identity
+test_action_mentions_do_not_authorize_decisions
 
 echo "all fm-nm-run-lib tests passed"

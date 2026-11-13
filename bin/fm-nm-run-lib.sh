@@ -384,8 +384,22 @@ for rnd in rounds:
                 resolved.setdefault(fid, "unresolved")
     else:
         resolved = {fid: "declined" for fid in ask_user}
+    identities = {}
+    if include_unresolved == "1":
+        for item in (rnd.get("findings") or []) + (rnd.get("user_findings") or []):
+            if isinstance(item.get("description"), str) and item["description"].strip():
+                identity = json.dumps(
+                    [item.get(field) for field in ("description", "severity", "file", "line")],
+                    ensure_ascii=True,
+                )
+                identities.setdefault(item["id"], set()).add(identity)
     for fid, action in resolved.items():
-        events.append(f"{step}\t{where}\t{fid}\t{action}\t{origin}")
+        event = f"{step}\t{where}\t{fid}\t{action}\t{origin}"
+        if include_unresolved == "1":
+            candidates = identities.get(fid, set())
+            identity = next(iter(candidates)) if len(candidates) == 1 else "null"
+            event += f"\t{identity}"
+        events.append(event)
 # Buffered so a failure part-way through the document prints only what is
 # missing, never a partial event list a caller could mistake for the audit.
 for line in events:
@@ -536,32 +550,57 @@ for fields in records:
             pending = None
 
 ACTION_PATTERN = re.compile(
-    r"\b(?P<action>fix(?:es|ed)?|ignore[sd]?|approve[sd]?|skip(?:ped)?|abort(?:ed)?|declin(?:e|ed|es))\b",
+    r"(?<![\w-])(?P<action>fix|ignore|approve|skip|abort|decline)(?![\w-])",
     re.IGNORECASE,
 )
 LABEL = {"fix": "fix", "nonfix": "decline/approve"}
 
 
 def action_of(keyword):
-    return "fix" if keyword.lower().startswith("fix") else "nonfix"
+    return "fix" if keyword.lower() == "fix" else "nonfix"
 
 
 def decided_actions(answer, finding_ids):
     keywords = list(ACTION_PATTERN.finditer(answer or ""))
     decided, explicit = {}, set()
-    if not keywords:
+    if not keywords or re.search(r"[`\"“”‘’]|(?<!\w)'|'(?!\w)", answer):
         return decided, explicit
     id_patterns = {
         fid: r"(?<![\w-])" + re.escape(fid) + r"(?![\w-])"
         for fid in finding_ids
     }
     labels = "|".join(id_patterns.values())
-    clauses = re.split(r"[;\n()]|(?=(?:" + labels + r")\s*:)", answer, flags=re.IGNORECASE)
+    answer = re.sub(r"^\s*Firstmate decision for run [\w.-]+ [\w.-]+:\s*", "", answer, flags=re.IGNORECASE)
+    clauses = []
+    for clause in re.split(r"[;\n()]", answer):
+        parts = re.split(r"(?=(?:" + labels + r")\s*:)", clause, flags=re.IGNORECASE)
+        if len(parts) > 1 and parts[0].strip() and not ACTION_PATTERN.search(parts[0]):
+            return {}, set()
+        clauses.extend(parts)
+    directive = re.compile(
+        r"^\s*(?:(?:" + labels + r")\s*:\s*)?" + ACTION_PATTERN.pattern,
+        re.IGNORECASE,
+    )
+    id_list = re.compile(r"(?:\s|,|:|\band\b|" + labels + r")*", re.IGNORECASE)
+    defaults = set()
+    ambiguous = False
     for clause in clauses:
-        actions = {action_of(match.group("action")) for match in ACTION_PATTERN.finditer(clause)}
-        if not actions:
+        mentions = list(ACTION_PATTERN.finditer(clause))
+        if not mentions:
             continue
-        value = next(iter(actions)) if len(actions) == 1 else None
+        match = directive.match(clause)
+        value = None
+        if match and len(mentions) == 1:
+            tail = clause[match.end():].strip()
+            if id_list.fullmatch(tail) or (
+                action_of(match.group("action")) == "nonfix"
+                and re.fullmatch(r"proceeding\s+without\s+live\s+validation", tail, re.IGNORECASE)
+            ):
+                value = action_of(match.group("action"))
+        if value is None:
+            ambiguous = True
+        else:
+            defaults.add(value)
         for fid, pattern in id_patterns.items():
             if re.search(pattern, clause, re.IGNORECASE):
                 if fid in explicit and decided[fid] != value:
@@ -569,10 +608,9 @@ def decided_actions(answer, finding_ids):
                 else:
                     decided[fid] = value
                 explicit.add(fid)
-    actions = {action_of(match.group("action")) for match in keywords}
-    if len(actions) == 1:
+    if not ambiguous and len(defaults) == 1:
         for fid in finding_ids:
-            decided.setdefault(fid, next(iter(actions)))
+            decided.setdefault(fid, next(iter(defaults)))
     return decided, explicit
 
 
@@ -583,8 +621,8 @@ def agrees(decided, recorded):
 
 
 by_round = {}
-for _, rnd, fid, action, origin in events:
-    by_round.setdefault(int(rnd[len("round "):]), []).append((fid, action, origin))
+for _, rnd, fid, action, origin, identity in events:
+    by_round.setdefault(int(rnd[len("round "):]), []).append((fid, action, origin, identity))
 
 decisions = {}
 missing = []
@@ -596,8 +634,8 @@ for rnd in rounds:
     origin = round_events[0][2]
     decided, explicit = {}, set()
     if rnd in covered:
-        decided, explicit = decided_actions(round_answer[rnd], [fid for fid, _, _ in round_events])
-    for fid, action, _ in round_events:
+        decided, explicit = decided_actions(round_answer[rnd], [fid for fid, _, _, _ in round_events])
+    for fid, action, _, identity in round_events:
         if action == "unresolved":
             if fid not in explicit:
                 decided.pop(fid, None)
@@ -608,7 +646,7 @@ for rnd in rounds:
             if rnd not in covered:
                 missing.append((fid, rnd, action, origin))
             continue
-        verdict = decided.get(fid) if rnd in covered else decisions.get(fid)
+        verdict = decided.get(fid) if rnd in covered else decisions.get((fid, identity))
         if verdict is None:
             if rnd in covered:
                 problems.append((fid, rnd, "unreadable", action))
@@ -617,8 +655,9 @@ for rnd in rounds:
         elif not agrees(verdict, action):
             problems.append((fid, rnd, verdict, action))
     if rnd in covered:
-        for fid, value in decided.items():
-            decisions[fid] = value
+        for fid, _, _, identity in round_events:
+            if fid in decided and identity != "null":
+                decisions[(fid, identity)] = decided[fid]
 
 
 def report_problems(out):
