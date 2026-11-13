@@ -784,7 +784,6 @@ pass "a default run is unchanged by the parity tier"
 
 doctor --fix --parity
 expect_code 1 "$DOCTOR_RC" "a host missing the whole parity toolchain was reported parity-ready"
-assert_contains "$DOCTOR_OUT" 'parity codegraph=MISSING' "the parity tier did not report the missing code-intelligence CLI"
 assert_contains "$DOCTOR_OUT" 'parity no-mistakes=MISSING' "the parity tier did not report the missing validation pipeline"
 assert_contains "$DOCTOR_OUT" 'check parity-toolchain=human:' "an incomplete parity toolchain was not tagged human"
 assert_contains "$DOCTOR_OUT" 'action: parity-toolchain:' "the parity gap came with no operator action"
@@ -796,7 +795,7 @@ pass "--parity reports the missing parity toolchain and never claims to install 
 install_parity_tools() { # <bin-dir>
   local dir=$1 tool
   for tool in omp claude codex no-mistakes gh gh-axi chrome-devtools-axi \
-    lavish-axi quota-axi codegraph google-chrome; do
+    lavish-axi quota-axi google-chrome; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/$tool"
     chmod +x "$dir/$tool"
   done

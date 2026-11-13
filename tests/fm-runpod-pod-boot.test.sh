@@ -105,7 +105,6 @@ if [ "${1:-}" = install ] && [ "${2:-}" = -g ]; then
   case "${3:-}" in
     tasks-axi|gh-axi|chrome-devtools-axi|lavish-axi|quota-axi) tool=${3:-} ;;
     @openai/codex) tool=codex ;;
-    @colbymchenry/codegraph) tool=codegraph ;;
     *) tool=harness ;;
   esac
   printf '#!/usr/bin/env bash\nexit 0\n' > "$npm_config_prefix/bin/$tool"
@@ -290,7 +289,7 @@ case "$account_home" in "$durable_root"|"$durable_root"/*) ;; *) exit 1 ;; esac
 case " $* " in
   *" --parity "*)
     for tool in claude codex no-mistakes gh gh-axi chrome-devtools-axi \
-      lavish-axi quota-axi codegraph google-chrome; do
+      lavish-axi quota-axi google-chrome; do
       command -v "$tool" >> "$FM_FAKE_CALLS" || exit 1
     done
     ;;
@@ -552,7 +551,6 @@ pass "the account home moves onto the volume and the host declares its durable r
 
 assert_contains "$calls" "bun install -g @oh-my-pi/pi-coding-agent" "omp must be installed through bun"
 assert_contains "$calls" "npm install -g @openai/codex" "codex must be installed"
-assert_contains "$calls" "npm install -g @colbymchenry/codegraph" "the code-intelligence CLI must be installed"
 assert_contains "$calls" "npm install -g gh-axi" "gh-axi must be installed"
 assert_contains "$calls" "npm install -g quota-axi" "quota-axi must be installed"
 assert_contains "$calls" "claude.ai/install.sh" "the claude harness must come from its vendor installer"
@@ -560,7 +558,6 @@ assert_contains "$calls" "no-mistakes" "the validation pipeline must be installe
 assert_contains "$calls" "@puppeteer/browsers" "a headless browser must be installed for browser work"
 assert_present "$w/volume/persistent-runtime/bun/bin/omp" "omp must live on the volume"
 assert_present "$w/volume/persistent-runtime/npm/bin/codex" "codex must live on the volume"
-assert_present "$w/volume/persistent-runtime/npm/bin/codegraph" "the code-intelligence CLI must live on the volume"
 assert_present "$HOMEDIR/.local/bin/claude" "the claude harness must install into the durable account home"
 assert_present "$HOMEDIR/.local/bin/no-mistakes" "the validation pipeline must install into the durable account home"
 assert_present "$HOMEDIR/.local/bin/omp" "later SSH jobs must receive a link to the durable omp"
