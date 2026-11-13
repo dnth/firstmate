@@ -269,7 +269,29 @@ ok - real isolated tmux OMP secondmate launch, idle health, marked replies, exit
 This proves the complete isolated-home lifecycle on the installed Linux runtime; it does not establish macOS or Herdr compatibility for that version.
 The deterministic launch guard in `tests/fm-omp-secondmate.test.sh` owns independent lock-PID, loaded-version, and session-pointer rejection checks and their named failure diagnostics.
 
-The native launch-error publisher was verified on the same installed OMP 18.12.5 against a disposable localhost HTTP 429 endpoint, using only a synthetic API key:
+#### OMP semantic busy state
+
+`tests/fm-omp-busy-live-e2e.test.sh` is the live guard for OMP's semantic busy source (`omp-ext`).
+It spawns through the real `fm-spawn` wiring against the installed OMP, runs one real turn through the generated per-task extension, and classifies the record with `bin/fm-busy-lib.sh`; rerun it after every OMP upgrade.
+The guard ran on 2026-11-12 against OMP 18.18.6 on Linux:
+
+```sh
+omp --version
+FM_OMP_BUSY_LIVE_E2E=1 bash tests/fm-omp-busy-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+omp/18.18.6
+ok - omp/18.18.6: real omp reports 'busy omp-ext' during a turn and 'idle omp-ext' after it (never unknown)
+```
+
+The live guard requests a shell tool call and observes `busy omp-ext` during the run and `idle omp-ext` after it; it stops sampling once busy is observed, so it does not prove uninterrupted busy state across inner turn boundaries.
+`tests/fm-busy-adapter-wiring.test.sh` pins the same extension portably in a plain Node host, including inner turn boundaries preserving state, `willContinue: true` keeping the record busy, and native child instances leaving the parent's record untouched.
+The contract is armed at launch, so an OMP worker spawned before this wiring existed keeps classifying `unknown` until it is relaunched; no migration exists.
+
+The native launch-error publisher was separately verified on OMP 18.12.5 against a disposable localhost HTTP 429 endpoint, using only a synthetic API key:
 
 ```sh
 FM_OMP_LAUNCH_ERROR_LIVE_E2E=1 bash tests/fm-omp-launch-error-live-e2e.test.sh

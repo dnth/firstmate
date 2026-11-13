@@ -42,8 +42,10 @@ case "${1:-}" in
       esac
     done
     prev=
+    lit=
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
+        lit=$arg
         [ -z "${FM_FAKE_LITERAL_LOG:-}" ] || printf '%s\n' "$arg" >> "$FM_FAKE_LITERAL_LOG"
         case "$arg" in
           *.fm-launch-*)
@@ -58,6 +60,29 @@ case "${1:-}" in
       fi
       prev=$arg
     done
+    # Emulate the launched omp extension's own session_start handshake: readiness
+    # and the first turn_start ack are the two markers fm-spawn waits on.
+    if [ -n "${FM_FAKE_OMP_ACK_STATE:-}" ]; then
+      text=$lit
+      case "$lit" in
+        *.fm-launch-*)
+          script=${lit#/bin/bash }
+          script=${script#\'}
+          script=${script%\'}
+          [ ! -f "$script" ] || text=$(cat "$script")
+          ;;
+      esac
+      case "$text" in
+        *FM_OMP_HARNESS=omp*)
+          for ext in "$FM_FAKE_OMP_ACK_STATE"/*.omp-ext.ts; do
+            [ -e "$ext" ] || continue
+            stem=${ext%.omp-ext.ts}
+            : > "$stem.omp-doorbell-ready"
+            : > "$stem.omp-started"
+          done
+          ;;
+      esac
+    fi
     exit 0
     ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
@@ -66,6 +91,37 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
+  # omp resolves through a Bun-shebang executable whose launch identity the
+  # capability probe accepts. Nothing executes the omp body under fake tmux, so
+  # the stand-in Bun only has to answer the capability probe's `--help` query.
+  cat > "$fakebin/bun" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" --help "*) printf '%s\n' '--model=<value> --thinking=<value> --auto-approve --session-dir=<value> --extension=<value> --resume=<value>' ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/omp" <<'SH'
+#!/usr/bin/env bun
+SH
+  chmod +x "$fakebin/bun" "$fakebin/omp"
+  # Stand-in for `treehouse get` on a pre-created fixture worktree. It runs the
+  # reset+clean sequence the guarded acquisition path requires (through the
+  # guard placed first on PATH) and reports the path. fm-spawn's omp path always
+  # leases, so this keeps the adapter test harness-free and pool-free.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  get)
+    wt=${FM_FAKE_TREEHOUSE_WT:?}
+    ( cd "$wt" && git checkout --force HEAD && git clean -fdq ) || exit 1
+    printf '%s\n' "$wt"
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -97,6 +153,8 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LITERAL_LOG="$home/tmux-literals.log" \
+    FM_FAKE_OMP_ACK_STATE="$home/state" \
+    FM_FAKE_TREEHOUSE_WT="$wt" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -473,6 +531,125 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+# drive_omp_ext <ext-path> <mode>: load the generated omp worker extension in a
+# plain Node host (type stripping; the extension imports the doorbell library)
+# and fire one lifecycle handler. Modes: handlers, turn-start, turn-end,
+# agent-start, end-continuing, end-final.
+drive_omp_ext() {
+  EXT_PATH="$1" MODE="$2" STATE_PATH="${3:-}" TASK_ID="${4:-}" ROOT_PATH="$ROOT" \
+    node --experimental-strip-types --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+// ctx.isIdle() reads false at a natural omp agent_end; state must not depend on it.
+const ctx = { isIdle: () => false };
+switch (process.env.MODE) {
+  case "ownership": {
+    const { execFileSync } = await import("node:child_process");
+    const { readFileSync } = await import("node:fs");
+    const childHandlers = {};
+    const childMod = await import(pathToFileURL(process.env.EXT_PATH).href + "?child");
+    childMod.default({ on: (name, fn) => { childHandlers[name] = fn; } });
+    const classify = () => execFileSync("bash", ["-c",
+      '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux fake:w omp "$2" "$3"',
+      "_", process.env.ROOT_PATH, process.env.TASK_ID, process.env.STATE_PATH,
+    ], { encoding: "utf8" }).trim();
+    const record = () => readFileSync(`${process.env.STATE_PATH}/${process.env.TASK_ID}.busy-state`, "utf8");
+    const expect = (value) => {
+      if (classify() !== value) throw new Error(`expected ${value}, got ${classify()}`);
+    };
+    await handlers.agent_start({ type: "agent_start" }, ctx);
+    expect("busy omp-ext");
+    const busy = record();
+    await childHandlers.agent_end?.({ type: "agent_end" }, ctx);
+    expect("busy omp-ext");
+    if (record() !== busy) throw new Error("child completion changed parent record");
+    await handlers.agent_end({ type: "agent_end", willContinue: true }, ctx);
+    expect("busy omp-ext");
+    await handlers.agent_end({ type: "agent_end" }, ctx);
+    expect("idle omp-ext");
+    const idle = record();
+    await childHandlers.agent_start?.({ type: "agent_start" }, ctx);
+    expect("idle omp-ext");
+    if (record() !== idle) throw new Error("child start changed parent record");
+    await handlers.agent_start({ type: "agent_start" }, ctx);
+    expect("busy omp-ext");
+    await handlers.agent_end({ type: "agent_end" }, ctx);
+    expect("idle omp-ext");
+    break;
+  }
+  case "handlers": console.log(Object.keys(handlers).sort().join(" ")); break;
+  case "turn-start": await handlers["turn_start"]({ type: "turn_start" }, ctx); break;
+  case "turn-end": await handlers["turn_end"]({ type: "turn_end", turnIndex: 0 }, ctx); break;
+  case "agent-start": await handlers["agent_start"]({ type: "agent_start" }, ctx); break;
+  case "end-continuing": await handlers["agent_end"]({ type: "agent_end", willContinue: true }, ctx); break;
+  case "end-final": await handlers["agent_end"]({ type: "agent_end" }, ctx); break;
+  default: throw new Error("unknown mode " + process.env.MODE);
+}
+if (process.env.MODE === "turn-end") {
+  await new Promise((resolve) => setTimeout(resolve, 200));
+}
+EOF
+}
+
+test_omp_extension_semantic_lifecycle() {
+  local rec id=busy-omp-1 out state ext
+  # fm-spawn refuses an OMP task id that still holds /tmp/fm-<id> from an
+  # earlier run, and these cases leave their other harnesses' temp roots alone.
+  rm -rf -- "/tmp/fm-$id"
+  rec=$(make_spawn_case omp-lifecycle omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  assert_present "$ext" "omp spawn did not write the per-task extension"
+
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "the spawn seed must classify 'busy fm-spawn', never '$out'"
+
+  out=$(drive_omp_ext "$ext" handlers) || fail "handler listing failed: $out"
+  case " $out " in
+    *" agent_settled "*) fail "the omp extension must not listen for agent_settled (omp has no such event)" ;;
+  esac
+  for handler in agent_start agent_end turn_start turn_end; do
+    case " $out " in
+      *" $handler "*) ;;
+      *) fail "the omp extension must register $handler, got '$out'" ;;
+    esac
+  done
+
+  # A turn boundary is not a work boundary: omp emits several turn_start/turn_end
+  # pairs inside one agent run, so neither may move the semantic state.
+  clear_turnend "$state" "$id"
+  out=$(drive_omp_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
+  assert_turnend_published "$state" "$id" "turn_end no longer touches the notification marker"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "turn_end must stay a notification, not a state edge, got '$out'"
+  out=$(drive_omp_ext "$ext" turn-start) || fail "turn_start drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "turn_start must not borrow the semantic state, got '$out'"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "agent_start must classify 'busy omp-ext', got '$out'"
+
+  out=$(drive_omp_ext "$ext" end-continuing) || fail "continuing agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "agent_end with willContinue must stay busy, got '$out'"
+
+  out=$(drive_omp_ext "$ext" end-final) || fail "final agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a plain agent_end must classify 'idle omp-ext', got '$out'"
+
+  out=$(drive_omp_ext "$ext" ownership "$state" "$id") || fail "parent/child ownership drive failed: $out"
+
+  fm_busy_source_trusted omp pi-ext && fail "omp must not trust the Pi extension's records"
+  fm_busy_source_trusted omp omp-ext || fail "omp must trust its own extension's records"
+  pass "omp extension: agent_start busy, willContinue stays busy, plain agent_end idle, turn boundaries stay notifications"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state launch notify_cmd
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -530,6 +707,7 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_omp_extension_semantic_lifecycle
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

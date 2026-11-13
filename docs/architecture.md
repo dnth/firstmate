@@ -172,7 +172,7 @@ Successful typed text sends then receive the existing `FM_SEND_SETTLE` pause so 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
 Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
-Each converted adapter reports its own turn lifecycle through the strongest verified source the vendor exposes: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, Claude through owned lifecycle hooks, and Hermes through its live TUI's busy-only composer/footer plus a plugin-forwarded lifecycle bridge for exact turn boundaries.
+Each converted adapter reports its own lifecycle through the strongest verified source the vendor exposes; the [harness adapter facts](../.agents/skills/harness-adapters/SKILL.md) name each harness's semantic source.
 Kimi behind Pi inherits Pi's lifecycle.
 Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, while the Hermes and Grok rendered sources are isolated by exact harness identity.
 Hermes' bridged lifecycle record outranks its rendered footer in both directions - a trusted busy beats a rendered ready row and a trusted idle beats a lagging rendered busy row - and the rendered tail is read only when no valid record exists, so neither a steer nor a `C-c` interrupt is gated on a stale screen.

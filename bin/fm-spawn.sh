@@ -4747,7 +4747,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|omp)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -4885,12 +4885,30 @@ EOF
     omp)
       rm -f "$OMP_READY" "$OMP_STARTED" "$OMP_DOORBELL_READY" "$OMP_DOORBELL_FAILED"
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
-// Firstmate OMP launch acknowledgement, inbox doorbell, and turn-end signal; written by fm-spawn.
+// Firstmate OMP launch acknowledgement, inbox doorbell, semantic busy state,
+// and turn-end signal; written by fm-spawn under the contract owned by
+// bin/fm-busy-lib.sh.
 // .omp-ready publishes only after the inbox doorbell activates; a failed
 // activation journals its reason to .omp-doorbell-failed instead, so a missing
 // marker is always attributable.
+// Semantic state: "agent_start" -> busy when a low-level agent run begins;
+// "agent_end" -> idle only when event.willContinue is not true. omp has no
+// agent_settled; willContinue marks the auto-retry, compaction-retry, queued-follow-up, and
+// session_stop-forced continuation cases that must stay busy.
+// turn_start/turn_end bracket an INNER turn (one model response plus its tool
+// calls), not a run: a single tool-using prompt emits several pairs between one
+// agent_start and agent_end, so they stay wake notifications for the watcher
+// and never state edges. ctx.isIdle() is not
+// consulted because it still reads false at a natural agent_end.
 import { execFile } from "node:child_process";
 import { installTaskInboxDoorbell } from "$FM_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts";
+const busyEvent = (state: string, event: string) =>
+  new Promise<void>((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+    ], () => resolve());
+  });
 export default function (omp: any) {
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, {
     inboxDir: "$STATE_REAL/$ID.inbox",
@@ -4906,6 +4924,21 @@ export default function (omp: any) {
       if (active) execFile("touch", ["$OMP_READY"]);
     });
   });
+  // Native children bind this extension again in the parent's process. Only
+  // the first instance may write this generation's state; a child's run end
+  // must not mark its still-working parent idle.
+  const ownersKey = Symbol.for("firstmate.omp-busy.owners");
+  const owners: Set<string> =
+    (globalThis as unknown as Record<symbol, Set<string>>)[ownersKey] ??= new Set<string>();
+  const ownerKey = "$STATE_REAL/$ID:$BUSY_GEN";
+  if (!owners.has(ownerKey)) {
+    owners.add(ownerKey);
+    omp.on("agent_start", () => busyEvent("busy", "agent-start"));
+    omp.on("agent_end", (event: any) => {
+      if (event && event.willContinue === true) return;
+      return busyEvent("idle", "agent-end");
+    });
+  }
   omp.on("turn_start", () => {
     taskInboxDoorbell.notifyTurnStart();
     execFile("touch", ["$OMP_STARTED"]);

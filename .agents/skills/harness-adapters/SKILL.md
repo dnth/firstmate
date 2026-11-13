@@ -315,6 +315,7 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 | Fact | Value |
 |---|---|
 | Busy-pane signature | `Working… ⟦esc⟧` with a rotating braille prefix. |
+| Busy state | `omp-ext` from the generated per-task extension; [the busy-state contract](../../../bin/fm-busy-lib.sh) owns lifecycle semantics and [runtime verification](../../../docs/verification/runtime-backends.md#omp-semantic-busy-state) records the live guard and relaunch requirement. |
 | Exit command | `/exit` |
 | Interrupt | Single Escape stops the active turn without exiting the session. |
 | Skill invocation | `/skill:<name>`, for example `/skill:no-mistakes`. |
