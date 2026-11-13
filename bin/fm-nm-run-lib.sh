@@ -568,7 +568,7 @@ def decided_actions(answer, finding_ids):
     keywords = list(ACTION_PATTERN.finditer(answer or ""))
     decided, explicit = {}, set()
     if not keywords or re.search(r"[()`\"“”‘’]|(?<!\w)'|'(?!\w)", answer):
-        return decided, explicit
+        return decided
     id_patterns = {
         fid: r"(?<![\w-])" + re.escape(fid) + r"(?![\w-])"
         for fid in finding_ids
@@ -579,7 +579,7 @@ def decided_actions(answer, finding_ids):
     for clause in re.split(r"[;\n]", answer):
         parts = re.split(r"(?=(?:" + labels + r")\s*:)", clause, flags=re.IGNORECASE)
         if len(parts) > 1 and parts[0].strip() and not ACTION_PATTERN.search(parts[0]):
-            return {}, set()
+            return {}
         clauses.extend(parts)
     directive = re.compile(
         r"^\s*(?:(?:" + labels + r")\s*:\s*)?" + ACTION_PATTERN.pattern,
@@ -591,7 +591,7 @@ def decided_actions(answer, finding_ids):
         mentions = list(ACTION_PATTERN.finditer(clause))
         if not mentions:
             if clause.strip():
-                return {}, set()
+                return {}
             continue
         match = directive.match(clause)
         value = None
@@ -600,18 +600,21 @@ def decided_actions(answer, finding_ids):
             if not tail or id_list.fullmatch(tail):
                 value = action_of(match.group("action"))
         if value is None:
-            return {}, set()
+            return {}
         defaults.add(value)
         for fid, pattern in id_patterns.items():
             if re.search(pattern, clause, re.IGNORECASE):
                 if fid in explicit and decided[fid] != value:
-                    return {}, set()
+                    return {}
                 decided[fid] = value
                 explicit.add(fid)
-    if len(defaults) == 1:
+    if explicit:
         for fid in finding_ids:
-            decided.setdefault(fid, next(iter(defaults)))
-    return decided, explicit
+            decided.setdefault(fid, "nonfix")
+    elif len(defaults) == 1:
+        for fid in finding_ids:
+            decided[fid] = next(iter(defaults))
+    return decided
 
 
 def agrees(decided, recorded):
@@ -639,14 +642,11 @@ for rnd in rounds:
     if not round_events:
         continue
     origin = round_events[0][2]
-    decided, explicit = {}, set()
+    decided = {}
     if rnd in covered:
-        decided, explicit = decided_actions(round_answer[rnd], round_context[rnd])
-        resolved_ids = {fid for fid, _, _, _ in round_events}
-        decided = {fid: value for fid, value in decided.items() if fid in explicit or fid in resolved_ids}
+        decided = decided_actions(round_answer[rnd], round_context[rnd])
+        decided = {fid: value for fid, value in decided.items() if fid in round_findings[rnd]}
     for fid, action, _, identity in round_events:
-        if fid not in explicit and action == "skip" and decided:
-            decided[fid] = "nonfix"
         if origin != "unknown":
             if rnd not in covered:
                 missing.append((fid, rnd, action, origin))
