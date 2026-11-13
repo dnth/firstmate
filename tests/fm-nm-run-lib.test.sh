@@ -433,7 +433,7 @@ test_finding_clauses_bind_their_own_actions() {
     write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
     decisions "$tmp/status" >/dev/null || fail "an agreeing mixed decision was refused: $answer"
   done
-  for answer in 'IGNORE R1 FIX R2' 'IGNORE R1; FIX R1' 'IGNORE; FIX R2'; do
+  for answer in 'IGNORE R1 FIX R2' 'IGNORE R1; FIX R1' 'IGNORE; FIX R2 (if approved)'; do
     write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
     out=$(decisions "$tmp/status")
     rc=$?
@@ -721,6 +721,59 @@ FIXTURE
   pass "covered unreadable answers invalidate earlier authority for actual and unresolved sibling findings"
 }
 
+test_mixed_partial_fixes_preserve_implicit_declines() {
+  local tmp origin scenario answer source selection field out rc expected
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
+  for origin in unknown interactive auto_yes; do
+    for field in findings user_findings; do
+      for scenario in skip decline repeated-skip fix absent unreadable ambiguous unnamed; do
+        answer='FIX R1; IGNORE R2'
+        source=user_declined
+        selection='[]'
+        expected=0
+        case "$scenario" in
+          skip) ;;
+          decline) ;;
+          repeated-skip) source=user ;;
+          fix) source=user; selection='["R3"]'; expected=1 ;;
+          absent) expected=1 ;;
+          unreadable) answer='FIX R1 (if approved); IGNORE R2'; expected=1 ;;
+          ambiguous) answer='FIX R1; IGNORE R1; IGNORE R2'; expected=1 ;;
+          unnamed) answer='FIX; IGNORE'; expected=1 ;;
+        esac
+        FM_TEST_ROUNDS_JSON=$(python3 - "$origin" "$field" "$scenario" "$source" "$selection" <<'FIXTURE'
+import json
+import sys
+origin, field, scenario, source, selection = sys.argv[1:]
+findings = [dict(id=f"R{i}", action="ask-user", description=f"finding {i}", severity="error") for i in range(1, 4)]
+first = dict(round=1, selection_source="user", response_origin=origin, selected_finding_ids=["R1"], **{field: findings[:2] if scenario == "absent" else findings})
+rounds = [first]
+if scenario != "skip":
+    rounds.append(dict(round=2, selection_source=source, response_origin="unknown", selected_finding_ids=json.loads(selection), findings=[findings[2]]))
+print(json.dumps(dict(schema_version=1, rounds=rounds)))
+FIXTURE
+)
+        write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
+        out=$(decisions "$tmp/status")
+        rc=$?
+        expect_code "$expected" "$rc" "mixed partial fix: $origin/$field/$scenario: $out"
+        if [ "$expected" -ne 0 ]; then
+          assert_contains "$out" 'finding R3' "mixed partial-fix refusal did not name R3"
+          if [ "$scenario" = fix ]; then
+            assert_contains "$out" 'firstmate decided decline' "the implicit skip was not carried as a decline"
+            assert_contains "$out" 'recorded fix' "the contradictory later fix was not named"
+          fi
+        fi
+      done
+    done
+  done
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "readable mixed partial fixes preserve same-round implicit declines without authorizing absent or ambiguous findings"
+}
+
 test_all_checks_passed_is_green
 test_no_ci_checks_reported_is_no_checks_not_green
 test_no_ci_declared_is_no_checks_despite_its_wording
@@ -746,5 +799,6 @@ test_carried_decisions_require_matching_finding_identity
 test_action_mentions_do_not_authorize_decisions
 test_unresolved_only_review_rounds_do_not_bind_answers
 test_new_covered_answers_supersede_carried_authority
+test_mixed_partial_fixes_preserve_implicit_declines
 
 echo "all fm-nm-run-lib tests passed"

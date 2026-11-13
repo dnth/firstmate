@@ -640,7 +640,7 @@ for rnd in rounds:
         resolved_ids = {fid for fid, _, _, _ in round_events}
         decided = {fid: value for fid, value in decided.items() if fid in explicit or fid in resolved_ids}
     for fid, action, _, identity in round_events:
-        if decided.get(fid) == "fix" and fid not in explicit and action == "skip":
+        if fid not in explicit and action == "skip" and decided and all(value is not None for value in decided.values()):
             decided[fid] = "nonfix"
         if origin != "unknown":
             if rnd not in covered:
