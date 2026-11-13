@@ -272,10 +272,15 @@ fm_nm_ask_user_key() {  # <run-id> <step>
 # implicitly declined.
 #
 # response_origin is the pipeline's record of who answered the gate:
-# interactive and auto_yes are recorded answers, and unknown means the run
-# predates or lost that record. A decision event whose origin is unknown or
-# unrecognized refuses rather than guessing, so the audit never silently falls
-# back to counting status-ledger text alone.
+# interactive and auto_yes are recorded answers. Missing, empty, and unknown
+# are ORIGIN UNPROVEN, not a refusal: no-mistakes v1.106.1 records an approve,
+# skip, or abort response's origin on the step result only and stores the
+# answered round as a decline with the column default `unknown`, so the round's
+# origin says nothing about the responder for those forms. The decision audit
+# below then requires both a matching firstmate decision record and agreement
+# between that decision and the round's recorded actions. Any other origin
+# string refuses rather than guessing, so the audit never silently falls back
+# to counting status-ledger text alone.
 #
 # Exit 0 prints the events (possibly none). Any other exit prints the concrete
 # missing requirement on stdout and means the run data could not be read.
@@ -364,9 +369,9 @@ for rnd in rounds:
     if not ask_user:
         continue
     origin = rnd.get("response_origin")
-    if origin in (None, "", "unknown"):
-        unreadable(f"{where} records an ask-user decision with no response_origin, so who answered it cannot be verified")
-    if origin not in ("interactive", "auto_yes"):
+    if origin in (None, ""):
+        origin = "unknown"
+    if origin not in ("interactive", "auto_yes", "unknown"):
         unreadable(f"{where} records an unrecognized response_origin {origin!r}, so who answered it cannot be verified")
     if source == "user":
         chosen = set(selection)
@@ -397,7 +402,7 @@ PY
 # Exit 0 prints the events (possibly none). Any other exit prints the concrete
 # missing requirement on stdout - failed status or rounds call, a status
 # document with no steps table, empty or unparseable rounds JSON, an
-# unsupported schema_version, or an origin-less decision event - so callers
+# unsupported schema_version, or an unrecognized response_origin - so callers
 # fail closed naming exactly what is missing. It never falls back to the
 # status-log text audit.
 fm_nm_ask_user_resolutions() {  # <dir> <timeout_secs> <run-id> [<status-doc>]
@@ -441,12 +446,29 @@ EOF
 # openings while pending and surplus answers do not advance it.
 # Explicit round recovery answers do not change the current implicit gate.
 #
+# A round whose response_origin is missing or unknown is ORIGIN UNPROVEN: the
+# no-mistakes version Firstmate supports records approve, skip, and abort
+# round declines without an origin, so the round alone cannot show who answered.
+# Such a round passes only with BOTH
+#   1. a matching firstmate `resolved` record for its occurrence (the same
+#      binding above), or, when a later round of the same step re-raises a
+#      finding on an origin-unproven round, a firstmate decision for that exact
+#      finding in an earlier round of the step; and
+#   2. agreement between what firstmate decided for the finding and the action
+#      the round recorded: FIX requires a recorded fix, and IGNORE, APPROVE,
+#      SKIP, ABORT, or DECLINE requires a recorded decline or skip.
+# A disagreement refuses naming the finding, the decided action, and the
+# recorded action; an excerpt with no readable decision refuses as unverifiable.
+# Interactive and auto_yes rounds keep the record-only rule: their origin is
+# the pipeline's own record of a real answer, and requirement 2 is skipped.
+#
 # Returns 0 silently when the run recorded no ask-user decision events or every
 # event is matched. Returns 1 and prints a per-step refusal detail (run, step,
-# finding, and answering origin) on stdout when a gate response has no
-# matching resolved record. Returns 2 and prints the concrete missing
-# requirement on stdout when the run's decision data cannot be read; callers
-# must surface that detail rather than substituting a generic refusal.
+# finding, round, and answering origin or unproven origin) on stdout when a
+# gate response has no matching resolved record or contradicts firstmate's
+# decision. Returns 2 and prints the concrete missing requirement on stdout when
+# the run's decision data cannot be read; callers must surface that detail
+# rather than substituting a generic refusal.
 # Callers must source bin/fm-classify-lib.sh for the status grammar.
 fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file> [<status-doc>]
   local dir=$1 timeout_secs=$2 run_id=$3 status_file=$4 status_doc=${5:-}
@@ -466,6 +488,7 @@ fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file> [<st
       printf '%s\n' "$rows" | awk -F '\t' -v s="$step" '$1 == s { print "event\t" $0 }'
       status_resolved_step_records "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")"
     } | python3 -c "$(cat <<'PY'
+import re
 import sys
 
 run_id, step, key = sys.argv[1:]
@@ -476,12 +499,18 @@ for line in sys.stdin:
         events.append(fields[1:])
     else:
         records.append(fields)
+if not events:
+    sys.exit(0)
+
 rounds = sorted({int(event[1][len("round "):]) for event in events})
 current = rounds[0]
 pending = None
 bindings = {}
 covered = set()
-for kind, record_key in records:
+round_answer = {}
+for fields in records:
+    kind, record_key = fields[0], fields[1]
+    answer = fields[2] if len(fields) > 2 else ""
     if record_key.startswith(key + "-r"):
         bound = int(record_key[len(key + "-r"):])
         if kind == "open":
@@ -499,14 +528,106 @@ for kind, record_key in records:
         pending = bound
     else:
         covered.add(bound)
+        round_answer[bound] = answer
         if pending == bound:
             pending = None
-missing = set(rounds) - covered
-if missing:
-    print(f"run {run_id} step {step}: missing matching resolved [key={key}] record(s):")
-    for _, rnd, fid, action, origin in events:
-        if int(rnd[len("round "):]) in missing:
-            print(f"  finding {fid} resolved as {action} ({rnd}, answered {origin})")
+
+# Firstmate's decision vocabulary in a bounded `answered:` excerpt: FIX asks for
+# the code change, while IGNORE, APPROVE, SKIP, ABORT, and DECLINE all decline
+# it. A keyword followed by a finding id in the same clause binds that finding;
+# the first keyword is the gate-wide verdict for findings the excerpt does not
+# bind. Anything else states no decision this audit can verify.
+ACTION_PATTERN = re.compile(
+    r"\b(?P<action>fix(?:es|ed)?|ignore[sd]?|approve[sd]?|skip(?:ped)?|abort(?:ed)?|declin(?:e|ed|es))\b",
+    re.IGNORECASE,
+)
+LABEL = {"fix": "fix", "nonfix": "decline/approve"}
+
+
+def action_of(keyword):
+    return "fix" if keyword.lower().startswith("fix") else "nonfix"
+
+
+def decided_actions(answer, finding_ids):
+    keywords = list(ACTION_PATTERN.finditer(answer or ""))
+    decided, explicit = {}, set()
+    if not keywords:
+        return decided, explicit
+    for index, match in enumerate(keywords):
+        end = keywords[index + 1].start() if index + 1 < len(keywords) else len(answer)
+        clause = answer[match.end():end]
+        action = action_of(match.group("action"))
+        for fid in finding_ids:
+            if fid in decided:
+                continue
+            if re.search(r"(?<![\w-])" + re.escape(fid) + r"(?![\w-])", clause, re.IGNORECASE):
+                decided[fid] = action
+                explicit.add(fid)
+    gate_wide = action_of(keywords[0].group("action"))
+    for fid in finding_ids:
+        decided.setdefault(fid, gate_wide)
+    return decided, explicit
+
+
+def agrees(decided, recorded, explicit, fix_response):
+    if decided == "fix":
+        # A fix response declines every finding it does not select, so an
+        # unnamed finding's implicit skip does not contradict the decision.
+        return recorded == "fix" or (not explicit and fix_response and recorded == "skip")
+    return recorded in ("declined", "skip")
+
+
+by_round = {}
+for _, rnd, fid, action, origin in events:
+    by_round.setdefault(int(rnd[len("round "):]), []).append((fid, action, origin))
+
+decisions = {}
+missing = []
+problems = []
+for rnd in rounds:
+    round_events = by_round.get(rnd, [])
+    if not round_events:
+        continue
+    origin = round_events[0][2]
+    decided, explicit = {}, set()
+    if rnd in covered:
+        decided, explicit = decided_actions(round_answer[rnd], [fid for fid, _, _ in round_events])
+    for fid, action, _ in round_events:
+        if origin != "unknown":
+            if rnd not in covered:
+                missing.append((fid, rnd, action, origin))
+            continue
+        verdict = (decided.get(fid), fid in explicit) if rnd in covered else decisions.get(fid)
+        if verdict is None or verdict[0] is None:
+            if rnd in covered:
+                problems.append((fid, rnd, "unreadable", action))
+            else:
+                missing.append((fid, rnd, action, origin))
+        elif not agrees(verdict[0], action, verdict[1], action != "declined"):
+            problems.append((fid, rnd, verdict[0], action))
+    if rnd in covered:
+        for fid, value in decided.items():
+            decisions[fid] = (value, fid in explicit)
+
+
+def report_problems(out):
+    if not problems:
+        return
+    out.write(f"run {run_id} step {step}: origin-unproven decision disagrees with firstmate's record:\n")
+    for fid, rnd, verdict, action in problems:
+        label = LABEL[verdict] if verdict in LABEL else "no readable action"
+        out.write(f"  finding {fid} (round {rnd}): firstmate decided {label}, but the pipeline recorded {action}\n")
+
+
+if missing or problems:
+    if missing:
+        print(f"run {run_id} step {step}: missing matching resolved [key={key}] record(s):")
+        for fid, rnd, action, origin in missing:
+            if origin == "unknown":
+                print(f"  finding {fid} resolved as {action} (round {rnd}, origin unproven)")
+            else:
+                print(f"  finding {fid} resolved as {action} (round {rnd}, answered {origin})")
+    report_problems(sys.stdout)
     sys.exit(1)
 PY
 )" "$run_id" "$step" "$(fm_nm_ask_user_key "$run_id" "$step")") || rc=$?

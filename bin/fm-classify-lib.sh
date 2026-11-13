@@ -697,15 +697,25 @@ EOF
   printf '%s\n' "$count"
 }
 
-# Emit step gate openings and canonical answers as TAB-separated kind, key rows.
-# Accept the step key, its round suffix, and its finding-specific detail suffix.
+# Emit step gate openings and canonical answers as TAB-separated kind, key,
+# answer rows. Accept the step key, its round suffix, and its finding-specific
+# detail suffix. An opening or a `resolved` line in another grammar carries an
+# empty answer, and answer text has embedded tabs flattened to spaces so the
+# three fields stay parseable. Callers that bind one answer to one gate
+# occurrence, such as the no-mistakes decision audit, read the third field; the
+# one-answer-per-event rule still means the excerpt decides the whole response.
 # This is process evidence, not tamper-proof provenance; same-user forgery risk is accepted.
 status_resolved_step_records() {  # <status-file> <key>
-  local f=$1 want=$2 line key kind verb
+  local f=$1 want=$2 line key kind verb answer
   { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || return 0
   while IFS= read -r line || [ -n "$line" ]; do
+    answer=''
     case "$line" in
-      "resolved [key="*"]: answered: "*) kind=record ;;
+      "resolved [key="*"]: answered: "*)
+        kind=record
+        answer=${line#*"]: answered: "}
+        answer=${answer//$'\t'/ }
+        ;;
       *)
         verb=$(status_line_verb "$line")
         case "$verb" in needs-decision|blocked) kind=open ;; *) continue ;; esac
@@ -719,7 +729,7 @@ status_resolved_step_records() {  # <status-file> <key>
         ;;
       *) continue ;;
     esac
-    printf '%s\t%s\n' "$kind" "$key"
+    printf '%s\t%s\t%s\n' "$kind" "$key" "$answer"
   done < "$f"
 }
 

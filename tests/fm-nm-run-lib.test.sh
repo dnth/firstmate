@@ -277,11 +277,11 @@ print(json.dumps({"schema_version": 1, "rounds": [
   pass "rounds documents over 128 KiB retain all matching decisions"
 }
 
-test_unreadable_or_originless_rounds_refuse_naming_what_is_missing() {
+test_unreadable_or_unrecognized_rounds_refuse_naming_what_is_missing() {
   local tmp out rc variant
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
   write_status "$tmp/status" 'resolved [key=nm-01TEST-review]: answered: approve R9'
-  for variant in rounds-failed no-steps unparseable no-origin no-schema no-round; do
+  for variant in rounds-failed no-steps unparseable bad-origin no-schema no-round; do
     FM_TEST_STATUS_RC=0
     FM_TEST_STATUS_DOC=$RUN_STATUS
     FM_TEST_ROUNDS_RC=0
@@ -290,7 +290,7 @@ test_unreadable_or_originless_rounds_refuse_naming_what_is_missing() {
       rounds-failed) FM_TEST_ROUNDS_RC=1 ;;
       no-steps) FM_TEST_STATUS_DOC=$NO_STATUS_STEPS ;;
       unparseable) FM_TEST_ROUNDS_JSON='not json' ;;
-      no-origin) FM_TEST_ROUNDS_JSON=${ROUNDS_ONE_DECISION/,\"response_origin\":\"interactive\"/} ;;
+      bad-origin) FM_TEST_ROUNDS_JSON=${ROUNDS_ONE_DECISION/\"response_origin\":\"interactive\"/\"response_origin\":\"mystery\"} ;;
       no-schema) FM_TEST_ROUNDS_JSON='{"rounds":[]}' ;;
       no-round) FM_TEST_ROUNDS_JSON=${ROUNDS_ONE_DECISION/\"round\":7/\"round\":null} ;;
     esac
@@ -303,7 +303,115 @@ test_unreadable_or_originless_rounds_refuse_naming_what_is_missing() {
   rm -rf "$tmp"
   FM_TEST_STATUS_DOC=$RUN_STATUS
   FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
-  pass "missing, unparseable, origin-less, and version-less rounds data refuses naming what is missing"
+  pass "missing, unparseable, unrecognized-origin, and version-less rounds data refuses naming what is missing"
+}
+
+# A test-step run document and the two real shapes PR 305's successor must
+# accept: the KCC single approve round, and the Aceh auto_fix re-raise that
+# repeats a finding an interactive round already declined. no-mistakes v1.106.1
+# records `response_origin: unknown` on the round for approve/skip/abort
+# responses (its executor writes the origin on the step result instead), so
+# these rounds are "origin unproven", never a refusal by themselves.
+TEST_STEP_STATUS='run:
+  id: "01TEST"
+  status: completed
+  steps[1]{step,status,findings,duration_ms}:
+    test,completed,1,1
+outcome: passed'
+
+ROUNDS_KCC_UNKNOWN='{"schema_version":1,"run_id":"01TEST","step":"test","rounds":[{"round":1,"trigger":"initial","selection_source":"user_declined","response_origin":"unknown","selected_finding_ids":[],"findings":[{"id":"test-1","action":"ask-user"}],"user_findings":null}]}'
+ROUNDS_ACEH_UNKNOWN='{"schema_version":1,"run_id":"01TEST","step":"review","rounds":[{"round":1,"trigger":"initial","selection_source":"user_declined","response_origin":"interactive","selected_finding_ids":[],"findings":[{"id":"R1","action":"ask-user"}],"user_findings":null},{"round":2,"trigger":"auto_fix","selection_source":"user_declined","response_origin":"unknown","selected_finding_ids":[],"findings":[{"id":"R1","action":"ask-user"}],"user_findings":null}]}'
+ROUNDS_UNKNOWN_FIX='{"schema_version":1,"rounds":[{"round":1,"selection_source":"user","response_origin":"unknown","selected_finding_ids":["test-1"],"findings":[{"id":"test-1","action":"ask-user"}]}]}'
+ROUNDS_PARTIAL_FIX='{"schema_version":1,"rounds":[{"round":1,"selection_source":"user","response_origin":"unknown","selected_finding_ids":["test-1"],"findings":[{"id":"test-1","action":"ask-user"},{"id":"test-2","action":"ask-user"}]}]}'
+
+test_unknown_origin_rounds_need_a_matching_firstmate_decision() {
+  local tmp out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_KCC_UNKNOWN
+  write_status "$tmp/status"
+  out=$(decisions "$tmp/status")
+  rc=$?
+  expect_code 1 "$rc" "an origin-unproven decision passed with no firstmate record"
+  assert_contains "$out" "run 01TEST" "refusal did not name the run"
+  assert_contains "$out" "step test" "refusal did not name the step"
+  assert_contains "$out" "round 1" "refusal did not name the round"
+  assert_contains "$out" "finding test-1" "refusal did not name the finding"
+  write_status "$tmp/status" \
+    'resolved [key=nm-01TEST-test]: answered: Firstmate decision for run 01TEST test-1: APPROVE proceeding without live validation'
+  decisions "$tmp/status" >/dev/null \
+    || fail "an origin-unproven approve covered by a firstmate decision was refused"
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "an origin-unproven decision passes only with a matching firstmate decision record"
+}
+
+test_repeated_unknown_round_carries_forward_a_decided_finding() {
+  local tmp out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ACEH_UNKNOWN
+  write_status "$tmp/status"
+  out=$(decisions "$tmp/status")
+  rc=$?
+  expect_code 1 "$rc" "the re-raised round passed without any firstmate decision"
+  assert_contains "$out" "round 2" "the first refusal did not name the re-raised round"
+  write_status "$tmp/status" \
+    'resolved [key=nm-01TEST-review]: answered: Firstmate decision for run 01TEST review: IGNORE R1 (keep the docstring change; respond --action fix with no findings selected)'
+  decisions "$tmp/status" >/dev/null \
+    || fail "the round-1 decision did not cover the re-raised round-2 finding"
+  write_status "$tmp/status" \
+    'resolved [key=nm-01TEST-review-r2]: answered: FIX R1'
+  out=$(decisions "$tmp/status")
+  rc=$?
+  expect_code 1 "$rc" "a round-2 record that contradicts the recorded decline was accepted"
+  assert_contains "$out" "finding R1" "mismatch refusal did not name the finding"
+  assert_contains "$out" "firstmate decided fix" "mismatch refusal did not name the decided action"
+  assert_contains "$out" "recorded declined" "mismatch refusal did not name the recorded action"
+  rm -rf "$tmp"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "a re-raised finding is covered by its earlier firstmate decision, and only while the action agrees"
+}
+
+test_unknown_origin_mismatch_refuses_naming_both_actions() {
+  local tmp out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_KCC_UNKNOWN
+  write_status "$tmp/status" 'resolved [key=nm-01TEST-test]: answered: FIX test-1'
+  out=$(decisions "$tmp/status")
+  rc=$?
+  expect_code 1 "$rc" "a firstmate FIX decision covered a recorded decline"
+  assert_contains "$out" "finding test-1" "fix/decline refusal did not name the finding"
+  assert_contains "$out" "firstmate decided fix" "fix/decline refusal did not name the decided action"
+  assert_contains "$out" "recorded declined" "fix/decline refusal did not name the recorded action"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_UNKNOWN_FIX
+  write_status "$tmp/status" 'resolved [key=nm-01TEST-test]: answered: IGNORE test-1'
+  out=$(decisions "$tmp/status")
+  rc=$?
+  expect_code 1 "$rc" "a firstmate IGNORE decision covered a recorded fix"
+  assert_contains "$out" "finding test-1" "decline/fix refusal did not name the finding"
+  assert_contains "$out" "firstmate decided decline" "decline/fix refusal did not name the decided action"
+  assert_contains "$out" "recorded fix" "decline/fix refusal did not name the recorded action"
+  rm -rf "$tmp"
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "an origin-unproven action that contradicts firstmate's decision refuses naming both actions"
+}
+
+test_partial_fix_implicit_skip_is_not_a_mismatch() {
+  local tmp
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_PARTIAL_FIX
+  write_status "$tmp/status" 'resolved [key=nm-01TEST-test]: answered: FIX test-1'
+  decisions "$tmp/status" >/dev/null \
+    || fail "a partial fix's implicit decline of an unnamed finding contradicted its firstmate decision"
+  write_status "$tmp/status" 'resolved [key=nm-01TEST-test]: answered: IGNORE test-1'
+  decisions "$tmp/status" >/dev/null && fail "a declined firstmate finding covered a recorded fix"
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "a partial fix's implicit decline agrees with firstmate while a named mismatch still refuses"
 }
 
 test_all_checks_passed_is_green
@@ -319,6 +427,10 @@ test_surplus_records_stay_bound_when_finding_ids_repeat
 test_reopened_keys_bind_new_gate_occurrences
 test_recovery_answers_do_not_move_implicit_gate_binding
 test_large_rounds_document_is_read_without_environment_limits
-test_unreadable_or_originless_rounds_refuse_naming_what_is_missing
+test_unreadable_or_unrecognized_rounds_refuse_naming_what_is_missing
+test_unknown_origin_rounds_need_a_matching_firstmate_decision
+test_repeated_unknown_round_carries_forward_a_decided_finding
+test_unknown_origin_mismatch_refuses_naming_both_actions
+test_partial_fix_implicit_skip_is_not_a_mismatch
 
 echo "all fm-nm-run-lib tests passed"
