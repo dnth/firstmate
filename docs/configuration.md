@@ -697,7 +697,7 @@ Bootstrap reports missing GitHub authentication separately as `NEEDS_GH_AUTH`; [
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 Full No-Mistakes PR registration and completion additionally require `python3` for the pipeline-backed decision-evidence check; [`bin/fm-nm-run-lib.sh`](../bin/fm-nm-run-lib.sh) owns its `no-mistakes axi rounds --json` evidence requirements and recovery mechanics.
-The check reads firstmate's `resolved [key=nm-<run>-<step>...]: answered:` excerpt in its canonical form: an optional prefix ending in `:` followed by the first clause `<VERB> <ids>`, with further `<VERB> <ids>` groups joined by `;`, `,`, or `and`.
+The check reads firstmate's `resolved [key=nm-<run>-<step>...]: answered:` excerpt in its canonical form: an optional `Firstmate decision ...:` or `Captain decision ...:` prefix followed by the first clause `<VERB> <ids>`, with further `<VERB> <ids>` groups joined by `;`, `,`, or `and`.
 `VERB` is `FIX`, `IGNORE`, `DECLINE`, `SKIP`, or `APPROVE`, and ids are finding ids the gate round presented.
 The clause ends at the first `(`, `.`, ` Reason`, or end of text; everything after it is reason prose and is ignored, so parenthesised asides never change the decision.
 A bare `APPROVE`, `IGNORE`, `DECLINE`, or `SKIP` with no ids declines every finding the round presented, while a bare `FIX` is prose and refuses.

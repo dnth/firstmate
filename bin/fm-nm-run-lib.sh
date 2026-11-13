@@ -458,15 +458,17 @@ EOF
 
 # Verify that every ask-user decision event the pipeline recorded for run $3
 # has a matching status record in task status file $4, one per gate response:
-# each parked gate must be escalated and decided again, so presence alone is
-# not enough. bin/fm-classify-lib.sh owns the canonical record grammar, its
-# accepted step-key suffixes, and its process-evidence limitation. One answer
-# covers all findings decided in its step and round, regardless of its excerpt.
+# presence alone is not enough. bin/fm-classify-lib.sh owns the status-line
+# envelope grammar, its accepted step-key suffixes, and its process-evidence
+# limitation. One answer binds the whole response; origin-unproven rounds also
+# require the per-finding content check below.
 # Round keys bind explicitly; bare and detail keys bind the current gate,
 # initially the first response, and retain it until a new opening. A new opening
 # after an answered gate advances to the next recorded response; repeated
 # openings while pending and surplus answers do not advance it.
 # Explicit round recovery answers do not change the current implicit gate.
+# Review rounds with only unresolved ask-user findings do not consume implicit
+# record occurrences, but an explicit round answer can update carried authority.
 #
 # A round whose response_origin is missing or unknown is ORIGIN UNPROVEN: the
 # no-mistakes version Firstmate supports records approve, skip, and abort
@@ -478,7 +480,11 @@ EOF
 #      finding in an earlier round of the step; and
 #   2. agreement between what firstmate decided for the finding and the action
 #      the round recorded: FIX requires a recorded fix, and IGNORE, APPROVE,
-#      SKIP, ABORT, or DECLINE requires a recorded decline or skip.
+#      SKIP, or DECLINE requires a recorded decline or skip.
+# Carry-forward requires matching description, severity, file, and line, with
+# a nonempty description and no conflicting identity for that id in the round.
+# A newer covered answer supersedes earlier authority for its presented ask-user
+# findings, including unresolved findings, even when the new answer is unreadable.
 # A disagreement refuses naming the finding, the decided action, and the
 # recorded action; an excerpt with no readable decision refuses as unverifiable.
 # Interactive and auto_yes rounds keep the record-only rule: their origin is
@@ -580,15 +586,7 @@ def action_of(keyword):
 
 
 def decided_actions(answer, finding_ids):
-    # The canonical firstmate record form, shared with docs/configuration.md:
-    #   [<prefix ending in ':'>] <VERB> <ids> [{';'|','|'and'} <VERB> <ids>]...
-    # The first clause ends at the first '(', '.', ' Reason', or end of text;
-    # everything after that is reason prose and is ignored, including
-    # parenthesised asides. A single verb with no ids is the gate-wide form:
-    # APPROVE, IGNORE, DECLINE, or SKIP declines every presented finding and
-    # FIX fixes every presented finding. A named answer binds named findings and
-    # implicitly declines every other presented finding. One finding bound to
-    # two action classes in one record is ambiguous and refuses.
+    # Parse the canonical first-clause contract in the enclosing shell header.
     text = answer or ""
     id_alts = sorted((re.escape(fid) for fid in finding_ids), key=len, reverse=True)
     verb_re = re.compile(r"(?<![\w-])(?P<verb>" + "|".join(VERBS) + r")(?![\w-])", re.IGNORECASE)
