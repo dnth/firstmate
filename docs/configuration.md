@@ -522,7 +522,8 @@ This section is the single owner of the canonical schema and its per-field seman
       "min_confidence": 0.85,
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "prewalk_into": "<OMP target model spec, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "prewalk_into": "<OMP target model spec, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 },
+          "peak_pricing": { "multiplier": "<number above 1>", "windows": [ { "weekdays": ["<mon..sun>"], "start": "HH:MM", "end": "HH:MM" } ] } }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
@@ -536,8 +537,8 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
-Profile `model`, `effort`, and `prewalk_into` fields and rule `why` are optional.
-Rule `approval`, `min_confidence`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+Profile `model`, `effort`, `prewalk_into`, and `peak_pricing` fields and rule `why` are optional.
+Rule `approval`, `min_confidence`, and `floor`, and profile `provider`, `floor`, and `peak_pricing` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
 `min_confidence` is a number from 0 through 1 that the rule's own probability in the answer must reach, in place of the resolver's global 0.6 floor on the answer's confidence; set it high on a rule whose wrong pick is costly and low on a rule that is a safe runner-up.
@@ -545,12 +546,20 @@ It is a confidence floor on the model's support for the rule, unrelated to the q
 A rule `floor` names the quota-axi `provider` and `scope` whose `effectivePercentRemaining` must be at least `min_percent` for the rule's profiles to apply.
 A known percentage below it makes the tool resolve among `default` instead; an absent or unknown row or unmeasured provider makes the floor unverifiable and escalates without authorizing default routing.
 A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, its ID and any rule-floor provider ID must each match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
-Bootstrap validates resolver-only `approval`, `min_confidence`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 The opted-in resolver has authoritative single-provider mappings for `claude`, `codex`, `grok`, `kimi`, `hermes`, and `devin`; every other dispatch-verified harness must declare `provider` explicitly on each profile: the multi-provider `pi`, `pi-signed`, `omp`, and `opencode`.
 Its single-provider table is owned by `bin/fm-quota-axi-lib.sh` and is separate from the model-prefix resolution in `fm_quota_provider_for_profile`, so typed-resolution additions cannot alter no-key routing.
 The resolver returns an actionable configuration error before any request when such a profile omits `provider`.
 A profile `floor` contains `scope` and `min_percent`, always uses that profile's provider, and makes that one candidate ineligible below `min_percent` on the named scope.
 An absent or unknown named row also makes the candidate unrankable and is reported as an unverifiable floor, not as a known shortfall.
+A profile `peak_pricing` declares when that provider costs more and how much more, and only typed dispatch resolution applies it.
+`multiplier` is a number above 1, and `windows` is a non-empty array of objects whose `weekdays` is a non-empty array of `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`, and whose `start` and `end` are UTC `HH:MM` clock times with `start` before `end`.
+A window covers `start` up to but not including `end`.
+Outside every declared window, the resolver multiplies that candidate's ranking weight by `multiplier` before the argmax; inside a declared window it ranks the candidate unadjusted, exactly as when the field is absent.
+For example, `multiplier: 2` with Monday-Friday windows `01:00`-`04:00` and `06:00`-`10:00` doubles the weight at all other weekday hours and throughout the weekend, including weekend hours inside those clock ranges.
+The adjustment changes only ranking: eligibility floors, exhausted-runway refusals, and approvals read the same evidence as without the field.
+An adjusted candidate line shows `offpeak=x<multiplier>` so a higher rank is explainable.
+A malformed `peak_pricing` is an actionable configuration error, never silently ignored.
+The [`fm-dispatch-resolve.sh` header](../bin/fm-dispatch-resolve.sh) owns the exact ranking weight and the test-only clock override.
 The verified `harness` values for crew profiles are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `omp`, `grok`, `kimi`, `hermes`, and `devin`.
 An omitted model or effort means the selected harness uses its own default for that axis.
 An omitted `prewalk_into` makes `fm-spawn.sh` add no Prewalk flags and preserves ordinary OMP-configured behavior byte-for-byte.
@@ -578,7 +587,7 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, an effort value unsupported by that harness, or `prewalk_into` on a non-OMP profile is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
-While typed resolution is active, malformed `approval`, `min_confidence`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
+While typed resolution is active, malformed `approval`, `min_confidence`, `floor`, `peak_pricing`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
@@ -603,7 +612,7 @@ When the sections are sent from a scout brief, the line `Brief kind: scout (repo
 When sections are extracted, a ship brief's delivery mode is deliberately omitted, because upstream live runs showed naming it pushing a routine ship brief toward the hardest tier (see [the verification record](verification/dispatch-resolve.md)).
 The scaffold's standard setup, rules, inbox, and definition-of-done text is the same in every brief, so leaving it out keeps its safety language from reading as a signal about the task.
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
-Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.
+Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider`, `floor`, and `peak_pricing`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric ranking-weight argmax over candidates using each candidate's limiting row.
 A rule that declares `min_confidence` is checked against that rule's own probability, whether it is the picked option or a runner-up, so a runner-up never needs weaker support than it would as the pick.
 A picked rule without `min_confidence`, and the neutral option, keep the global 0.6 floor on the answer's confidence exactly as before, so a file with no declared floors behaves as it did.
 When the picked rule declares its own floor and its probability is below it, the tool takes the most probable other option whose probability clears that option's floor (a rule's `min_confidence`, otherwise 0.6), prints a `fallback:` line naming both floors, and resolves that rule as though it had been picked; no qualifying option, or two equally probable ones, is `ambiguous`.
@@ -621,7 +630,7 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific credential setting.
 Typed resolution validates and reads `quota-axi --json` according to the schema-version and account-lane contract in the [`fm-dispatch-resolve.sh` header](../bin/fm-dispatch-resolve.sh); an incompatible snapshot is an ordinary `error` outcome that returns the intake to firstmate, so the `FM_QUOTA_AXI_MIN` floor is unchanged.
 `config/quota-account-lanes.json` is an optional local, gitignored file that turns one profile on a multi-account provider into one candidate per account, so a dispatch can spend whichever of the captain's accounts has the most headroom instead of whichever account its single credential happens to be.
 It maps a quota-axi provider family to the concrete provider ids that spend each of that family's accounts, keyed by the `accountKey` the snapshot reports:

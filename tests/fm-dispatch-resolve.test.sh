@@ -24,7 +24,7 @@ RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
-for command_name in bash chmod cp dirname jq mktemp rm; do
+for command_name in bash chmod cp date dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
 
@@ -711,6 +711,184 @@ TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TIE" run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "tie escalates"
 assert_contains "$out" '  reason: genuine spendPriority tie' "tie is named"
 pass "tie: equal spendPriority never breaks by array order"
+
+# --- peak pricing: an off-peak boost that never changes eligibility ------------
+# A profile may declare peak_pricing: the UTC clock windows when its provider
+# costs more, and the cost multiplier. Outside those windows (weekday off-peak
+# and all weekend) the resolver multiplies that candidate's ranking weight by
+# the multiplier before the argmax; inside a peak window it ranks unadjusted.
+# The clock is pinned through FM_DISPATCH_CLOCK_UTC so these cases never depend
+# on when the suite runs.
+PEAK_RULES="$TMP_ROOT/peak-rules.json"
+cat > "$PEAK_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "Work that a peak-priced provider serves.",
+      "use": [
+        {
+          "harness": "omp",
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "provider": "google",
+          "peak_pricing": {
+            "multiplier": 2,
+            "windows": [
+              { "weekdays": ["mon", "tue", "wed", "thu", "fri"], "start": "01:00", "end": "04:00" },
+              { "weekdays": ["mon", "tue", "wed", "thu", "fri"], "start": "06:00", "end": "10:00" }
+            ]
+          }
+        },
+        { "harness": "omp", "model": "opencode-go/kimi-k3", "provider": "zai" }
+      ]
+    }
+  ]
+}
+JSON
+PEAK_PLAIN="$TMP_ROOT/peak-plain.json"
+jq 'del(.rules[0].use[0].peak_pricing)' "$PEAK_RULES" > "$PEAK_PLAIN"
+
+write_peak_response() {  # <path>
+  cat > "$1" <<'JSON'
+{ "model": "jev-1.13.0",
+  "answers": { "rule": { "type": "choice", "choice": "rule_1", "confidence": 0.9,
+    "probabilities": { "rule_1": 0.95, "default": 0.05 } } },
+  "usage": { "input_tokens": 812, "output_tokens": 60 } }
+JSON
+}
+
+reset_log
+cp "$PEAK_RULES" "$RULES"
+write_peak_response "$RESPONSE"
+FM_DISPATCH_CLOCK_UTC=2026-11-12T05:00:00Z TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "a weekday off-peak instant resolves"
+assert_contains "$out" "  profile: --harness 'omp' --model 'opencode-go/deepseek-v4.1-flash'" "off-peak boosts a below-leader weight past the leader"
+assert_contains "$out" 'candidate: omp:opencode-go/deepseek-v4.1-flash  provider=google  scope=all_models  remaining=72%  spendPriority=0.3  offpeak=x2  runway=through_reset  -> eligible' "the off-peak boost shows on the adjusted candidate line"
+assert_contains "$out" 'candidate: omp:opencode-go/kimi-k3  provider=zai  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "an undeclared candidate keeps its unadjusted line"
+assert_not_contains "$(grep 'candidate: omp:opencode-go/kimi-k3' <<<"$out")" 'offpeak=' "an undeclared candidate shows no adjustment"
+pass "off-peak: a declared candidate more than half the leader's weight wins after the boost"
+
+reset_log
+cp "$PEAK_RULES" "$RULES"
+write_peak_response "$RESPONSE"
+FM_DISPATCH_CLOCK_UTC=2026-11-14T02:00:00Z TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "a weekend instant resolves"
+assert_contains "$out" "  profile: --harness 'omp' --model 'opencode-go/deepseek-v4.1-flash'" "the weekend boost applies inside the clock window"
+assert_contains "$out" 'spendPriority=0.3  offpeak=x2' "the weekend candidate line shows the boost"
+pass "weekend: the same off-peak boost applies inside a declared clock window"
+
+reset_log
+cp "$PEAK_RULES" "$RULES"
+write_peak_response "$RESPONSE"
+FM_DISPATCH_CLOCK_UTC=2026-11-12T02:00:00Z TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+peak_out=$out
+assert_contains "$peak_out" "  profile: --harness 'omp' --model 'opencode-go/kimi-k3'" "peak ranks by the unadjusted weight"
+assert_not_contains "$peak_out" 'offpeak=' "peak output shows no adjustment"
+reset_log
+cp "$PEAK_PLAIN" "$RULES"
+write_peak_response "$RESPONSE"
+FM_DISPATCH_CLOCK_UTC=2026-11-12T02:00:00Z TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+plain_out=$out
+assert_equals "$(grep -v 'latency_ms:' <<<"$peak_out")" "$(grep -v 'latency_ms:' <<<"$plain_out")" "peak output is identical to a run with no window declared"
+pass "peak: ranking and output are identical to no declared window"
+
+MIDNIGHT_RULES="$TMP_ROOT/midnight-rules.json"
+jq '.rules[0].use[0].peak_pricing.windows = [{"weekdays": ["fri"], "start": "00:00", "end": "00:01"}]' "$PEAK_RULES" > "$MIDNIGHT_RULES"
+cat > "$FAKEBIN/date" <<'SH'
+#!/usr/bin/env bash
+for format in "$@"; do :; done
+case "$format" in
+  +%u|+%H:%M|'+%u %H:%M')
+    if [ -s "$FM_TEST_CLOCK_LOG" ]; then
+      dow=6 hhmm=00:00
+    else
+      dow=5 hhmm=23:59
+    fi
+    printf '%s\n' sampled >> "$FM_TEST_CLOCK_LOG"
+    case "$format" in
+      +%u) printf '%s\n' "$dow" ;;
+      +%H:%M) printf '%s\n' "$hhmm" ;;
+      *) printf '%s %s\n' "$dow" "$hhmm" ;;
+    esac
+    ;;
+  *) exec "$FM_TEST_REAL_DATE" "$@" ;;
+esac
+SH
+chmod +x "$FAKEBIN/date"
+export FM_TEST_REAL_DATE FM_TEST_CLOCK_LOG
+FM_TEST_REAL_DATE=$(command -v date)
+FM_TEST_CLOCK_LOG="$TMP_ROOT/clock-log"
+for clock_override in '' 2026-11-13T23:59:59Z; do
+  reset_log
+  : > "$FM_TEST_CLOCK_LOG"
+  cp "$MIDNIGHT_RULES" "$RULES"
+  write_peak_response "$RESPONSE"
+  FM_DISPATCH_CLOCK_UTC="$clock_override" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "a midnight-crossing clock resolves ($clock_override)"
+  assert_contains "$out" "  profile: --harness 'omp' --model 'opencode-go/deepseek-v4.1-flash'" "Friday 23:59 is off-peak; mixing Friday with Saturday 00:00 would select the other model"
+  assert_contains "$out" 'spendPriority=0.3  offpeak=x2' "both clock fields describe the same off-peak instant"
+  assert_equals "$(cat "$FM_TEST_CLOCK_LOG")" sampled "the UTC clock is sampled once ($clock_override)"
+done
+rm "$FAKEBIN/date"
+pass "live and overridden clocks capture weekday and time together across midnight"
+
+reset_log
+PEAK_FLOOR="$TMP_ROOT/peak-floor.json"
+jq '.rules[0].use[0].floor = {"scope": "all_models", "min_percent": 80}' "$PEAK_RULES" > "$PEAK_FLOOR"
+cp "$PEAK_FLOOR" "$RULES"
+write_peak_response "$RESPONSE"
+FM_DISPATCH_CLOCK_UTC=2026-11-12T05:00:00Z TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: omp:opencode-go/deepseek-v4.1-flash  provider=google  scope=all_models  remaining=72%  spendPriority=-  runway=through_reset  -> not eligible: profile floor all_models below 80%' "an off-peak declared candidate below its floor stays ineligible"
+assert_not_contains "$(grep 'candidate: omp:opencode-go/deepseek-v4.1-flash' <<<"$out")" 'offpeak=' "an ineligible candidate shows no adjustment"
+assert_contains "$out" "  profile: --harness 'omp' --model 'opencode-go/kimi-k3'" "the remaining candidate still resolves"
+
+reset_log
+PEAK_EXHAUSTED="$TMP_ROOT/peak-exhausted.json"
+jq '(.providers[] | select(.provider == "google") | .quotaSemantics.effectiveAvailability[] | .runway.status) = "exhausted_now"' "$QUOTA" > "$PEAK_EXHAUSTED"
+cp "$PEAK_RULES" "$RULES"
+write_peak_response "$RESPONSE"
+FM_DISPATCH_CLOCK_UTC=2026-11-12T05:00:00Z TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PEAK_EXHAUSTED" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: omp:opencode-go/deepseek-v4.1-flash  provider=google  scope=all_models  remaining=72%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "an off-peak declared candidate with exhausted runway stays ineligible"
+assert_not_contains "$(grep 'candidate: omp:opencode-go/deepseek-v4.1-flash' <<<"$out")" 'offpeak=' "an exhausted candidate shows no adjustment"
+
+reset_log
+PEAK_TIE_RULES="$TMP_ROOT/peak-tie-rules.json"
+jq '.rules[0].use[1].peak_pricing = .rules[0].use[0].peak_pricing' "$PEAK_RULES" > "$PEAK_TIE_RULES"
+PEAK_TIE_QUOTA="$TMP_ROOT/peak-tie-quota.json"
+jq '(.providers[] | select(.provider == "zai") | .quotaSemantics.effectiveAvailability[] | .selection.spendPriority) = 0.3' "$QUOTA" > "$PEAK_TIE_QUOTA"
+cp "$PEAK_TIE_RULES" "$RULES"
+write_peak_response "$RESPONSE"
+FM_DISPATCH_CLOCK_UTC=2026-11-12T05:00:00Z TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PEAK_TIE_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "an off-peak tie still escalates"
+assert_contains "$out" '  reason: genuine spendPriority tie' "an off-peak tie is named"
+assert_not_contains "$out" '  profile:' "an off-peak tie emits no profile"
+pass "eligibility and ties read the same evidence with and without a declared window"
+
+for bad_pricing in \
+  '.rules[0].use[0].peak_pricing.multiplier = 1' \
+  '.rules[0].use[0].peak_pricing.multiplier = 0.5' \
+  '.rules[0].use[0].peak_pricing.multiplier = "2"' \
+  '.rules[0].use[0].peak_pricing.windows = []' \
+  '.rules[0].use[0].peak_pricing.windows[0].start = "24:00"' \
+  '.rules[0].use[0].peak_pricing.windows[0].start = "1:00"' \
+  '.rules[0].use[0].peak_pricing.windows[0].end = "04:00x"' \
+  '.rules[0].use[0].peak_pricing.windows[0].start = "01:00\n"' \
+  '.rules[0].use[0].peak_pricing.windows[0].end = "04:00\n"' \
+  '.default = .rules[0].use | .default[0].peak_pricing.windows[0].start = "01:00\n"' \
+  '.default = .rules[0].use | .default[0].peak_pricing.windows[0].end = "04:00\n"' \
+  '.rules[0].use[0].peak_pricing.windows[0].start = "04:00"' \
+  '.rules[0].use[0].peak_pricing.windows[0].weekdays = ["funday"]' \
+  '.rules[0].use[0].peak_pricing.windows[0].weekdays = []' \
+  '.rules[0].use[0].peak_pricing = "2x"'; do
+  jq "$bad_pricing" "$PEAK_RULES" > "$RULES"
+  reset_log
+  TYPESAFE_API_KEY=$KEY FM_DISPATCH_CLOCK_UTC=2026-11-12T05:00:00Z run code out err "$BRIEF"
+  expect_code 2 "$code" "malformed peak_pricing exits 2 ($bad_pricing)"
+  assert_contains "$err" 'peak_pricing' "the malformed declaration names the field ($bad_pricing)"
+  assert_absent "$LOG/argv" "malformed peak_pricing never reaches the network ($bad_pricing)"
+done
+cp "$BASE_RULES" "$RULES"
+write_response "$RESPONSE" default 0.88
+pass "a malformed peak_pricing declaration is an actionable configuration error"
 
 # --- nothing rankable escalates -------------------------------------------------
 reset_log
