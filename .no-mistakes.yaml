@@ -28,12 +28,10 @@ document:
 # `.github/workflows/ci.yml` invokes it directly, with invocation parity
 # asserted by `tests/fm-lint.test.sh`.
 #
-# With no arguments, that owner lints the branch's changed canonical shell files
-# locally (no --external-sources, cross-file codes excluded) and the full
-# canonical source-aware set in CI, so this gate no longer repeats the full
-# ShellCheck sweep CI already runs. Keep two bounded workers: changed-file mode
-# analyzes only the selected roots instead of inlining library closures, so the
-# old serial pin's peak-memory workaround no longer applies.
+# Its header owns context selection and full-mode fallbacks. FM_LINT_JOBS=1 is
+# no longer needed for the ordinary changed-file local pass: it analyzes only
+# selected roots without --external-sources, avoiding the full source-aware
+# sweep's peak-memory cost. Keep the owner's default bounded worker count.
 #
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
 # Test is intent-targeted validation of whether the change meets its brief;

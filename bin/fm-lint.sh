@@ -3,10 +3,10 @@
 #
 # Runs its file set with ShellCheck's default severity, extended analysis,
 # ambient configuration disabled, and one exact ShellCheck version. CI and the
-# no-mistakes gate both invoke this script with no arguments, so the rule set,
-# version, bounded execution, and diagnostics ordering cannot drift.
-# Tests stop source analysis at imported production modules because every
-# production shell is already a canonical, source-aware root of this same run.
+# no-mistakes gate both invoke this script with no arguments, sharing the pin,
+# bounded execution, and diagnostics ordering across the modes below.
+# Tests stop source analysis at imported production modules; full-mode lint
+# covers every production shell as a separate source-aware canonical root.
 #
 # With no explicit paths, the file set and source-following posture depend on
 # context:
@@ -17,7 +17,7 @@
 #     runs, so CI coverage never depends on a local diff.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints only
 #     the canonical-set files changed since that merge-base, including
-#     uncommitted edits, via plain local `git diff` (no network, no `gh`). That
+#     uncommitted tracked edits, via local `git diff` (no network, no `gh`). That
 #     local pass drops --external-sources and excludes SC1091, SC2034, SC2153,
 #     and SC2329, the codes that need library context; CI still reports them.
 #     A branch with zero matching changed files skips ShellCheck, prints a
@@ -46,7 +46,7 @@ set -u
 
 REQUIRED_SHELLCHECK=0.11.0
 # Cross-file codes that need --external-sources. The local changed-file pass
-# cannot judge them, so they stay CI-only.
+# cannot judge them; full mode and explicit paths keep them enabled.
 LOCAL_NOX_EXCLUDE=SC1091,SC2034,SC2153,SC2329
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/fm-lint.sh"
