@@ -20,9 +20,9 @@
 # Claude and Codex. CLI mode is used by OpenCode, Pi, and OMP after their adapters
 # extract the exact command string.
 #
-# The policy receives this checkout as --home and the effective home as
-# --fm-home (FM_HOME, else this checkout), so a top-level cd that stays inside
-# the home is allowed while a cd that would leave it stays denied.
+# The policy receives this checkout as --home and the shell's actual FM_HOME
+# value as --fm-home (empty when unset). Destination and proof requirements
+# are owned by docs/cd-guard.md.
 #
 # Exit/output contract (identical shape to bin/fm-arm-pretool-check.sh):
 #   ALLOW - exit 0 and no output.

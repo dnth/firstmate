@@ -12,9 +12,9 @@
 // The shell tokenizer and command-position analysis are imported from
 // bin/fm-arm-command-policy.mjs, the sole owner of firstmate's shell
 // classification, so this guard never duplicates shell lexing. This policy
-// never evaluates, expands, sources, or runs any byte of the submitted command;
-// it inspects lexical command positions only, and resolves the single literal or
-// variable-prefixed path it compares against the home.
+// never evaluates, sources, or runs any byte of the submitted command;
+// it inspects lexical command positions and resolves only the operand forms
+// documented in docs/cd-guard.md.
 
 import { Lexer, splitProgram, commandPosition } from "./fm-arm-command-policy.mjs";
 import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
@@ -148,8 +148,7 @@ function expandTarget(word, context) {
   if (rest.includes("$") || /[*?[\]{}]/.test(rest)) return null;
   const name = match[1] ?? match[2];
   if (name !== "FM_HOME" || !context.fmHome) return null;
-  // A relative FM_HOME resolves against the tracked directories in Bash, which
-  // this policy does not model, so only an absolute value is expandable.
+  // The expansion context is normalized by decision() before it reaches here.
   if (!context.fmHome.startsWith("/")) return null;
   return context.fmHome + rest;
 }
@@ -204,8 +203,8 @@ function cdDestination(node, position, wordIndex, context, cwd) {
 }
 
 function decision(command, context = {}) {
-  // The transport supplies absolute physical paths; normalizing keeps a
-  // trailing slash or a relative spelling from escaping the containment test.
+  // The transport supplies the physical checkout root and the raw FM_HOME.
+  // Normalize non-empty path inputs before containment and operand checks.
   const userHome = context.userHome ?? process.env.HOME ?? "";
   const settings = {
     home: context.home ? resolve(context.home) : "",
