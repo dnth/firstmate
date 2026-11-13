@@ -31,11 +31,300 @@ pinned_ready() {
 
 test_list_files_reports_the_shell_inventory() {
   local listed expected
-  listed=$("$LINT" --list-files)
+  # --list-files is the canonical inventory query, not a selection preview: it
+  # must print the full set even on a local branch where lint would select only
+  # changed files, so the documented syntax sweep never silently narrows.
+  listed=$(CI='' GITHUB_ACTIONS='' "$LINT" --list-files)
   expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh --list-files did not return the complete shell inventory"
   pass "fm-lint.sh --list-files reports the complete shell inventory"
+}
+
+# --- changed-file selection fixtures ---------------------------------------
+#
+# fm-lint.sh selects its own file set from git context, so these cases run a
+# real throwaway git repo: a local `main` branch holds canonical shell roots,
+# and each test branches from it. ShellCheck is stubbed to record the flags and
+# roots of every lint invocation, so a case proves exactly which files the lint
+# owner selected without depending on real findings.
+
+# fm_lint_fixture_repo <tmp-root> echoes a committed fixture repo whose `main`
+# branch holds one canonical shell root per canonical directory.
+fm_lint_fixture_repo() {
+  local repo="$1/repo"
+  mkdir -p "$repo/bin/backends" "$repo/tests"
+  cp "$LINT" "$repo/bin/fm-lint.sh"
+  cat > "$repo/bin/alpha.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'alpha\n'
+SH
+  cat > "$repo/bin/beta.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'beta\n'
+SH
+  cat > "$repo/bin/backends/gamma.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'gamma\n'
+SH
+  cat > "$repo/tests/delta.test.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'delta\n'
+SH
+  printf '# fixture repo\n' > "$repo/README.md"
+  git -C "$repo" init -q
+  fm_lint_fixture_commit "$repo" 'fixture: canonical shell roots'
+  git -C "$repo" branch -M main
+  printf '%s\n' "$repo"
+}
+
+# fm_lint_fixture_commit <repo> <message>: commit the fixture working tree with
+# an inline identity so the fixture never depends on host git config.
+fm_lint_fixture_commit() {
+  git -C "$1" add -A
+  git -C "$1" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "$2"
+}
+
+# fm_lint_fixture_canonical <repo>: the canonical file set that repo's full
+# lint must cover, sorted the way the lint owner sorts it.
+fm_lint_fixture_canonical() {
+  (cd "$1" && find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+}
+
+# fm_lint_stub_shellcheck <fakebin>: install a ShellCheck stub that reports the
+# pinned version, records every lint invocation's --external-sources and
+# --exclude posture in $FM_TEST_LINT_FLAG_LOG, and records the roots it was
+# asked to check in $FM_TEST_LINT_ROOT_LOG.
+fm_lint_stub_shellcheck() {
+  local fakebin=$1
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: %s\n' "${FM_TEST_LINT_VERSION:-0.11.0}"
+  exit 0
+fi
+follow=no
+exclude=none
+unexpected=
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+  case "$1" in
+    --norc) ;;
+    --external-sources) follow=yes ;;
+    --exclude=*) exclude=${1#--exclude=} ;;
+    *) unexpected="${unexpected} $1" ;;
+  esac
+  shift
+done
+[ -z "$unexpected" ] || printf 'unexpected=%s\n' "$unexpected" >> "$FM_TEST_LINT_FLAG_LOG"
+[ "$#" -eq 0 ] || shift
+printf 'external-sources=%s\nexclude=%s\n' "$follow" "$exclude" >> "$FM_TEST_LINT_FLAG_LOG"
+printf '%s\n' "$@" >> "$FM_TEST_LINT_ROOT_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+}
+
+# fm_lint_assert_flags <flags-log> <expected-follow> <expected-exclude>: every
+# recorded lint invocation must carry exactly that source-following and exclusion
+# posture, and at least one invocation must have been recorded.
+fm_lint_assert_flags() {
+  local flags=$1 follow=$2 exclude=$3
+  [ -s "$flags" ] || fail "ShellCheck was never invoked; flag log is empty"
+  awk -v follow="$follow" -v exclude="$exclude" '
+    /^external-sources=/ { calls++; if ($0 != "external-sources=" follow) bad=1 }
+    /^exclude=/ { if ($0 != "exclude=" exclude) bad=1 }
+    /^unexpected=/ { bad=1 }
+    END { exit (calls > 0 && !bad) ? 0 : 1 }
+  ' "$flags" \
+    || fail "ShellCheck was not invoked with external-sources=$follow exclude=$exclude"$'\n'"$(cat "$flags")"
+}
+
+test_changed_mode_lints_only_changed_canonical_files() {
+  local tmp repo fakebin log flags out
+  tmp=$(fm_test_tmproot fm-lint-changed)
+  repo=$(fm_lint_fixture_repo "$tmp")
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_shellcheck "$fakebin"
+  log="$tmp/roots.log"
+  flags="$tmp/flags.log"
+  git -C "$repo" checkout -q -b feature
+  # An uncommitted canonical edit must be selected; the README edit must not.
+  printf '\n# uncommitted local edit\n' >> "$repo/bin/alpha.sh"
+  printf '\n# unrelated prose\n' >> "$repo/README.md"
+
+  out=$(cd "$repo" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
+    FM_LINT_JOBS=1 FM_TEST_LINT_ROOT_LOG="$log" FM_TEST_LINT_FLAG_LOG="$flags" \
+    FM_TEST_LINT_VERSION="$REQUIRED" ./bin/fm-lint.sh 2>&1) \
+    || fail "changed-mode lint failed"$'\n'"$out"
+  [ "$(cat "$log")" = "bin/alpha.sh" ] \
+    || fail "changed mode did not lint exactly the changed canonical file"$'\n'"logged: $(cat "$log")"
+  fm_lint_assert_flags "$flags" no "SC1091,SC2034,SC2153,SC2329"
+  assert_contains "$out" "source following disabled" \
+    "changed mode did not disclose dropped source following"
+  pass "changed mode lints only changed canonical files without source following"
+}
+
+test_ci_and_actions_force_the_full_source_aware_lint() {
+  local tmp repo fakebin log flags expected signal out
+  tmp=$(fm_test_tmproot fm-lint-ci-full)
+  repo=$(fm_lint_fixture_repo "$tmp")
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_shellcheck "$fakebin"
+  log="$tmp/roots.log"
+  flags="$tmp/flags.log"
+  expected=$(fm_lint_fixture_canonical "$repo")
+  git -C "$repo" checkout -q -b feature
+  printf '\n# branch edit\n' >> "$repo/bin/alpha.sh"
+
+  for signal in CI GITHUB_ACTIONS; do
+    : > "$log"
+    : > "$flags"
+    if [ "$signal" = CI ]; then
+      out=$(cd "$repo" && PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS='' \
+        FM_LINT_JOBS=1 FM_TEST_LINT_ROOT_LOG="$log" FM_TEST_LINT_FLAG_LOG="$flags" \
+        FM_TEST_LINT_VERSION="$REQUIRED" ./bin/fm-lint.sh 2>&1) \
+        || fail "$signal=true lint failed"$'\n'"$out"
+    else
+      out=$(cd "$repo" && PATH="$fakebin:$PATH" CI='' GITHUB_ACTIONS=true \
+        FM_LINT_JOBS=1 FM_TEST_LINT_ROOT_LOG="$log" FM_TEST_LINT_FLAG_LOG="$flags" \
+        FM_TEST_LINT_VERSION="$REQUIRED" ./bin/fm-lint.sh 2>&1) \
+        || fail "$signal=true lint failed"$'\n'"$out"
+    fi
+    [ "$(LC_ALL=C sort "$log")" = "$expected" ] \
+      || fail "$signal=true did not lint the full canonical set"$'\n'"linted: $(LC_ALL=C sort "$log")"
+    fm_lint_assert_flags "$flags" yes none
+  done
+  pass "CI=true and GITHUB_ACTIONS=true force the full source-aware lint"
+}
+
+test_main_branch_forces_the_full_source_aware_lint() {
+  local tmp repo fakebin log flags expected out
+  tmp=$(fm_test_tmproot fm-lint-main-full)
+  repo=$(fm_lint_fixture_repo "$tmp")
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_shellcheck "$fakebin"
+  log="$tmp/roots.log"
+  flags="$tmp/flags.log"
+  expected=$(fm_lint_fixture_canonical "$repo")
+
+  out=$(cd "$repo" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
+    FM_LINT_JOBS=1 FM_TEST_LINT_ROOT_LOG="$log" FM_TEST_LINT_FLAG_LOG="$flags" \
+    FM_TEST_LINT_VERSION="$REQUIRED" ./bin/fm-lint.sh 2>&1) \
+    || fail "main-branch lint failed"$'\n'"$out"
+  [ "$(git -C "$repo" rev-parse --abbrev-ref HEAD)" = main ] \
+    || fail "fixture did not run on its main branch"
+  [ "$(LC_ALL=C sort "$log")" = "$expected" ] \
+    || fail "main branch did not lint the full canonical set"$'\n'"linted: $(LC_ALL=C sort "$log")"
+  fm_lint_assert_flags "$flags" yes none
+  pass "the main branch forces the full source-aware lint"
+}
+
+test_no_merge_base_forces_the_full_source_aware_lint() {
+  local tmp repo fakebin log flags expected out
+  tmp=$(fm_test_tmproot fm-lint-nomergebase-full)
+  repo=$(fm_lint_fixture_repo "$tmp")
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_shellcheck "$fakebin"
+  log="$tmp/roots.log"
+  flags="$tmp/flags.log"
+  expected=$(fm_lint_fixture_canonical "$repo")
+  git -C "$repo" checkout -q --orphan unrelated
+  fm_lint_fixture_commit "$repo" 'fixture: unrelated history'
+
+  out=$(cd "$repo" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
+    FM_LINT_JOBS=1 FM_TEST_LINT_ROOT_LOG="$log" FM_TEST_LINT_FLAG_LOG="$flags" \
+    FM_TEST_LINT_VERSION="$REQUIRED" ./bin/fm-lint.sh 2>&1) \
+    || fail "no-merge-base lint failed"$'\n'"$out"
+  [ "$(LC_ALL=C sort "$log")" = "$expected" ] \
+    || fail "no merge-base did not lint the full canonical set"$'\n'"linted: $(LC_ALL=C sort "$log")"
+  fm_lint_assert_flags "$flags" yes none
+  pass "a branch without a merge-base forces the full source-aware lint"
+}
+
+test_zero_changed_files_prints_the_note_and_exits_zero() {
+  local tmp repo fakebin log flags out rc
+  tmp=$(fm_test_tmproot fm-lint-zero-changed)
+  repo=$(fm_lint_fixture_repo "$tmp")
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_shellcheck "$fakebin"
+  log="$tmp/roots.log"
+  flags="$tmp/flags.log"
+  git -C "$repo" checkout -q -b docs-only
+  printf '\n# docs only\n' >> "$repo/README.md"
+
+  rc=0
+  out=$(cd "$repo" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
+    FM_LINT_JOBS=1 FM_TEST_LINT_ROOT_LOG="$log" FM_TEST_LINT_FLAG_LOG="$flags" \
+    FM_TEST_LINT_VERSION="$REQUIRED" ./bin/fm-lint.sh 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "zero changed targets must exit 0, got $rc"$'\n'"$out"
+  assert_contains "$out" "no changed lint targets" "zero changed targets did not print the note"
+  [ ! -s "$flags" ] || fail "zero changed targets still invoked ShellCheck"$'\n'"$(cat "$flags")"
+  pass "zero changed lint targets print a note and exit 0 without linting"
+}
+
+test_explicit_paths_bypass_changed_selection() {
+  local tmp repo fakebin log flags out
+  tmp=$(fm_test_tmproot fm-lint-explicit)
+  repo=$(fm_lint_fixture_repo "$tmp")
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_shellcheck "$fakebin"
+  log="$tmp/roots.log"
+  flags="$tmp/flags.log"
+  git -C "$repo" checkout -q -b feature
+  printf '\n# branch edit\n' >> "$repo/bin/alpha.sh"
+
+  out=$(cd "$repo" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
+    FM_LINT_JOBS=1 FM_TEST_LINT_ROOT_LOG="$log" FM_TEST_LINT_FLAG_LOG="$flags" \
+    FM_TEST_LINT_VERSION="$REQUIRED" ./bin/fm-lint.sh bin/beta.sh 2>&1) \
+    || fail "explicit-path lint failed"$'\n'"$out"
+  [ "$(cat "$log")" = "bin/beta.sh" ] \
+    || fail "explicit paths did not bypass changed-file selection"$'\n'"logged: $(cat "$log")"
+  fm_lint_assert_flags "$flags" yes none
+  pass "explicit paths bypass changed-file selection and keep source following"
+}
+
+test_changed_mode_hides_cross_file_codes_that_full_lint_reports() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): changed-mode exclusion behavior"
+    return
+  fi
+  local tmp repo out rc
+  tmp=$(fm_test_tmproot fm-lint-exclusions)
+  repo=$(fm_lint_fixture_repo "$tmp")
+  cat > "$repo/tests/cross-file.test.sh" <<'SH'
+#!/usr/bin/env bash
+# Assigned here and only consumed by a library the local gate does not follow.
+cross_file_only=1
+outer() {
+  (
+    # Defined here and only invoked by a library the local gate does not follow.
+    cross_file_helper() {
+      printf 'ok\n'
+    }
+    printf 'hi\n'
+  )
+}
+outer
+SH
+  fm_lint_fixture_commit "$repo" 'fixture: cross-file-only codes'
+  git -C "$repo" checkout -q -b feature
+  printf '\n# branch edit\n' >> "$repo/tests/cross-file.test.sh"
+
+  rc=0
+  out=$(cd "$repo" && GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 ./bin/fm-lint.sh 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "changed mode reported a cross-file-only fixture"$'\n'"$out"
+  assert_not_contains "$out" "SC2034 (" "changed mode still reported SC2034"
+  assert_not_contains "$out" "SC2329 (" "changed mode still reported SC2329"
+
+  rc=0
+  out=$(cd "$repo" && GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    ./bin/fm-lint.sh tests/cross-file.test.sh 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "full lint passed a cross-file-only fixture"
+  assert_contains "$out" "SC2034" "full lint lost SC2034"
+  assert_contains "$out" "SC2329" "full lint lost SC2329"
+  pass "changed mode excludes cross-file codes that the full lint still reports"
 }
 
 test_pins_an_explicit_version() {
@@ -542,6 +831,13 @@ PY
 }
 
 test_list_files_reports_the_shell_inventory
+test_changed_mode_lints_only_changed_canonical_files
+test_ci_and_actions_force_the_full_source_aware_lint
+test_main_branch_forces_the_full_source_aware_lint
+test_no_merge_base_forces_the_full_source_aware_lint
+test_zero_changed_files_prints_the_note_and_exits_zero
+test_explicit_paths_bypass_changed_selection
+test_changed_mode_hides_cross_file_codes_that_full_lint_reports
 test_pins_an_explicit_version
 test_workflows_parse_and_emit_valid_shell
 test_installer_retries_transient_download_failure
