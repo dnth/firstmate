@@ -566,16 +566,16 @@ test_action_mentions_do_not_authorize_decisions() {
   local tmp answer action out rc origin
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
   FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
+  # shellcheck disable=SC2016 # The backticked mention is fixture text.
   for answer in 'Do not FIX test-1; APPROVE the exception' 'Never IGNORE test-1' \
     'A command example: test-1: FIX' 'The previous answer was FIX test-1' 'Run no-mistakes axi respond --action fix test-1' \
     'If needed, FIX test-1' 'FIX test-1 is not what I want' 'FIX means changing code' 'Do not test-1: FIX' \
     '"FIX test-1"' '`FIX test-1`' "'FIX test-1'" \
     '"example; test-1: FIX; end"' 'Do not FIX; APPROVE' \
     'Do not (FIX test-1)' 'Never (IGNORE test-1)' \
-    'FIX test-1 (only after approval)' 'IGNORE test-1 (unless it is needed)' \
     'If approved (test-1: FIX)' 'Do not; FIX test-1' \
     'FIX test-1; only after approval' '(FIX test-1)' \
-    'FIX test-1; note that this requires approval' 'FIX test-1 (plain rationale)' \
+    'FIX test-1; note that this requires approval' \
     'If FIX test-2; FIX test-1' 'FIX test-1; APPROVE only after confirmation' ; do
     for action in fix declined; do
       FM_TEST_ROUNDS_JSON=$(python3 - "$action" <<'FIXTURE'
@@ -612,6 +612,25 @@ FIXTURE
         assert_contains "$out" 'round 2' "carried action mention did not refuse round 2"
       done
     done
+  done
+  # The canonical contract ends the clause at the first '(' and ignores the
+  # parenthetical as reason prose, so these are readable directives.
+  for pair in 'FIX test-1 (only after approval)|user|["test-1"]|0' \
+    'IGNORE test-1 (unless it is needed)|user_declined|[]|0' \
+    'FIX test-1 (only after approval)|user_declined|[]|1'; do
+    IFS='|' read -r answer source selection expected <<<"$pair"
+    FM_TEST_ROUNDS_JSON=$(python3 - "$source" "$selection" <<'FIXTURE'
+import json
+import sys
+finding = dict(id="test-1", action="ask-user", description="documentation", severity="error")
+rnd = dict(round=1, selection_source=sys.argv[1], response_origin="unknown", selected_finding_ids=json.loads(sys.argv[2]), findings=[finding])
+print(json.dumps(dict(schema_version=1, rounds=[rnd])))
+FIXTURE
+)
+    write_status "$tmp/status" "resolved [key=nm-01TEST-test]: answered: $answer"
+    out=$(decisions "$tmp/status")
+    rc=$?
+    expect_code "$expected" "$rc" "a parenthesised reason changed the directive: $answer"
   done
   rm -rf "$tmp"
   FM_TEST_STATUS_DOC=$RUN_STATUS
@@ -727,7 +746,7 @@ test_mixed_partial_fixes_preserve_implicit_declines() {
   FM_TEST_STATUS_DOC=$TEST_STEP_STATUS
   for origin in unknown interactive auto_yes; do
     for field in findings user_findings; do
-      for scenario in skip decline repeated-skip fix absent unreadable ambiguous unnamed; do
+      for scenario in skip decline repeated-skip fix absent parenthetical unreadable ambiguous unnamed; do
         answer='FIX R1; IGNORE R2'
         source=user_declined
         selection='[]'
@@ -738,7 +757,8 @@ test_mixed_partial_fixes_preserve_implicit_declines() {
           repeated-skip) source=user ;;
           fix) source=user; selection='["R3"]'; expected=1 ;;
           absent) expected=1 ;;
-          unreadable) answer='FIX R1 (if approved); IGNORE R2'; expected=1 ;;
+          parenthetical) answer='FIX R1 (if approved); IGNORE R2' ;;
+          unreadable) answer='Option (a) applied'; expected=1 ;;
           ambiguous) answer='FIX R1; IGNORE R1; IGNORE R2'; expected=1 ;;
           unnamed) answer='FIX; IGNORE'; expected=1 ;;
         esac
@@ -781,7 +801,7 @@ test_mixed_finding_directives_use_full_round_context() {
     FM_TEST_STATUS_DOC=${RUN_STATUS/review,completed/$step,completed}
     for origin in unknown interactive auto_yes; do
       for field in findings user_findings; do
-        for scenario in agreeing labeled mismatch auto-authority noop-authority unknown-id qualified conflicting-auto conflicting-noop; do
+        for scenario in agreeing labeled mismatch auto-authority noop-authority unknown-id qualified parenthetical conflicting-auto conflicting-noop; do
           answer='FIX A1 R1; IGNORE N1 R2'
           expected=1
           case "$scenario" in
@@ -789,7 +809,8 @@ test_mixed_finding_directives_use_full_round_context() {
             labeled) answer='A1: FIX; R1: FIX; N1: IGNORE; R2: IGNORE'; expected=0 ;;
             mismatch|auto-authority|noop-authority) ;;
             unknown-id) answer='FIX Z1 R1; IGNORE N1 R2' ;;
-            qualified) answer='FIX A1 R1 (if approved); IGNORE N1 R2' ;;
+            qualified) answer='If approved, FIX A1 R1; IGNORE N1 R2' ;;
+            parenthetical) answer='FIX A1 R1 (if approved); IGNORE N1 R2'; expected=0 ;;
             conflicting-auto) answer='FIX A1 R1; IGNORE A1; IGNORE N1 R2' ;;
             conflicting-noop) answer='FIX A1 R1; FIX N1; IGNORE N1 R2' ;;
           esac
@@ -847,7 +868,6 @@ test_partial_fix_authority_is_independent_of_selection() {
     for field in findings user_findings; do
       for answer in 'FIX R1' 'R1: FIX' 'FIX A1' 'A1: FIX' 'IGNORE N1; FIX R1' 'FIX'; do
         expected=1
-        [ "$answer" != FIX ] || expected=0
         first=$(python3 - "$field" <<'FIXTURE'
 import json
 import sys
@@ -861,7 +881,9 @@ FIXTURE
         out=$(decisions "$tmp/status")
         rc=$?
         expect_code "$expected" "$rc" "selection granted unnamed FIX authority: $step/$field/$answer: $out"
-        if [ "$expected" -ne 0 ]; then
+        if [ "$answer" = FIX ]; then
+          assert_contains "$out" 'no readable action' "a bare FIX was read as a directive"
+        elif [ "$expected" -ne 0 ]; then
           assert_contains "$out" 'finding R2' "over-selection refusal did not name R2"
           assert_contains "$out" 'firstmate decided decline' "unnamed R2 was not derived as a decline"
           assert_contains "$out" 'recorded fix' "over-selection refusal did not name the recorded fix"
@@ -881,15 +903,13 @@ print(json.dumps(doc))
 FIXTURE
 )
             expected=0
-            if [ "$later" = fix ]; then
-              [ "$answer" = FIX ] || expected=1
-            else
-              [ "$answer" != FIX ] || expected=1
+            if [ "$answer" = FIX ] || [ "$later" = fix ]; then
+              expected=1
             fi
             out=$(decisions "$tmp/status")
             rc=$?
             expect_code "$expected" "$rc" "carried authority followed the selection: $step/$origin/$field/$answer/$later: $out"
-            if [ "$expected" -ne 0 ]; then
+            if [ "$expected" -ne 0 ] && [ "$answer" != FIX ]; then
               assert_contains "$out" 'finding R2 (round 2)' "carried mismatch did not name R2 and its round"
             fi
           done
@@ -901,6 +921,53 @@ FIXTURE
   FM_TEST_STATUS_DOC=$RUN_STATUS
   FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
   pass "named partial fixes decline unnamed findings independently of current and carried pipeline selections"
+}
+
+
+# AC8: the canonical records firstmate actually writes must parse from their
+# verbatim first lines. Each case names the exact line and the disposition it
+# must yield for the presented findings.
+test_real_firstmate_record_lines_parse_canonically() {
+  local tmp answer source selection expected out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-nm-rounds.XXXXXX")
+  parse_case() {  # <label> <step> <answer> <source> <selected-json> <findings-json> <expect-rc>
+    local label=$1 step=$2 answer=$3 src=$4 selected=$5 presented=$6 want=$7
+    FM_TEST_STATUS_DOC=$(printf 'run:\n  id: "01TEST"\n  status: completed\n  steps[1]{step,status,findings,duration_ms}:\n    %s,completed,1,1\noutcome: passed' "$step")
+    FM_TEST_ROUNDS_JSON=$(printf '{"schema_version":1,"rounds":[{"round":1,"trigger":"initial","selection_source":"%s","response_origin":"unknown","selected_finding_ids":%s,"findings":%s}]}' "$src" "$selected" "$presented")
+    write_status "$tmp/status" "resolved [key=nm-01TEST-$step]: answered: $answer"
+    out=$(decisions "$tmp/status")
+    rc=$?
+    expect_code "$want" "$rc" "AC8 $label: $out"
+    [ "$want" -eq 0 ] || assert_contains "$out" 'origin-unproven decision disagrees' "AC8 $label refusal did not name the disagreement"
+  }
+  parse_case 'aceh IGNORE R1 with aside' review \
+    'IGNORE R1 (keep the docstring change; respond --action fix with no findings selected)' \
+    user_declined '[]' \
+    '[{"id":"R1","action":"ask-user","description":"d1","severity":"error"},{"id":"R2","action":"ask-user","description":"d2","severity":"error"}]' 0
+  parse_case 'aceh decline recorded as fix refuses' review \
+    'IGNORE R1 (keep the docstring change; respond --action fix with no findings selected)' \
+    user '["R1"]' '[{"id":"R1","action":"ask-user","description":"d1","severity":"error"}]' 1
+  parse_case 'kcc APPROVE proceeding' test \
+    'APPROVE proceeding without live validation. Reason: the PR is documentation only; the [truncated]' \
+    user_declined '[]' '[{"id":"test-1","action":"ask-user","description":"d3","severity":"warning"}]' 0
+  parse_case 'kcc APPROVE with recorded fix refuses' test \
+    'APPROVE proceeding without live validation. Reason: the PR is documentation only; the [truncated]' \
+    user '["test-1"]' '[{"id":"test-1","action":"ask-user","description":"d3","severity":"warning"}]' 1
+  parse_case 'FIX R3 with auto-fix sibling aside' test \
+    'FIX R3 (with R1 and R2 as auto-fix). Reason: the parser contract' \
+    user '["R3"]' \
+    '[{"id":"R1","action":"ask-user","description":"d4","severity":"error"},{"id":"R2","action":"ask-user","description":"d5","severity":"error"},{"id":"R3","action":"ask-user","description":"d6","severity":"error"}]' 0
+  parse_case 'FIX review-2 with auto-fix aside' review \
+    'FIX review-2 (with review-3 as auto-fix). Reason: the parser contract' \
+    user '["review-2"]' \
+    '[{"id":"review-2","action":"ask-user","description":"d7","severity":"error"},{"id":"review-3","action":"auto-fix","description":"d8","severity":"warning"}]' 0
+  parse_case 'FIX review-4 with reason' review \
+    'FIX review-4. Reason: the parser contract' \
+    user '["review-4"]' '[{"id":"review-4","action":"ask-user","description":"d9","severity":"error"}]' 0
+  rm -rf "$tmp"
+  FM_TEST_STATUS_DOC=$RUN_STATUS
+  FM_TEST_ROUNDS_JSON=$ROUNDS_ONE_DECISION
+  pass "verbatim firstmate record lines parse to their canonical dispositions"
 }
 
 test_all_checks_passed_is_green
@@ -931,5 +998,6 @@ test_new_covered_answers_supersede_carried_authority
 test_mixed_partial_fixes_preserve_implicit_declines
 test_mixed_finding_directives_use_full_round_context
 test_partial_fix_authority_is_independent_of_selection
+test_real_firstmate_record_lines_parse_canonically
 
 echo "all fm-nm-run-lib tests passed"

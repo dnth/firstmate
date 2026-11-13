@@ -482,6 +482,20 @@ EOF
 # Interactive and auto_yes rounds keep the record-only rule: their origin is
 # the pipeline's own record of a real answer, and requirement 2 is skipped.
 #
+# A firstmate `resolved` record's answer is read in its canonical form:
+#   [<prefix ending in ':'>] <VERB> <ids> [{';'|','|'and'} <VERB> <ids>]...
+# VERB is FIX, IGNORE, DECLINE, SKIP, or APPROVE (case-insensitive) and ids are
+# finding ids the gate round presented. A canonical prefix is the firstmate
+# decision sentence ending in `:`; a bare finding label (`R1: IGNORE`) may start
+# the clause. The first clause ends at the first '(', '.', ' Reason', or end of
+# text, and everything after it is reason prose that is ignored, including
+# parenthesised asides like "(with R1 and R2 as auto-fix)". A bare APPROVE,
+# IGNORE, DECLINE, or SKIP with no ids declines every finding the round
+# presented; a bare FIX is prose and refuses. Named findings bind their own
+# verb, every other presented finding is the pipeline's implicit decline, and
+# one finding bound to two action classes is ambiguous and refuses. Firstmate
+# must keep writing this form; docs/configuration.md states it for operators.
+#
 # Returns 0 silently when the run recorded no ask-user decision events or every
 # event is matched. Returns 1 and prints a per-step refusal detail (run, step,
 # finding, round, and answering origin or unproven origin) on stdout when a
@@ -553,67 +567,117 @@ for fields in records:
         if pending == bound:
             pending = None
 
-ACTION_PATTERN = re.compile(
-    r"(?<![\w-])(?P<action>fix|ignore|approve|skip|abort|decline)(?![\w-])",
-    re.IGNORECASE,
-)
 LABEL = {"fix": "fix", "nonfix": "decline/approve"}
+VERBS = ("fix", "ignore", "decline", "skip", "approve")
 
 
 def action_of(keyword):
-    return "fix" if keyword.lower() == "fix" else "nonfix"
+    return "fix" if keyword.lower().startswith("fix") else "nonfix"
 
 
 def decided_actions(answer, finding_ids):
-    keywords = list(ACTION_PATTERN.finditer(answer or ""))
-    decided, explicit = {}, set()
-    if not keywords or re.search(r"[()`\"“”‘’]|(?<!\w)'|'(?!\w)", answer):
-        return decided
-    id_patterns = {
-        fid: r"(?<![\w-])" + re.escape(fid) + r"(?![\w-])"
-        for fid in finding_ids
-    }
-    labels = "|".join(id_patterns.values())
-    answer = re.sub(r"^\s*Firstmate decision for run [\w.-]+ [\w.-]+:\s*", "", answer, flags=re.IGNORECASE)
-    clauses = []
-    for clause in re.split(r"[;\n]", answer):
-        parts = re.split(r"(?=(?:" + labels + r")\s*:)", clause, flags=re.IGNORECASE)
-        if len(parts) > 1 and parts[0].strip() and not ACTION_PATTERN.search(parts[0]):
+    # The canonical firstmate record form, shared with docs/configuration.md:
+    #   [<prefix ending in ':'>] <VERB> <ids> [{';'|','|'and'} <VERB> <ids>]...
+    # The first clause ends at the first '(', '.', ' Reason', or end of text;
+    # everything after that is reason prose and is ignored, including
+    # parenthesised asides. A single verb with no ids is the gate-wide form:
+    # APPROVE, IGNORE, DECLINE, or SKIP declines every presented finding and
+    # FIX fixes every presented finding. A named answer binds named findings and
+    # implicitly declines every other presented finding. One finding bound to
+    # two action classes in one record is ambiguous and refuses.
+    text = answer or ""
+    id_alts = sorted((re.escape(fid) for fid in finding_ids), key=len, reverse=True)
+    verb_re = re.compile(r"(?<![\w-])(?P<verb>" + "|".join(VERBS) + r")(?![\w-])", re.IGNORECASE)
+    first = verb_re.search(text)
+    if not first:
+        return {}
+    prefix = text[:first.start()]
+    clause_start = first.start()
+    if prefix.strip():
+        if id_alts and re.fullmatch(r"(?:" + "|".join(id_alts) + r")\s*:", prefix.strip()):
+            # A bare finding label starts the clause (`R1: IGNORE; R2: FIX`).
+            clause_start = len(prefix) - len(prefix.lstrip())
+        elif not re.match(r"(?is)^(?:firstmate|captain)\s+decision\b[^:]*:\s*$", prefix.strip()):
+            # Any other prose before the directive is not a record prefix.
             return {}
-        clauses.extend(parts)
-    directive = re.compile(
-        r"^\s*(?:(?:" + labels + r")\s*:\s*)?" + ACTION_PATTERN.pattern,
-        re.IGNORECASE,
-    )
-    id_list = re.compile(r"(?:" + labels + r")(?:(?:\s+|\s*,\s*|\s+and\s+)(?:" + labels + r"))*", re.IGNORECASE)
-    defaults = set()
-    for clause in clauses:
-        mentions = list(ACTION_PATTERN.finditer(clause))
-        if not mentions:
-            if clause.strip():
-                return {}
+    clause_end = len(text)
+    for pattern in (r"\(", r"\.", r"(?i:\breason\b)"):
+        match = re.search(pattern, text[first.start():])
+        if match:
+            clause_end = min(clause_end, first.start() + match.start())
+    clause = text[clause_start:clause_end]
+
+    id_re = re.compile(r"(?<![\w-])(?P<id>" + "|".join(id_alts) + r")(?![\w-])") if id_alts else None
+    joiner_re = re.compile(r"(?:[;,]|\band\b)\s*", re.IGNORECASE)
+    label_re = re.compile(r"\s*:\s*") if id_alts else None
+
+    pos = 0
+    groups = []
+    current = None
+    trailing = False
+    while pos < len(clause):
+        if clause[pos].isspace():
+            pos += 1
             continue
-        match = directive.match(clause)
-        value = None
-        if match and len(mentions) == 1:
-            tail = clause[match.end():].strip()
-            if not tail or id_list.fullmatch(tail):
-                value = action_of(match.group("action"))
-        if value is None:
+        match = id_re.match(clause, pos) if id_re else None
+        if match and label_re.match(clause, match.end()):
+            # Label form: the named finding takes the verb that follows.
+            label_id = match.group("id")
+            pos = label_re.match(clause, match.end()).end()
+            match = verb_re.match(clause, pos)
+            if not match:
+                return {}
+            current = [action_of(match.group("verb")), [label_id]]
+            groups.append(current)
+            pos = match.end()
+            continue
+        if match:
+            if current is None:
+                return {}
+            current[1].append(match.group("id"))
+            pos = match.end()
+            continue
+        match = joiner_re.match(clause, pos)
+        if match and match.end() > pos:
+            pos = match.end()
+            match = verb_re.match(clause, pos)
+            if match:
+                current = [action_of(match.group("verb")), []]
+                groups.append(current)
+                pos = match.end()
+            continue
+        if current is not None and verb_re.match(clause, pos):
             return {}
-        defaults.add(value)
-        for fid, pattern in id_patterns.items():
-            if re.search(pattern, clause, re.IGNORECASE):
-                if fid in explicit and decided[fid] != value:
-                    return {}
-                decided[fid] = value
-                explicit.add(fid)
-    if explicit:
-        for fid in finding_ids:
-            decided.setdefault(fid, "nonfix")
-    elif len(defaults) == 1:
-        for fid in finding_ids:
-            decided[fid] = next(iter(defaults))
+        match = verb_re.match(clause, pos) if current is None else None
+        if not match:
+            trailing = True
+            break
+        current = [action_of(match.group("verb")), []]
+        groups.append(current)
+        pos = match.end()
+
+    if not groups:
+        return {}
+    if len(groups) == 1 and not groups[0][1]:
+        # A single decline verb with no ids is the gate-wide form; prose after
+        # it is the reason (`APPROVE proceeding without live validation ...`).
+        # A bare FIX stays unreadable: without ids it is prose, not a directive.
+        gate = groups[0][0]
+        if gate != "nonfix":
+            return {}
+        return {fid: gate for fid in finding_ids}
+    if trailing:
+        return {}
+    decided = {}
+    for value, ids in groups:
+        if not ids:
+            return {}
+        for fid in ids:
+            if fid in decided and decided[fid] != value:
+                return {}
+            decided[fid] = value
+    for fid in finding_ids:
+        decided.setdefault(fid, "nonfix")
     return decided
 
 
