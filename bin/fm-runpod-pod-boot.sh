@@ -55,9 +55,9 @@
 #   fm-runpod-pod-boot.sh --help
 #
 # The pod is contracted to reach FULL parity with a local second mate: every
-# worker harness its crew dispatch can select, the universal toolchain, the
-# code-intelligence CLI, and a browser. Every one of them installs UNDER THE
-# VOLUME, so the setup cost is paid once per volume rather than once per pod.
+# worker harness its crew dispatch can select, the universal toolchain, and a
+# browser. Every one of them installs UNDER THE VOLUME, so the setup cost is
+# paid once per volume rather than once per pod.
 # Codex, Claude, and gh credentials still use the durable account home.
 # OMP is the deliberate exception: its subscription credentials stay in the
 # workstation auth broker, and this pod receives only a mode-600 bearer plus a
@@ -154,7 +154,6 @@ FM_NODE_VERSION=24.19.0
 # is what makes that login once-per-volume.
 FM_OMP_PACKAGE=@oh-my-pi/pi-coding-agent
 FM_CODEX_PACKAGE=@openai/codex
-FM_CODEGRAPH_PACKAGE=@colbymchenry/codegraph
 FM_AXI_PACKAGES="gh-axi chrome-devtools-axi lavish-axi quota-axi"
 FM_AXI_HOOK_PACKAGES="gh-axi chrome-devtools-axi lavish-axi"
 FM_BUN_INSTALL_URL=https://bun.sh/install
@@ -215,7 +214,6 @@ toolchain_plan() {
   for pkg in $FM_AXI_PACKAGES; do
     plan_step "$pkg"
   done
-  plan_step codegraph
   plan_step google-chrome
   plan_step claude-headless
   plan_step sshd-remote-forwarding
@@ -576,7 +574,7 @@ ensure_npm_tools() {
   local rc=0 package
   have npm || { log "npm is unavailable, so npm-distributed tools cannot be installed"; return 1; }
   mkdir -p "$FM_NPM_PREFIX" || return 1
-  for package in tasks-axi $FM_AXI_PACKAGES "$FM_CODEX_PACKAGE" "$FM_CODEGRAPH_PACKAGE"; do
+  for package in tasks-axi $FM_AXI_PACKAGES "$FM_CODEX_PACKAGE"; do
     log "installing $package"
     npm install -g "$package" >> "$FM_BOOT_LOG" 2>&1 \
       || { log "$package installation failed"; rc=1; }

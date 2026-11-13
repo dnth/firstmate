@@ -293,7 +293,7 @@ Only after sshd starts does first boot provision the remaining noninteractive pr
 3. Install `herdr` and `treehouse` through this repository's own pinned, checksum-verified installers, `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`, so a pod runs the exact builds CI verifies rather than a floating latest.
 4. Install the parity toolchain below.
 
-A RunPod second mate is contracted to reach full parity with a local one, so the pod installs everything a local second mate and the crews it spawns use: the `omp`, `claude`, and `codex` worker harnesses, the universal toolchain owned by [`configuration.md`](configuration.md#toolchain) (`no-mistakes`, `gh`, `gh-axi`, `chrome-devtools-axi`, `lavish-axi`, `quota-axi`, `tasks-axi`), the CodeGraph CLI, and a headless Chrome for browser work.
+A RunPod second mate is contracted to reach full parity with a local one, so the pod installs everything a local second mate and the crews it spawns use: the `omp`, `claude`, and `codex` worker harnesses, the universal toolchain owned by [`configuration.md`](configuration.md#toolchain), and a headless Chrome for browser work.
 All of it installs under the volume, so the cost is paid once per volume rather than once per pod.
 `bin/fm-remote-doctor.sh --parity` is the single owner of what that set is; the boot script installs toward it and the tests check the two lists against each other.
 

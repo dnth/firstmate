@@ -19,12 +19,12 @@
 #
 # --parity adds a second verification tier on top of that minimum, for a host
 # expected to do everything a local second mate and its crews do: every
-# dispatchable worker harness, the validation pipeline, the axi family, the
-# code-intelligence CLI, and a browser. It is opt-in because this command owns
-# readiness for EVERY remote second mate, and a minimal remote host is complete
-# at the required minimum above. Without --parity nothing below changes: no
-# parity fact is printed and no parity check is recorded. The tier reports gaps
-# and never installs; the host's own provisioning owns installation.
+# dispatchable worker harness, the validation pipeline, the axi family, and a
+# browser. It is opt-in because this command owns readiness for EVERY remote
+# second mate, and a minimal remote host is complete at the required minimum
+# above. Without --parity nothing below changes: no parity fact is printed and
+# no parity check is recorded. The tier reports gaps and never installs; the
+# host's own provisioning owns installation.
 #
 # Line protocol, one fact per line, stable for script consumers:
 #   mode=check|fix
@@ -72,11 +72,11 @@ HARNESS_TOOLS=(omp claude codex opencode pi pi-signed grok kimi)
 OPTIONAL_TOOLS=(tmux no-mistakes gh)
 # The --parity tier. Every worker harness this fleet's crew dispatch can select,
 # plus the universal toolchain owned by docs/configuration.md "Toolchain", plus
-# the code-intelligence CLI and the browser a local second mate uses. Presence
-# only: a completed login is a human step, and the durable-home check below is
-# what makes that login survive the host's own replacement.
+# the browser a local second mate uses. Presence only: a completed login is a
+# human step, and the durable-home check below is what makes that login survive
+# the host's own replacement.
 PARITY_TOOLS=(omp claude codex no-mistakes gh gh-axi chrome-devtools-axi
-  lavish-axi quota-axi codegraph google-chrome)
+  lavish-axi quota-axi google-chrome)
 # A host that keeps only part of its filesystem across replacement declares the
 # durable part here. Absent means the whole host persists, which is true of an
 # ordinary remote machine and false of a container with a network volume.
