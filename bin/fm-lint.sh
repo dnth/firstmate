@@ -238,6 +238,11 @@ else
 fi
 ROOT_COUNT=${#ROOTS[@]}
 
+if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
+  printf 'fm-lint.sh: no changed lint targets\n'
+  exit 0
+fi
+
 if ! command -v shellcheck >/dev/null 2>&1; then
   printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s for CI parity.\n' \
     "$REQUIRED_SHELLCHECK" >&2
@@ -259,11 +264,6 @@ fi
 if [ "$FOLLOW_SOURCES" -eq 0 ]; then
   printf 'fm-lint.sh: local changed-file mode; source following disabled, excluding %s\n' \
     "$EXCLUDE_CODES" >&2
-fi
-
-if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
-  printf 'fm-lint.sh: no changed lint targets\n'
-  exit 0
 fi
 
 if [ -n "$TELEMETRY" ]; then

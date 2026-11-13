@@ -243,24 +243,48 @@ test_no_merge_base_forces_the_full_source_aware_lint() {
 }
 
 test_zero_changed_files_prints_the_note_and_exits_zero() {
-  local tmp repo fakebin log flags out rc
+  local tmp repo fakebin log flags out rc isolated tool scenario lint_path version
   tmp=$(fm_test_tmproot fm-lint-zero-changed)
   repo=$(fm_lint_fixture_repo "$tmp")
   fakebin=$(fm_fakebin "$tmp")
-  fm_lint_stub_shellcheck "$fakebin"
   log="$tmp/roots.log"
   flags="$tmp/flags.log"
+  isolated="$tmp/isolated-bin"
+  mkdir -p "$isolated"
+  for tool in bash dirname git sort awk; do
+    ln -s "$(command -v "$tool")" "$isolated/$tool"
+  done
   git -C "$repo" checkout -q -b docs-only
   printf '\n# docs only\n' >> "$repo/README.md"
 
-  rc=0
-  out=$(cd "$repo" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
-    FM_LINT_JOBS=1 FM_TEST_LINT_ROOT_LOG="$log" FM_TEST_LINT_FLAG_LOG="$flags" \
-    FM_TEST_LINT_VERSION="$REQUIRED" ./bin/fm-lint.sh 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || fail "zero changed targets must exit 0, got $rc"$'\n'"$out"
-  assert_contains "$out" "no changed lint targets" "zero changed targets did not print the note"
-  [ ! -s "$flags" ] || fail "zero changed targets still invoked ShellCheck"$'\n'"$(cat "$flags")"
-  pass "zero changed lint targets print a note and exit 0 without linting"
+  for scenario in provisioned missing-shellcheck wrong-version-no-perl; do
+    version=$REQUIRED
+    case "$scenario" in
+      provisioned)
+        fm_lint_stub_shellcheck "$fakebin"
+        lint_path="$fakebin:$PATH"
+        ;;
+      missing-shellcheck)
+        rm "$fakebin/shellcheck"
+        ln -s "$(command -v perl)" "$isolated/perl"
+        lint_path="$fakebin:$isolated"
+        ;;
+      wrong-version-no-perl)
+        rm "$isolated/perl"
+        fm_lint_stub_shellcheck "$fakebin"
+        version=0.0.0
+        lint_path="$fakebin:$isolated"
+        ;;
+    esac
+    rc=0
+    out=$(cd "$repo" && PATH="$lint_path" GITHUB_ACTIONS='' CI='' \
+      FM_LINT_JOBS=1 FM_TEST_LINT_ROOT_LOG="$log" FM_TEST_LINT_FLAG_LOG="$flags" \
+      FM_TEST_LINT_VERSION="$version" ./bin/fm-lint.sh 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || fail "$scenario: zero changed targets must exit 0, got $rc"$'\n'"$out"
+    assert_contains "$out" "no changed lint targets" "$scenario: zero changed targets did not print the note"
+    [ ! -s "$flags" ] || fail "$scenario: zero changed targets still invoked ShellCheck"$'\n'"$(cat "$flags")"
+  done
+  pass "zero changed lint targets print a note and exit 0 regardless of lint dependencies"
 }
 
 test_explicit_paths_bypass_changed_selection() {
