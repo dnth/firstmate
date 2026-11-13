@@ -102,6 +102,8 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       # Single owner of the lint definition (file set + config + version). Do not
       # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
+      # GitHub Actions sets GITHUB_ACTIONS=true, so this invocation always lints
+      # the full canonical source-aware set; fm-lint.sh owns local selection.
       - run: bin/fm-lint.sh
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr

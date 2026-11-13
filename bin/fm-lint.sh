@@ -1,12 +1,30 @@
 #!/usr/bin/env bash
 # fm-lint.sh - the single owner of firstmate's shell-lint definition.
 #
-# Runs every canonical shell root with ShellCheck's default severity, extended
-# analysis, ambient configuration disabled, and one exact ShellCheck version.
-# CI and no-mistakes both invoke this script with no arguments, so the file set,
-# rule set, version, bounded execution, and diagnostics ordering cannot drift.
-# Tests stop source analysis at imported production modules because every
-# production shell is already a canonical, source-aware root of this same run.
+# Runs its file set with ShellCheck's default severity, extended analysis,
+# ambient configuration disabled, and one exact ShellCheck version. CI and the
+# no-mistakes gate both invoke this script with no arguments, sharing the pin,
+# bounded execution, and diagnostics ordering across the modes below.
+# Tests stop source analysis at imported production modules; full-mode lint
+# covers every production shell as a separate source-aware canonical root.
+#
+# With no explicit paths, the file set and source-following posture depend on
+# context:
+#   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
+#     merge-base against origin/main (or local main) can be found, it lints the
+#     full canonical set (bin/*.sh bin/backends/*.sh tests/*.sh) with
+#     --external-sources and full dataflow analysis. This is what CI always
+#     runs, so CI coverage never depends on a local diff.
+#   - Otherwise (an ordinary local branch with a real merge-base) it lints only
+#     the canonical-set files changed since that merge-base, including
+#     uncommitted tracked edits, via local `git diff` (no network, no `gh`). That
+#     local pass drops --external-sources and excludes SC1091, SC2034, SC2153,
+#     and SC2329, the codes that need library context; CI still reports them.
+#     A branch with zero matching changed files skips ShellCheck, prints a
+#     "no changed lint targets" note, and exits 0.
+# Explicit paths always bypass this file-set selection and lint exactly the
+# given paths with --external-sources. --list-files always prints the full
+# canonical inventory, independent of the selection mode.
 #
 # Canonical lint defaults to two bounded workers over two stable logical shards.
 # Each shard writes separate diagnostics, and the parent replays those outputs in
@@ -17,7 +35,7 @@
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
 #
 # Usage:
-#   fm-lint.sh                         lint the canonical file set
+#   fm-lint.sh                         lint the context-selected file set (see above)
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
@@ -27,6 +45,9 @@
 set -u
 
 REQUIRED_SHELLCHECK=0.11.0
+# Cross-file codes that need --external-sources. The local changed-file pass
+# cannot judge them; full mode and explicit paths keep them enabled.
+LOCAL_NOX_EXCLUDE=SC1091,SC2034,SC2153,SC2329
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/fm-lint.sh"
 ROOT="$(cd "$SELF_DIR/.." && pwd)"
@@ -43,7 +64,7 @@ fm_lint_worker_stop() {
 
 fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
   local manifest=$1 output_dir=$2 shard_index=$3 tab index path output rc=0
-  local -a roots
+  local -a roots shellcheck_args
   roots=()
   tab=$(printf '\t')
   while IFS="$tab" read -r index path || [ -n "${index:-}${path:-}" ]; do
@@ -55,7 +76,14 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     trap 'fm_lint_worker_stop; exit 129' HUP
     trap 'fm_lint_worker_stop; exit 130' INT
     trap 'fm_lint_worker_stop; exit 143' TERM
-    "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${roots[@]}" > "$output.out" 2>&1 &
+    shellcheck_args=(--norc)
+    if [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
+      shellcheck_args+=(--external-sources)
+    fi
+    if [ -n "${FM_LINT_INTERNAL_EXCLUDE:-}" ]; then
+      shellcheck_args+=(--exclude="$FM_LINT_INTERNAL_EXCLUDE")
+    fi
+    "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[@]}" > "$output.out" 2>&1 &
     FM_LINT_WORKER_SHELLCHECK_PID=$!
     wait "$FM_LINT_WORKER_SHELLCHECK_PID" || rc=$?
     FM_LINT_WORKER_SHELLCHECK_PID=
@@ -84,7 +112,7 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 fm_lint_usage() {
-  sed -n '2,26{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,44{s/^# \{0,1\}//;p;}' "$SELF"
 }
 
 JOBS=${FM_LINT_JOBS:-2}
@@ -131,19 +159,87 @@ case "$JOBS" in
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
 esac
 
-if [ "$#" -gt 0 ]; then
-  ROOTS=("$@")
-else
-  ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
-fi
-ROOT_COUNT=${#ROOTS[@]}
+CANONICAL_ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
 
 if [ "$LIST_FILES" -eq 1 ]; then
   [ "$#" -eq 0 ] || {
     printf 'fm-lint.sh: --list-files does not accept explicit paths.\n' >&2
     exit 2
   }
-  printf '%s\n' "${ROOTS[@]}"
+  printf '%s\n' "${CANONICAL_ROOTS[@]}"
+  exit 0
+fi
+
+# fm_lint_changed_base_ref prints the ref to diff the working branch against:
+# the local origin/main tracking ref when present, else local main. Returns
+# nonzero when neither is resolvable, which the caller treats as "no
+# merge-base found" and falls back to a full lint.
+fm_lint_changed_base_ref() {
+  if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
+    printf 'origin/main\n'
+    return 0
+  fi
+  if git rev-parse --verify -q main >/dev/null 2>&1; then
+    printf 'main\n'
+    return 0
+  fi
+  return 1
+}
+
+# fm_lint_is_canonical_root tests membership in the canonical set (a direct
+# *.sh child of bin/, bin/backends/, or tests/) without the shell case
+# statement's non-pathname wildcard matching a path separator by accident.
+fm_lint_is_canonical_root() {
+  local path=$1 dir base
+  case "$path" in
+    */*) dir=${path%/*}; base=${path##*/} ;;
+    *) dir=; base=$path ;;
+  esac
+  case "$base" in
+    *.sh) : ;;
+    *) return 1 ;;
+  esac
+  case "$dir" in
+    bin|bin/backends|tests) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+CHANGED_MODE=0
+FOLLOW_SOURCES=1
+EXCLUDE_CODES=
+if [ "$#" -gt 0 ]; then
+  ROOTS=("$@")
+else
+  full_lint=1
+  if [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
+    && command -v git >/dev/null 2>&1 \
+    && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != main ]; then
+    base_ref=$(fm_lint_changed_base_ref) || base_ref=
+    merge_base=
+    [ -z "$base_ref" ] || merge_base=$(git merge-base "$base_ref" HEAD 2>/dev/null) || merge_base=
+    [ -z "$merge_base" ] || full_lint=0
+  fi
+
+  if [ "$full_lint" -eq 1 ]; then
+    ROOTS=("${CANONICAL_ROOTS[@]}")
+  else
+    CHANGED_MODE=1
+    FOLLOW_SOURCES=0
+    EXCLUDE_CODES=$LOCAL_NOX_EXCLUDE
+    ROOTS=()
+    while IFS= read -r -d '' changed_path; do
+      fm_lint_is_canonical_root "$changed_path" || continue
+      [ -f "$changed_path" ] || continue
+      ROOTS+=("$changed_path")
+    done < <(git diff --name-only --diff-filter=ACMR -z "$merge_base" -- 2>/dev/null | LC_ALL=C sort -z)
+  fi
+fi
+ROOT_COUNT=${#ROOTS[@]}
+
+if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
+  printf 'fm-lint.sh: no changed lint targets\n'
   exit 0
 fi
 
@@ -164,6 +260,10 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
   printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s. Install %s.\n' \
     "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
   exit 1
+fi
+if [ "$FOLLOW_SOURCES" -eq 0 ]; then
+  printf 'fm-lint.sh: local changed-file mode; source following disabled, excluding %s\n' \
+    "$EXCLUDE_CODES" >&2
 fi
 
 if [ -n "$TELEMETRY" ]; then
@@ -290,18 +390,21 @@ fm_lint_run_worker() {  # <worker-index>
     if [ "$(uname)" = Darwin ]; then
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -lp -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" \
+          FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     else
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" \
+          FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     fi
   else
     [ -z "$TELEMETRY" ] || printf 'timing_unavailable=1\n' > "$timing"
     exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
-      env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+      env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" \
+        FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi
 }
@@ -387,7 +490,11 @@ if [ -n "$TELEMETRY" ]; then
   source_directives=$(wc -l < "$TMP_ROOT/source-targets" | tr -d '[:space:]')
   source_boundaries=$(grep -c '^/dev/null$' "$TMP_ROOT/source-targets" 2>/dev/null || true)
   case "$source_boundaries" in ''|*[!0-9]*) source_boundaries=0 ;; esac
-  source_followed=$((source_directives - source_boundaries))
+  if [ "$FOLLOW_SOURCES" -eq 1 ]; then
+    source_followed=$((source_directives - source_boundaries))
+  else
+    source_followed=0
+  fi
   source_targets=$(LC_ALL=C sort -u "$TMP_ROOT/source-targets" | wc -l | tr -d '[:space:]')
   content_cksum=$(cksum "$TMP_ROOT/content-cksums" | awk '{print $1 "-" $2}')
   git_head=$(git rev-parse HEAD 2>/dev/null || printf 'unavailable')

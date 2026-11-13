@@ -25,8 +25,13 @@ document:
 # Pin lint to the same owner CI runs instead of leaving it to no-mistakes'
 # default handling, which does not invoke the repository's canonical lint gate.
 # `bin/fm-lint.sh` owns the complete lint definition and
-# `.github/workflows/ci.yml` invokes it directly, with parity asserted by
-# `tests/fm-lint.test.sh`.
+# `.github/workflows/ci.yml` invokes it directly, with invocation parity
+# asserted by `tests/fm-lint.test.sh`.
+#
+# Its header owns context selection and full-mode fallbacks. FM_LINT_JOBS=1 is
+# no longer needed for the ordinary changed-file local pass: it analyzes only
+# selected roots without --external-sources, avoiding the full source-aware
+# sweep's peak-memory cost. Keep the owner's default bounded worker count.
 #
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
 # Test is intent-targeted validation of whether the change meets its brief;
@@ -34,8 +39,7 @@ document:
 # security, Herdr, tmux, and lifecycle coverage). A full-suite override here
 # would duplicate CI and defeat the targeted Test contract.
 commands:
-  # Use the serial mode documented by bin/fm-lint.sh to reduce peak memory.
-  lint: 'FM_LINT_JOBS=1 bin/fm-lint.sh'
+  lint: 'bin/fm-lint.sh'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:

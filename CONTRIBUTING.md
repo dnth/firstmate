@@ -56,7 +56,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
-  `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, and pinned shellcheck version), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
+  `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck config and pinned shellcheck version), and both CI and the no-mistakes gate invoke it without arguments.
+  Its [header](bin/fm-lint.sh) owns the context-based file selection, full-mode fallbacks, and source-analysis differences between local and CI runs.
   It pins one exact shellcheck version and refuses to run under any other; print it with `bin/fm-lint.sh --required-version` and install that build locally.
 - Harness-adapter ownership spans detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, semantic busy sources and trust gates in `bin/fm-busy-lib.sh`, delivery-only rendered guards in `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`; the `firstmate-coding-guidelines` skill owns the validation policy for checks that depend on those harnesses.
 - Changes to runtime session backends (`bin/fm-backend.sh`, `bin/backends/`, and the scripts that dispatch through them) keep current setup and limits in the relevant backend guide and active empirical evidence in [`docs/verification/runtime-backends.md`](docs/verification/runtime-backends.md).
@@ -83,7 +84,8 @@ Check and test the toolbelt before pushing:
 
 ```sh
 while IFS= read -r script; do /bin/bash -n "$script" || exit; done < <(bin/fm-lint.sh --list-files)   # syntax-check the canonical shell surface
-bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
+bin/fm-lint.sh   # run context-selected lint; see its header for full-mode fallbacks
+CI=true bin/fm-lint.sh   # force the full canonical source-aware lint locally, exactly what CI runs
 bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
 bin/fm-test-run.sh --family pure-contract-unit   # ordinary family-scoped local path (serial, timed)
 bin/fm-test-run.sh --changed   # conservative changed-file-informed set (never silent full suite)
