@@ -18,9 +18,11 @@ from pathlib import Path
 try:
     from .intake import handle_fm_command, maybe_intake_from_text, pre_gateway_dispatch_hook
     from .outbox_poster import configure_bot_identity, start_outbox_watcher
+    from .tool_path import set_plugin_hermes_home
 except ImportError:
     from intake import handle_fm_command, maybe_intake_from_text, pre_gateway_dispatch_hook
     from outbox_poster import configure_bot_identity, start_outbox_watcher
+    from tool_path import set_plugin_hermes_home
 
 
 def _owning_profile_home(ctx):
@@ -49,5 +51,9 @@ def register(ctx):
         args_hint="request",
     )
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch_hook)
-    configure_bot_identity(_owning_profile_home(ctx))
+    profile_home = _owning_profile_home(ctx)
+    configure_bot_identity(profile_home)
+    # The gateway profile caches inbound media under its own home, which is not
+    # always the process HERMES_HOME; carry it into every Firstmate subprocess.
+    set_plugin_hermes_home(profile_home)
     start_outbox_watcher()

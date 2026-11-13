@@ -845,8 +845,83 @@ PY
   pass "attachment-only empty raw stays empty end to end"
 }
 
+# --- profile cache home: the gateway caches under the profile, not HERMES_HOME
+#
+# A dedicated gateway profile runs with its process HERMES_HOME at the base
+# Hermes home, while its Discord adapter caches inbound images under the
+# profile home's cache/images (gateway/run_adapters.py enters the profile scope
+# before plugin discovery, and get_hermes_dir resolves cache/images there).
+# Intake must admit exactly that home's caches, and nothing else.
+
+test_profile_cache_home_admits_the_profile_cache() {
+  local home base profile out
+  home="$TMP_ROOT/c-profile-cache"
+  base="$TMP_ROOT/c-profile-cache-hermes"
+  profile="$base/profiles/fmcomms"
+  setup_home "$home"
+  mkdir -p "$profile/cache/images" "$base/cache/images" "$profile/plugins/firstmate-comms"
+  printf 'IMGDATA' > "$profile/cache/images/img_1700.webp"
+  printf 'BASEDATA' > "$base/cache/images/base.webp"
+  out=$(HERMES_HOME="$base" HERMES_BASE="$base" HERMES_PROFILE="$profile" plugin_env "$home" <<'PY'
+import importlib.util, os, sys
+sys.path.insert(0, os.environ["FM_EVENTS_DIR"])
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+import fmevents as ev
+home, root, plugin_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+base = Path(os.environ["HERMES_BASE"])
+profile = Path(os.environ["HERMES_PROFILE"])
+ev.setup(home, root)
+spec = importlib.util.spec_from_file_location("fm_plugin", Path(plugin_dir) / "__init__.py")
+plugin = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(plugin)
+with patch.object(plugin, "start_outbox_watcher"):
+    ctx = Mock()
+    # Hermes discovers user plugins under the active profile home, so this is
+    # the manifest path a dedicated gateway profile hands to register().
+    ctx.manifest.path = profile / "plugins" / "firstmate-comms" / "plugin.yaml"
+    plugin.register(ctx)
+import intake
+G, C, A = ev.G, ev.C, ev.A
+Path(home, "config", "ext-channel").write_text(C + "\n")
+raw = SimpleNamespace(content="look at this",
+                      guild_id=G, channel_id=C,
+                      type=SimpleNamespace(value=0),
+                      author=SimpleNamespace(id=A, bot=False, system=False),
+                      webhook_id=None, edited_at=None)
+source = SimpleNamespace(platform=SimpleNamespace(value="discord"),
+                         chat_id=C, chat_type="group",
+                         user_id=A, user_name="captain", thread_id=None,
+                         scope_id=G, guild_id=G,
+                         message_id="910000000000000001", is_bot=False)
+cache_hit = profile / "cache" / "images" / "img_1700.webp"
+outside = base / "cache" / "images" / "base.webp"
+event = SimpleNamespace(
+    text="look at this", source=source, raw_message=raw,
+    message_id="910000000000000001",
+    reply_to_message_id=None, reply_to_text=None,
+    media_urls=[str(cache_hit), str(outside), "https://cdn.discordapp.com/remote.webp"],
+    media_types=["image/webp", "image/webp", "image/webp"])
+assert (intake.pre_gateway_dispatch_hook(event) or {}).get("action") == "skip"
+record = ev.inbox(home)["910000000000000001"]
+assert [att["name"] for att in record["attachments"]] == ["img_1700.webp"], record
+folder = Path(home) / "state" / "ext-attachments" / record["slug"]
+assert sorted(p.name for p in folder.iterdir()) == ["0-img_1700.webp"], list(folder.iterdir())
+assert (folder / "0-img_1700.webp").read_bytes() == b"IMGDATA"
+skipped = {entry["name"]: entry["reason"] for entry in record["skipped_attachments"]}
+assert skipped == {"base.webp": "uncached", "remote.webp": "uncached"}, record
+print("profile-cache-ok")
+PY
+  ) || fail "profile cache-root case failed: $out"
+  assert_contains "$out" "profile-cache-ok" \
+    "a profile-cached image must be staged while paths outside the profile caches are refused"
+  pass "a profile-cached image is staged and paths outside the profile caches are refused"
+}
+
 test_attachment_injection_never_becomes_trusted_text
 
 
 test_attachment_only_empty_raw_stays_empty_end_to_end
+test_profile_cache_home_admits_the_profile_cache
 echo "all fm-ext-plugin-dest tests passed"

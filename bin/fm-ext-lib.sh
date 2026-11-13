@@ -1755,12 +1755,16 @@ fm_ext_attachment_safe_name() {
 
 # fm_ext_attachment_cache_roots: print the Hermes adapter cache roots the
 # gateway may hand us, one per line. The adapter caches downloads under
-# HERMES_HOME/cache/{images,audio,documents} (legacy
-# HERMES_HOME/{image_cache,audio_cache,document_cache} when populated), so a
-# manifest path outside those roots is never copied. HERMES_HOME resolves
-# physically so a symlinked root cannot escape the comparison.
+# <home>/cache/{images,audio,documents} (legacy <home>/{image_cache,
+# audio_cache,document_cache} when populated), so a manifest path outside those
+# roots is never copied. <home> is FM_EXT_HERMES_HOME when the plugin passes
+# the profile Hermes loaded it for, else the gateway process's HERMES_HOME.
+# A dedicated gateway profile caches under its profile home while its process
+# HERMES_HOME can still name the base Hermes home, so FM_EXT_HERMES_HOME wins.
+# The home resolves physically so a symlinked root cannot escape the
+# comparison.
 fm_ext_attachment_cache_roots() {
-  local dir=${HERMES_HOME-} resolved
+  local dir=${FM_EXT_HERMES_HOME:-${HERMES_HOME-}} resolved
   [ -n "$dir" ] || return 0
   resolved=$(cd -- "$dir" 2>/dev/null && pwd -P) || return 0
   printf '%s\n' "$resolved/cache/images"

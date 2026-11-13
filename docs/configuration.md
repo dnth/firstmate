@@ -1049,8 +1049,12 @@ The `ext-respond` skill owns drain, classification, lifecycle action, and local 
 Ordinary message requests can carry files, including a message with no text; slash commands use their existing text path.
 Intake copies eligible cached files into a private per-request folder under `state/ext-attachments/` and records kept and skipped attachments in the inbox.
 The [intake header](../bin/fm-ext-intake.sh) owns the manifest, record fields, permissions, caps, and skip rules; [the staging helper](../bin/fm-ext-lib.sh) owns skip reasons and supported cache roots.
-Cache admission uses the gateway process's `HERMES_HOME`; without a resolvable home, every attachment path is skipped as uncached.
+Cache admission uses the Hermes home the plugin was loaded for: the plugin passes it to intake as `FM_EXT_HERMES_HOME`, and an intake run without it falls back to the gateway process's `HERMES_HOME`.
+That distinction matters because a dedicated gateway profile caches inbound media under its profile home while the process `HERMES_HOME` can still name the base Hermes home.
+Without a resolvable home, every attachment path is skipped as uncached.
+Only that home's `cache/{images,audio,documents}` and its populated legacy `*_cache` directories are admitted.
 Published inbox records and their copied files survive later intake failures, so recovery does not depend on the gateway cache still containing the files.
+Every rejected attachment is listed with its name and reason in the drain's EXT REQUESTS section, so a request that lost its image says so before Firstmate answers it.
 Text-only requests retain their existing record shape without attachment fields.
 The [plugin README](../contrib/hermes-gateway-firstmate-comms/README.md#how-it-works) owns raw-message text selection and its compatibility fallback.
 The [`ext-respond` safety rules](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) own treating attachment bytes as untrusted data and keeping file contents, names, and paths out of Discord replies.
@@ -1417,6 +1421,7 @@ FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds without a claim or progress hea
 FM_EXT_MIDDELIVERY_RECOVERY_MAX=3   # reopen attempts before a stuck generation is failed terminally and surfaced as ext-delivery-failed
 FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records, retired ext-outbox markers, inbound attachments, and outbound media (7 days); larger values clamp back to it
 FM_EXT_HISTORY_MAX_CHARS=8000   # characters of message text kept in a request's thread-history sidecar; the replied-to message and Firstmate's latest recognised post are kept past it
+FM_EXT_HERMES_HOME=      # Hermes home whose cache/{images,audio,documents} and legacy *_cache dirs may supply inbound attachments; the gateway plugin sets it to the profile home it loaded for, and unset falls back to HERMES_HOME
 FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes; the delivery pass runs on its own thread, independent of the decision sweeps
 FM_EXT_PRUNE_INTERVAL_SECS=3600   # minimum seconds between retention prunes in the inbox poll; the poll claims offers before pruning, so this only bounds prune frequency
 FM_EXT_OVERDUE_SECS=300   # seconds an unanswered local-bridge request may sit before the watcher surfaces one `ext-request-overdue <slug> age=<n>m` wake for it; non-numeric values use 300; values below 60 (including negatives) clamp to 60, clamping warns once per setting per watcher process on stderr (docs/configuration.md "Local Communication Officer bridge")
