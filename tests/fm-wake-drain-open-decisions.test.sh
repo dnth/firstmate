@@ -15,6 +15,32 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-open-decisions-tests)
 
+# Protect the new/changed-decision verdict independently of terminal delivery:
+# previous fold tests proved visibility but never prevented repeated replies.
+test_reply_verdict_only_changes_with_open_decisions() {
+  local dir state out ident revision
+  dir=$(make_case decision-reply-change)
+  state="$dir/state"; out="$dir/drain.out"
+  for revision in first unchanged changed resolved; do
+    case "$revision" in
+      first|changed)
+        printf 'needs-decision [key=choice]: %s choice\nworking: other work\n' "$revision" >> "$state/task.status"
+        ;;
+      resolved) printf 'resolved [key=choice]: selected\n' >> "$state/task.status" ;;
+    esac
+    ident=$(status_ident "$state/task.status") || fail "decision identity"
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+      --task task --status-ident "$ident" --through "$(wc -c < "$state/task.status" | tr -d ' ')" >/dev/null || fail "decision delivery fixture"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2>/dev/null || fail "decision drain $revision"
+    if [ "$revision" = unchanged ]; then
+      grep -Fx 'REPLY_VERDICT: silent (no captain-facing change)' "$out" >/dev/null || fail "unchanged decision spoke: $(cat "$out")"
+    else
+      grep -F 'open-decisions' "$out" | grep -F 'REPLY_VERDICT: speak' >/dev/null || fail "decision $revision change stayed silent: $(cat "$out")"
+    fi
+  done
+  pass "new, changed and closed open decisions speak; unchanged decisions stay silent"
+}
+
 test_buried_decision_still_surfaces() {
   local dir state out
   dir=$(make_case buried)
@@ -97,7 +123,7 @@ test_no_open_decisions_prints_nothing() {
   if grep -F 'STATUS OUTCOME BACKSTOP' "$out" >/dev/null; then
     fail "a delivered terminal status printed the outcome backstop: $(cat "$out")"
   fi
-  [ ! -s "$out" ] || fail "the empty case with no queued wakes was not silent: $(cat "$out")"
+  [ "$(cat "$out")" = 'REPLY_VERDICT: silent (no captain-facing change)' ] || fail "the empty case with no queued wakes was not silent: $(cat "$out")"
   pass "no open decisions across the fleet prints nothing when terminal status is delivered"
 }
 
@@ -140,7 +166,7 @@ test_unterminated_status_event_is_not_repeated_when_covered() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain failed for covered unterminated status"
-  [ ! -s "$out" ] || fail "delivered unterminated status was resurfaced: $(cat "$out")"
+  [ "$(cat "$out")" = 'REPLY_VERDICT: silent (no captain-facing change)' ] || fail "delivered unterminated status was resurfaced: $(cat "$out")"
   pass "a delivered unterminated status event is not repeated by the backstop"
 }
 
@@ -331,3 +357,5 @@ test_unterminated_status_event_is_not_repeated_when_covered
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+
+test_reply_verdict_only_changes_with_open_decisions

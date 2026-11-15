@@ -29,6 +29,11 @@
 # tells "main has already seen this one" apart from a request whose close was
 # coalesced away unread.
 #
+# REPLY_VERDICT: silent (no captain-facing change) or speak rows=<sequence ids> sections=<changed surfaces>; on silent, acknowledge and end the turn with no captain-facing text.
+# Verdict observations (.wake-reply-status-<actor> and .wake-reply-decisions-<actor>)
+# are published under the status-presentation lock after successful presentation;
+# they never acknowledge status bytes or completion-delivery obligations.
+#
 # Machine channel: under FM_WAKE_DRAIN_DECISION_REVISIONS=1 (set only by the
 # away-mode daemon) every rendered OPEN DECISIONS row also emits one
 # "DECISION_REVISION<TAB><task><TAB><key><TAB><endpoint><TAB><ident>" line on
@@ -295,6 +300,7 @@ print_unread_status_section() {
     [ -n "$line" ] || continue
     line="$task $line"
     if [ "$shown" -eq 0 ]; then
+      REPLY_SECTIONS="${REPLY_SECTIONS}unread-status,"
       printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
     fi
     printf '%s\n' "$line" || return 1
@@ -342,6 +348,7 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       receipt_line="STATUS OUTCOME BACKSTOP: after relaying it to the captain, record its receipt: bin/fm-branch-outcome.sh deliver --task $task --status-ident $ident --endpoint $ev_endpoint"
       bytes=$(( ${#line} + ${#receipt_line} + 2 ))
       if [ $((used + bytes)) -gt "$global_bytes" ]; then omitted=$((omitted + 1)); continue; fi
+      REPLY_SECTIONS="${REPLY_SECTIONS}status-outcome-backstop:$task:$ev_endpoint,"
       output="${output}${line}"$'\n'"${receipt_line}"$'\n'
       used=$((used + bytes)); shown=$((shown + 1))
     done <<EOF
@@ -353,6 +360,7 @@ EOF
 $snapshot
 EOF
   [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  if [ "$omitted" -gt 0 ]; then REPLY_SECTIONS="${REPLY_SECTIONS}status-outcome-backstop:omitted,"; fi
   printf 'STATUS OUTCOME BACKSTOP (captain-facing task events without a recorded delivery receipt):\n'
   printf '%s' "$output"
   [ "$omitted" -gt 0 ] && printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted"
@@ -450,6 +458,7 @@ print_open_decisions_section() {
 $due
 EOF
   fi
+  REPLY_DECISIONS=$(printf '%s\n' "$open" | LC_ALL=C sort)
   [ -n "$open" ] || return 0
 
   while IFS=$(printf '\t') read -r row_origin task key verb due_marker note; do
@@ -556,6 +565,7 @@ $diverged
 EOF
 
   [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  REPLY_SECTIONS="${REPLY_SECTIONS}record-divergence,"
   printf 'RECORD DIVERGENCE (answered in the status log, still held in the backlog - nothing was closed automatically):\n' || return 1
   printf '%s' "$output" || return 1
   if [ "$omitted" -gt 0 ]; then
@@ -612,6 +622,7 @@ print_ext_requests_section() {
   [ "$ACTOR" = main ] || return 0
   pending=$(fm_ext_pending_requests "$FM_HOME" 2>/dev/null) || return 0
   [ -n "$pending" ] || return 0
+  REPLY_SECTIONS="${REPLY_SECTIONS}ext-request,"
   printf 'EXT REQUESTS AWAITING ANSWER (local Communication Officer; answer each with the ext-respond skill - listed on every drain until ext-respond removes its inbox record):\n'
   while IFS= read -r slug; do
     [ -n "$slug" ] || continue
@@ -733,10 +744,66 @@ EOF
   return 1
 }
 
+# Observe through the same captured endpoints as annotation, without advancing
+# the unread-status cursor (routine-only spans intentionally remain annotatable).
+prepare_reply_rows() {  # <rows> <status-snapshot>
+  local rows=$1 snapshot=$2 task endpoint ident latest previous epoch seq kind key payload historical current_revision previous_revision new_status
+  REPLY_STATUS=''
+  REPLY_ROWS=''
+  while IFS=$'\t' read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    latest=''
+    if fm_wake_unread_events "$STATE/$task.status" 0 0 "$endpoint"; then latest=$FM_WAKE_EVENT_LINE; fi
+    REPLY_STATUS="${REPLY_STATUS}${task}"$'\t'"${latest}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
+  done <<EOF
+$snapshot
+EOF
+  while IFS=$'\t' read -r epoch seq kind key payload; do
+    [ -n "$seq" ] || continue
+    task='' historical=false
+    case "$kind" in
+      stale) task=$(window_to_task "$key" "$STATE") ;;
+      signal)
+        if fm_wake_status_key_map "$key"; then
+          task=${FM_WAKE_STATUS_KEY%.status}; historical=$FM_WAKE_STATUS_HISTORICAL
+        fi
+        ;;
+    esac
+    latest=$(printf '%s' "$REPLY_STATUS" | awk -F '\t' -v task="$task" '$1 == task { print $2 }')
+    previous=$(awk -F '\t' -v task="$task" '$1 == task { print $2 }' "$STATE/.wake-reply-status-$ACTOR" 2>/dev/null || true)
+    current_revision=$(printf '%s' "$REPLY_STATUS" | awk -F '\t' -v task="$task" '$1 == task { print $3 ":" $4 }')
+    previous_revision=$(awk -F '\t' -v task="$task" '$1 == task { print $3 ":" $4 }' "$STATE/.wake-reply-status-$ACTOR" 2>/dev/null || true)
+    new_status=true
+    [ "$current_revision" != "$previous_revision" ] || new_status=false
+    if status_wake_needs_reply "$kind" "$historical" "$latest" "$previous" "$new_status"; then
+      REPLY_ROWS="${REPLY_ROWS}${seq},"
+    fi
+  done <<EOF
+$rows
+EOF
+}
+
+print_reply_verdict() {
+  local previous tmp
+  previous=$(cat "$STATE/.wake-reply-decisions-$ACTOR" 2>/dev/null || true)
+  if [ "$REPLY_DECISIONS" != "$previous" ]; then REPLY_SECTIONS="${REPLY_SECTIONS}open-decisions,"; fi
+  if [ -n "$REPLY_ROWS$REPLY_SECTIONS" ]; then
+    printf 'REPLY_VERDICT: speak rows=%s sections=%s\n' "${REPLY_ROWS%,}" "${REPLY_SECTIONS%,}" | sed 's/rows= /rows=- /; s/sections=$/sections=-/' || return 1
+  else
+    printf 'REPLY_VERDICT: silent (no captain-facing change)\n' || return 1
+  fi
+  tmp=$(mktemp "$STATE/.wake-reply.tmp.XXXXXX") || return 1
+  if ! { printf '%s' "$REPLY_STATUS" > "$tmp" && _fm_atomic_replace "$tmp" "$STATE/.wake-reply-status-$ACTOR"; }; then rm -f "$tmp"; return 1; fi
+  tmp=$(mktemp "$STATE/.wake-reply.tmp.XXXXXX") || return 1
+  if ! { printf '%s' "$REPLY_DECISIONS" > "$tmp" && _fm_atomic_replace "$tmp" "$STATE/.wake-reply-decisions-$ACTOR"; }; then rm -f "$tmp"; return 1; fi
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   fm_lock_acquire_wait "$lock" || return 1
+  REPLY_SECTIONS='' REPLY_DECISIONS=''
   snapshot=$(status_presentation_snapshot "$STATE") || rc=1
+  if [ "$rc" -eq 0 ]; then prepare_reply_rows "$rows" "$snapshot" || rc=1; fi
   if [ "$rc" -eq 0 ] && [ -n "$rows" ] && [ -n "$snapshot" ]; then
     fm_wake_print_annotations "$rows" "$snapshot" || rc=1
     if [ "$rc" -eq 0 ]; then
@@ -747,8 +814,11 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   # Sections run even with no status snapshot: the open-decisions fold carries
   # backlog-backed due rows, so board-only holds surface on a status-less home.
   if [ "$rc" -eq 0 ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ]; then
+    print_ext_requests_section || true
+    print_reply_verdict || rc=1
+  fi
   fm_lock_release "$lock"
-  if [ "$rc" -eq 0 ]; then print_ext_requests_section || true; fi
   return "$rc"
 }
 

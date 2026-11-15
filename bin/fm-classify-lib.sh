@@ -2057,6 +2057,23 @@ status_open_activities() {  # <status-file-or-dash>
   _fm_status_open_activities_stream < "$f"
 }
 
+# Captain-facing wake verdict; callers supply snapshot-bounded status lines and
+# their last presented observation, not watcher event history or current state.
+status_wake_needs_reply() {  # <kind> <historical-signal> <latest> <previous> <new-status>
+  local kind=$1 historical=$2 latest=$3 previous=$4 new_status=$5
+  status_is_terminal_verb "$latest" && return 0
+  case "$kind" in
+    stale)
+      status_is_paused "$latest" && return 1
+      [ -n "$latest" ] && [ "$latest" = "$previous" ] && return 1
+      ;;
+    signal)
+      [ "$historical" = true ] && [ "$new_status" = false ] && return 1
+      ;;
+  esac
+  return 0
+}
+
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {
