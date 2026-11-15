@@ -8,6 +8,22 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-supervision-instructions)
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
 
+test_reply_verdict_silent_action_across_harnesses() {
+  local harness out
+  for harness in claude codex opencode omp pi pi-signed grok unknown; do
+    out=$("$RENDER" --harness "$harness")
+    # shellcheck disable=SC2016 # Literal Markdown code spans, not shell expansion.
+    assert_contains "$out" 'REPLY_VERDICT`: on `silent`, acknowledge and end the turn with no captain-facing text using the silent-turn mechanism of the selected harness protocol.' "$harness missing silent action"
+    # shellcheck disable=SC2016 # Literal Markdown code span.
+    if [ "$harness" = omp ]; then
+      assert_contains "$out" 'ends with exactly `…`' "OMP lost its invisible silent-turn mechanism"
+    else
+      assert_not_contains "$out" 'ends with exactly `…`' "$harness received OMP-specific guidance"
+    fi
+  done
+  pass "all primary protocols share the drain verdict silent action"
+}
+
 test_selected_harness_block_only() {
   local out
   out=$("$RENDER" --harness codex)
@@ -213,3 +229,5 @@ test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_omp_snippet_uses_effective_extension_path
 test_pi_snippet_uses_effective_extension_path
+
+test_reply_verdict_silent_action_across_harnesses

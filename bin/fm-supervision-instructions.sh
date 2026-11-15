@@ -213,6 +213,7 @@ else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
 ordinary_wake_line
+cat "$DOC_DIR/reply-verdict.md"
 printf '\n'
 render_snippet
 printf '\n'

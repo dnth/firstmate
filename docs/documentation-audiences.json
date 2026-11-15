@@ -395,6 +395,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/reply-verdict.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/unknown.md",
       "audience": "agent-runtime"
     },

@@ -2235,6 +2235,9 @@ handle_durable_wakes() {  # <watcher-reason> <state>
           fi
           ;;
         complete)
+          case "$line" in
+            'REPLY_VERDICT: silent (no captain-facing change)'|'REPLY_VERDICT: speak rows='*' sections='*) continue ;;
+          esac
           [ -z "$line" ] || { capture_valid=false; break; }
           ;;
       esac

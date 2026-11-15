@@ -321,8 +321,8 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
     fail "routine working/covered done lines printed OPEN DECISIONS: $(cat "$out")"
   fi
-  [ ! -s "$out" ] || fail "the empty-queue covered routine case was not silent: $(cat "$out")"
-  pass "routine working and delivered done lines print nothing on an empty-queue drain"
+  [ "$(cat "$out")" = 'REPLY_VERDICT: silent (no captain-facing change)' ] || fail "the empty-queue covered routine case was not silent: $(cat "$out")"
+  pass "routine working and delivered done lines emit only the silent verdict on an empty-queue drain"
 }
 
 test_outcome_backstop_resurfaces_missed_terminal_until_delivered() {
@@ -354,7 +354,7 @@ test_outcome_backstop_resurfaces_missed_terminal_until_delivered() {
     || fail "could not record the parked delivery receipt"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$delivered" \
     || fail "the delivered backstop drain failed"
-  [ ! -s "$delivered" ] || fail "a delivered terminal event repeated: $(cat "$delivered")"
+  [ "$(cat "$delivered")" = 'REPLY_VERDICT: silent (no captain-facing change)' ] || fail "a delivered terminal event repeated: $(cat "$delivered")"
   pass "the wake drain resurfaces a parked terminal status until its delivery receipt is recorded"
 }
 
@@ -388,7 +388,7 @@ test_outcome_backstop_resurfaces_terminal_buried_under_routine_status() {
     || fail "could not record the buried delivery receipt"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$delivered" \
     || fail "the delivered buried-terminal drain failed"
-  [ ! -s "$delivered" ] || fail "a delivered buried terminal event repeated: $(cat "$delivered")"
+  [ "$(cat "$delivered")" = 'REPLY_VERDICT: silent (no captain-facing change)' ] || fail "a delivered buried terminal event repeated: $(cat "$delivered")"
   pass "the wake drain resurfaces a terminal status buried under routine work until delivered"
 }
 
@@ -410,7 +410,7 @@ test_outcome_backstop_delivery_receipt_is_idempotent() {
     || fail "a duplicate delivery receipt was appended: $(cat "$state/completion-deliveries.jsonl")"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "the delivered drain failed"
-  [ ! -s "$out" ] || fail "a delivered event printed the backstop: $(cat "$out")"
+  [ "$(cat "$out")" = 'REPLY_VERDICT: silent (no captain-facing change)' ] || fail "a delivered event printed the backstop: $(cat "$out")"
   pass "a delivery receipt is idempotent and retires the backstop entry"
 }
 
@@ -552,6 +552,115 @@ test_outcome_backstop_receipt_refusals_append_nothing() {
   pass "--endpoint on a non-event, an identity-mismatched --through, and a torn-file --through all refuse without appending"
 }
 
+# Protect the captain-facing verdict at the real drain boundary: quiet stale
+# and turn-end wakes previously had no machine verdict, so placeholder replies
+# survived even though unread-status tests correctly proved cursor deduplication.
+test_reply_verdict_quiet_rows_and_actionable_overrides() {
+  local variant dir state out expected
+  for variant in quiet unchanged decision blocked 'done' failed merged ext backstop new-status repeated-status; do
+    dir=$(make_case "reply-verdict-$variant")
+    state="$dir/state"; out="$dir/drain.out"
+    printf 'window=fleet:paused\n' > "$state/task.meta"
+    printf 'paused: waiting for upstream\n' > "$state/task.status"
+    printf 'working: implementing\n' > "$state/active.status"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "prime verdict cursor"
+    printf 'paused: waiting for the next upstream window\n' >> "$state/task.status"
+    append_wake "$state" stale fleet:paused 'stale: fleet:paused' || fail "queue paused stale"
+    append_wake "$state" signal active.turn-ended.gen 'signal: active.turn-ended.gen' || fail "queue turn end"
+    expected='REPLY_VERDICT: silent'
+    case "$variant" in
+      unchanged)
+        printf 'window=fleet:active\n' > "$state/active.meta"
+        append_wake "$state" stale fleet:active 'stale: fleet:active' || fail "queue unchanged stale"
+        ;;
+      decision|blocked|done|failed)
+        if [ "$variant" = decision ]; then variant=needs-decision; fi
+        printf '%s: choose storage\n' "$variant" > "$state/choice.status"
+        append_wake "$state" signal choice.status 'signal: choice.status' || fail "queue decision"
+        expected='REPLY_VERDICT: speak rows=3'
+        ;;
+      merged)
+        append_wake "$state" check merged 'check: task merged' || fail "queue merged check"
+        expected='REPLY_VERDICT: speak rows=3'
+        ;;
+      ext)
+        append_wake "$state" check ext-request-request 'check: ext-request request' || fail "queue ext-request"
+        expected='REPLY_VERDICT: speak rows=3'
+        ;;
+      new-status|repeated-status)
+        if [ "$variant" = new-status ]; then
+          printf 'working: changed implementation\n' >> "$state/active.status"
+        else
+          printf 'working: implementing\n' >> "$state/active.status"
+        fi
+        expected='REPLY_VERDICT: speak rows=2'
+        ;;
+      backstop)
+        printf 'done: artifact report.md\n' > "$state/result.status"
+        expected='REPLY_VERDICT: speak rows=- sections=status-outcome-backstop:result:'
+        ;;
+    esac
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2>/dev/null || fail "drain verdict $variant"
+    grep -F "$expected" "$out" >/dev/null || fail "$variant expected $expected: $(cat "$out")"
+  done
+  pass "quiet stale and turn-end rows stay silent; decision, merged/ext checks and backstop override"
+}
+
+test_reply_status_cache_reads_only_new_bytes() {
+  local dir state status fakebin real_perl endpoint ident out
+  dir=$(make_case reply-status-cache)
+  state="$dir/state"; status="$state/cache.status"; fakebin="$dir/reader-bin"
+  real_perl=$(command -v perl) || fail "perl is required for the status reader"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/perl" <<'SHIM'
+#!/usr/bin/env bash
+if [ "${4:-}" = "$CACHE_STATUS" ] && [ "$#" -eq 6 ]; then
+  printf '%s:%s\n' "$5" "$6" >> "$CACHE_READS"
+fi
+exec "$CACHE_PERL" "$@"
+SHIM
+  cat > "$fakebin/span" <<'SHIM'
+#!/usr/bin/env bash
+dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null
+SHIM
+  chmod +x "$fakebin/perl" "$fakebin/span"
+  export FM_STATUS_SPAN_READER="$fakebin/span"
+  export CACHE_STATUS="$status" CACHE_READS="$dir/reads" CACHE_PERL="$real_perl"
+  printf 'working: original\n' > "$status"
+  endpoint=$(wc -c < "$status" | tr -d ' ')
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "prime latest-status cache"
+  grep -Fx "0:$endpoint" "$CACHE_READS" >/dev/null || fail "initial observation did not read the captured span"
+  : > "$CACHE_READS"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "repeat cached observation"
+  [ ! -s "$CACHE_READS" ] || fail "unchanged status was reread"
+  printf 'working: appended\n' >> "$status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "observe appended status"
+  grep -E "^$endpoint:" "$CACHE_READS" >/dev/null || fail "append reread lifetime history"
+  assert_contains "$(cat "$state/.wake-reply-status-main")" 'working: appended' "append failed to refresh latest status"
+  : > "$CACHE_READS"
+  printf '\n' >> "$status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "observe blank append"
+  assert_contains "$(cat "$state/.wake-reply-status-main")" 'working: appended' "blank append erased latest status"
+  for out in truncated replaced; do
+    : > "$CACHE_READS"
+    if [ "$out" = replaced ]; then
+      printf 'working: replacement\n' > "$dir/replacement"
+      mv "$dir/replacement" "$status"
+    else
+      printf 'paused: wait\n' > "$status"
+    fi
+    endpoint=$(wc -c < "$status" | tr -d ' ')
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "observe $out status"
+    grep -Fx "0:$endpoint" "$CACHE_READS" >/dev/null || fail "$out status did not reset observation"
+    ident=$(cat "$status")
+    assert_contains "$(cat "$state/.wake-reply-status-main")" "$ident" "$out status retained stale latest line"
+  done
+  unset CACHE_STATUS CACHE_READS CACHE_PERL FM_STATUS_SPAN_READER
+  pass "latest-status observations cache unchanged logs and read only appends, resetting on truncation and replacement"
+}
+
+test_reply_status_cache_reads_only_new_bytes
+test_reply_verdict_quiet_rows_and_actionable_overrides
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
