@@ -159,6 +159,7 @@ Keep fleet delivery posture and captain-private strategy out of project memory.
 When the captain invokes `/stow`, load the `stow` skill for the complete knowledge-routing and unfinished-work sweep.
 When the captain invokes `/reflect`, load the `reflect` skill for post-run system-improvement analysis; it proposes tracked changes through the normal task lifecycle and never edits them itself.
 When the captain invokes `/cleanup`, load the `cleanup` skill for a report-first review of finished work and leftover resources; it removes only what the captain names.
+When the captain invokes `/implicit-state-audit`, load `implicit-state-audit` for a read-only module audit and visual review of concrete fixes.
 
 ## 7. Task lifecycle
 
@@ -187,7 +188,6 @@ If established evidence already answers an informational question, relay it with
 Never both present a likely-enough solution and launch a parallel design exercise that is not expected to change it.
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
-Load `implicit-state-audit` when the captain asks to audit implicit state machines in a project module.
 
 Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
 Pass the mode explicitly to the brief, and pass both values explicitly to a fresh spawn and any scout promotion; a ship relaunch may recover mode and `yolo` from its recorded metadata when the caller omits them (see [`docs/agent-control.md`](docs/agent-control.md)).

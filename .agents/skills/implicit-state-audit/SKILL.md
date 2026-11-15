@@ -1,14 +1,17 @@
 ---
 name: implicit-state-audit
 description: >-
-  Audit implicit state machines in a project module when the captain requests that audit.
-  Turns the request into a Fable-only read-only scout and a visual review of concrete fixes.
-user-invocable: false
+  Audit a project module's implicit state machines with a Fable-only read-only scout,
+  then review concrete fixes visually.
+user-invocable: true
+disable-model-invocation: true
 metadata:
   internal: true
 ---
 
 # Implicit state audit
+
+Invoke `/implicit-state-audit` with a project and module scope; this procedure runs only at the captain's request.
 
 ## Firstmate procedure
 
