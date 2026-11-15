@@ -606,6 +606,60 @@ test_reply_verdict_quiet_rows_and_actionable_overrides() {
   pass "quiet stale and turn-end rows stay silent; decision, merged/ext checks and backstop override"
 }
 
+test_reply_status_cache_reads_only_new_bytes() {
+  local dir state status fakebin real_perl endpoint ident out
+  dir=$(make_case reply-status-cache)
+  state="$dir/state"; status="$state/cache.status"; fakebin="$dir/reader-bin"
+  real_perl=$(command -v perl) || fail "perl is required for the status reader"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/perl" <<'SHIM'
+#!/usr/bin/env bash
+if [ "${4:-}" = "$CACHE_STATUS" ] && [ "$#" -eq 6 ]; then
+  printf '%s:%s\n' "$5" "$6" >> "$CACHE_READS"
+fi
+exec "$CACHE_PERL" "$@"
+SHIM
+  cat > "$fakebin/span" <<'SHIM'
+#!/usr/bin/env bash
+dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null
+SHIM
+  chmod +x "$fakebin/perl" "$fakebin/span"
+  export FM_STATUS_SPAN_READER="$fakebin/span"
+  export CACHE_STATUS="$status" CACHE_READS="$dir/reads" CACHE_PERL="$real_perl"
+  printf 'working: original\n' > "$status"
+  endpoint=$(wc -c < "$status" | tr -d ' ')
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "prime latest-status cache"
+  grep -Fx "0:$endpoint" "$CACHE_READS" >/dev/null || fail "initial observation did not read the captured span"
+  : > "$CACHE_READS"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "repeat cached observation"
+  [ ! -s "$CACHE_READS" ] || fail "unchanged status was reread"
+  printf 'working: appended\n' >> "$status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "observe appended status"
+  grep -E "^$endpoint:" "$CACHE_READS" >/dev/null || fail "append reread lifetime history"
+  assert_contains "$(cat "$state/.wake-reply-status-main")" 'working: appended' "append failed to refresh latest status"
+  : > "$CACHE_READS"
+  printf '\n' >> "$status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "observe blank append"
+  assert_contains "$(cat "$state/.wake-reply-status-main")" 'working: appended' "blank append erased latest status"
+  for out in truncated replaced; do
+    : > "$CACHE_READS"
+    if [ "$out" = replaced ]; then
+      printf 'working: replacement\n' > "$dir/replacement"
+      mv "$dir/replacement" "$status"
+    else
+      printf 'paused: wait\n' > "$status"
+    fi
+    endpoint=$(wc -c < "$status" | tr -d ' ')
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null || fail "observe $out status"
+    grep -Fx "0:$endpoint" "$CACHE_READS" >/dev/null || fail "$out status did not reset observation"
+    ident=$(cat "$status")
+    assert_contains "$(cat "$state/.wake-reply-status-main")" "$ident" "$out status retained stale latest line"
+  done
+  unset CACHE_STATUS CACHE_READS CACHE_PERL FM_STATUS_SPAN_READER
+  pass "latest-status observations cache unchanged logs and read only appends, resetting on truncation and replacement"
+}
+
+test_reply_status_cache_reads_only_new_bytes
 test_reply_verdict_quiet_rows_and_actionable_overrides
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed

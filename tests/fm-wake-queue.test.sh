@@ -140,7 +140,7 @@ test_concurrent_append_and_drain() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" 2> "$dir/drain-two.err" || fail "final drain failed"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out2")
   [ "$count" -eq 40 ] || fail "expected final replay of 40 durable records, got $count"
-  malformed=$(awk -F '\t' 'NF && NF != 5 { bad++ } END { print bad + 0 }' "$out2")
+  malformed=$(awk -F '\t' '/^REPLY_VERDICT: speak rows=[0-9]+(,[0-9]+)* sections=-$/ { verdicts++; next } NF && NF != 5 { bad++ } END { print bad + (verdicts != 1) }' "$out2")
   [ "$malformed" -eq 0 ] || fail "drained records had malformed fields"
   unique=$(awk -F '\t' 'NF == 5 { keys[$4] = 1 } END { for (k in keys) count++; print count + 0 }' "$out2")
   [ "$unique" -eq 40 ] || fail "expected 40 unique keys, got $unique"
@@ -322,7 +322,7 @@ test_drain_dedupes_obvious_duplicates() {
   append_wake "$state" heartbeat heartbeat heartbeat || fail "second heartbeat append failed"
   append_wake "$state" signal task.status "signal: $state/task.status $state/task.turn-ended" || fail "second signal append failed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "dedupe drain failed"
-  count=$(awk 'NF { count++ } END { print count + 0 }' "$out")
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$count" -eq 2 ] || fail "expected 2 deduped records, got $count"
   grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null || fail "heartbeat was not preserved"
   grep "$(printf '\tsignal\ttask.status\t')" "$out" | grep -F "$state/task.turn-ended" >/dev/null || fail "latest signal payload was not preserved"
@@ -821,16 +821,21 @@ SH
   cmp -s "$expected" "$actual" || fail "enrichment changed or reordered an authoritative raw row"
 
   annotation_count=$(grep -c '^wake annotation:' "$out" || true)
-  [ "$annotation_count" -eq 1 ] || fail "expected only the unreadable-race-safe status annotation, got $annotation_count"
+  [ "$annotation_count" -eq 0 ] || fail "the failed status snapshot produced annotations"
   if grep -E '^wake annotation:.*: task\.status:' "$out" >/dev/null; then
     fail "replaced status file produced an annotation"
   fi
-  grep -F 'latest wake-EVENT observed at drain, not current state; historical / not necessarily the triggering event: turn-only.status:' "$out" >/dev/null \
-    || fail "bare turn-end mapping did not carry the historical warning"
   if grep -F 'must-not-be-read' "$out" >/dev/null; then
     fail "drain trusted a payload path or followed an out-of-state status symlink"
   fi
   [ -s "$state/.wake-queue" ] || fail "the failed-closed enrichment consumed durable wake rows"
+  rm "$state/task.status"
+  printf 'working: first\n\ndone: latest event\n' > "$state/task.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2>/dev/null || fail "ordinary structural enrichment failed"
+  awk -F '\t' 'NF == 5 { print }' "$out" > "$actual"
+  cmp -s "$expected" "$actual" || fail "ordinary enrichment changed an authoritative raw row"
+  grep -F 'latest wake-EVENT observed at drain, not current state; historical / not necessarily the triggering event: turn-only.status:' "$out" >/dev/null \
+    || fail "bare turn-end mapping did not carry the historical warning"
   pass "structural signal enrichment fails closed on a status-file swap without consuming durable rows"
 }
 
@@ -1687,7 +1692,7 @@ test_granted_completion_survives_its_rows_acknowledgement() {
     || fail "the delivery receipt failed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main-delivered.out" 2>/dev/null \
     || fail "the delivered main drain failed"
-  [ ! -s "$dir/main-delivered.out" ] \
+  [ "$(cat "$dir/main-delivered.out")" = 'REPLY_VERDICT: silent (no captain-facing change)' ] \
     || fail "a delivered completion still printed the backstop: $(cat "$dir/main-delivered.out")"
   pass "a granted completion survives its row's acknowledgement as a pending obligation until delivered"
 }

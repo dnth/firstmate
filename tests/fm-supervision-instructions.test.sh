@@ -8,16 +8,18 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-supervision-instructions)
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
 
-# A quiet wake formerly requested an ellipsis on OMP and had no shared silent
-# action on other surfaces; the existing harness-selection tests did not assert it.
 test_reply_verdict_silent_action_across_harnesses() {
   local harness out
   for harness in claude codex opencode omp pi pi-signed grok unknown; do
     out=$("$RENDER" --harness "$harness")
     # shellcheck disable=SC2016 # Literal Markdown code spans, not shell expansion.
-    assert_contains "$out" 'REPLY_VERDICT`: on `silent`, acknowledge and end the turn with no captain-facing text.' "$harness missing silent action"
-    # shellcheck disable=SC2016 # Literal Markdown placeholder.
-    assert_not_contains "$out" 'ends with exactly `…`' "$harness still asks for a placeholder"
+    assert_contains "$out" 'REPLY_VERDICT`: on `silent`, acknowledge and end the turn with no captain-facing text using the silent-turn mechanism of the selected harness protocol.' "$harness missing silent action"
+    # shellcheck disable=SC2016 # Literal Markdown code span.
+    if [ "$harness" = omp ]; then
+      assert_contains "$out" 'ends with exactly `…`' "OMP lost its invisible silent-turn mechanism"
+    else
+      assert_not_contains "$out" 'ends with exactly `…`' "$harness received OMP-specific guidance"
+    fi
   done
   pass "all primary protocols share the drain verdict silent action"
 }

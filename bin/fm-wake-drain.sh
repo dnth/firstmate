@@ -747,13 +747,24 @@ EOF
 # Observe through the same captured endpoints as annotation, without advancing
 # the unread-status cursor (routine-only spans intentionally remain annotatable).
 prepare_reply_rows() {  # <rows> <status-snapshot>
-  local rows=$1 snapshot=$2 task endpoint ident latest previous epoch seq kind key payload historical current_revision previous_revision new_status
+  local rows=$1 snapshot=$2 task endpoint ident latest previous epoch seq kind key payload historical current_revision previous_revision new_status cached cached_endpoint cached_ident offset
   REPLY_STATUS=''
   REPLY_ROWS=''
   while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
-    latest=''
-    if fm_wake_unread_events "$STATE/$task.status" 0 0 "$endpoint"; then latest=$FM_WAKE_EVENT_LINE; fi
+    cached=$(awk -F '\t' -v task="$task" '$1 == task { print $0 }' "$STATE/.wake-reply-status-$ACTOR" 2>/dev/null || true)
+    latest=$(printf '%s' "$cached" | cut -f2)
+    cached_endpoint=$(printf '%s' "$cached" | cut -f3)
+    cached_ident=$(printf '%s' "$cached" | cut -f4)
+    offset=0
+    if [ "$cached_ident" = "$ident" ] && [ -n "$cached_endpoint" ] && [ "$cached_endpoint" -le "$endpoint" ]; then
+      offset=$cached_endpoint
+    else
+      latest=''
+    fi
+    if [ "$offset" -lt "$endpoint" ]; then
+      if fm_wake_unread_events "$STATE/$task.status" 0 "$offset" "$endpoint"; then latest=$FM_WAKE_EVENT_LINE; fi
+    fi
     REPLY_STATUS="${REPLY_STATUS}${task}"$'\t'"${latest}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
   done <<EOF
 $snapshot
