@@ -167,7 +167,7 @@ test_write_is_durable_and_exact() {
   doorbell2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec2")
   [ "$doorbell" = "$doorbell2" ] \
     || fail "every record in one inbox should ring the same drain-all doorbell"
-  assert_contains "$doorbell" "list \"\$FM_TASK_INBOX\"/*.msg" "doorbell should list all unhandled records through FM_TASK_INBOX"
+  assert_contains "$doorbell" "list files named '*.msg' in \"\$FM_TASK_INBOX\"" "doorbell should list all unhandled records through FM_TASK_INBOX"
   assert_contains "$doorbell" "'t1.inbox' steering inbox" "doorbell should quote and name the inbox"
   assert_contains "$doorbell" "numeric order" "doorbell should require ordered processing"
   assert_contains "$doorbell" "handled/" "doorbell should name the handled dir"
@@ -179,8 +179,8 @@ test_write_is_durable_and_exact() {
 }
 
 # The doorbell may land in a pane whose agent has exited, where it is a shell
-# command line. Execute the real line in real shells and assert it is inert:
-# exit 0, no output, and nothing in the inbox touched.
+# command line. Execute the real line without FM_TASK_INBOX in real shells and
+# assert it is inert: exit 0, no output, and nothing in the inbox touched.
 test_doorbell_is_a_shell_noop() {
   local state task rec doorbell sh out before after marker
   state="$TMP_ROOT/noop/state"
@@ -197,20 +197,18 @@ test_doorbell_is_a_shell_noop() {
     "the doorbell should escape an embedded single quote in its quoted inbox name"
   before=$(ls -R "$state/$task.inbox")
   for sh in sh bash zsh; do
-    command -v "$sh" >/dev/null 2>&1 || continue
-    out=$(cd "$state" && FM_TASK_INBOX="$state/$task.inbox" "$sh" -c "$doorbell" 2>&1) \
+    command -v "$sh" >/dev/null 2>&1 || fail "$sh is required for the dead-parent-shell regression"
+    out=$(cd "$state" && unset FM_TASK_INBOX && "$sh" -c "$doorbell" 2>&1) \
       || fail "$sh executed the hostile-name doorbell with a non-zero status: $out"
     [ -z "$out" ] || fail "$sh produced output while executing the hostile-name doorbell: $out"
     [ ! -e "$marker" ] || fail "$sh executed shell syntax embedded in the inbox path"
   done
   # An interactive-style zsh with the line fed on stdin, the closest portable
   # stand-in for a dead pane's login shell reading typed keystrokes.
-  if command -v zsh >/dev/null 2>&1; then
-    out=$(cd "$state" && printf '%s\n' "$doorbell" | FM_TASK_INBOX="$state/$task.inbox" zsh -s 2>&1) \
-      || fail "zsh reading the hostile-name doorbell from stdin failed: $out"
-    [ -z "$out" ] || fail "zsh printed while reading the hostile-name doorbell: $out"
-    [ ! -e "$marker" ] || fail "zsh executed shell syntax from the stdin doorbell"
-  fi
+  out=$(cd "$state" && unset FM_TASK_INBOX && printf '%s\n' "$doorbell" | zsh -s 2>&1) \
+    || fail "zsh reading the hostile-name doorbell from stdin failed: $out"
+  [ -z "$out" ] || fail "zsh printed while reading the hostile-name doorbell: $out"
+  [ ! -e "$marker" ] || fail "zsh executed shell syntax from the stdin doorbell"
   after=$(ls -R "$state/$task.inbox")
   [ "$before" = "$after" ] || fail "executing the doorbell changed the inbox:"$'\n'"$after"
   [ -f "$rec" ] || fail "executing the doorbell removed the unhandled record"
@@ -483,7 +481,7 @@ test_hermes_concurrent_rings_never_interleave() {
   local state fb rec log i pids rc bad whole
   # One WHOLE doorbell line, pinned end to end: a spliced or truncated
   # write cannot satisfy this, so the count below is real evidence.
-  whole='^: Firstmate instruction waiting: list "[$]FM_TASK_INBOX"/[*]\.msg in your .t1\.inbox. steering inbox, read and act on each in numeric order, then mv each into its handled/\.$'
+  whole='^: Firstmate instruction waiting: list files named .[*]\.msg. in "[$]FM_TASK_INBOX", your .t1\.inbox. steering inbox, read and act on each in numeric order, then mv each into its handled/\.$'
   read -r state fb rec <<EOF
 $(setup_ring_case hermes-ring-concurrent)
 EOF
@@ -590,7 +588,7 @@ test_watcher_rerings_idle_pane_quietly() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your 't1.inbox' steering inbox" "$log" \
+  grep -qF "Firstmate instruction waiting: list files named '*.msg' in \"\$FM_TASK_INBOX\", your 't1.inbox' steering inbox" "$log" \
     || { kill "$pid" 2>/dev/null; fail "the watcher never re-rang the doorbell:"$'\n'"$(cat "$log")"; }
   kill -0 "$pid" 2>/dev/null \
     || fail "a healthy re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"
