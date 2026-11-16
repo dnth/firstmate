@@ -41,6 +41,9 @@
 #   (aa) no-mistakes + hidden untracked work (status config)   -> REFUSE (all untracked)
 #   (ab) no-mistakes + merged PR, replay differs by whitespace -> REFUSE (verbatim ids)
 #   (ac) no-mistakes + containment proof Git cannot run        -> REFUSE (names proof)
+#   (ad) no-mistakes + commit only on the local mirror remote   -> REFUSE (mirror excluded)
+#   (ae) writer saves tracked or untracked work while stopping  -> REFUSE (post-stop proof,
+#       before the close marker, branch delete, or worktree return, on both removal paths)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -602,7 +605,7 @@ run_teardown() {
 # regardless of whether the host installs them in /usr/bin, /usr/sbin, or a
 # package-manager bin.
 FM_TEST_PATH_COMMANDS=(awk bash basename cat chmod cp cut date dirname env find git grep head
-  hostname id jq ln lsof mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat
+  hostname id jq ln lsof mkdir mktemp mv node tasks-axi perl ps readlink realpath rm sed sh sleep sort stat
   tail timeout tr uname wc xargs)
 
 make_path_excluding() {  # <case-dir> <fixture-name> <excluded-cmd>...
@@ -769,6 +772,38 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+# The pipeline mirror is not a durable remote copy. Existing remote tests have
+# no mirror, so they cannot catch counting its refs or excluding real forks too.
+test_no_mistakes_mirror_requires_real_remote() {
+  local case_dir rc local_head
+  case_dir=$(make_case nm-mirror)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "mirror-only work"
+  git init -q --bare "$case_dir/mirror.git"
+  git -C "$case_dir/project" remote add no-mistakes "$case_dir/mirror.git"
+  git -C "$case_dir/wt" push -q no-mistakes fm/task-x1
+  git -C "$case_dir/project" fetch -q no-mistakes
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  assert_equals "$local_head" \
+    "$(git -C "$case_dir/wt" rev-parse refs/remotes/no-mistakes/fm/task-x1)" \
+    "nm-mirror: mirror must contain the task commit"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "nm-mirror: teardown must refuse mirror-only work"
+  assert_grep "not on any remote and not landed" "$case_dir/stderr" \
+    "nm-mirror: refusal must name unlanded work"
+  assert_present "$case_dir/state/task-x1.meta" "nm-mirror: refusal removed task records"
+  assert_equals "$local_head" "$(git -C "$case_dir/wt" rev-parse fm/task-x1)" \
+    "nm-mirror: refusal removed or changed the task branch"
+
+  add_fork_with_pushed_branch "$case_dir"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "nm-mirror: another real remote must still count: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "nm-mirror: preserved work did not clean up"
+  pass "mirror-only work refuses; pushing the same work to a real fork allows cleanup"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -2470,6 +2505,202 @@ test_leaked_worktree_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving"
 }
 
+# Existing reap tests only stop sleepers, and dirty-work tests start dirty.
+# Exercise both worktree-removal paths with a real writer that dirties the
+# clean, pushed copy on TERM, before any replayable completion is published.
+test_stop_time_changes_refuse_before_completion() {
+  local backend change case_dir rc pid ready target local_head attempt path_without_lsof endpoint_tool endpoint_pid token hermes_home state_real
+  for backend in tmux tmux-no-lsof orca orca-no-lsof herdr herdr-projected; do
+    for change in tracked untracked; do
+      case_dir=$(make_case "stop-write-$backend-$change")
+      write_meta "$case_dir" no-mistakes ship
+      wt_commit_file "$case_dir" feature.txt landed "landed work"
+      git -C "$case_dir/wt" push -q origin fm/task-x1
+      git -C "$case_dir/project" fetch -q origin
+      local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      append_pr_meta_url "$case_dir"
+      seed_backlog_in_flight "$case_dir"
+      if [[ "$backend" = orca* ]]; then
+        fm_write_meta "$case_dir/state/task-x1.meta" \
+          "window=fm-task-x1" "endpoint_task_id=task-x1" \
+          "terminal=term-task-x1" "backend=orca" "orca_worktree_id=wt-task-x1" \
+          "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" \
+          "mode=no-mistakes" "spawn_gen=teardown-test-task-x1" \
+          "pr=https://github.com/example/repo/pull/7"
+        cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-} \${2:-}" = 'worktree show' ]; then
+  printf '{"ok":true,"result":{"worktree":{"path":"%s"}}}\n' '$case_dir/wt'
+else
+  printf '%s\n' "\$*" >> '$case_dir/removal.log'
+  printf '{"ok":true}\n'
+fi
+SH
+        chmod +x "$case_dir/fakebin/orca"
+      else
+        cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$case_dir/removal.log'
+SH
+        chmod +x "$case_dir/fakebin/treehouse"
+      fi
+      if [[ "$backend" = herdr* ]]; then
+        configure_herdr_projection_teardown_case "$case_dir"
+        if [ "$backend" = herdr ]; then
+          rm "$case_dir/state/task-x1.herdr-presentation"
+        fi
+      fi
+      token=fm.abcdefghijkl
+      hermes_home="$case_dir/hermes-home"
+      state_real=$(cd "$case_dir/state" && pwd -P)
+      mkdir -p "$hermes_home/fm-turn-end.d"
+      printf '%s\n' "$token" > "$case_dir/state/task-x1.hermes-turnend-token"
+      jq -n --arg id task-x1 --arg state "$state_real" \
+        --arg session_file "$state_real/task-x1.hermes-session" \
+        '{id:$id,state:$state,session_file:$session_file}' \
+        > "$hermes_home/fm-turn-end.d/$token"
+      printf '%s\n' 'harness=hermes' "hermes_home=$hermes_home" \
+        "hermes_owner_token=$token" >> "$case_dir/state/task-x1.meta"
+      cp "$case_dir/state/task-x1.meta" "$case_dir/meta.before"
+      target="$case_dir/wt/feature.txt"
+      if [ "$change" = untracked ]; then
+        target="$case_dir/wt/late.txt"
+        git -C "$case_dir/wt" config status.showUntrackedFiles no
+      fi
+      cat > "$case_dir/writer.sh" <<'SH'
+#!/usr/bin/env bash
+target=$1
+case_dir=$2
+finish() {
+  if [ -e "$case_dir/state/task-x1.backlog-close" ]; then
+    order=completion-already-published
+  else
+    order=completion-not-published
+  fi
+  printf 'saved during stop\n' > "$target"
+  printf '%s\n' "$order" > "$case_dir/stop-order"
+  exit 0
+}
+trap finish TERM
+printf '%s\n' "$$" > "$case_dir/writer.pid"
+: > "$case_dir/writer.ready"
+while :; do sleep 0.05; done
+SH
+      ready="$case_dir/writer.ready"
+      ( cd "$case_dir" && FM_HERMES_TASK_TOKEN="$token" exec perl -e '
+          my ($script, $target, $root) = @ARGV;
+          setpgrp(0, 0);
+          my $child = fork();
+          die "fork" unless defined $child;
+          if (!$child) {
+            exec "env", "-u", "FM_HERMES_TASK_TOKEN", "bash", $script, $target, $root;
+            die "exec writer";
+          }
+          sleep 300;
+        ' "$case_dir/writer.sh" "$target" "$case_dir" ) &
+      endpoint_pid=$!
+      attempt=0
+      while [ ! -f "$ready" ] && [ "$attempt" -lt 100 ]; do
+        sleep 0.05
+        attempt=$((attempt + 1))
+      done
+      if [ ! -f "$ready" ]; then
+        kill -KILL "$endpoint_pid" 2>/dev/null || true
+        wait "$endpoint_pid" 2>/dev/null || true
+        fail "stop-write-$backend-$change: writer did not arm its TERM handler"
+      fi
+
+      pid=$(cat "$case_dir/writer.pid")
+      case "$backend" in
+        tmux*) endpoint_tool=tmux ;;
+        orca*) endpoint_tool=orca ;;
+        herdr*) endpoint_tool=herdr ;;
+      esac
+      mv "$case_dir/fakebin/$endpoint_tool" "$case_dir/fakebin/$endpoint_tool.original"
+      cat > "$case_dir/fakebin/$endpoint_tool" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
+  [ ! -e '$case_dir/endpoint.closed' ] || exit 1
+  kill -0 '$endpoint_pid' 2>/dev/null || exit 1
+  printf '%s\n' '$endpoint_pid'
+  exit 0
+fi
+case "\$*" in
+  *kill-window*|*'terminal close'*|*'pane close'*)
+    kill -TERM '$endpoint_pid'
+    for ((i=0; i<100; i++)); do
+      kill -0 '$endpoint_pid' 2>/dev/null || break
+      sleep 0.05
+    done
+    : > '$case_dir/endpoint.closed'
+    ;;
+esac
+exec '$case_dir/fakebin/$endpoint_tool.original' "\$@"
+SH
+      chmod +x "$case_dir/fakebin/$endpoint_tool"
+      path_without_lsof=$PATH
+      if [[ "$backend" = *-no-lsof ]]; then
+        path_without_lsof=$(make_path_without_lsof "$case_dir")
+      fi
+      rc=0
+      FM_FAKE_HERDR_LOG="$case_dir/herdr.log" \
+      FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
+      FM_FAKE_HERDR_RESTORED="$case_dir/restored" \
+      FM_TEARDOWN_TEST_PATH="$path_without_lsof" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      if [ "$backend" = orca-no-lsof ]; then
+        assert_absent "$case_dir/endpoint.closed" \
+          "stop-write-$backend-$change: unavailable ownership must refuse before closing"
+        kill -0 "$endpoint_pid" 2>/dev/null \
+          || fail "stop-write-$backend-$change: refusal lost the endpoint"
+        kill -TERM "$pid"
+        attempt=0
+        while [ ! -e "$case_dir/stop-order" ] && [ "$attempt" -lt 100 ]; do
+          sleep 0.05
+          attempt=$((attempt + 1))
+        done
+      else
+        assert_present "$case_dir/endpoint.closed" \
+          "stop-write-$backend-$change: endpoint was not closed"
+        ! kill -0 "$endpoint_pid" 2>/dev/null \
+          || fail "stop-write-$backend-$change: endpoint identity survived closure"
+      fi
+      kill -KILL "$pid" "$endpoint_pid" 2>/dev/null || true
+      wait "$endpoint_pid" 2>/dev/null || true
+      assert_grep "saved during stop" "$target" \
+        "stop-write-$backend-$change: writer did not save its change"
+      expect_code 1 "$rc" "stop-write-$backend-$change: late work must refuse teardown"
+      if [ "$backend" != orca-no-lsof ]; then
+        assert_grep "uncommitted changes" "$case_dir/stderr" \
+          "stop-write-$backend-$change: refusal did not name late work"
+      fi
+      assert_grep "completion-not-published" "$case_dir/stop-order" \
+        "stop-write-$backend-$change: close marker was published before stopping writers"
+      assert_absent "$case_dir/state/task-x1.backlog-close" \
+        "stop-write-$backend-$change: refusal left a replayable completion"
+      if [[ "$backend" = orca* ]]; then
+        if [ -f "$case_dir/removal.log" ]; then
+          ! grep -q 'worktree remove' "$case_dir/removal.log" \
+            || fail "stop-write-$backend-$change: refusal reached worktree removal"
+        fi
+      else
+        assert_absent "$case_dir/removal.log" \
+          "stop-write-$backend-$change: refusal reached worktree removal"
+      fi
+      assert_equals "$local_head" "$(git -C "$case_dir/wt" rev-parse fm/task-x1)" \
+        "stop-write-$backend-$change: refusal deleted or changed the task branch"
+      cmp -s "$case_dir/meta.before" "$case_dir/state/task-x1.meta" \
+        || fail "stop-write-$backend-$change: refusal changed the task record"
+      if [ "$backend" = herdr-projected ]; then
+        assert_present "$case_dir/state/task-x1.herdr-presentation" \
+          "stop-write-$backend-$change: refusal retired the retry journal"
+      fi
+      assert_equals in_flight "$(backlog_row_state "$case_dir")" \
+        "stop-write-$backend-$change: refusal closed the unfinished row"
+    done
+  done
+  pass "stop-time tracked and hidden untracked writes preserve branch, records, and row on every endpoint shutdown path"
+}
+
 test_leaked_tasktmp_process_is_reaped() {
   local case_dir rc pid
   case_dir=$(make_case leaked-tasktmp-reap)
@@ -3888,6 +4119,8 @@ SH
   pass "teardown refuses a standing done: claim that carries no delivery artifact"
 }
 
+test_no_mistakes_mirror_requires_real_remote
+test_stop_time_changes_refuse_before_completion
 test_local_only_fork_remote_allows
 test_done_claim_requires_delivery_artifact
 test_teardown_closes_the_backlog_item_itself

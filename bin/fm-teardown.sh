@@ -8,8 +8,9 @@
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under this task's meta lock before teardown reports success. Teardown records
-# state/<id>.backlog-close first, so a process killed between the halves leaves
-# the exact close replayable at the next session start. The transition is
+# state/<id>.backlog-close after the post-stop safety proof and before removing
+# the task record, so a process killed between the halves leaves the exact close
+# replayable at the next session start. The transition is
 # skipped on a config/backlog-backend=manual home and in a markdown home that
 # keeps no data/backlog.md; those cases print the manual follow-up. A row still
 # held for the captain is retained - returned to Queued with the deliverable
@@ -17,9 +18,10 @@
 # question.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
+# reachable from any remote-tracking branch except the local no-mistakes mirror
+# (a fork counts as a remote, so upstream-contribution PRs pushed to a fork
+# satisfy this in any mode), OR - for a normal ship task whose commits are not
+# so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
@@ -41,6 +43,8 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# Safety is proved again after task writers stop, before publishing a replayable
+# backlog close, deleting the task branch, or returning the worktree.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -155,10 +159,10 @@
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
 #
-# Pre-teardown cleanup sequence (runs once every landed/discard-work safety
-# refusal above has already passed, and BEFORE any worktree return, branch
-# delete, or backend kill below - a still-active run or a leaked process may
-# own live work in that worktree):
+# Pre-teardown cleanup sequence (starts after the initial landed/discard-work
+# checks pass, before worktree return or branch deletion). Discover owned
+# processes before concluding the run or closing the endpoint, so shutdown
+# cannot erase the ancestry or pane identity needed to enforce ownership:
 #   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
 #     be torn down while its no-mistakes pipeline run is still PARKED at a gate
 #     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
@@ -181,11 +185,12 @@
 #     process group, so it survives reparented to init (observed 2026-08-03:
 #     two `go test` binaries, deadlines blown past by ~100x, pinning CPU for
 #     hours with no live task meta to attribute them to once teardown had
-#     already removed it). reap_task_worktree_processes finds every process
+#     already removed it). discover_task_worktree_processes records every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
+#     walking the worktree's file tree). After endpoint closure,
+#     reap_task_worktree_processes sends TERM, then KILL after a short grace
+#     period to any survivor whose process identity still matches. Both
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
@@ -194,7 +199,7 @@
 #     token only when hermes_owner_token= metadata, the private state token,
 #     and the profile lifecycle registry bind the same task and state paths.
 #     The token-bearing roots and their exact process descendants join the cwd
-#     set before TERM/KILL, so process-group-detached MCP children are reaped
+#     set before endpoint closure, so process-group-detached MCP children are reaped
 #     without selecting any unmarked personal Hermes or gateway process.
 #     Ownership proof has two distinct failure shapes and they are handled
 #     differently on purpose. Proof that CONTRADICTS itself - a metadata token
@@ -216,6 +221,9 @@
 #     pass stay tracked by process identity through the KILL escalation and the
 #     final survivor check, so a child reparented after its parent exits is
 #     still reaped rather than dropped by the post-TERM rescan.
+#     Without lsof, only tmux has a fallback: record the pane process group's
+#     members and identities before closing it. Other backends, or an
+#     unverifiable tmux group, refuse before endpoint closure.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -600,9 +608,10 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
 # The backlog gate (bin/fm-backlog-transition-lib.sh): when it applies, this
-# teardown owns the paired close and must be able to record it before any
-# destructive step. A gate error (unresolvable data directory, unreadable
-# backend config, incompatible tasks-axi) refuses while everything is intact.
+# teardown owns the paired close and records it after stopping task writers and
+# proving safety again, before removing task records. A gate error (unresolvable
+# data directory, unreadable backend config, incompatible tasks-axi) refuses while
+# everything is intact.
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
@@ -831,7 +840,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$WT" log --format=%H HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -913,7 +922,7 @@ content_in_default() {
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
+# reachable under the header's remote-preservation rule? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed. A containment proof Git
@@ -1329,7 +1338,7 @@ validate_worktree_teardown_safety() {
     | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi|hermes)-turnend$)' \
     | head -1 || true)
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -1782,48 +1791,44 @@ report_task_process_scan_failure() {
   esac
 }
 
-reap_task_backend_process_group() {  # <label>
-  local label=$1 leader leader_start pgid current_pgid own_pgid
+discover_task_backend_process_group() {  # <label>
+  local label=$1 leader leader_start pgid current_pgid own_pgid table
   if [ "$BACKEND" != tmux ]; then
-    echo "warning: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
-    return 0
+    echo "REFUSED: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
+    return 1
   fi
   leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
   case "$leader" in ''|*[!0-9]*)
-    echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
-    return 0
+    echo "REFUSED: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
+    return 1
     ;;
   esac
   leader_start=$(task_process_identity "$leader") || {
-    echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
-    return 0
+    echo "REFUSED: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
+    return 1
   }
   pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || pgid=""
   pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
   case "$pgid" in ''|*[!0-9]*|0|1)
-    echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
-    return 0
+    echo "REFUSED: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
+    return 1
     ;;
   esac
   own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
   own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
   if [ "$pgid" = "$own_pgid" ]; then
-    echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
-    return 0
+    echo "REFUSED: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
+    return 1
   fi
-  task_process_identity_matches "$leader" "$leader_start" || return 0
+  task_process_identity_matches "$leader" "$leader_start" || return 1
   current_pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || current_pgid=""
   current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
-  [ "$current_pgid" = "$pgid" ] || return 0
-  echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
-  kill -TERM -- "-$pgid" 2>/dev/null || true
-  sleep 1
-  if task_process_identity_matches "$leader" "$leader_start" \
-     && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
-     && kill -0 -- "-$pgid" 2>/dev/null; then
-    echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
-    kill -KILL -- "-$pgid" 2>/dev/null || true
-  fi
+  [ "$current_pgid" = "$pgid" ] || return 1
+  table=$(LC_ALL=C ps -e -o pid=,pgid= 2>/dev/null) || return 1
+  task_process_identity_matches "$leader" "$leader_start" || return 1
+  TASK_BACKEND_PIDS=$(printf '%s\n' "$table" | awk -v pgid="$pgid" '$2 == pgid { print $1 }')
+  task_pid_list_contains "$TASK_BACKEND_PIDS" "$leader" || return 1
+  echo "teardown: reaping leaked $label process group for $ID: $pgid (recorded before endpoint close)" >&2
 }
 
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
@@ -1833,8 +1838,8 @@ reap_task_backend_process_group() {  # <label>
 # the recheck. Every process proven owned in a pass is remembered by pid AND
 # process identity, so a child that reparents to init when its parent exits on
 # TERM stays under enforcement instead of vanishing from the post-TERM
-# ownership rescan. A missing lsof uses the backend process-group fallback; an
-# lsof scan error refuses before destructive teardown.
+# ownership rescan. The header owns discovery ordering and the missing-lsof
+# fallback; a scan error refuses further cleanup.
 REAP_TRACKED_PIDS=()
 REAP_TRACKED_IDENTITIES=()
 
@@ -1878,16 +1883,50 @@ reap_tracked_survivors() {
   return 0
 }
 
-reap_task_worktree_processes() {  # <label> <dir>...
-  local label=$1 pids pid identity current_pids i pass=1 max_passes=3
-  local -a tracked_pids tracked_identities remaining_pids remaining_identities
+reap_process_identity() {
+  local i
+  if [ "${#REAP_TRACKED_PIDS[@]}" -gt 0 ]; then
+    for i in "${!REAP_TRACKED_PIDS[@]}"; do
+      if [ "${REAP_TRACKED_PIDS[$i]}" = "$1" ]; then
+        printf '%s\n' "${REAP_TRACKED_IDENTITIES[$i]}"
+        return 0
+      fi
+    done
+  fi
+  task_process_identity "$1"
+}
+
+discover_task_worktree_processes() {
+  local label=$1 pids pid identity
   shift
   REAP_TRACKED_PIDS=()
   REAP_TRACKED_IDENTITIES=()
+  TASK_BACKEND_PIDS=
   if ! command -v lsof >/dev/null 2>&1; then
-    reap_task_backend_process_group "$label"
-    [ -n "${TASK_HERMES_OWNER_TOKEN:-}" ] || return 0
+    discover_task_backend_process_group "$label" || return 1
   fi
+  if ! task_pids_for_reap "$@"; then
+    report_task_process_scan_failure
+    return 1
+  fi
+  pids=$(reap_merge_pid_lists "$TASK_PIDS" "$TASK_BACKEND_PIDS")
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if identity=$(task_process_identity "$pid"); then
+      reap_track_process "$pid" "$identity"
+    elif ! task_pid_is_defunct "$pid" && kill -0 "$pid" 2>/dev/null; then
+      echo "REFUSED: cannot verify leaked process $pid identity for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
+      return 1
+    fi
+  done <<EOF
+$pids
+EOF
+}
+
+reap_task_worktree_processes() {  # <label> <dir>...
+  local label=$1 pids pid identity i pass=1 max_passes=3
+  local -a tracked_pids tracked_identities remaining_pids remaining_identities
+  shift
   while [ "$pass" -le "$max_passes" ]; do
     if ! task_pids_for_reap "$@"; then
       report_task_process_scan_failure
@@ -1899,7 +1938,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
     tracked_identities=()
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      if ! identity=$(task_process_identity "$pid"); then
+      if ! identity=$(reap_process_identity "$pid"); then
         if ! task_pids_for_reap "$@"; then
           report_task_process_scan_failure
           return 1
@@ -1920,17 +1959,11 @@ EOF
       pass=$((pass + 1))
       continue
     fi
-    if ! task_pids_for_reap "$@"; then
-      report_task_process_scan_failure
-      return 1
-    fi
-    current_pids=$TASK_PIDS
     echo "teardown: reaping leaked $label process(es) for $ID: $(printf '%s' "$pids" | tr '\n' ' ')" >&2
     for i in "${!tracked_pids[@]}"; do
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
-      if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+      if task_process_identity_matches "$pid" "$identity"; then
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
@@ -1942,7 +1975,7 @@ EOF
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
       reap_pid_is_tracked "$pid" && continue
-      identity=$(task_process_identity "$pid") || continue
+      identity=$(reap_process_identity "$pid") || continue
       reap_track_process "$pid" "$identity"
     done <<EOF
 $TASK_PIDS
@@ -3107,8 +3140,112 @@ else
   esac
 fi
 
-# Record the exact backlog close BEFORE any destructive step: a process killed
-# between removing the record and closing the row would otherwise leave nothing
+# A Herdr close may reposition shared workspace order, so the whole
+# destructive sequence below (worktree return, pane close, record removal)
+# runs under the named-session presentation lock, acquired BEFORE anything is
+# returned or erased: a contended lock refuses here while the isolated copy,
+# every durable record, and the endpoint are all still intact for a plain
+# rerun. An unresolvable lock path (for example an unreachable server) also
+# refuses before any destructive step.
+TEARDOWN_HERDR_SESSION=
+TEARDOWN_HERDR_PANE=
+if [ "$BACKEND" = herdr ]; then
+  teardown_herdr_preflight_target "$T" "$ID" || exit 1
+  fm_backend_herdr_parse_target "$T" || exit 1
+  TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
+  TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+fi
+
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
+
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+  discover_task_worktree_processes worktree "$WT" "$TASK_TMP" || exit 1
+  conclude_task_no_mistakes_run "$WT"
+elif [ "$KIND" != secondmate ]; then
+  discover_task_worktree_processes tasktmp "$TASK_TMP" || exit 1
+fi
+
+if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+  if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
+  else
+    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
+  fi
+elif [ "$BACKEND" = herdr ]; then
+  if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
+    fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
+  else
+    echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
+  fi
+elif [ "$BACKEND" = orca ]; then
+  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
+    ORCA_PATH_MATCH_VERIFIED=1
+  fi
+  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+else
+  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+fi
+# The initial landed/discard-work checks above have passed (or --force skipped
+# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# --force, and before branch deletion or worktree return - a still-parked run or a
+# leaked process can own live work in this exact worktree. Not for
+# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
+# dedicated process-event and firstmate-home removal machinery further below,
+# not by task-worktree cleanup.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+elif [ "$KIND" != secondmate ]; then
+  reap_task_worktree_processes tasktmp "$TASK_TMP"
+fi
+
+# A refused, skipped, or failed Herdr close must never erase a live task's
+# durable endpoint identity: unless the exact pane is confirmed gone, retain
+# every record and stop before any removal below so a later rerun can retry
+# the locked close. Only a structured not-found proves the pane gone; unknown
+# presence, missing or malformed endpoint identity, and missing confirmation
+# machinery all refuse.
+if [ "$BACKEND" = herdr ]; then
+  fm_backend_source herdr || true
+  if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
+    echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
+    exit 1
+  fi
+  if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+    echo "error: herdr pane $T for $ID is not confirmed gone; its close could not be confirmed after being refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
+    exit 1
+  fi
+fi
+
+# Writers can save changes while their run concludes or their processes exit.
+# Re-prove the stopped copy on every backend before publishing completion or
+# deleting its branch. Keep the later Treehouse stale-lock callback as well.
+if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+  validate_worktree_teardown_safety || exit 1
+fi
+
+# Record the exact backlog close after that proof: a process killed between
+# removing the record and closing the row would otherwise leave nothing
 # to reconstruct the close from. The marker is validated on write and replayed
 # by the next session start if this run never reaches the transition below.
 BACKLOG_CLOSED=0
@@ -3132,42 +3269,19 @@ else
   BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
 fi
 
-# Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
-elif [ "$KIND" != secondmate ]; then
-  reap_task_worktree_processes tasktmp "$TASK_TMP"
-fi
-
-# A Herdr close may reposition shared workspace order, so the whole
-# destructive sequence below (worktree return, pane close, record removal)
-# runs under the named-session presentation lock, acquired BEFORE anything is
-# returned or erased: a contended lock refuses here while the isolated copy,
-# every durable record, and the endpoint are all still intact for a plain
-# rerun. An unresolvable lock path (for example an unreachable server) also
-# refuses before any destructive step.
-TEARDOWN_HERDR_SESSION=
-TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
-  teardown_herdr_preflight_target "$T" "$ID" || exit 1
-  fm_backend_herdr_parse_target "$T" || exit 1
-  TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
-  TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
+  else
+    echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
+  fi
+elif [ "$BACKEND" = herdr ] \
+     && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
-    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
-    ORCA_PATH_MATCH_VERIFIED=1
-  fi
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
@@ -3180,7 +3294,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-hermes-turnend" "$WT/.fm-devin-turnend"
   fi
-  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
@@ -3214,72 +3327,6 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fm_treehouse_slot_owner_release "$WT" "$ID"
 fi
 
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
-fi
-
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  # The presentation lock was acquired before the worktree return above; a
-  # contended lock already refused this teardown while everything was intact.
-  if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
-  else
-    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
-  fi
-elif [ "$BACKEND" = herdr ]; then
-  if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
-    fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
-  else
-    echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
-  fi
-elif [ "$BACKEND" != orca ]; then
-  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-fi
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
-  else
-    echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
-  fi
-elif [ "$BACKEND" = herdr ] \
-     && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
-fi
-# A refused, skipped, or failed Herdr close must never erase a live task's
-# durable endpoint identity: unless the exact pane is confirmed gone, retain
-# every record and stop before any removal below so a later rerun can retry
-# the locked close. Only a structured not-found proves the pane gone; unknown
-# presence, missing or malformed endpoint identity, and missing confirmation
-# machinery all refuse.
-if [ "$BACKEND" = herdr ]; then
-  fm_backend_source herdr || true
-  if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
-    echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
-    exit 1
-  fi
-  if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
-    echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
-    exit 1
-  fi
-fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
