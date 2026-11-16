@@ -483,7 +483,83 @@ test_omp_relaunch_refuses_missing_worktree() {
   pass "OMP relaunch refuses a recorded worktree that is missing"
 }
 
+# Existing cases cover missing paths, artifacts and endpoint identity, not a
+# valid record restored onto a primary copy. This must refuse before launch.
+test_omp_relaunch_isolation() {
+  local shape=$1 rec id out status task_copy recorded_project git_dir= git_work_tree=
+  id=$(case_id "isolation-$shape")
+  rec=$(make_relaunch_case "isolation-$shape" "$id")
+  read_relaunch_record "$rec"
+  recorded_project=$PROJ_DIR
+  case "$shape" in
+    project) task_copy=$PROJ_DIR ;;
+    home) task_copy=$HOME_DIR ;;
+    code) task_copy=$ROOT ;;
+    project-symlink)
+      ln -s "$PROJ_DIR" "$HOME_DIR/project-link" || fail "symlink fixture failed"
+      task_copy=$HOME_DIR/project-link
+      ;;
+    code-spoof)
+      task_copy=$ROOT
+      git_dir=$(git -C "$WT_DIR" rev-parse --absolute-git-dir)
+      git_work_tree=$ROOT
+      ;;
+    project-spoof)
+      task_copy=$PROJ_DIR
+      git_dir=$(git -C "$WT_DIR" rev-parse --absolute-git-dir)
+      git_work_tree=$PROJ_DIR
+      ;;
+    linked-project-spoof)
+      task_copy=$PROJ_DIR
+      recorded_project=$WT_DIR
+      git_dir=$(git -C "$WT_DIR" rev-parse --absolute-git-dir)
+      git_work_tree=$PROJ_DIR
+      ;;
+    standalone)
+      task_copy="$HOME_DIR/isolated-clone"
+      git clone --quiet "$PROJ_DIR" "$task_copy" || fail "isolated clone fixture failed"
+      ;;
+    *) fail "unknown isolation case: $shape" ;;
+  esac
+  write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$task_copy" "$recorded_project" "$FAKEBIN_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id" "/tmp/fm-$id"
+  chmod 700 "/tmp/fm-$id" || fail "task temp fixture permissions failed"
+
+  set +e
+  out=$(unset GIT_DIR GIT_WORK_TREE
+    if [ -n "$git_dir" ]; then
+      export GIT_DIR="$git_dir" GIT_WORK_TREE="$git_work_tree"
+    fi
+    FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$task_copy" FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    FM_FAKE_LIST_WINDOWS="fm-$id" FM_FAKE_OMP_ACK="$HOME_DIR/state/$id.omp-started" \
+    PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" --relaunch 2>&1)
+  status=$?
+  set -e
+  if [ "$shape" = standalone ]; then
+    expect_code 0 "$status" "isolated standalone clone relaunch failed: $out"
+    assert_grep "worktree=$task_copy" "$HOME_DIR/state/$id.meta" \
+      "standalone relaunch did not keep the isolated clone"
+  else
+    [ "$status" -ne 0 ] || fail "relaunch into primary $shape copy succeeded"
+    assert_contains "$out" "not an isolated task worktree" "primary $shape refusal was unclear"
+    [ ! -s "$LAUNCH_LOG" ] || fail "primary $shape copy received launch input"
+  fi
+  pass "OMP relaunch isolation: $shape"
+}
+
 # Run tests in an order that lets each test own its isolated fixture.
+test_omp_relaunch_isolation code-spoof
+test_omp_relaunch_isolation project
+test_omp_relaunch_isolation home
+test_omp_relaunch_isolation code
+test_omp_relaunch_isolation project-symlink
+test_omp_relaunch_isolation project-spoof
+test_omp_relaunch_isolation linked-project-spoof
+test_omp_relaunch_isolation standalone
 test_omp_ship_relaunch_accepts_existing_artifacts
 test_omp_ship_relaunch_preserves_prewalk_and_extension_opt_in
 test_omp_relaunch_refuses_symlinked_runtime_artifact
