@@ -1141,6 +1141,25 @@ SH
   pass "returned custom check descendants are drained on installed and fallback timeout paths"
 }
 
+test_fallback_preserves_signaled_check_status() {
+  local dir state check status
+  dir=$(make_case fallback-signal-status)
+  state="$dir/home/state"
+  check="$state/signal.check.sh"
+  cat > "$check" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$$"
+SH
+  chmod 0700 "$check"
+
+  status=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_CHECK_FORCE_FALLBACK=1 FM_CHECK_TIMEOUT=10 \
+    bash -c '. "$1"; run_check_capture "$2" || exit 1; printf "%s\n" "$FM_CHECK_RC"' \
+      bash "$WATCH" "$check") || fail "fallback watcher could not capture a signaled check"
+  [ "$status" = 143 ] || fail "fallback watcher recorded SIGTERM status as $status instead of 143"
+  pass "fallback watcher preserves a signaled check status"
+}
+
 test_timed_out_custom_check_surfaces_with_partial_output() {
   local backend dir state rc force_fallback
   for backend in installed-timeout fallback-timeout; do
@@ -2299,5 +2318,6 @@ test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
+test_fallback_preserves_signaled_check_status
 test_timed_out_custom_check_surfaces_with_partial_output
 test_teardown_removes_poll_artifacts
