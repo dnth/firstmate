@@ -1188,11 +1188,12 @@ SH
 }
 
 test_timed_out_bridge_polls_do_not_wake() {
-  local bridge dir state poll rc
+  local bridge dir state poll ran rc
   for bridge in x ext; do
     dir=$(make_case "timed-out-$bridge-bridge-poll")
     state="$dir/home/state"
     poll="$dir/root/bin/fm-$bridge-poll.sh"
+    ran="$dir/poll-ran"
     case "$bridge" in
       x)
         fmx_poll_shim_content "$dir/home" "$dir/root" > "$state/x-watch.check.sh" \
@@ -1212,6 +1213,7 @@ SH
     esac
     cat > "$poll" <<'SH'
 #!/usr/bin/env bash
+printf 'ran\n' > "$FM_TEST_BRIDGE_POLL_RAN"
 trap '' TERM
 while :; do :; done
 SH
@@ -1219,11 +1221,14 @@ SH
     add_stop_custom_check "$dir"
 
     rc=0
-    FM_CHECK_FORCE_FALLBACK=1 FM_TEST_CHECK_TIMEOUT=1 FM_TEST_WATCH_ROOT="$dir/root" \
+    FM_CHECK_FORCE_FALLBACK=1 FM_TEST_BRIDGE_POLL_RAN="$ran" FM_TEST_CHECK_TIMEOUT=1 \
+      FM_TEST_WATCH_ROOT="$dir/root" \
       run_watcher_bounded "$dir/home" "$dir/fakebin" \
         > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
     [ "$rc" -eq 0 ] \
       || fail "$bridge bridge timeout watcher failed (rc=$rc): $(cat "$dir/watch.err")"
+    grep -qxF ran "$ran" \
+      || fail "$bridge bridge poll did not run before the timeout"
     grep -qxF "check: $state/z-stop.check.sh: stop-cycle" "$dir/watch.out" \
       || fail "$bridge bridge timeout raised a spurious wake: $(cat "$dir/watch.out")"
   done
