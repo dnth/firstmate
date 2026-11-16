@@ -1787,8 +1787,8 @@ report_task_process_scan_failure() {
   esac
 }
 
-reap_task_backend_process_group() {  # <label>
-  local label=$1 leader leader_start pgid current_pgid own_pgid
+discover_task_backend_process_group() {  # <label>
+  local label=$1 leader leader_start pgid current_pgid own_pgid table
   if [ "$BACKEND" != tmux ]; then
     echo "REFUSED: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
     return 1
@@ -1820,15 +1820,11 @@ reap_task_backend_process_group() {  # <label>
   current_pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || current_pgid=""
   current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
   [ "$current_pgid" = "$pgid" ] || return 1
-  echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
-  kill -TERM -- "-$pgid" 2>/dev/null || true
-  sleep 1
-  if task_process_identity_matches "$leader" "$leader_start" \
-     && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
-     && kill -0 -- "-$pgid" 2>/dev/null; then
-    echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
-    kill -KILL -- "-$pgid" 2>/dev/null || true
-  fi
+  table=$(LC_ALL=C ps -e -o pid=,pgid= 2>/dev/null) || return 1
+  task_process_identity_matches "$leader" "$leader_start" || return 1
+  TASK_BACKEND_PIDS=$(printf '%s\n' "$table" | awk -v pgid="$pgid" '$2 == pgid { print $1 }')
+  task_pid_list_contains "$TASK_BACKEND_PIDS" "$leader" || return 1
+  echo "teardown: reaping leaked $label process group for $ID: $pgid (recorded before endpoint close)" >&2
 }
 
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
@@ -1883,16 +1879,50 @@ reap_tracked_survivors() {
   return 0
 }
 
-reap_task_worktree_processes() {  # <label> <dir>...
-  local label=$1 pids pid identity current_pids i pass=1 max_passes=3
-  local -a tracked_pids tracked_identities remaining_pids remaining_identities
+reap_process_identity() {
+  local i
+  if [ "${#REAP_TRACKED_PIDS[@]}" -gt 0 ]; then
+    for i in "${!REAP_TRACKED_PIDS[@]}"; do
+      if [ "${REAP_TRACKED_PIDS[$i]}" = "$1" ]; then
+        printf '%s\n' "${REAP_TRACKED_IDENTITIES[$i]}"
+        return 0
+      fi
+    done
+  fi
+  task_process_identity "$1"
+}
+
+discover_task_worktree_processes() {
+  local label=$1 pids pid identity
   shift
   REAP_TRACKED_PIDS=()
   REAP_TRACKED_IDENTITIES=()
+  TASK_BACKEND_PIDS=
   if ! command -v lsof >/dev/null 2>&1; then
-    reap_task_backend_process_group "$label" || return 1
-    [ -n "${TASK_HERMES_OWNER_TOKEN:-}" ] || return 0
+    discover_task_backend_process_group "$label" || return 1
   fi
+  if ! task_pids_for_reap "$@"; then
+    report_task_process_scan_failure
+    return 1
+  fi
+  pids=$(reap_merge_pid_lists "$TASK_PIDS" "$TASK_BACKEND_PIDS")
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if identity=$(task_process_identity "$pid"); then
+      reap_track_process "$pid" "$identity"
+    elif ! task_pid_is_defunct "$pid" && kill -0 "$pid" 2>/dev/null; then
+      echo "REFUSED: cannot verify leaked process $pid identity for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
+      return 1
+    fi
+  done <<EOF
+$pids
+EOF
+}
+
+reap_task_worktree_processes() {  # <label> <dir>...
+  local label=$1 pids pid identity i pass=1 max_passes=3
+  local -a tracked_pids tracked_identities remaining_pids remaining_identities
+  shift
   while [ "$pass" -le "$max_passes" ]; do
     if ! task_pids_for_reap "$@"; then
       report_task_process_scan_failure
@@ -1904,7 +1934,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
     tracked_identities=()
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      if ! identity=$(task_process_identity "$pid"); then
+      if ! identity=$(reap_process_identity "$pid"); then
         if ! task_pids_for_reap "$@"; then
           report_task_process_scan_failure
           return 1
@@ -1925,17 +1955,11 @@ EOF
       pass=$((pass + 1))
       continue
     fi
-    if ! task_pids_for_reap "$@"; then
-      report_task_process_scan_failure
-      return 1
-    fi
-    current_pids=$TASK_PIDS
     echo "teardown: reaping leaked $label process(es) for $ID: $(printf '%s' "$pids" | tr '\n' ' ')" >&2
     for i in "${!tracked_pids[@]}"; do
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
-      if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+      if task_process_identity_matches "$pid" "$identity"; then
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
@@ -1947,7 +1971,7 @@ EOF
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
       reap_pid_is_tracked "$pid" && continue
-      identity=$(task_process_identity "$pid") || continue
+      identity=$(reap_process_identity "$pid") || continue
       reap_track_process "$pid" "$identity"
     done <<EOF
 $TASK_PIDS
@@ -3112,10 +3136,6 @@ else
   esac
 fi
 
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  conclude_task_no_mistakes_run "$WT"
-fi
-
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)
 # runs under the named-session presentation lock, acquired BEFORE anything is
@@ -3153,6 +3173,13 @@ if [ "$BACKEND" = herdr ] \
   fi
 fi
 
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+  discover_task_worktree_processes worktree "$WT" "$TASK_TMP" || exit 1
+  conclude_task_no_mistakes_run "$WT"
+elif [ "$KIND" != secondmate ]; then
+  discover_task_worktree_processes tasktmp "$TASK_TMP" || exit 1
+fi
+
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
     fm_backend_herdr_projection_close_pane_focus_preserving \
@@ -3175,6 +3202,19 @@ elif [ "$BACKEND" = orca ]; then
 else
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
+# The initial landed/discard-work checks above have passed (or --force skipped
+# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# --force, and before branch deletion or worktree return - a still-parked run or a
+# leaked process can own live work in this exact worktree. Not for
+# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
+# dedicated process-event and firstmate-home removal machinery further below,
+# not by task-worktree cleanup.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+elif [ "$KIND" != secondmate ]; then
+  reap_task_worktree_processes tasktmp "$TASK_TMP"
+fi
+
 # A refused, skipped, or failed Herdr close must never erase a live task's
 # durable endpoint identity: unless the exact pane is confirmed gone, retain
 # every record and stop before any removal below so a later rerun can retry
@@ -3191,19 +3231,6 @@ if [ "$BACKEND" = herdr ]; then
     echo "error: herdr pane $T for $ID is not confirmed gone; its close could not be confirmed after being refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
     exit 1
   fi
-fi
-
-# The initial landed/discard-work checks above have passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before branch deletion or worktree return - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
-elif [ "$KIND" != secondmate ]; then
-  reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
 
 # Writers can save changes while their run concludes or their processes exit.

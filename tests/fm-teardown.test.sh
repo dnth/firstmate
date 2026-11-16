@@ -2509,8 +2509,8 @@ test_leaked_worktree_process_is_reaped() {
 # Exercise both worktree-removal paths with a real writer that dirties the
 # clean, pushed copy on TERM, before any replayable completion is published.
 test_stop_time_changes_refuse_before_completion() {
-  local backend change case_dir rc pid ready target local_head attempt path_without_lsof endpoint_tool
-  for backend in tmux orca orca-no-lsof herdr herdr-projected; do
+  local backend change case_dir rc pid ready target local_head attempt path_without_lsof endpoint_tool endpoint_pid token hermes_home state_real
+  for backend in tmux tmux-no-lsof orca orca-no-lsof herdr herdr-projected; do
     for change in tracked untracked; do
       case_dir=$(make_case "stop-write-$backend-$change")
       write_meta "$case_dir" no-mistakes ship
@@ -2550,6 +2550,17 @@ SH
           rm "$case_dir/state/task-x1.herdr-presentation"
         fi
       fi
+      token=fm.abcdefghijkl
+      hermes_home="$case_dir/hermes-home"
+      state_real=$(cd "$case_dir/state" && pwd -P)
+      mkdir -p "$hermes_home/fm-turn-end.d"
+      printf '%s\n' "$token" > "$case_dir/state/task-x1.hermes-turnend-token"
+      jq -n --arg id task-x1 --arg state "$state_real" \
+        --arg session_file "$state_real/task-x1.hermes-session" \
+        '{id:$id,state:$state,session_file:$session_file}' \
+        > "$hermes_home/fm-turn-end.d/$token"
+      printf '%s\n' 'harness=hermes' "hermes_home=$hermes_home" \
+        "hermes_owner_token=$token" >> "$case_dir/state/task-x1.meta"
       cp "$case_dir/state/task-x1.meta" "$case_dir/meta.before"
       target="$case_dir/wt/feature.txt"
       if [ "$change" = untracked ]; then
@@ -2571,45 +2582,64 @@ finish() {
   exit 0
 }
 trap finish TERM
+printf '%s\n' "$$" > "$case_dir/writer.pid"
 : > "$case_dir/writer.ready"
 while :; do sleep 0.05; done
 SH
       ready="$case_dir/writer.ready"
-      ( cd "$case_dir" && exec bash "$case_dir/writer.sh" "$target" "$case_dir" ) &
-      pid=$!
+      ( cd "$case_dir" && FM_HERMES_TASK_TOKEN="$token" exec perl -e '
+          my ($script, $target, $root) = @ARGV;
+          setpgrp(0, 0);
+          my $child = fork();
+          die "fork" unless defined $child;
+          if (!$child) {
+            exec "env", "-u", "FM_HERMES_TASK_TOKEN", "bash", $script, $target, $root;
+            die "exec writer";
+          }
+          sleep 300;
+        ' "$case_dir/writer.sh" "$target" "$case_dir" ) &
+      endpoint_pid=$!
       attempt=0
       while [ ! -f "$ready" ] && [ "$attempt" -lt 100 ]; do
         sleep 0.05
         attempt=$((attempt + 1))
       done
       if [ ! -f "$ready" ]; then
-        kill -KILL "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
+        kill -KILL "$endpoint_pid" 2>/dev/null || true
+        wait "$endpoint_pid" 2>/dev/null || true
         fail "stop-write-$backend-$change: writer did not arm its TERM handler"
       fi
 
+      pid=$(cat "$case_dir/writer.pid")
       case "$backend" in
-        tmux) endpoint_tool=tmux ;;
+        tmux*) endpoint_tool=tmux ;;
         orca*) endpoint_tool=orca ;;
         herdr*) endpoint_tool=herdr ;;
       esac
       mv "$case_dir/fakebin/$endpoint_tool" "$case_dir/fakebin/$endpoint_tool.original"
       cat > "$case_dir/fakebin/$endpoint_tool" <<SH
 #!/usr/bin/env bash
+if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
+  [ ! -e '$case_dir/endpoint.closed' ] || exit 1
+  kill -0 '$endpoint_pid' 2>/dev/null || exit 1
+  printf '%s\n' '$endpoint_pid'
+  exit 0
+fi
 case "\$*" in
   *kill-window*|*'terminal close'*|*'pane close'*)
-    kill -TERM '$pid'
+    kill -TERM '$endpoint_pid'
     for ((i=0; i<100; i++)); do
-      [ ! -e '$case_dir/stop-order' ] || break
+      kill -0 '$endpoint_pid' 2>/dev/null || break
       sleep 0.05
     done
+    : > '$case_dir/endpoint.closed'
     ;;
 esac
 exec '$case_dir/fakebin/$endpoint_tool.original' "\$@"
 SH
       chmod +x "$case_dir/fakebin/$endpoint_tool"
       path_without_lsof=$PATH
-      if [ "$backend" = orca-no-lsof ]; then
+      if [[ "$backend" = *-no-lsof ]]; then
         path_without_lsof=$(make_path_without_lsof "$case_dir")
       fi
       rc=0
@@ -2617,8 +2647,25 @@ SH
       FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
       FM_FAKE_HERDR_RESTORED="$case_dir/restored" \
       FM_TEARDOWN_TEST_PATH="$path_without_lsof" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-      kill -KILL "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
+      if [ "$backend" = orca-no-lsof ]; then
+        assert_absent "$case_dir/endpoint.closed" \
+          "stop-write-$backend-$change: unavailable ownership must refuse before closing"
+        kill -0 "$endpoint_pid" 2>/dev/null \
+          || fail "stop-write-$backend-$change: refusal lost the endpoint"
+        kill -TERM "$pid"
+        attempt=0
+        while [ ! -e "$case_dir/stop-order" ] && [ "$attempt" -lt 100 ]; do
+          sleep 0.05
+          attempt=$((attempt + 1))
+        done
+      else
+        assert_present "$case_dir/endpoint.closed" \
+          "stop-write-$backend-$change: endpoint was not closed"
+        ! kill -0 "$endpoint_pid" 2>/dev/null \
+          || fail "stop-write-$backend-$change: endpoint identity survived closure"
+      fi
+      kill -KILL "$pid" "$endpoint_pid" 2>/dev/null || true
+      wait "$endpoint_pid" 2>/dev/null || true
       assert_grep "saved during stop" "$target" \
         "stop-write-$backend-$change: writer did not save its change"
       expect_code 1 "$rc" "stop-write-$backend-$change: late work must refuse teardown"
