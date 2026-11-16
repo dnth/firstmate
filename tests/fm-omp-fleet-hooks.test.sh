@@ -234,6 +234,24 @@ cat > "$AUTOSYNC_ROOT/bin/fm-todo-project.sh" <<'SH'
 projection='[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]'
 [ -z "${FM_FAKE_PROJECTION:-}" ] || projection=$FM_FAKE_PROJECTION
 case "${FM_FAKE_EMIT_MODE:-ok}" in
+  catchup|catchup-fail|catchup-bad)
+    if [ ! -f "$FM_FAKE_EMIT_LOG.rewrite" ]; then
+      printf 'changed during emit\n' >> "$FM_FIXTURE_BOARD"
+      printf 'done\n' > "$FM_FAKE_EMIT_LOG.rewrite"
+      sleep 0.2
+      case "$FM_FAKE_EMIT_MODE" in
+        catchup-fail) exit 3 ;;
+        catchup-bad) printf '{broken\n'; exit 0 ;;
+      esac
+      printf '%s\n' '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]'
+    else
+      printf '%s\n' "$FM_CHANGED_PROJECTION"
+    fi
+    ;;
+  churn)
+    printf 'changed during every emit\n' >> "$FM_FIXTURE_BOARD"
+    printf '%s\n' "$FM_CHANGED_PROJECTION"
+    ;;
   ok) printf '%s\n' "$projection" ;;
   fail) printf '%s\n' 'projection backend unavailable' >&2 ; exit 3 ;;
   badjson) printf '%s\n' '{"phase":"Active"' ;;
@@ -257,7 +275,7 @@ env -u FM_TASK_ID FM_HOOKS="$AUTOSYNC_HOOKS" FM_HOME="$AUTOSYNC_ROOT" FM_STATE_O
 FM_CHANGED_PROJECTION="$CHANGED_PROJECTION" FM_FAKE_EMIT_LOG="$EMIT_LOG" FM_FAKE_EMIT_PID="$EMIT_PID" \
 FM_FIXTURE_BOARD="$BOARD" node --experimental-strip-types --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const { default: extension } = await import(process.env.FM_HOOKS);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -266,7 +284,9 @@ const handlers = new Map();
 const sent = [];
 extension({ on(name, handler) { handlers.set(name, handler); }, sendMessage(message, options) { sent.push({ message, options }); } });
 const turnEnd = handlers.get("turn_end");
-const ctx = { sessionManager: { getSessionId: () => "primary-session-a" } };
+const initialTodo = [{ name: "Active", tasks: [{ content: "ship-1 - Ship Alpha", status: "pending" }] }];
+const todoResult = phases => ({ type: "message", message: { role: "toolResult", toolName: "todo", details: { phases } } });
+const ctx = { sessionManager: { getSessionId: () => "primary-session-a", getBranch: () => [todoResult(initialTodo)] } };
 const stateDir = join(process.env.FM_STATE_OVERRIDE, "omp-todo-autosync");
 const board = process.env.FM_FIXTURE_BOARD;
 const emitLog = process.env.FM_FAKE_EMIT_LOG;
@@ -283,8 +303,7 @@ const waitForEmits = async count => {
 };
 const settle = async () => { await sleep(300); };
 
-// A fresh session already applied the board at session start: the first turn
-// only records a baseline, so an unchanged board stays silent.
+// The live transcript confirms the initial todo matches the board.
 await turnEnd({}, ctx);
 await waitForEmits(1);
 assert.equal(sent.length, 0);
@@ -370,13 +389,55 @@ assert.equal(sent.length, 2);
 assert.match(sent[1].message.content, /"list":\[\]/);
 
 // A different session in the same home keeps its own record and starts from
-// its own baseline, so sibling sessions never inherit this one's projection.
+// its own live todo, so sibling sessions never inherit this one's projection.
 process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
-const ctxB = { sessionManager: { getSessionId: () => "primary-session-b" } };
+const changedTodo = [...initialTodo, { name: "Ready", tasks: [{ content: "queued-1 - Queue Beta", status: "completed" }] }];
+const ctxB = { sessionManager: { getSessionId: () => "primary-session-b", getBranch: () => [todoResult(changedTodo)] } };
 await turnEnd({}, ctxB);
 await waitForEmits(emitCount() + 1);
 assert.equal(sent.length, 2);
 assert.equal(readdirSync(stateDir).length, 2);
+const freshTurn = async (id, getBranch, expectedOffers) => {
+  const beforeOffers = sent.length;
+  const beforeEmits = emitCount();
+  const freshCtx = { sessionManager: { getSessionId: () => id, getBranch } };
+  await turnEnd({}, freshCtx);
+  await waitForEmits(beforeEmits + 1);
+  assert.equal(sent.length - beforeOffers, expectedOffers, id);
+  await turnEnd({}, freshCtx);
+  await settle();
+  assert.equal(sent.length - beforeOffers, expectedOffers, `${id} repeated`);
+};
+await freshTurn("fresh-stale", () => [todoResult(initialTodo)], 1);
+await freshTurn("fresh-unreadable", () => { throw new Error("unreadable"); }, 1);
+await freshTurn("fresh-custom", () => [{ type: "custom", customType: "user_todo_edit", data: { phases: changedTodo } }], 0);
+await freshTurn("fresh-newest-tool", () => [{ type: "custom", customType: "user_todo_edit", data: { phases: initialTodo } }, todoResult(changedTodo)], 0);
+await freshTurn("fresh-error", () => [todoResult(initialTodo), { ...todoResult(changedTodo), message: { ...todoResult(changedTodo).message, isError: true } }], 1);
+await freshTurn("fresh-malformed", () => [todoResult(initialTodo), todoResult([{ name: "Ready", tasks: [null] }])], 1);
+process.env.FM_FAKE_PROJECTION = '[{"phase":"Active","items":["first","second"]}]';
+await freshTurn("fresh-reordered", () => [todoResult([{ name: "Active", tasks: [{ content: "second", status: "pending" }, { content: "first", status: "pending" }] }])], 1);
+
+for (const mode of ["catchup", "catchup-fail", "catchup-bad", "churn"]) {
+  try { unlinkSync(`${emitLog}.rewrite`); } catch {}
+  process.env.FM_FAKE_EMIT_MODE = mode;
+  const beforeEmits = emitCount();
+  const beforeOffers = sent.length;
+  const catchupCtx = { sessionManager: { getSessionId: () => `session-${mode}`, getBranch: () => [todoResult(initialTodo)] } };
+  await turnEnd({}, catchupCtx);
+  if (mode !== "churn") {
+    const deadline = Date.now() + 8000;
+    while (!existsSync(`${emitLog}.rewrite`) && Date.now() < deadline) await sleep(10);
+    assert.ok(existsSync(`${emitLog}.rewrite`));
+  }
+  await turnEnd({}, catchupCtx);
+  const rounds = mode === "churn" ? 3 : 2;
+  await waitForEmits(beforeEmits + rounds);
+  await settle();
+  assert.equal(emitCount() - beforeEmits, rounds, mode);
+  assert.equal(sent.length - beforeOffers, 1, mode);
+  assert.match(sent.at(-1).message.content, /queued-1 - Queue Beta/);
+}
+process.env.FM_FAKE_EMIT_MODE = "ok";
 console.log("ok - OMP turn-end autosync offers one bounded projection per board change");
 JS
 autosync_status=$?

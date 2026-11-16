@@ -378,6 +378,43 @@ function todoAutosyncSessionId(ctx: unknown): string {
 	return typeof sessionId === "string" ? sessionId : "";
 }
 
+function liveTodoProjection(ctx: any): TodoProjectionPhase[] | undefined {
+	try {
+		const branch: unknown = ctx?.sessionManager?.getBranch?.();
+		if (!Array.isArray(branch)) return undefined;
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			let phases: unknown;
+			try {
+				if (entry?.type === "custom" && entry.customType === "user_todo_edit") {
+					phases = entry.data?.phases;
+				} else if (entry?.type === "message" && entry.message?.role === "toolResult"
+					&& entry.message.toolName === "todo" && entry.message.isError !== true) {
+					phases = entry.message.details?.phases;
+				} else {
+					continue;
+				}
+				if (!Array.isArray(phases)) continue;
+				const projection: TodoProjectionPhase[] = [];
+				for (const phase of phases) {
+					if (typeof phase?.name !== "string" || !Array.isArray(phase.tasks)) throw new Error();
+					const items: string[] = [];
+					for (const task of phase.tasks) {
+						if (typeof task?.content !== "string" || typeof task.status !== "string") throw new Error();
+						items.push(task.content);
+					}
+					projection.push({ phase: phase.name, items });
+				}
+				return projection;
+			} catch {
+				continue;
+			}
+		}
+	} catch {
+	}
+	return undefined;
+}
+
 /** Board version a projection was computed from; `undefined` when it is unusable. */
 function boardVersion(boardPath: string): { boardMtimeMs: number; boardSize: number } | undefined {
 	try {
@@ -420,7 +457,8 @@ async function syncSessionTodo(pi: ExtensionAPI, ctx: unknown): Promise<void> {
 		const state = process.env.FM_STATE_OVERRIDE || resolve(fmHome, "state");
 		if (!todoAutosyncScopeApplies(extensionRoot, state)) return;
 		const data = process.env.FM_DATA_OVERRIDE || resolve(fmHome, "data");
-		const version = boardVersion(resolve(data, "backlog.md"));
+		const boardPath = resolve(data, "backlog.md");
+		let version = boardVersion(boardPath);
 		if (!version) return;
 		const sessionId = todoAutosyncSessionId(ctx);
 		const recordPath = resolve(state, TODO_AUTOSYNC_STATE_DIR, `${createHash("sha256").update(sessionId || "session").digest("hex").slice(0, 16)}.json`);
@@ -428,50 +466,52 @@ async function syncSessionTodo(pi: ExtensionAPI, ctx: unknown): Promise<void> {
 		if (autosyncInFlight.has(memoryKey)) return;
 		// A date-gated hold can change the Ready phase with no board write, so a
 		// new UTC day also earns one recomputation.
-		const dateKey = new Date().toISOString().slice(0, 10);
-		const previous = readTodoAutosyncRecord(recordPath);
+		let dateKey = new Date().toISOString().slice(0, 10);
+		let previous = readTodoAutosyncRecord(recordPath);
 		if (previous && previous.boardMtimeMs === version.boardMtimeMs && previous.boardSize === version.boardSize && previous.dateKey === dateKey) return;
 		autosyncInFlight.add(memoryKey);
 		try {
-			let output: string;
-			try {
-				output = await runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--emit"], extensionRoot, fmHome, TODO_AUTOSYNC_EMIT_TIMEOUT_MS);
-			} catch {
-				// Record the attempted board version so a failing or hung projection
-				// costs at most one subprocess until the board changes again.
-				writeTodoAutosyncRecord(recordPath, { ...previous, ...version, dateKey });
-				return;
-			}
-			const phases = parseTodoProjection(output);
-			if (!phases) {
-				writeTodoAutosyncRecord(recordPath, { ...previous, ...version, dateKey });
-				return;
-			}
-			const hash = todoProjectionHash(phases);
-			const record: TodoAutosyncRecord = { hash, ...version, dateKey };
-			if (previous === undefined) {
-				// A fresh session applied its projection at session start, so the first
-				// observation is a baseline: only a later board change asks for a rebuild.
-				writeTodoAutosyncRecord(recordPath, record);
-				return;
-			}
-			if (previous.hash !== hash && offeredProjections.get(memoryKey) !== hash) {
-				const content = buildTodoAutosyncInstruction(phases);
-				if (content) {
-					pi.sendMessage(
-						{
-							customType: "firstmate-todo-projection",
-							content,
-							display: false,
-							attribution: "agent",
-							details: { kind: "todo-projection", runtime: "omp" },
-						},
-						{ deliverAs: "nextTurn", triggerTurn: true },
-					);
-					offeredProjections.set(memoryKey, hash);
+			for (let round = 0; round < 3; round++) {
+				let phases: TodoProjectionPhase[] | undefined;
+				try {
+					const output = await runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--emit"], extensionRoot, fmHome, TODO_AUTOSYNC_EMIT_TIMEOUT_MS);
+					phases = parseTodoProjection(output);
+				} catch {
 				}
+				const record: TodoAutosyncRecord = { ...previous, ...version, dateKey };
+				if (phases) {
+					const hash = todoProjectionHash(phases);
+					const live = liveTodoProjection(ctx);
+					if ((live && todoProjectionHash(live) === hash)
+						|| previous?.hash === hash || offeredProjections.get(memoryKey) === hash) {
+						record.hash = hash;
+					} else {
+						const content = buildTodoAutosyncInstruction(phases);
+						if (content) {
+							pi.sendMessage(
+								{
+									customType: "firstmate-todo-projection",
+									content,
+									display: false,
+									attribution: "agent",
+									details: { kind: "todo-projection", runtime: "omp" },
+								},
+								{ deliverAs: "nextTurn", triggerTurn: true },
+							);
+							offeredProjections.set(memoryKey, hash);
+							record.hash = hash;
+						}
+					}
+				}
+				writeTodoAutosyncRecord(recordPath, record);
+				const nextVersion = boardVersion(boardPath);
+				const nextDate = new Date().toISOString().slice(0, 10);
+				if (!nextVersion || (nextVersion.boardMtimeMs === version.boardMtimeMs
+					&& nextVersion.boardSize === version.boardSize && nextDate === dateKey)) break;
+				previous = record;
+				version = nextVersion;
+				dateKey = nextDate;
 			}
-			writeTodoAutosyncRecord(recordPath, record);
 		} finally {
 			autosyncInFlight.delete(memoryKey);
 		}
