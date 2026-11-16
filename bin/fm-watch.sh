@@ -117,6 +117,9 @@
 # FM_MAIN_WAKE_UNDELIVERED_ALARM_SECS (default 300s) - read-only, once per
 # oldest-row episode, and skipped while state/.afk hands delivery to the
 # away-mode daemon.
+# FM_CHECK_TIMEOUT reporting is tested with GNU timeout, macOS gtimeout, and
+# the Perl fallback. BusyBox timeout reports a TERM deadline as exit 143, so
+# that deadline is not surfaced as a "timed out after Ns" result.
 # FM_WATCH_REMOTE_TIMEOUT bounds each remote beacon probe in seconds, accepts
 # integers from 1 through 15, defaults to 5, and falls back to 5 when invalid;
 # probes prefer timeout, then gtimeout, then a Perl fallback. The timeout tools
