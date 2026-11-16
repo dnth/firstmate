@@ -1008,6 +1008,7 @@ test_custom_snapshot_cleanup_on_signal() {
   chmod 0700 "$state/custom.check.sh"
   cat > "$dir/fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+case ${1:-} in --kill-after=*) shift ;; esac
 shift
 "$@" &
 child=$!
@@ -1080,6 +1081,7 @@ SH
     if [ "$backend" = installed-timeout ]; then
       cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+case ${1:-} in --kill-after=*) shift ;; esac
 shift
 exec "$@"
 SH
@@ -1147,8 +1149,11 @@ test_timed_out_custom_check_surfaces_with_partial_output() {
     cat > "$state/custom.check.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'finding before the cut\n'
-sleep 30
+trap '' TERM
+after_cut=$((SECONDS + 4))
+while [ "$SECONDS" -lt "$after_cut" ]; do :; done
 printf 'finding after the cut\n'
+while :; do :; done
 SH
     chmod 0700 "$state/custom.check.sh"
     FM_HOME="$dir/home" "$REGISTER" custom >/dev/null || fail "could not register $backend timed-out check"
@@ -1156,9 +1161,13 @@ SH
       # A real deadline enforcer standing in for GNU timeout, which this host may lack.
       cat > "$dir/fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+case ${1:-} in
+  --kill-after=*) kill_after=${1#*=}; shift ;;
+  *) exit 64 ;;
+esac
 t=$1
 shift
-exec perl -e 'my $t = shift; my $pid = fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { kill "KILL", $pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$t" "$@"
+exec perl -e 'my $t = shift; my $kill_after = shift; my $pid = fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", $pid; select undef, undef, undef, $kill_after; if (waitpid($pid, 1) == 0) { kill "KILL", $pid; waitpid $pid, 0; exit 137 } exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$t" "$kill_after" "$@"
 SH
       chmod 0700 "$dir/fakebin/timeout"
       force_fallback=0
