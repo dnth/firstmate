@@ -635,7 +635,7 @@ run_watcher_bounded() {
   # read (bin/fm-review-manifest.sh budgets half the check timeout); a 1-second
   # check budget would leave no read at all and report every poll unreadable.
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
-    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=4 \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT="${FM_TEST_CHECK_TIMEOUT:-4}" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
       FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS="${FM_TEST_WATCH_RESURFACE_MAX_ANNOUNCEMENTS:-999999}" \
       FM_WATCH_RESURFACE_MAX_SECS="${FM_TEST_WATCH_RESURFACE_MAX_SECS:-999999}" \
@@ -1008,6 +1008,7 @@ test_custom_snapshot_cleanup_on_signal() {
   chmod 0700 "$state/custom.check.sh"
   cat > "$dir/fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+case ${1:-} in -k) shift 2 ;; esac
 shift
 "$@" &
 child=$!
@@ -1080,6 +1081,7 @@ SH
     if [ "$backend" = installed-timeout ]; then
       cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+case ${1:-} in -k) shift 2 ;; esac
 shift
 exec "$@"
 SH
@@ -1137,6 +1139,146 @@ SH
     [ ! -e "$state/.watch.lock/pid" ] || fail "$backend watcher left its singleton lock"
   done
   pass "returned custom check descendants are drained on installed and fallback timeout paths"
+}
+
+test_fallback_preserves_signaled_check_status() {
+  local dir state check status
+  dir=$(make_case fallback-signal-status)
+  state="$dir/home/state"
+  check="$state/signal.check.sh"
+  cat > "$check" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$$"
+SH
+  chmod 0700 "$check"
+
+  status=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_CHECK_FORCE_FALLBACK=1 FM_CHECK_TIMEOUT=10 \
+    bash -c '. "$1"; run_check_capture "$2" || exit 1; printf "%s\n" "$FM_CHECK_RC"' \
+      bash "$WATCH" "$check") || fail "fallback watcher could not capture a signaled check"
+  [ "$status" = 143 ] || fail "fallback watcher recorded SIGTERM status as $status instead of 143"
+  pass "fallback watcher preserves a signaled check status"
+}
+
+test_bridge_owned_multiline_wake_is_unchanged() {
+  local dir state expected rc
+  dir=$(make_case bridge-owned-multiline-wake)
+  state="$dir/home/state"
+  : > "$dir/home/config/ext-bridge"
+  printf 'fixture-secret\n' > "$dir/home/config/ext-secret"
+  chmod 0600 "$dir/home/config/ext-secret"
+  cat > "$dir/fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$dir/root/bin/fm-ext-poll.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'ext-request first\next-request second\n'
+SH
+  chmod 0700 "$dir/fakebin/jq" "$dir/root/bin/fm-ext-poll.sh"
+
+  rc=0
+  FM_TEST_WATCH_ROOT="$dir/root" run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "bridge-owned multiline watcher failed (rc=$rc): $(cat "$dir/watch.err")"
+  expected=$(printf 'check: %s/ext-watch.check.sh: ext-request first\next-request second' "$state")
+  [ "$(cat "$dir/watch.out")" = "$expected" ] \
+    || fail "bridge-owned multiline wake changed shape: $(cat "$dir/watch.out")"
+  pass "bridge-owned multiline wakes keep their original shape"
+}
+
+test_timed_out_bridge_polls_do_not_wake() {
+  local bridge dir state poll ran rc
+  for bridge in x ext; do
+    dir=$(make_case "timed-out-$bridge-bridge-poll")
+    state="$dir/home/state"
+    poll="$dir/root/bin/fm-$bridge-poll.sh"
+    ran="$dir/poll-ran"
+    case "$bridge" in
+      x)
+        fmx_poll_shim_content "$dir/home" "$dir/root" > "$state/x-watch.check.sh" \
+          || fail "could not create the X bridge poll shim"
+        chmod 0700 "$state/x-watch.check.sh"
+        ;;
+      ext)
+        : > "$dir/home/config/ext-bridge"
+        printf 'fixture-secret\n' > "$dir/home/config/ext-secret"
+        chmod 0600 "$dir/home/config/ext-secret"
+        cat > "$dir/fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+        chmod 0700 "$dir/fakebin/jq"
+        ;;
+    esac
+    cat > "$poll" <<'SH'
+#!/usr/bin/env bash
+printf 'ran\n' > "$FM_TEST_BRIDGE_POLL_RAN"
+trap '' TERM
+while :; do :; done
+SH
+    chmod 0700 "$poll"
+    add_stop_custom_check "$dir"
+
+    rc=0
+    FM_CHECK_FORCE_FALLBACK=1 FM_TEST_BRIDGE_POLL_RAN="$ran" FM_TEST_CHECK_TIMEOUT=1 \
+      FM_TEST_WATCH_ROOT="$dir/root" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" \
+        > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] \
+      || fail "$bridge bridge timeout watcher failed (rc=$rc): $(cat "$dir/watch.err")"
+    grep -qxF ran "$ran" \
+      || fail "$bridge bridge poll did not run before the timeout"
+    grep -qxF "check: $state/z-stop.check.sh: stop-cycle" "$dir/watch.out" \
+      || fail "$bridge bridge timeout raised a spurious wake: $(cat "$dir/watch.out")"
+  done
+  pass "timed-out bridge polls do not raise watcher-owned wakes"
+}
+
+test_timed_out_custom_check_surfaces_with_partial_output() {
+  local backend dir state rc force_fallback
+  for backend in installed-timeout fallback-timeout; do
+    dir=$(make_case "timed-out-custom-check-$backend")
+    state="$dir/home/state"
+    cat > "$state/custom.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'finding before the cut\n'
+trap '' TERM
+after_cut=$((SECONDS + 4))
+while [ "$SECONDS" -lt "$after_cut" ]; do :; done
+printf 'finding after the cut\n'
+while :; do :; done
+SH
+    chmod 0700 "$state/custom.check.sh"
+    FM_HOME="$dir/home" "$REGISTER" custom >/dev/null || fail "could not register $backend timed-out check"
+    if [ "$backend" = installed-timeout ]; then
+      # A real deadline enforcer standing in for GNU timeout, which this host may lack.
+      cat > "$dir/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+case ${1:-} in
+  -k) kill_after=$2; shift 2 ;;
+  *) exit 64 ;;
+esac
+t=$1
+shift
+exec perl -e 'my $t = shift; my $kill_after = shift; my $pid = fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", $pid; select undef, undef, undef, $kill_after; if (waitpid($pid, 1) == 0) { kill "KILL", $pid; waitpid $pid, 0; exit 137 } exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$t" "$kill_after" "$@"
+SH
+      chmod 0700 "$dir/fakebin/timeout"
+      force_fallback=0
+    else
+      rm -f "$dir/fakebin/timeout" "$dir/fakebin/gtimeout"
+      force_fallback=1
+    fi
+
+    rc=0
+    FM_TEST_CHECK_TIMEOUT=1 FM_CHECK_FORCE_FALLBACK="$force_fallback" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$backend watcher did not stop on the timed-out check (rc=$rc): $(cat "$dir/watch.err")"
+    grep -qxF "check: $state/custom.check.sh: finding before the cut timed out after 1s" "$dir/watch.out" \
+      || fail "$backend watcher dropped earlier output or the timeout from its one wake line: $(cat "$dir/watch.out")"
+    ! grep -qF 'finding after the cut' "$dir/watch.out" || fail "$backend watcher let the check run past its timeout"
+  done
+  pass "a timed-out custom check surfaces its timeout and earlier output on installed and fallback timeout paths"
 }
 
 test_teardown_removes_poll_artifacts() {
@@ -2251,4 +2393,8 @@ test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
+test_fallback_preserves_signaled_check_status
+test_bridge_owned_multiline_wake_is_unchanged
+test_timed_out_bridge_polls_do_not_wake
+test_timed_out_custom_check_surfaces_with_partial_output
 test_teardown_removes_poll_artifacts
