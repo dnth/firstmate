@@ -635,7 +635,7 @@ run_watcher_bounded() {
   # read (bin/fm-review-manifest.sh budgets half the check timeout); a 1-second
   # check budget would leave no read at all and report every poll unreadable.
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
-    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=4 \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT="${FM_TEST_CHECK_TIMEOUT:-4}" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
       FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS="${FM_TEST_WATCH_RESURFACE_MAX_ANNOUNCEMENTS:-999999}" \
       FM_WATCH_RESURFACE_MAX_SECS="${FM_TEST_WATCH_RESURFACE_MAX_SECS:-999999}" \
@@ -1137,6 +1137,45 @@ SH
     [ ! -e "$state/.watch.lock/pid" ] || fail "$backend watcher left its singleton lock"
   done
   pass "returned custom check descendants are drained on installed and fallback timeout paths"
+}
+
+test_timed_out_custom_check_surfaces_with_partial_output() {
+  local backend dir state rc force_fallback
+  for backend in installed-timeout fallback-timeout; do
+    dir=$(make_case "timed-out-custom-check-$backend")
+    state="$dir/home/state"
+    cat > "$state/custom.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'finding before the cut\n'
+sleep 30
+printf 'finding after the cut\n'
+SH
+    chmod 0700 "$state/custom.check.sh"
+    FM_HOME="$dir/home" "$REGISTER" custom >/dev/null || fail "could not register $backend timed-out check"
+    if [ "$backend" = installed-timeout ]; then
+      # A real deadline enforcer standing in for GNU timeout, which this host may lack.
+      cat > "$dir/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+t=$1
+shift
+exec perl -e 'my $t = shift; my $pid = fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { kill "KILL", $pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$t" "$@"
+SH
+      chmod 0700 "$dir/fakebin/timeout"
+      force_fallback=0
+    else
+      rm -f "$dir/fakebin/timeout" "$dir/fakebin/gtimeout"
+      force_fallback=1
+    fi
+
+    rc=0
+    FM_TEST_CHECK_TIMEOUT=1 FM_CHECK_FORCE_FALLBACK="$force_fallback" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$backend watcher did not stop on the timed-out check (rc=$rc): $(cat "$dir/watch.err")"
+    grep -qxF "check: $state/custom.check.sh: finding before the cut timed out after 1s" "$dir/watch.out" \
+      || fail "$backend watcher dropped earlier output or the timeout from its one wake line: $(cat "$dir/watch.out")"
+    ! grep -qF 'finding after the cut' "$dir/watch.out" || fail "$backend watcher let the check run past its timeout"
+  done
+  pass "a timed-out custom check surfaces its timeout and earlier output on installed and fallback timeout paths"
 }
 
 test_teardown_removes_poll_artifacts() {
@@ -2251,4 +2290,5 @@ test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
+test_timed_out_custom_check_surfaces_with_partial_output
 test_teardown_removes_poll_artifacts
