@@ -1177,9 +1177,9 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
-    .agents/skills/bro/THIRD_PARTY_NOTICES.md)
-      # Prose notice file bundled with an imported skill; same contract family
-      # the skill's own SKILL.md selects, so --changed cannot refuse it.
+    .agents/skills/bro/THIRD_PARTY_NOTICES.md|.agents/skills/test-audit/*.md|\
+    .agents/skills/test-audit/references/*.md)
+      # Bundled skill prose selects the same contract family as SKILL.md.
       printf '%s\n' pure-contract-unit
       ;;
     contrib/hermes-gateway-firstmate-comms/*)
