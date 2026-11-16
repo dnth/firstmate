@@ -40,3 +40,4 @@ These skills are not captain-invocable; load them only at their precise triggers
 These skills run only when the captain invokes them; this index records their load triggers for audit.
 - `cleanup` - load when the captain invokes `/cleanup` or asks to list or clean up finished scouts, merged or done work, stale working copies, or leftover resources.
 - `implicit-state-audit` - load when the captain invokes `/implicit-state-audit` to audit a project module's implicit state machines.
+- `test-audit` - load when the captain invokes `/test-audit` for a project test audit, selected pruning batches, or an explicit subsystem campaign.

@@ -241,6 +241,7 @@ Claude and Grok use the slash form shown here, Codex uses the same names with `$
 | `/bro`             | Restate the last message in plain human language, with no jargon |
 | `/cleanup`         | Run an on-demand, report-first review of finished scouts and workers, stale working copies, and leftover panes or processes, removing only what the captain names and never forcing |
 | `/implicit-state-audit` | Audit a project module's implicit state machines with a Fable-only read-only scout, then review ranked before/after fixes visually |
+| `/test-audit` | Sample a project's test value, review mutation-proven pruning batches visually, and ship only captain-picked batches; subsystem campaigns require an explicit request |
 | `/updatefirstmate` | Self-update firstmate and its secondmates with fast-forward-only pulls, persist-gated restarts for every live home left on the target commit, and fallback nudges when replacement cannot be proven, then safely refresh an installed machine-wide `omp` |
 | `/reflect`         | Inspect a meaningful run's durable evidence after it ends, classify the lessons worth encoding, and file earned structural improvements as backlog proposals - it analyzes and proposes but never edits tracked behavior itself |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |

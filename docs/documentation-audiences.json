@@ -191,6 +191,22 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/test-audit/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/test-audit/CAMPAIGN.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/test-audit/references/audit.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/test-audit/THIRD_PARTY_NOTICES.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/operational-home-layout/SKILL.md",
       "audience": "agent-runtime"
     },
