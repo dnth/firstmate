@@ -444,7 +444,7 @@ test_hermes_spawn_tui_skill_state_and_teardown() {
     || fail "Hermes ordinary steer inbox record lost its exact message"
   assert_not_contains "$commands" "Continue with the adapter." \
     "Hermes ordinary steer leaked payload bytes into the terminal"
-  assert_contains "$commands" "Firstmate instruction waiting: list '$HOME_DIR/state/$TEST_ID.inbox'/*.msg" \
+  assert_contains "$commands" "Firstmate instruction waiting: list files named '*.msg' in '\$FM_TASK_INBOX', your '$TEST_ID.inbox' steering inbox" \
     "Hermes ordinary steer did not ring the durable inbox doorbell"
   assert_contains "$commands" "Read the skill at $HOME_DIR/.agents/skills/no-mistakes/SKILL.md completely and follow it now." \
     "Hermes skill invocation did not use the validated Firstmate skill pointer"

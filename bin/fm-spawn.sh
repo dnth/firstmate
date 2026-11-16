@@ -5519,6 +5519,12 @@ else
   fi
   LAUNCH="FM_TASK_ID=$sq_task_id FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= $LAUNCH"
 fi
+# Every launch, secondmate included, also carries the absolute path of this
+# task's steering inbox, so the constant doorbell line (bin/fm-task-inbox-lib.sh)
+# can name "$FM_TASK_INBOX" instead of a path that grows with the home's depth.
+# It is an environment prefix like FM_TASK_ID above, resolved from the physical
+# state dir the inbox is written under.
+LAUNCH="FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox") $LAUNCH"
 # A pane-typed Treehouse acquisition replaced the proven parent shell with a
 # fresh nested shell after the early probe: re-prove execution before the
 # first nested-shell byte (GOTMPDIR export or the launch itself). A nested rc

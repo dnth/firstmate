@@ -1178,7 +1178,7 @@ test_omp_native_receive_reports_exact_binding() {
       [ "$(wc -l < "$signal_log" | tr -d '[:space:]')" = 1 ] && break
       /bin/sleep 0.01
     done
-    assert_contains "$(cat "$signal_log")" "$home/state/native.inbox" \
+    assert_contains "$(cat "$signal_log")" "'native.inbox' steering inbox" \
       "$backend native session event did not carry this task's own instruction"
     assert_contains "$(cat "$signal_log")" '"triggerTurn":true' \
       "$backend native delivery did not trigger a bound turn"

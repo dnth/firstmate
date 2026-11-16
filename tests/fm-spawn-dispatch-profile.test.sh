@@ -660,6 +660,9 @@ test_no_profile_keeps_claude_profile_defaults() {
   # typed line stays well under the pane-typing bound. The exec prefix is
   # part of that canonical staged command.
   assert_contains "$launch" "FM_TASK_ID='$id'" "staged launch did not carry the task identity"
+  # The steering doorbell names "$FM_TASK_INBOX", so the launch must bind it to
+  # the task's own absolute inbox in the physical state dir.
+  assert_contains "$launch" "FM_TASK_INBOX='$(cd "$HOME_DIR/state" && pwd -P)/$id.inbox'" "staged launch did not export the task's absolute steering inbox"
   assert_contains "$launch" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false exec claude --dangerously-skip-permissions" "staged launch did not carry the canonical claude command"
   assert_contains "$launch" "encode launch-brief" "staged launch did not carry the brief encoder"
   tasktmp=$(sed -n 's/^tasktmp=//p' "$HOME_DIR/state/$id.meta")
