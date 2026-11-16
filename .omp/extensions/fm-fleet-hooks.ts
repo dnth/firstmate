@@ -7,20 +7,24 @@
 // only todo surfaces are the `todo_reminder` event (gated by `todo.reminders`,
 // which Firstmate disables), `ExtensionAPI.appendEntry`, which writes a
 // transcript entry that rehydrates only on branch/session transition, and the
-// `/todo` command controller. The handler therefore works through the seam the
-// brief allows instead: it compares the board's `fm-todo-project.sh --emit`
-// projection with the last one offered to this session and injects exactly one
-// bounded instruction carrying the projection. An unchanged board, an unusable
-// projection, or an unreadable record injects nothing and never blocks a turn.
+// `/todo` command controller. The handler therefore offers an instruction:
+// it compares the board's `fm-todo-project.sh --emit`
+// projection with the live todo and the last applied-or-offered projection.
+// Repeated offers for the same projection/live-todo pair are bounded; unusable
+// projections inject nothing. A missing or unreadable record forces a fresh
+// comparison rather than assuming startup already applied the projection.
 //
 // Cost and identity: `--emit` drives tasks-axi and takes tens of seconds in a
 // real home, so a turn first compares the board file's version (mtime, size) and
-// the UTC date with the record, and only a changed board version pays for the
-// projection. The pass runs unawaited because the injected instruction starts
-// its own turn. The record lives in this home's private
+// the UTC date and live-todo signature with the record. An unchanged tuple
+// skips the projection, including after a failed pass. The pass runs unawaited
+// because the injected instruction starts its own turn. The record lives in
+// this home's private
 // `state/omp-todo-autosync/<session-key>.json`, keyed by an opaque hash of the
 // OMP session id, so sibling homes and sibling sessions never share it, and a
-// worker whose todo belongs to its own task never touches it.
+// worker whose todo belongs to its own task never touches it. Lock ownership
+// and session identity are rechecked after projection; superseded board/date
+// results are discarded, with at most three projection attempts per pass.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, mkdirSync, openSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -274,7 +278,7 @@ type TodoProjectionPhase = { phase: string; items: string[] };
 const TODO_AUTOSYNC_MAX_INSTRUCTION_CHARS = 8000;
 const TODO_AUTOSYNC_STATE_DIR = "omp-todo-autosync";
 // `--emit` drives tasks-axi and costs tens of seconds in a real home, so it is
-// bounded generously and only a changed board pays it.
+// bounded generously and skipped when the recorded board/date/todo tuple matches.
 const TODO_AUTOSYNC_EMIT_TIMEOUT_MS = 30000;
 
 /**
@@ -322,10 +326,11 @@ function buildTodoAutosyncInstruction(phases: readonly TodoProjectionPhase[]): s
 	return instruction.length <= TODO_AUTOSYNC_MAX_INSTRUCTION_CHARS ? instruction : undefined;
 }
 
-// One private record per session: the projection hash last observed or offered
-// plus the board version that produced it. The version lets an unchanged board
-// skip the projection subprocess entirely, because `--emit` costs seconds in a
-// real home and a turn-end hook must not pay that on every turn.
+// One private record per session: the last checked board/date/live-todo tuple,
+// with a projection hash only when confirmed live or offered by this pass.
+// Failed, malformed, or oversized results must not inherit a hash from another
+// live-todo signature: that would fabricate a deduplication pair and suppress
+// a later repair. Recording the tuple still avoids retrying every turn.
 type TodoAutosyncRecord = {
 	hash?: string;
 	liveTodoHash: string;

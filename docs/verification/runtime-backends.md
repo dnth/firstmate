@@ -420,7 +420,7 @@ ok - OMP secondmate launch and recovery use the isolated adapter and an exact ho
 The deterministic spawn checks prove that an OMP launch refuses a git-tracked project extension without the explicit override, records the override when passed, and leaves projects without tracked extensions unchanged.
 Raw-launch OMP refusals and direct non-OMP compatibility are covered by `tests/fm-spawn-dispatch-profile.test.sh`.
 The secondmate integration checks prove that the exact Firstmate primary, fleet-hook, supervision-branch, and compact-adviser extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
-Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
+Live firing of the fleet hook's `tool_result`, `todo_reminder`, `turn_end`, `session_switch`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
 
 The Firstmate project todo policy was verified on 2026-09-12 against OMP 18.1.14 through OMP's effective-configuration interface:
 
@@ -458,7 +458,8 @@ src/modes/controllers/todo-command-controller.ts:462  `/todo` edits persist `use
 src/modes/runtime-init.ts:83                ExtensionAPI.appendEntry is sessionManager.appendCustomEntry; the todo tracker rehydrates it only through syncFromBranch on branch/rewind/session transition
 ```
 
-`ExtensionAPI.appendEntry("user_todo_edit", { phases })` therefore persists a list that only rehydrates on a later branch or session transition, so it is not a live update. `tests/fm-omp-fleet-hooks.test.sh` proves the turn-end autosync path the extension uses instead: one bounded `--emit` projection instruction per board change, silence on an unchanged board and on a failed or malformed projection, and no board replacement inside an `fm-spawn` task worker.
+`ExtensionAPI.appendEntry("user_todo_edit", { phases })` therefore persists a list that only rehydrates on a later branch or session transition, so it is not a live update.
+The autosync behavior is owned by [configuration.md](../configuration.md#harness-support); `tests/fm-omp-fleet-hooks.test.sh` covers projection offers, deduplication, failure handling, superseded results, lock and session boundaries, and worker exclusion.
 
 ### OMP native orchestration opt-in
 
