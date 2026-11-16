@@ -179,7 +179,7 @@ const { default: extension } = await import(process.env.FM_HOOKS);
 const handlers = new Map();
 const sent = [];
 extension({ on(name, handler) { handlers.set(name, handler); }, sendMessage(message, options) { sent.push({ message, options }); } });
-assert.deepEqual([...handlers.keys()], ["tool_result", "todo_reminder", "session.compacting"]);
+assert.deepEqual([...handlers.keys()], ["session_switch", "tool_result", "todo_reminder", "turn_end", "session.compacting"]);
 assert.equal(await handlers.get("tool_result")({ content: null }), undefined);
 const reminder = await handlers.get("todo_reminder")({}, {});
 assert.equal(reminder, undefined);
@@ -219,6 +219,422 @@ after_handler=$(fixture_digest)
 [ "$before_handler" = "$after_handler" ] \
   || fail "OMP fleet handlers mutated the observable board or state bytes"
 pass "OMP fleet drift and compaction handlers leave board and state bytes unchanged"
+
+AUTOSYNC_ROOT="$TMP_ROOT/autosync-home"
+mkdir -p "$AUTOSYNC_ROOT/.omp/extensions" "$AUTOSYNC_ROOT/bin" "$AUTOSYNC_ROOT/state" "$AUTOSYNC_ROOT/data"
+cp "$FM_HOOKS" "$AUTOSYNC_ROOT/.omp/extensions/fm-fleet-hooks.ts"
+cp "$ROOT/bin/fm-primary-scope-lib.sh" "$AUTOSYNC_ROOT/bin/fm-primary-scope-lib.sh"
+printf 'fixture home\n' > "$AUTOSYNC_ROOT/AGENTS.md"
+printf '## In flight\n- [ ] ship-1 - Ship Alpha\n' > "$AUTOSYNC_ROOT/data/backlog.md"
+git -C "$AUTOSYNC_ROOT" init -q
+cat > "$AUTOSYNC_ROOT/bin/fm-todo-project.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = "--emit" ] || exit 2
+[ -z "${FM_FAKE_EMIT_LOG:-}" ] || printf 'emit\n' >> "$FM_FAKE_EMIT_LOG"
+projection='[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]'
+[ -z "${FM_FAKE_PROJECTION:-}" ] || projection=$FM_FAKE_PROJECTION
+case "${FM_FAKE_EMIT_MODE:-ok}" in
+  catchup|catchup-fail|catchup-bad)
+    if [ ! -f "$FM_FAKE_EMIT_LOG.rewrite" ]; then
+      printf 'changed during emit\n' >> "$FM_FIXTURE_BOARD"
+      printf 'done\n' > "$FM_FAKE_EMIT_LOG.rewrite"
+      sleep 0.2
+      case "$FM_FAKE_EMIT_MODE" in
+        catchup-fail) exit 3 ;;
+        catchup-bad) printf '{broken\n'; exit 0 ;;
+      esac
+      printf '%s\n' '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]'
+    else
+      printf '%s\n' "$FM_CHANGED_PROJECTION"
+    fi
+    ;;
+  restore)
+    if [ ! -f "$FM_FAKE_EMIT_LOG.rewrite" ]; then
+      node --input-type=module <<'RESTORE'
+import { readFileSync, writeFileSync, utimesSync } from "node:fs";
+const saved = JSON.parse(readFileSync(`${process.env.FM_FAKE_EMIT_LOG}.saved`, "utf8"));
+writeFileSync(process.env.FM_FIXTURE_BOARD, saved.bytes);
+utimesSync(process.env.FM_FIXTURE_BOARD, saved.atime, saved.mtime);
+RESTORE
+      printf 'restored\n' > "$FM_FAKE_EMIT_LOG.rewrite"
+      printf '%s\n' "$FM_CHANGED_PROJECTION"
+    else
+      printf '%s\n' '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]'
+    fi
+    ;;
+  churn)
+    printf 'changed during every emit\n' >> "$FM_FIXTURE_BOARD"
+    printf '%s\n' "$FM_CHANGED_PROJECTION"
+    ;;
+  ok) printf '%s\n' "$projection" ;;
+  fail) printf '%s\n' 'projection backend unavailable' >&2 ; exit 3 ;;
+  badjson) printf '%s\n' '{"phase":"Active"' ;;
+  shape) printf '%s\n' '[{"phase":"Active","items":[7]}]' ;;
+  empty) printf '%s\n' '[]' ;;
+  hang)
+    [ -z "${FM_FAKE_EMIT_PID:-}" ] || printf '%s\n' "$$" > "$FM_FAKE_EMIT_PID"
+    exec sleep 60
+    ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$AUTOSYNC_ROOT/bin/fm-todo-project.sh"
+AUTOSYNC_HOOKS="$AUTOSYNC_ROOT/.omp/extensions/fm-fleet-hooks.ts"
+CHANGED_PROJECTION='[{"phase":"Active","items":["ship-1 - Ship Alpha"]},{"phase":"Ready","items":["queued-1 - Queue Beta"]}]'
+BOARD="$AUTOSYNC_ROOT/data/backlog.md"
+EMIT_LOG="$TMP_ROOT/autosync-emit.log"
+EMIT_PID="$TMP_ROOT/autosync-emit.pid"
+
+env -u FM_TASK_ID FM_HOOKS="$AUTOSYNC_HOOKS" FM_HOME="$AUTOSYNC_ROOT" FM_STATE_OVERRIDE="$AUTOSYNC_ROOT/state" \
+FM_CHANGED_PROJECTION="$CHANGED_PROJECTION" FM_FAKE_EMIT_LOG="$EMIT_LOG" FM_FAKE_EMIT_PID="$EMIT_PID" \
+FM_FIXTURE_BOARD="$BOARD" node --experimental-strip-types --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const { default: extension } = await import(process.env.FM_HOOKS);
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+const handlers = new Map();
+const sent = [];
+extension({ on(name, handler) { handlers.set(name, handler); }, sendMessage(message, options) { sent.push({ message, options }); } });
+const turnEnd = handlers.get("turn_end");
+const initialTodo = [{ name: "Active", tasks: [{ content: "ship-1 - Ship Alpha", status: "pending" }] }];
+const todoResult = phases => ({ type: "message", message: { role: "toolResult", toolName: "todo", details: { phases } } });
+const ctx = { sessionManager: { getSessionId: () => "primary-session-a", getBranch: () => [todoResult(initialTodo)] } };
+const lockPath = join(process.env.FM_STATE_OVERRIDE, ".lock");
+writeFileSync(lockPath, `${process.pid}\n`);
+const stateDir = join(process.env.FM_STATE_OVERRIDE, "omp-todo-autosync");
+const board = process.env.FM_FIXTURE_BOARD;
+const emitLog = process.env.FM_FAKE_EMIT_LOG;
+const emitCount = () => {
+  try { return readFileSync(emitLog, "utf8").split("\n").filter(Boolean).length; } catch { return 0; }
+};
+const waitForEmits = async count => {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    if (emitCount() >= count) { await sleep(200); return; }
+    await sleep(20);
+  }
+  throw new Error(`projection subprocess stayed at ${emitCount()}, waiting for ${count}`);
+};
+const settle = async () => { await sleep(300); };
+
+// The live transcript confirms the initial todo matches the board.
+await turnEnd({}, ctx);
+await waitForEmits(1);
+assert.equal(sent.length, 0);
+const baselineFiles = readdirSync(stateDir);
+assert.equal(baselineFiles.length, 1);
+const baseline = JSON.parse(readFileSync(join(stateDir, baselineFiles[0]), "utf8"));
+assert.match(baseline.hash, /^[0-9a-f]{64}$/);
+
+// AC2: repeated turns on an unchanged board inject nothing and cost no
+// projection subprocess at all.
+await turnEnd({}, ctx);
+await turnEnd({}, ctx);
+await settle();
+assert.equal(emitCount(), 1);
+assert.equal(sent.length, 0);
+
+// AC1: the turn that observes a board write offers one bounded instruction
+// carrying the projection the todo tool must re-initialize from.
+appendFileSync(board, "- [ ] queued-1 - Queue Beta\n");
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+await turnEnd({}, ctx);
+await waitForEmits(2);
+assert.equal(sent.length, 1);
+assert.equal(sent[0].message.customType, "firstmate-todo-projection");
+assert.equal(sent[0].message.display, false);
+assert.match(sent[0].message.content, /\{"op":"init","list":\[/);
+assert.match(sent[0].message.content, /queued-1 - Queue Beta/);
+assert.match(sent[0].message.content, /board projection, not a new request/);
+assert.ok(sent[0].message.content.length <= 8000);
+assert.deepEqual(sent[0].options, { deliverAs: "nextTurn", triggerTurn: true });
+
+// AC2: the same changed projection never repeats, however many turns follow.
+await turnEnd({}, ctx);
+await turnEnd({}, ctx);
+await turnEnd({}, ctx);
+await settle();
+assert.equal(emitCount(), 2);
+assert.equal(sent.length, 1);
+
+// A board write that leaves the projection identical re-runs the projection
+// once and still offers nothing.
+appendFileSync(board, "\n");
+await turnEnd({}, ctx);
+await waitForEmits(3);
+assert.equal(sent.length, 1);
+
+// AC3: a failing, malformed, or wrongly shaped projection injects nothing,
+// never throws, and is not retried while the board version is unchanged.
+for (const mode of ["fail", "badjson", "shape"]) {
+  process.env.FM_FAKE_EMIT_MODE = mode;
+  appendFileSync(board, `# ${mode}\n`);
+  const before = emitCount();
+  await turnEnd({}, ctx);
+  await waitForEmits(before + 1);
+  assert.equal(sent.length, 1);
+  await turnEnd({}, ctx);
+  await turnEnd({}, ctx);
+  await settle();
+  assert.equal(emitCount(), before + 1);
+  assert.equal(sent.length, 1);
+}
+
+// AC3: a hung projection never blocks the turn that observes it.
+process.env.FM_FAKE_EMIT_MODE = "hang";
+appendFileSync(board, "# hang\n");
+const started = Date.now();
+await turnEnd({}, ctx);
+assert.ok(Date.now() - started < 100, `turn end blocked for ${Date.now() - started}ms`);
+const pidDeadline = Date.now() + 8000;
+while (Date.now() < pidDeadline && !existsSync(process.env.FM_FAKE_EMIT_PID)) await sleep(20);
+assert.ok(existsSync(process.env.FM_FAKE_EMIT_PID), "hung projection subprocess never started");
+process.kill(-Number(readFileSync(process.env.FM_FAKE_EMIT_PID, "utf8").trim()), "SIGKILL");
+await settle();
+assert.equal(sent.length, 1);
+process.env.FM_FAKE_EMIT_MODE = "ok";
+
+// An empty board is a real projection: its rebuild instruction clears the todo.
+appendFileSync(board, "# empty\n");
+process.env.FM_FAKE_PROJECTION = "[]";
+await turnEnd({}, ctx);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, 2);
+assert.match(sent[1].message.content, /"list":\[\]/);
+
+// A different session in the same home keeps its own record and starts from
+// its own live todo, so sibling sessions never inherit this one's projection.
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+const changedTodo = [...initialTodo, { name: "Ready", tasks: [{ content: "queued-1 - Queue Beta", status: "completed" }] }];
+const ctxB = { sessionManager: { getSessionId: () => "primary-session-b", getBranch: () => [todoResult(changedTodo)] } };
+await turnEnd({}, ctxB);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, 2);
+assert.equal(readdirSync(stateDir).length, 2);
+const freshTurn = async (id, getBranch, expectedOffers) => {
+  const beforeOffers = sent.length;
+  const beforeEmits = emitCount();
+  const freshCtx = { sessionManager: { getSessionId: () => id, getBranch } };
+  await turnEnd({}, freshCtx);
+  await waitForEmits(beforeEmits + 1);
+  assert.equal(sent.length - beforeOffers, expectedOffers, id);
+  await turnEnd({}, freshCtx);
+  await settle();
+  assert.equal(sent.length - beforeOffers, expectedOffers, `${id} repeated`);
+};
+await freshTurn("fresh-stale", () => [todoResult(initialTodo)], 1);
+await freshTurn("fresh-unreadable", () => { throw new Error("unreadable"); }, 1);
+await freshTurn("fresh-custom", () => [{ type: "custom", customType: "user_todo_edit", data: { phases: changedTodo } }], 0);
+await freshTurn("fresh-newest-tool", () => [{ type: "custom", customType: "user_todo_edit", data: { phases: initialTodo } }, todoResult(changedTodo)], 0);
+await freshTurn("fresh-error", () => [todoResult(initialTodo), { ...todoResult(changedTodo), message: { ...todoResult(changedTodo).message, isError: true } }], 1);
+await freshTurn("fresh-malformed", () => [todoResult(initialTodo), todoResult([{ name: "Ready", tasks: [null] }])], 1);
+process.env.FM_FAKE_PROJECTION = '[{"phase":"Active","items":["first","second"]}]';
+await freshTurn("fresh-reordered", () => [todoResult([{ name: "Active", tasks: [{ content: "second", status: "pending" }, { content: "first", status: "pending" }] }])], 1);
+
+for (const mode of ["catchup", "catchup-fail", "catchup-bad", "churn"]) {
+  try { unlinkSync(`${emitLog}.rewrite`); } catch {}
+  process.env.FM_FAKE_EMIT_MODE = mode;
+  const beforeEmits = emitCount();
+  const beforeOffers = sent.length;
+  const catchupCtx = { sessionManager: { getSessionId: () => `session-${mode}`, getBranch: () => [todoResult(initialTodo)] } };
+  await turnEnd({}, catchupCtx);
+  if (mode !== "churn") {
+    const deadline = Date.now() + 8000;
+    while (!existsSync(`${emitLog}.rewrite`) && Date.now() < deadline) await sleep(10);
+    assert.ok(existsSync(`${emitLog}.rewrite`));
+  }
+  await turnEnd({}, catchupCtx);
+  const rounds = mode === "churn" ? 3 : 2;
+  await waitForEmits(beforeEmits + rounds);
+  await settle();
+  assert.equal(emitCount() - beforeEmits, rounds, mode);
+  assert.equal(sent.length - beforeOffers, mode === "churn" ? 0 : 1, mode);
+  if (mode !== "churn") assert.match(sent.at(-1).message.content, /queued-1 - Queue Beta/);
+}
+process.env.FM_FAKE_EMIT_MODE = "ok";
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+const cycleCtx = { sessionManager: { getSessionId: () => "cycle-session", getBranch: () => [todoResult(initialTodo)] } };
+const cycleOffers = sent.length;
+await turnEnd({}, cycleCtx);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, cycleOffers + 1);
+process.env.FM_FAKE_PROJECTION = '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]';
+appendFileSync(board, "cycle A\n");
+await turnEnd({}, cycleCtx);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, cycleOffers + 1);
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+appendFileSync(board, "cycle B\n");
+await turnEnd({}, cycleCtx);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, cycleOffers + 2);
+
+const lockCtx = { sessionManager: { getSessionId: () => "lock-session", getBranch: () => [] } };
+const lockedEmits = emitCount();
+const lockedOffers = sent.length;
+const lockedState = readdirSync(stateDir);
+for (const lock of [undefined, "invalid", "1", "99999999"]) {
+  if (lock === undefined) unlinkSync(lockPath);
+  else writeFileSync(lockPath, lock);
+  appendFileSync(board, "foreign lock\n");
+  await turnEnd({}, lockCtx);
+  await settle();
+  assert.equal(emitCount(), lockedEmits);
+  assert.equal(sent.length, lockedOffers);
+  assert.deepEqual(readdirSync(stateDir), lockedState);
+}
+writeFileSync(lockPath, `${process.pid}\n`);
+await turnEnd({}, lockCtx);
+await waitForEmits(lockedEmits + 1);
+assert.equal(sent.length, lockedOffers + 1);
+
+writeFileSync(lockPath, `${process.ppid}\n`);
+await freshTurn("ancestor-lock", () => [], 1);
+writeFileSync(lockPath, `${process.pid}\n`);
+
+for (const boundary of ["switch", "identity", "lock", "lock-fail", "lock-bad"]) {
+  process.env.FM_FAKE_EMIT_MODE = boundary === "lock-fail" ? "catchup-fail"
+    : boundary === "lock-bad" ? "catchup-bad" : "catchup";
+  try { unlinkSync(`${emitLog}.rewrite`); } catch {}
+  const boundaryOffers = sent.length;
+  const boundaryState = readdirSync(stateDir).map(file => [file, readFileSync(join(stateDir, file), "utf8")]);
+  let sessionId = `before-${boundary}`;
+  let branchReads = 0;
+  const boundaryCtx = { sessionManager: { getSessionId: () => sessionId, getBranch: () => { branchReads++; return []; } } };
+  await turnEnd({}, boundaryCtx);
+  const deadline = Date.now() + 8000;
+  while (!existsSync(`${emitLog}.rewrite`) && Date.now() < deadline) await sleep(10);
+  assert.ok(existsSync(`${emitLog}.rewrite`));
+  if (boundary === "switch") handlers.get("session_switch")({}, boundaryCtx);
+  if (boundary === "identity") sessionId = "after-identity";
+  if (boundary.startsWith("lock")) writeFileSync(lockPath, "99999999");
+  await sleep(500);
+  assert.equal(sent.length, boundaryOffers, boundary);
+  assert.equal(branchReads, 1, boundary);
+  assert.deepEqual(readdirSync(stateDir).map(file => [file, readFileSync(join(stateDir, file), "utf8")]), boundaryState, boundary);
+  writeFileSync(lockPath, `${process.pid}\n`);
+  process.env.FM_FAKE_EMIT_MODE = "ok";
+  await turnEnd({}, boundaryCtx);
+  await waitForEmits(emitCount() + 1);
+  assert.equal(sent.length, boundaryOffers + 1, `${boundary} recovery`);
+}
+utimesSync(board, 1700000000, 1700000000);
+const savedBoard = statSync(board);
+const savedBytes = readFileSync(board, "utf8");
+writeFileSync(`${emitLog}.saved`, JSON.stringify({ bytes: savedBytes, atime: savedBoard.atimeMs / 1000, mtime: savedBoard.mtimeMs / 1000 }));
+try { unlinkSync(`${emitLog}.rewrite`); } catch {}
+appendFileSync(board, "superseded B\n");
+process.env.FM_FAKE_EMIT_MODE = "restore";
+const supersededOffers = sent.length;
+const supersededEmits = emitCount();
+const restoredCtx = { sessionManager: { getSessionId: () => "restored-session", getBranch: () => [todoResult(initialTodo)] } };
+await turnEnd({}, restoredCtx);
+await waitForEmits(supersededEmits + 2);
+assert.equal(sent.length, supersededOffers);
+assert.equal(emitCount(), supersededEmits + 2);
+assert.equal(readFileSync(board, "utf8"), savedBytes);
+await turnEnd({}, restoredCtx);
+await settle();
+assert.equal(emitCount(), supersededEmits + 2);
+
+process.env.FM_FAKE_EMIT_MODE = "ok";
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+let lateTodo = initialTodo;
+const lateCtx = { sessionManager: { getSessionId: () => "late-session", getBranch: () => [todoResult(lateTodo)] } };
+const lateOffers = sent.length;
+await turnEnd({}, lateCtx);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, lateOffers + 1);
+const versionV = statSync(board);
+const unchangedEmits = emitCount();
+writeFileSync(board, savedBytes);
+utimesSync(board, versionV.atimeMs / 1000, versionV.mtimeMs / 1000);
+process.env.FM_FAKE_PROJECTION = '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]';
+await turnEnd({}, lateCtx);
+await settle();
+assert.equal(emitCount(), unchangedEmits);
+assert.equal(sent.length, lateOffers + 1);
+const beforeLate = emitCount();
+lateTodo = changedTodo;
+await turnEnd({}, lateCtx);
+await waitForEmits(beforeLate + 1);
+assert.equal(sent.length, lateOffers + 2);
+assert.deepEqual(JSON.parse(sent.at(-1).message.content.split("\n")[1]), { op: "init", list: [{ phase: "Active", items: ["ship-1 - Ship Alpha"] }] });
+await turnEnd({}, lateCtx);
+await settle();
+assert.equal(emitCount(), beforeLate + 1);
+assert.equal(sent.length, lateOffers + 2);
+lateTodo = initialTodo;
+await turnEnd({}, lateCtx);
+await waitForEmits(beforeLate + 2);
+assert.equal(sent.length, lateOffers + 2);
+await turnEnd({}, lateCtx);
+await settle();
+assert.equal(emitCount(), beforeLate + 2);
+
+for (const mode of ["fail", "badjson", "shape", "oversized"]) {
+  const filesBefore = new Set(readdirSync(stateDir));
+  let manualTodo = initialTodo;
+  const manualCtx = { sessionManager: { getSessionId: () => `manual-${mode}`, getBranch: () => [todoResult(manualTodo)] } };
+  process.env.FM_FAKE_EMIT_MODE = "ok";
+  process.env.FM_FAKE_PROJECTION = '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]';
+  await turnEnd({}, manualCtx);
+  await waitForEmits(emitCount() + 1);
+  const recordFile = readdirSync(stateDir).find(file => !filesBefore.has(file));
+  assert.ok(recordFile);
+  const readRecord = () => JSON.parse(readFileSync(join(stateDir, recordFile), "utf8"));
+  assert.match(readRecord().hash, /^[0-9a-f]{64}$/);
+  const manualOffers = sent.length;
+  appendFileSync(board, `manual B ${mode}\n`);
+  manualTodo = changedTodo;
+  process.env.FM_FAKE_EMIT_MODE = mode === "oversized" ? "ok" : mode;
+  process.env.FM_FAKE_PROJECTION = mode === "oversized"
+    ? JSON.stringify([{ phase: "Active", items: ["x".repeat(8100)] }]) : process.env.FM_CHANGED_PROJECTION;
+  await turnEnd({}, manualCtx);
+  await waitForEmits(emitCount() + 1);
+  assert.equal(sent.length, manualOffers, mode);
+  assert.equal(Object.hasOwn(readRecord(), "hash"), false, mode);
+  const failedEmits = emitCount();
+  await turnEnd({}, manualCtx);
+  await settle();
+  assert.equal(emitCount(), failedEmits, `${mode} settles`);
+  process.env.FM_FAKE_EMIT_MODE = "ok";
+  process.env.FM_FAKE_PROJECTION = '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]';
+  appendFileSync(board, `manual A ${mode}\n`);
+  await turnEnd({}, manualCtx);
+  await waitForEmits(failedEmits + 1);
+  assert.equal(sent.length, manualOffers + 1, `${mode} repair`);
+  assert.deepEqual(JSON.parse(sent.at(-1).message.content.split("\n")[1]), { op: "init", list: [{ phase: "Active", items: ["ship-1 - Ship Alpha"] }] });
+  assert.match(readRecord().hash, /^[0-9a-f]{64}$/);
+  await turnEnd({}, manualCtx);
+  await settle();
+  assert.equal(emitCount(), failedEmits + 1);
+  assert.equal(sent.length, manualOffers + 1);
+}
+console.log("ok - OMP turn-end autosync offers one bounded projection per board change");
+JS
+autosync_status=$?
+expect_code 0 "$autosync_status" "OMP turn-end todo autosync assertions should pass"
+
+env -u FM_TASK_ID FM_HOOKS="$AUTOSYNC_HOOKS" FM_HOME="$AUTOSYNC_ROOT" FM_STATE_OVERRIDE="$AUTOSYNC_ROOT/state" \
+FM_CHANGED_PROJECTION="$CHANGED_PROJECTION" FM_TASK_ID="ship-9" node --experimental-strip-types --input-type=module <<'JS'
+import assert from "node:assert/strict";
+const { default: extension } = await import(process.env.FM_HOOKS);
+const handlers = new Map();
+const sent = [];
+extension({ on(name, handler) { handlers.set(name, handler); }, sendMessage(message, options) { sent.push({ message, options }); } });
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+await handlers.get("turn_end")({}, { sessionManager: { getSessionId: () => "primary-session-a" } });
+await new Promise(resolve => setTimeout(resolve, 500));
+assert.equal(sent.length, 0);
+console.log("ok - an fm-spawn task worker never replaces its own todo with the board");
+JS
+scope_status=$?
+expect_code 0 "$scope_status" "OMP todo autosync should stay silent inside a task worker"
+pass "OMP turn-end todo autosync stays bounded, fail-open, and primary-only"
+
 
 mkfifo "$HOME_FIXTURE/state/a-fifo.meta"
 FM_HOOKS="$HANDLER_HOOKS" FM_HOME="$HOME_FIXTURE" FM_STATE_OVERRIDE="$HOME_FIXTURE/state" \

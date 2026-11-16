@@ -420,7 +420,7 @@ ok - OMP secondmate launch and recovery use the isolated adapter and an exact ho
 The deterministic spawn checks prove that an OMP launch refuses a git-tracked project extension without the explicit override, records the override when passed, and leaves projects without tracked extensions unchanged.
 Raw-launch OMP refusals and direct non-OMP compatibility are covered by `tests/fm-spawn-dispatch-profile.test.sh`.
 The secondmate integration checks prove that the exact Firstmate primary, fleet-hook, supervision-branch, and compact-adviser extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
-Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
+Live firing of the fleet hook's `tool_result`, `todo_reminder`, `turn_end`, `session_switch`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
 
 The Firstmate project todo policy was verified on 2026-09-12 against OMP 18.1.14 through OMP's effective-configuration interface:
 
@@ -437,6 +437,29 @@ omp/18.1.14
 {"key":"todo.enabled","value":true,"type":"boolean","description":"Enable the todo tool for task tracking"}
 ok - OMP keeps normal todo operation while suppressing reminder-initiated turns
 ```
+
+The extension surface for the session todo list was inspected on 2026-11-16 against OMP 18.18.6 in the installed `@oh-my-pi/pi-coding-agent` package; no extension API sets the list live.
+
+```sh
+omp --version
+grep -n 'interface ExtensionAPI' -A 120 src/extensibility/extensions/types.ts
+grep -n 'todo' src/extensibility/extensions/types.ts
+grep -rn 'setTodos\|syncFromBranch()' src --include=*.ts
+grep -rn 'appendEntry' src/modes/runtime-init.ts
+```
+
+```text
+omp/18.18.6
+src/extensibility/extensions/types.ts:1168  ExtensionAPI: no todo mutator (tools, commands, messages, flags, model/tool state only)
+src/extensibility/extensions/types.ts:1238  only todo surface is `on("todo_reminder", ...)`, gated by `todo.reminders` (src/session/todo-tracker.ts:207)
+src/modes/interactive-mode.ts:5133         setTodos lives on the TUI mode controller, not the extension context
+src/modes/controllers/event-controller.ts:1628  todo UI state applies from a `todo` tool result's `details.phases`
+src/modes/controllers/todo-command-controller.ts:462  `/todo` edits persist `user_todo_edit` custom entries
+src/modes/runtime-init.ts:83                ExtensionAPI.appendEntry is sessionManager.appendCustomEntry; the todo tracker rehydrates it only through syncFromBranch on branch/rewind/session transition
+```
+
+`ExtensionAPI.appendEntry("user_todo_edit", { phases })` therefore persists a list that only rehydrates on a later branch or session transition, so it is not a live update.
+The autosync behavior is owned by [configuration.md](../configuration.md#harness-support); `tests/fm-omp-fleet-hooks.test.sh` covers projection offers, deduplication, failure handling, superseded results, lock and session boundaries, and worker exclusion.
 
 ### OMP native orchestration opt-in
 
