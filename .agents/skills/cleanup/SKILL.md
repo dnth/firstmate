@@ -66,7 +66,7 @@ This category ranks the reclaimable space on the filesystems the fleet writes to
 Buckets and their owning commands:
 
 - Docker - report the whole `docker system df` line first, then these as separate rows, each with Docker's own reclaimable figure:
-  - unused build cache - tool cache; `docker builder prune`, with `--all` only when the captain names internal and frontend images too; removal costs rebuild time on the next build.
+  - unused build cache - tool cache; `docker builder prune` removes only dangling build cache; use `docker builder prune --all` only when the captain approves the whole unused build cache; removal costs rebuild time on the next build.
   - dangling images - unowned build leftovers, belonging to no recorded task; `docker image prune`; removal costs only rebuilding them.
   - named images no container uses - task-owned when the name matches a finished task and tool-owned otherwise; resolve each candidate tag to its immutable image ID and compare those IDs against every container's image, because several tags can share one ID and a tag can look unused while a stopped container still references that image; exclude images belonging to work that is still running; remove one with `docker image rm <image>` only after the captain names that image or that exact list, say when removing one alias of a shared ID only untags it and reclaims nothing, and count the cost as a rebuild or re-pull.
   - unused volumes - task-owned only when a finished task's own record proves it, and `not ready` otherwise; `docker volume ls -f dangling=true` and `docker system df -v` give the names and sizes; a volume holds whatever state the stack wrote, so removal is data loss; remove one with `docker volume rm <name>` only after the captain names that name.
