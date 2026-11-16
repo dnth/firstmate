@@ -27,12 +27,12 @@
 #
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
-# PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. RunPod
-# children also receive the validated FM_TREEHOUSE_LOCAL_ROOT. USER and LOGNAME
-# are added only when nonempty in the worker's environment, since macOS
-# credential lookups key on the login identity; they never override the fields
-# above. The PATH
-# is intentionally filesystem-discovered rather than login-shell-derived:
+# PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. After
+# validating provider state, RunPod children also receive IS_SANDBOX=1 and the
+# validated FM_TREEHOUSE_LOCAL_ROOT. USER and LOGNAME are added only when
+# nonempty in the worker's environment, since macOS credential lookups key on
+# the login identity; they never replace the fixed or sandbox-owned fields. The
+# PATH is intentionally filesystem-discovered rather than login-shell-derived:
 # ~/.local/bin; nvm, asdf, and mise shims/install bins; Nix; Homebrew; and the
 # system tail. No shell startup files are evaluated.
 #

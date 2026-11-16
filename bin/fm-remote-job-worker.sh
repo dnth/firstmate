@@ -7,15 +7,12 @@
 # account queue, refuses symlinks and malformed records, and executes only a
 # tracked non-symlink fm-*.sh under this worker's configured FM_ROOT/bin.
 #
-# Each child runs under env -i with the shared filesystem-composed PATH, HOME,
-# FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. RunPod commands also
-# receive the validated FM_TREEHOUSE_LOCAL_ROOT; the library header owns the
-# optional USER and LOGNAME passthrough. Commands receive their
-# captured stdin and have a 360-second default timeout. Their stdout and stderr
-# are independently constrained to the job library's 1048576-byte bound. A
-# record is marked done only after its bounded outputs and numeric exit status
-# have been committed. The library header owns the exact record fields and
-# lifecycle.
+# The fm-remote-job-lib.sh header owns the exact env -i child-environment
+# contract. Commands receive their captured stdin and have a 360-second default
+# timeout. Their stdout and stderr are independently constrained to the job
+# library's 1048576-byte bound. A record is marked done only after its bounded
+# outputs and numeric exit status have been committed. The library header owns
+# the exact record fields and lifecycle.
 set -u
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
