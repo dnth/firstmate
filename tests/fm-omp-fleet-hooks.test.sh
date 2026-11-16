@@ -574,6 +574,45 @@ await turnEnd({}, lateCtx);
 await settle();
 assert.equal(emitCount(), beforeLate + 2);
 
+for (const mode of ["fail", "badjson", "shape", "oversized"]) {
+  const filesBefore = new Set(readdirSync(stateDir));
+  let manualTodo = initialTodo;
+  const manualCtx = { sessionManager: { getSessionId: () => `manual-${mode}`, getBranch: () => [todoResult(manualTodo)] } };
+  process.env.FM_FAKE_EMIT_MODE = "ok";
+  process.env.FM_FAKE_PROJECTION = '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]';
+  await turnEnd({}, manualCtx);
+  await waitForEmits(emitCount() + 1);
+  const recordFile = readdirSync(stateDir).find(file => !filesBefore.has(file));
+  assert.ok(recordFile);
+  const readRecord = () => JSON.parse(readFileSync(join(stateDir, recordFile), "utf8"));
+  assert.match(readRecord().hash, /^[0-9a-f]{64}$/);
+  const manualOffers = sent.length;
+  appendFileSync(board, `manual B ${mode}\n`);
+  manualTodo = changedTodo;
+  process.env.FM_FAKE_EMIT_MODE = mode === "oversized" ? "ok" : mode;
+  process.env.FM_FAKE_PROJECTION = mode === "oversized"
+    ? JSON.stringify([{ phase: "Active", items: ["x".repeat(8100)] }]) : process.env.FM_CHANGED_PROJECTION;
+  await turnEnd({}, manualCtx);
+  await waitForEmits(emitCount() + 1);
+  assert.equal(sent.length, manualOffers, mode);
+  assert.equal(Object.hasOwn(readRecord(), "hash"), false, mode);
+  const failedEmits = emitCount();
+  await turnEnd({}, manualCtx);
+  await settle();
+  assert.equal(emitCount(), failedEmits, `${mode} settles`);
+  process.env.FM_FAKE_EMIT_MODE = "ok";
+  process.env.FM_FAKE_PROJECTION = '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]';
+  appendFileSync(board, `manual A ${mode}\n`);
+  await turnEnd({}, manualCtx);
+  await waitForEmits(failedEmits + 1);
+  assert.equal(sent.length, manualOffers + 1, `${mode} repair`);
+  assert.deepEqual(JSON.parse(sent.at(-1).message.content.split("\n")[1]), { op: "init", list: [{ phase: "Active", items: ["ship-1 - Ship Alpha"] }] });
+  assert.match(readRecord().hash, /^[0-9a-f]{64}$/);
+  await turnEnd({}, manualCtx);
+  await settle();
+  assert.equal(emitCount(), failedEmits + 1);
+  assert.equal(sent.length, manualOffers + 1);
+}
 console.log("ok - OMP turn-end autosync offers one bounded projection per board change");
 JS
 autosync_status=$?

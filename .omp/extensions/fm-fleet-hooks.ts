@@ -519,14 +519,15 @@ async function syncSessionTodo(pi: ExtensionAPI, ctx: unknown): Promise<void> {
 				}
 				const live = liveTodoProjection(ctx);
 				const liveTodoHash = live ? todoProjectionHash(live) : "unreadable";
-				const record: TodoAutosyncRecord = { ...previous, ...version, dateKey, liveTodoHash };
+				const record: TodoAutosyncRecord = { ...version, dateKey, liveTodoHash };
 				if (phases) {
 					const hash = todoProjectionHash(phases);
 					const offeredIdentity = `${hash}:${liveTodoHash}`;
-					if (liveTodoHash === hash
-						|| (previous?.hash === hash && previous.liveTodoHash === liveTodoHash)
-						|| offeredProjections.get(memoryKey) === offeredIdentity) {
+					if (liveTodoHash === hash) {
 						record.hash = hash;
+						offeredProjections.set(memoryKey, offeredIdentity);
+					} else if ((previous?.hash === hash && previous.liveTodoHash === liveTodoHash)
+						|| offeredProjections.get(memoryKey) === offeredIdentity) {
 						offeredProjections.set(memoryKey, offeredIdentity);
 					} else {
 						const content = buildTodoAutosyncInstruction(phases);
