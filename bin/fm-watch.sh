@@ -2832,10 +2832,6 @@ run_check_capture() {
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
   fm_check_output_cleanup
   FM_CHECK_RC=$rc
-  # Keep what the check printed before the cut: the timeout is part of the result.
-  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-    FM_CHECK_RESULT="${FM_CHECK_RESULT:+$FM_CHECK_RESULT }timed out after ${CHECK_TIMEOUT}s"
-  fi
 }
 
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
@@ -3338,6 +3334,9 @@ while :; do
           fm_custom_check_snapshot_cleanup
           rejected_checks="$rejected_checks $c"
           continue
+        fi
+        if [ "$FM_CHECK_RC" -eq 124 ] || [ "$FM_CHECK_RC" -eq 137 ]; then
+          out="${out:+$out }timed out after ${CHECK_TIMEOUT}s"
         fi
       fi
       if [ "$is_pr_poll" -eq 1 ] && [ "$out" = "review $url clear" ]; then

@@ -1187,6 +1187,49 @@ SH
   pass "bridge-owned multiline wakes keep their original shape"
 }
 
+test_timed_out_bridge_polls_do_not_wake() {
+  local bridge dir state poll rc
+  for bridge in x ext; do
+    dir=$(make_case "timed-out-$bridge-bridge-poll")
+    state="$dir/home/state"
+    poll="$dir/root/bin/fm-$bridge-poll.sh"
+    case "$bridge" in
+      x)
+        fmx_poll_shim_content "$dir/home" "$dir/root" > "$state/x-watch.check.sh" \
+          || fail "could not create the X bridge poll shim"
+        chmod 0700 "$state/x-watch.check.sh"
+        ;;
+      ext)
+        : > "$dir/home/config/ext-bridge"
+        printf 'fixture-secret\n' > "$dir/home/config/ext-secret"
+        chmod 0600 "$dir/home/config/ext-secret"
+        cat > "$dir/fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+        chmod 0700 "$dir/fakebin/jq"
+        ;;
+    esac
+    cat > "$poll" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do :; done
+SH
+    chmod 0700 "$poll"
+    add_stop_custom_check "$dir"
+
+    rc=0
+    FM_CHECK_FORCE_FALLBACK=1 FM_TEST_CHECK_TIMEOUT=1 FM_TEST_WATCH_ROOT="$dir/root" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" \
+        > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] \
+      || fail "$bridge bridge timeout watcher failed (rc=$rc): $(cat "$dir/watch.err")"
+    grep -qxF "check: $state/z-stop.check.sh: stop-cycle" "$dir/watch.out" \
+      || fail "$bridge bridge timeout raised a spurious wake: $(cat "$dir/watch.out")"
+  done
+  pass "timed-out bridge polls do not raise watcher-owned wakes"
+}
+
 test_timed_out_custom_check_surfaces_with_partial_output() {
   local backend dir state rc force_fallback
   for backend in installed-timeout fallback-timeout; do
@@ -2347,5 +2390,6 @@ test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_fallback_preserves_signaled_check_status
 test_bridge_owned_multiline_wake_is_unchanged
+test_timed_out_bridge_polls_do_not_wake
 test_timed_out_custom_check_surfaces_with_partial_output
 test_teardown_removes_poll_artifacts
