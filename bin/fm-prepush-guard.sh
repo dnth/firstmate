@@ -4,7 +4,7 @@
 # bin/fm-spawn.sh runs `install <worktree> <dir>` for every ship and scout
 # working copy, placing <dir> under the task's temp root (/tmp/fm-<id>/) and
 # pointing the worker's git at it through command-scope GIT_CONFIG_*
-# environment on the launch command (GIT_CONFIG_KEY_0=core.hooksPath). The
+# environment on the launch command (an appended core.hooksPath entry). The
 # guard therefore binds the worker's process tree only: nothing is written to
 # the repository's shared config or common hooks dir, sibling worktrees are
 # byte-identical before and after install, and fm-teardown's tasktmp removal

@@ -26,7 +26,12 @@
 #   No-Mistakes run, and a non-secondmate OMP relaunch also
 #   recovers --prewalk-into and --allow-project-omp-extensions so the replacement
 #   worker keeps the prior launch intent.
-#   A relaunch validates the recorded endpoint before reusing it. A
+#   An ordinary-worker relaunch refuses the primary home, code root, and the
+#   recorded project's primary checkout before sending endpoint input.
+#   Git-location environment is ignored for this decision; the task's git dir
+#   may not equal the recorded project's common dir, but a standalone clone is
+#   allowed. Secondmates remain exempt. A relaunch also validates the recorded
+#   endpoint before reusing it. A
 #   recovery-grade agent_state of `missing` (tmux, herdr) or a structural
 #   endpoint-absence verdict of `absent` (zellij, cmux) proves the recorded
 #   pane is gone, so the relaunch skips the live-pane cwd proof and recreates
@@ -213,8 +218,9 @@
 #   git worktree root distinct from the primary project checkout.
 #   Every ship and scout working copy also gets a per-copy pre-push guard
 #   (bin/fm-prepush-guard.sh) refusing pushes to main, master, and the repo's
-#   default branch; it rides the launch environment's GIT_CONFIG_* injection,
-#   so no repository config or sibling worktree is touched.
+#   default branch; its hooks-path entry is appended after every inherited
+#   command-scope GIT_CONFIG_* entry without touching repository config or
+#   sibling worktrees.
 #   A no-mistakes ship additionally gets the per-worker PR guard
 #   (bin/fm-nm-pr-guard.sh): `gh` and `gh-axi` wrappers in the task temp root
 #   lead the worker's PATH with FM_NM_PR_GUARD=1, so a worker-initiated PR
@@ -3499,13 +3505,28 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
-validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real project_common worktree_common
+validate_spawn_worktree() (  # <source> <inspect-target>
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real project_common worktree_git_dir primary
+  if [ "$RELAUNCH" -eq 1 ]; then
+    # Judge the recorded directories, not a repository selected by the caller.
+    unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_INDEX_FILE \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_NAMESPACE \
+      GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_GLOBAL \
+      GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
+  fi
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
   fi
   proj_real=$PROJ_ABS_REAL
+  if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+    for primary in "$FM_HOME" "$FM_ROOT" "$PROJ_ABS"; do
+      if [ -n "$wt_real" ] && [ "$wt_real" = "$(real_path_or_raw "$primary")" ]; then
+        echo "error: task $ID's recorded worktree '$WT' is the primary home or checkout ($primary), not an isolated task worktree; refusing to relaunch a worker there" >&2
+        exit 1
+      fi
+    done
+  fi
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
   wt_top_real=
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
@@ -3527,22 +3548,18 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     exit 1
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
-    project_common=$(git -C "$PROJ_ABS" rev-parse --git-common-dir 2>/dev/null || true)
-    worktree_common=$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null || true)
-    case "$project_common" in
-      /*) project_common=$(cd "$project_common" 2>/dev/null && pwd -P || true) ;;
-      *) project_common=$(cd "$PROJ_ABS/$project_common" 2>/dev/null && pwd -P || true) ;;
-    esac
-    case "$worktree_common" in
-      /*) worktree_common=$(cd "$worktree_common" 2>/dev/null && pwd -P || true) ;;
-      *) worktree_common=$(cd "$WT/$worktree_common" 2>/dev/null && pwd -P || true) ;;
-    esac
-    if [ -z "$project_common" ] || [ -z "$worktree_common" ] || [ "$project_common" != "$worktree_common" ]; then
-      echo "error: $source is not a worktree belonging to recorded project '$PROJ_ABS' (resolved '$WT'); refusing relaunch to avoid using an unrelated checkout. Inspect target $inspect_target" >&2
+    project_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
+    worktree_git_dir=$(git -C "$WT" rev-parse --absolute-git-dir 2>/dev/null) || exit 1
+    project_common=$(cd "$project_common" && pwd -P) || exit 1
+    worktree_git_dir=$(cd "$worktree_git_dir" && pwd -P) || exit 1
+    # Compare against the recorded project's common dir, not the task copy's:
+    # a standalone clone is isolated even though its own git/common dirs match.
+    if [ "$worktree_git_dir" = "$project_common" ]; then
+      echo "error: task $ID's recorded worktree '$WT' is the recorded project's primary checkout, not an isolated task worktree; refusing to relaunch a worker there" >&2
       exit 1
     fi
   fi
-}
+)
 
 # The recorded worktree is only reusable for a proven-gone relaunch while this
 # task still owns it through a durable Treehouse lease held under this task's
@@ -5478,7 +5495,20 @@ else
   # never touches it - the working copy's files and its sibling worktrees
   # carry no trace of the guard.
   if [ -n "$PUSH_GUARD_HOOKS_DIR" ]; then
-    LAUNCH="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(shell_quote "$PUSH_GUARD_HOOKS_DIR") $LAUNCH"
+    # Terminal servers need not inherit this process's command-scope config.
+    # Carry the full block explicitly, then append the guard so it wins.
+    inherited_git_count=${GIT_CONFIG_COUNT:-0}
+    case "$inherited_git_count" in
+      *[!0-9]*) echo "error: invalid inherited GIT_CONFIG_COUNT" >&2; exit 1 ;;
+    esac
+    inherited_git_count=$((10#$inherited_git_count))
+    git_config_env="GIT_CONFIG_COUNT=$((inherited_git_count + 1))"
+    for ((git_config_i=0; git_config_i<inherited_git_count; git_config_i++)); do
+      git_config_key="GIT_CONFIG_KEY_$git_config_i"
+      git_config_value="GIT_CONFIG_VALUE_$git_config_i"
+      git_config_env="$git_config_env $git_config_key=$(shell_quote "${!git_config_key}") $git_config_value=$(shell_quote "${!git_config_value}")"
+    done
+    LAUNCH="$git_config_env GIT_CONFIG_KEY_$inherited_git_count=core.hooksPath GIT_CONFIG_VALUE_$inherited_git_count=$(shell_quote "$PUSH_GUARD_HOOKS_DIR") $LAUNCH"
   fi
   # The No-Mistakes PR guard rides the launch command the same way: its dir
   # leads PATH and FM_NM_PR_GUARD=1 arms it. "$PATH" resolves inside the staged

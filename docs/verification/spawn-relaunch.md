@@ -14,7 +14,6 @@ ok - a bare ship relaunch resumes the recorded worktree and preserves WIP
 ok - a bare ship relaunch restores recorded harness, model, and effort
 ok - a raw ship relaunch requiring a worktree is refused
 ok - a ship relaunch refuses an active tmux endpoint before sending input
-ok - a ship relaunch refuses a worktree from an unrelated repository
 # all fm-spawn-worktree-settle tests passed
 ok - OMP ship relaunch accepts existing task artifacts and preserves profile
 ok - OMP ship relaunch preserves explicit prewalk and extension opt-in

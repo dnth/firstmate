@@ -75,6 +75,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
 6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded worktree and normally the endpoint - and recreates the endpoint inside that same worktree when the backend proves the recorded one gone - while allowing OMP secondmates to publish a fresh endpoint after clearing the previous harness's per-task wiring and arming a fresh busy generation.
    A ship relaunch also recovers the recorded mode and yolo contract when the caller does not repeat them.
    For OMP ships and scouts, the launch owner accepts the prior task artifacts only after the recorded endpoint identity, worktree, and stopped state are proven, then restores the recorded OMP launch options for the replacement.
+   The `fm-spawn.sh` header owns the ordinary-worker relaunch isolation boundary; secondmate homes remain exempt.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
@@ -131,6 +132,7 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-stall-recovery.test.sh` - exit confirmation when an owned endpoint disappears after exit delivery, with an unrelated endpoint left untouched.
 - `tests/fm-spawn-relaunch-dead-endpoint.test.sh` - proven-gone endpoint recreation in the recorded worktree across tmux, Herdr, zellij, and cmux for both `fm-spawn --relaunch` and `fm-control relaunch`, the lease-ownership gate, the Herdr drifted-shell `cd` recovery, and the live/ambiguous/unprovable refusal matrix.
+- `tests/fm-omp-relaunch-guard.test.sh` - primary home, code root, and project checkout refusals, Git-location spoofing, isolated standalone clone acceptance, and OMP artifact/profile recovery.
 - `tests/fm-secondmate-restart.test.sh` - the persist gate, restart capability routing, local and remote control-plane relaunches, already-current versus unprovable runtime behavior, and a local OMP restart after an update changes its loaded extension closure.
 - `tests/fm-update.test.sh` - fast-forward classification, live secondmate restart/nudge sets, and stopped or malformed endpoint handling.
 - `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` - host-local remote lifecycle control, including OMP endpoint binding and SSH unknown-state handling.

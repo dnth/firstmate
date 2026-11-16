@@ -73,6 +73,7 @@ case "${1:-}" in
           marker=${marker#\'}
           script=${marker%\'}
           [ ! -f "$script" ] || printf '%s\n' "$(cat "$script")" >> "$FM_FAKE_SEND_LOG"
+          [ ! -f "$script" ] || cp "$script" "$FM_FAKE_SEND_LOG.script"
           ;;
       esac
     done
@@ -109,6 +110,11 @@ SH
 # Hermetic stub: `axi status` reports no active run; everything else is a no-op.
 exit 0
 SH
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+exec git config --get core.hooksPath
+SH
+  chmod +x "$fakebin/codex" || return 1
   chmod +x "$fakebin/treehouse" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes" || return 1
   printf '%s\n' "$fakebin"
 }
@@ -180,9 +186,9 @@ run_teardown() {  # <home> <id>: uses FAKEBIN_DIR from read_case_record
     "$TEARDOWN" "$id" 2>&1
 }
 
-# Extract the hooks dir the launch command carries, from the fake send log.
+# Ask Git through the staged launch rather than assuming the guard's index.
 send_log_hooks_dir() {  # <send-log>
-  sed -n "s/.*GIT_CONFIG_VALUE_0='\([^']*\)'.*/\1/p" "$1" | head -1
+  PATH="$FAKEBIN_DIR:$PATH" bash "$1.script"
 }
 
 test_spawn_installs_guard_and_blocks_default_branch_pushes() {
@@ -195,8 +201,6 @@ test_spawn_installs_guard_and_blocks_default_branch_pushes() {
   status=$?
   expect_code 0 "$status" "spawn failed: $out"
   assert_contains "$out" "spawned $id" "spawn did not report success"
-  assert_contains "$(cat "$CASE_DIR/send.log")" "GIT_CONFIG_KEY_0=core.hooksPath" \
-    "launch command did not inject core.hooksPath"
   hooks_dir=$(send_log_hooks_dir "$CASE_DIR/send.log")
   assert_equals "/tmp/fm-$id/prepush-guard" "$hooks_dir" \
     "launch env did not point at the task-local hooks dir"
@@ -503,6 +507,51 @@ test_scout_spawn_also_installs_the_guard() {
   pass "scout working copies get the same guard"
 }
 
+# The public spawn boundary must carry all command-scope config into the
+# worker, even when the pane shell has none of the parent's environment.
+# Existing guard cases supply only the guard entry and miss dropped siblings.
+test_spawn_preserves_inherited_git_config() {
+  local rec id out status
+  id="prepush-inherited-$$"
+  rec=$(make_case inherited-config "$id") || fail "fixture setup failed"
+  read_case_record "$rec"
+  FM_TEST_CLEANUP_DIRS+=("/tmp/fm-$id")
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/usr/bin/env bash
+set -eu
+git -C "$FM_TEST_WORKTREE" config --get-all credential.https://example.invalid.helper > "$FM_TEST_RESULT.helper"
+git -C "$FM_TEST_WORKTREE" config --get firstmate.inherited > "$FM_TEST_RESULT.unrelated"
+printf '%s\n' "$GIT_CONFIG_COUNT" > "$FM_TEST_RESULT.count"
+exec git -C "$FM_TEST_WORKTREE" push origin HEAD:main
+SH
+  chmod +x "$FAKEBIN_DIR/codex" || fail "fake worker chmod failed"
+
+  out=$(GIT_CONFIG_COUNT=2 \
+    GIT_CONFIG_KEY_0=credential.https://example.invalid.helper \
+    GIT_CONFIG_VALUE_0='!scoped helper with spaces and a quote: '"'" \
+    GIT_CONFIG_KEY_1=firstmate.inherited GIT_CONFIG_VALUE_1='unrelated value' \
+    run_spawn "$id" --mode no-mistakes --yolo off)
+  expect_code 0 "$?" "spawn with inherited config failed: $out"
+  wt_commit "$POOL_DIR" 'worker ahead' || fail "fixture commit failed"
+
+  # A pane created by a long-lived terminal server need not inherit the
+  # caller's config block. Execute the real staged launch in that environment.
+  out=$(env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
+    -u GIT_CONFIG_KEY_1 -u GIT_CONFIG_VALUE_1 \
+    FM_TEST_WORKTREE="$POOL_DIR" FM_TEST_RESULT="$CASE_DIR/result" \
+    PATH="$FAKEBIN_DIR:$PATH" bash "$CASE_DIR/send.log.script" 2>&1)
+  status=$?
+  assert_equals '!scoped helper with spaces and a quote: '"'" \
+    "$(cat "$CASE_DIR/result.helper")" "inherited scoped helper was lost or changed"
+  assert_equals 'unrelated value' "$(cat "$CASE_DIR/result.unrelated")" \
+    "unrelated inherited entry was lost"
+  assert_equals 3 "$(cat "$CASE_DIR/result.count")" "guard did not append one config entry"
+  [ "$status" -ne 0 ] || fail "inherited config disabled the default-branch guard"
+  assert_contains "$out" "fm-prepush-guard" "worker push did not run the guard"
+  pass "spawn preserves inherited config and appends a working pre-push guard"
+}
+
+test_spawn_preserves_inherited_git_config
 test_spawn_installs_guard_and_blocks_default_branch_pushes
 test_guard_blocks_nonstandard_default_branch
 test_guard_uses_pushurl_default_branch
