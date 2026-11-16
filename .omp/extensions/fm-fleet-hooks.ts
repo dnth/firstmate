@@ -328,6 +328,7 @@ function buildTodoAutosyncInstruction(phases: readonly TodoProjectionPhase[]): s
 // real home and a turn-end hook must not pay that on every turn.
 type TodoAutosyncRecord = {
 	hash?: string;
+	liveTodoHash: string;
 	boardMtimeMs: number;
 	boardSize: number;
 	dateKey: string;
@@ -348,7 +349,9 @@ function readTodoAutosyncRecord(path: string): TodoAutosyncRecord | undefined {
 	if (typeof dateKey !== "string") return undefined;
 	const hash = "hash" in parsed ? parsed.hash : undefined;
 	if (hash !== undefined && typeof hash !== "string") return undefined;
-	return { hash: hash === "" ? undefined : hash, boardMtimeMs, boardSize, dateKey };
+	const liveTodoHash = "liveTodoHash" in parsed ? parsed.liveTodoHash : "";
+	if (typeof liveTodoHash !== "string") return undefined;
+	return { hash: hash === "" ? undefined : hash, liveTodoHash, boardMtimeMs, boardSize, dateKey };
 }
 
 function writeTodoAutosyncRecord(path: string, record: TodoAutosyncRecord): boolean {
@@ -492,7 +495,9 @@ async function syncSessionTodo(pi: ExtensionAPI, ctx: unknown): Promise<void> {
 		// new UTC day also earns one recomputation.
 		let dateKey = new Date().toISOString().slice(0, 10);
 		let previous = readTodoAutosyncRecord(recordPath);
-		if (previous && previous.boardMtimeMs === version.boardMtimeMs && previous.boardSize === version.boardSize && previous.dateKey === dateKey) return;
+		const initialLive = liveTodoProjection(ctx);
+		const initialLiveHash = initialLive ? todoProjectionHash(initialLive) : "unreadable";
+		if (previous && previous.boardMtimeMs === version.boardMtimeMs && previous.boardSize === version.boardSize && previous.dateKey === dateKey && previous.liveTodoHash === initialLiveHash) return;
 		autosyncInFlight.add(memoryKey);
 		try {
 			for (let round = 0; round < 3; round++) {
@@ -503,14 +508,26 @@ async function syncSessionTodo(pi: ExtensionAPI, ctx: unknown): Promise<void> {
 				} catch {
 				}
 				if (!passIsCurrent()) return;
-				const record: TodoAutosyncRecord = { ...previous, ...version, dateKey };
+				const currentVersion = boardVersion(boardPath);
+				const currentDate = new Date().toISOString().slice(0, 10);
+				if (!currentVersion) return;
+				if (currentVersion.boardMtimeMs !== version.boardMtimeMs
+					|| currentVersion.boardSize !== version.boardSize || currentDate !== dateKey) {
+					version = currentVersion;
+					dateKey = currentDate;
+					continue;
+				}
+				const live = liveTodoProjection(ctx);
+				const liveTodoHash = live ? todoProjectionHash(live) : "unreadable";
+				const record: TodoAutosyncRecord = { ...previous, ...version, dateKey, liveTodoHash };
 				if (phases) {
 					const hash = todoProjectionHash(phases);
-					const live = liveTodoProjection(ctx);
-					if ((live && todoProjectionHash(live) === hash)
-						|| previous?.hash === hash || offeredProjections.get(memoryKey) === hash) {
+					const offeredIdentity = `${hash}:${liveTodoHash}`;
+					if (liveTodoHash === hash
+						|| (previous?.hash === hash && previous.liveTodoHash === liveTodoHash)
+						|| offeredProjections.get(memoryKey) === offeredIdentity) {
 						record.hash = hash;
-						offeredProjections.set(memoryKey, hash);
+						offeredProjections.set(memoryKey, offeredIdentity);
 					} else {
 						const content = buildTodoAutosyncInstruction(phases);
 						if (content) {
@@ -525,7 +542,7 @@ async function syncSessionTodo(pi: ExtensionAPI, ctx: unknown): Promise<void> {
 								},
 								{ deliverAs: "nextTurn", triggerTurn: true },
 							);
-							offeredProjections.set(memoryKey, hash);
+							offeredProjections.set(memoryKey, offeredIdentity);
 							record.hash = hash;
 						}
 					}

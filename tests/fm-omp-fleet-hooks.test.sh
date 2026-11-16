@@ -248,6 +248,20 @@ case "${FM_FAKE_EMIT_MODE:-ok}" in
       printf '%s\n' "$FM_CHANGED_PROJECTION"
     fi
     ;;
+  restore)
+    if [ ! -f "$FM_FAKE_EMIT_LOG.rewrite" ]; then
+      node --input-type=module <<'RESTORE'
+import { readFileSync, writeFileSync, utimesSync } from "node:fs";
+const saved = JSON.parse(readFileSync(`${process.env.FM_FAKE_EMIT_LOG}.saved`, "utf8"));
+writeFileSync(process.env.FM_FIXTURE_BOARD, saved.bytes);
+utimesSync(process.env.FM_FIXTURE_BOARD, saved.atime, saved.mtime);
+RESTORE
+      printf 'restored\n' > "$FM_FAKE_EMIT_LOG.rewrite"
+      printf '%s\n' "$FM_CHANGED_PROJECTION"
+    else
+      printf '%s\n' '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]'
+    fi
+    ;;
   churn)
     printf 'changed during every emit\n' >> "$FM_FIXTURE_BOARD"
     printf '%s\n' "$FM_CHANGED_PROJECTION"
@@ -275,7 +289,7 @@ env -u FM_TASK_ID FM_HOOKS="$AUTOSYNC_HOOKS" FM_HOME="$AUTOSYNC_ROOT" FM_STATE_O
 FM_CHANGED_PROJECTION="$CHANGED_PROJECTION" FM_FAKE_EMIT_LOG="$EMIT_LOG" FM_FAKE_EMIT_PID="$EMIT_PID" \
 FM_FIXTURE_BOARD="$BOARD" node --experimental-strip-types --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const { default: extension } = await import(process.env.FM_HOOKS);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -436,8 +450,8 @@ for (const mode of ["catchup", "catchup-fail", "catchup-bad", "churn"]) {
   await waitForEmits(beforeEmits + rounds);
   await settle();
   assert.equal(emitCount() - beforeEmits, rounds, mode);
-  assert.equal(sent.length - beforeOffers, 1, mode);
-  assert.match(sent.at(-1).message.content, /queued-1 - Queue Beta/);
+  assert.equal(sent.length - beforeOffers, mode === "churn" ? 0 : 1, mode);
+  if (mode !== "churn") assert.match(sent.at(-1).message.content, /queued-1 - Queue Beta/);
 }
 process.env.FM_FAKE_EMIT_MODE = "ok";
 process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
@@ -498,7 +512,7 @@ for (const boundary of ["switch", "identity", "lock", "lock-fail", "lock-bad"]) 
   if (boundary.startsWith("lock")) writeFileSync(lockPath, "99999999");
   await sleep(500);
   assert.equal(sent.length, boundaryOffers, boundary);
-  assert.equal(branchReads, 0, boundary);
+  assert.equal(branchReads, 1, boundary);
   assert.deepEqual(readdirSync(stateDir).map(file => [file, readFileSync(join(stateDir, file), "utf8")]), boundaryState, boundary);
   writeFileSync(lockPath, `${process.pid}\n`);
   process.env.FM_FAKE_EMIT_MODE = "ok";
@@ -506,6 +520,60 @@ for (const boundary of ["switch", "identity", "lock", "lock-fail", "lock-bad"]) 
   await waitForEmits(emitCount() + 1);
   assert.equal(sent.length, boundaryOffers + 1, `${boundary} recovery`);
 }
+utimesSync(board, 1700000000, 1700000000);
+const savedBoard = statSync(board);
+const savedBytes = readFileSync(board, "utf8");
+writeFileSync(`${emitLog}.saved`, JSON.stringify({ bytes: savedBytes, atime: savedBoard.atimeMs / 1000, mtime: savedBoard.mtimeMs / 1000 }));
+try { unlinkSync(`${emitLog}.rewrite`); } catch {}
+appendFileSync(board, "superseded B\n");
+process.env.FM_FAKE_EMIT_MODE = "restore";
+const supersededOffers = sent.length;
+const supersededEmits = emitCount();
+const restoredCtx = { sessionManager: { getSessionId: () => "restored-session", getBranch: () => [todoResult(initialTodo)] } };
+await turnEnd({}, restoredCtx);
+await waitForEmits(supersededEmits + 2);
+assert.equal(sent.length, supersededOffers);
+assert.equal(emitCount(), supersededEmits + 2);
+assert.equal(readFileSync(board, "utf8"), savedBytes);
+await turnEnd({}, restoredCtx);
+await settle();
+assert.equal(emitCount(), supersededEmits + 2);
+
+process.env.FM_FAKE_EMIT_MODE = "ok";
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+let lateTodo = initialTodo;
+const lateCtx = { sessionManager: { getSessionId: () => "late-session", getBranch: () => [todoResult(lateTodo)] } };
+const lateOffers = sent.length;
+await turnEnd({}, lateCtx);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, lateOffers + 1);
+const versionV = statSync(board);
+const unchangedEmits = emitCount();
+writeFileSync(board, savedBytes);
+utimesSync(board, versionV.atimeMs / 1000, versionV.mtimeMs / 1000);
+process.env.FM_FAKE_PROJECTION = '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]';
+await turnEnd({}, lateCtx);
+await settle();
+assert.equal(emitCount(), unchangedEmits);
+assert.equal(sent.length, lateOffers + 1);
+const beforeLate = emitCount();
+lateTodo = changedTodo;
+await turnEnd({}, lateCtx);
+await waitForEmits(beforeLate + 1);
+assert.equal(sent.length, lateOffers + 2);
+assert.deepEqual(JSON.parse(sent.at(-1).message.content.split("\n")[1]), { op: "init", list: [{ phase: "Active", items: ["ship-1 - Ship Alpha"] }] });
+await turnEnd({}, lateCtx);
+await settle();
+assert.equal(emitCount(), beforeLate + 1);
+assert.equal(sent.length, lateOffers + 2);
+lateTodo = initialTodo;
+await turnEnd({}, lateCtx);
+await waitForEmits(beforeLate + 2);
+assert.equal(sent.length, lateOffers + 2);
+await turnEnd({}, lateCtx);
+await settle();
+assert.equal(emitCount(), beforeLate + 2);
+
 console.log("ok - OMP turn-end autosync offers one bounded projection per board change");
 JS
 autosync_status=$?
