@@ -8,8 +8,9 @@
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under this task's meta lock before teardown reports success. Teardown records
-# state/<id>.backlog-close first, so a process killed between the halves leaves
-# the exact close replayable at the next session start. The transition is
+# state/<id>.backlog-close after the post-stop safety proof and before removing
+# the task record, so a process killed between the halves leaves the exact close
+# replayable at the next session start. The transition is
 # skipped on a config/backlog-backend=manual home and in a markdown home that
 # keeps no data/backlog.md; those cases print the manual follow-up. A row still
 # held for the captain is retained - returned to Queued with the deliverable
@@ -17,9 +18,10 @@
 # question.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
+# reachable from any remote-tracking branch except the local no-mistakes mirror
+# (a fork counts as a remote, so upstream-contribution PRs pushed to a fork
+# satisfy this in any mode), OR - for a normal ship task whose commits are not
+# so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
@@ -41,6 +43,8 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# Safety is proved again after task writers stop, before publishing a replayable
+# backlog close, deleting the task branch, or returning the worktree.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -155,9 +159,9 @@
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
 #
-# Pre-teardown cleanup sequence (runs once every landed/discard-work safety
-# refusal above has already passed, and BEFORE any worktree return, branch
-# delete, or backend kill below - a still-active run or a leaked process may
+# Pre-teardown cleanup sequence (starts after the initial landed/discard-work
+# checks pass, and BEFORE any worktree return, branch deletion, or backend kill
+# below - a still-active run or a leaked process may
 # own live work in that worktree):
 #   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
 #     be torn down while its no-mistakes pipeline run is still PARKED at a gate
@@ -600,9 +604,10 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
 # The backlog gate (bin/fm-backlog-transition-lib.sh): when it applies, this
-# teardown owns the paired close and must be able to record it before any
-# destructive step. A gate error (unresolvable data directory, unreadable
-# backend config, incompatible tasks-axi) refuses while everything is intact.
+# teardown owns the paired close and records it after stopping task writers and
+# proving safety again, before removing task records. A gate error (unresolvable
+# data directory, unreadable backend config, incompatible tasks-axi) refuses while
+# everything is intact.
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
@@ -831,7 +836,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$WT" log --format=%H HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -1329,7 +1334,7 @@ validate_worktree_teardown_safety() {
     | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi|hermes)-turnend$)' \
     | head -1 || true)
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -3107,8 +3112,29 @@ else
   esac
 fi
 
-# Record the exact backlog close BEFORE any destructive step: a process killed
-# between removing the record and closing the row would otherwise leave nothing
+# The initial landed/discard-work checks above have passed (or --force skipped
+# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# --force, and before branch deletion or worktree return - a still-parked run or a
+# leaked process can own live work in this exact worktree. Not for
+# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
+# dedicated process-event and firstmate-home removal machinery further below,
+# not by task-worktree cleanup.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+  conclude_task_no_mistakes_run "$WT"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+elif [ "$KIND" != secondmate ]; then
+  reap_task_worktree_processes tasktmp "$TASK_TMP"
+fi
+
+# Writers can save changes while their run concludes or their processes exit.
+# Re-prove the stopped copy on every backend before publishing completion or
+# deleting its branch. Keep the later Treehouse stale-lock callback as well.
+if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+  validate_worktree_teardown_safety || exit 1
+fi
+
+# Record the exact backlog close after that proof: a process killed between
+# removing the record and closing the row would otherwise leave nothing
 # to reconstruct the close from. The marker is validated on write and replayed
 # by the next session start if this run never reaches the transition below.
 BACKLOG_CLOSED=0
@@ -3130,20 +3156,6 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   fi
 else
   BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
-fi
-
-# Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
-elif [ "$KIND" != secondmate ]; then
-  reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
 
 # A Herdr close may reposition shared workspace order, so the whole
