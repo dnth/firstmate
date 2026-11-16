@@ -160,9 +160,9 @@
 # removal so the operator can see what happened.
 #
 # Pre-teardown cleanup sequence (starts after the initial landed/discard-work
-# checks pass, and BEFORE any worktree return, branch deletion, or backend kill
-# below - a still-active run or a leaked process may
-# own live work in that worktree):
+# checks pass, before worktree return or branch deletion). Discover owned
+# processes before concluding the run or closing the endpoint, so shutdown
+# cannot erase the ancestry or pane identity needed to enforce ownership:
 #   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
 #     be torn down while its no-mistakes pipeline run is still PARKED at a gate
 #     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
@@ -185,11 +185,12 @@
 #     process group, so it survives reparented to init (observed 2026-08-03:
 #     two `go test` binaries, deadlines blown past by ~100x, pinning CPU for
 #     hours with no live task meta to attribute them to once teardown had
-#     already removed it). reap_task_worktree_processes finds every process
+#     already removed it). discover_task_worktree_processes records every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
+#     walking the worktree's file tree). After endpoint closure,
+#     reap_task_worktree_processes sends TERM, then KILL after a short grace
+#     period to any survivor whose process identity still matches. Both
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
@@ -198,7 +199,7 @@
 #     token only when hermes_owner_token= metadata, the private state token,
 #     and the profile lifecycle registry bind the same task and state paths.
 #     The token-bearing roots and their exact process descendants join the cwd
-#     set before TERM/KILL, so process-group-detached MCP children are reaped
+#     set before endpoint closure, so process-group-detached MCP children are reaped
 #     without selecting any unmarked personal Hermes or gateway process.
 #     Ownership proof has two distinct failure shapes and they are handled
 #     differently on purpose. Proof that CONTRADICTS itself - a metadata token
@@ -220,6 +221,9 @@
 #     pass stay tracked by process identity through the KILL escalation and the
 #     final survivor check, so a child reparented after its parent exits is
 #     still reaped rather than dropped by the post-TERM rescan.
+#     Without lsof, only tmux has a fallback: record the pane process group's
+#     members and identities before closing it. Other backends, or an
+#     unverifiable tmux group, refuse before endpoint closure.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -918,7 +922,7 @@ content_in_default() {
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
+# reachable under the header's remote-preservation rule? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed. A containment proof Git
@@ -1834,8 +1838,8 @@ discover_task_backend_process_group() {  # <label>
 # the recheck. Every process proven owned in a pass is remembered by pid AND
 # process identity, so a child that reparents to init when its parent exits on
 # TERM stays under enforcement instead of vanishing from the post-TERM
-# ownership rescan. A missing lsof uses the backend process-group fallback; an
-# lsof scan error refuses before destructive teardown.
+# ownership rescan. The header owns discovery ordering and the missing-lsof
+# fallback; a scan error refuses further cleanup.
 REAP_TRACKED_PIDS=()
 REAP_TRACKED_IDENTITIES=()
 
