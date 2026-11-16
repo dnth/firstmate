@@ -1008,7 +1008,7 @@ test_custom_snapshot_cleanup_on_signal() {
   chmod 0700 "$state/custom.check.sh"
   cat > "$dir/fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
-case ${1:-} in --kill-after=*) shift ;; esac
+case ${1:-} in -k) shift 2 ;; esac
 shift
 "$@" &
 child=$!
@@ -1081,7 +1081,7 @@ SH
     if [ "$backend" = installed-timeout ]; then
       cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
-case ${1:-} in --kill-after=*) shift ;; esac
+case ${1:-} in -k) shift 2 ;; esac
 shift
 exec "$@"
 SH
@@ -1160,6 +1160,33 @@ SH
   pass "fallback watcher preserves a signaled check status"
 }
 
+test_bridge_owned_multiline_wake_is_unchanged() {
+  local dir state expected rc
+  dir=$(make_case bridge-owned-multiline-wake)
+  state="$dir/home/state"
+  : > "$dir/home/config/ext-bridge"
+  printf 'fixture-secret\n' > "$dir/home/config/ext-secret"
+  chmod 0600 "$dir/home/config/ext-secret"
+  cat > "$dir/fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$dir/root/bin/fm-ext-poll.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'ext-request first\next-request second\n'
+SH
+  chmod 0700 "$dir/fakebin/jq" "$dir/root/bin/fm-ext-poll.sh"
+
+  rc=0
+  FM_TEST_WATCH_ROOT="$dir/root" run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "bridge-owned multiline watcher failed (rc=$rc): $(cat "$dir/watch.err")"
+  expected=$(printf 'check: %s/ext-watch.check.sh: ext-request first\next-request second' "$state")
+  [ "$(cat "$dir/watch.out")" = "$expected" ] \
+    || fail "bridge-owned multiline wake changed shape: $(cat "$dir/watch.out")"
+  pass "bridge-owned multiline wakes keep their original shape"
+}
+
 test_timed_out_custom_check_surfaces_with_partial_output() {
   local backend dir state rc force_fallback
   for backend in installed-timeout fallback-timeout; do
@@ -1181,7 +1208,7 @@ SH
       cat > "$dir/fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 case ${1:-} in
-  --kill-after=*) kill_after=${1#*=}; shift ;;
+  -k) kill_after=$2; shift 2 ;;
   *) exit 64 ;;
 esac
 t=$1
@@ -2319,5 +2346,6 @@ test_live_artifact_single_link_and_privacy_validation
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_fallback_preserves_signaled_check_status
+test_bridge_owned_multiline_wake_is_unchanged
 test_timed_out_custom_check_surfaces_with_partial_output
 test_teardown_removes_poll_artifacts

@@ -2751,9 +2751,9 @@ run_check_process() {
   local c=$1
   shift
   if [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
-    exec timeout --kill-after=1 "$CHECK_TIMEOUT" bash "$c" "$@"
+    exec timeout -k 1 "$CHECK_TIMEOUT" bash "$c" "$@"
   elif [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout --kill-after=1 "$CHECK_TIMEOUT" bash "$c" "$@"
+    exec gtimeout -k 1 "$CHECK_TIMEOUT" bash "$c" "$@"
   else
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
     exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", $owned ? $pid : -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; my $status = $?; exit(($status & 127) ? 128 + ($status & 127) : $status >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
@@ -3342,9 +3342,13 @@ while :; do
         out=
       fi
       if [ -n "$out" ]; then
-        # One line, as the queued row stores it: wake consumers keep only
-        # prefixed lines, so a later output line would otherwise be dropped.
-        reason="check: $c: $(printf '%s' "$out" | fm_wake_clean_field)"
+        if [ "$check_owns_wake" -eq 1 ]; then
+          reason="check: $c: $out"
+        else
+          # One line, as the queued row stores it: wake consumers keep only
+          # prefixed lines, so a later output line would otherwise be dropped.
+          reason="check: $c: $(printf '%s' "$out" | fm_wake_clean_field)"
+        fi
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           # One role-routed durable outcome for a merge this home detected:
           # bin/fm-merge-outcome-lib.sh publishes the captain-facing row (main
