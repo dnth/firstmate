@@ -605,7 +605,7 @@ run_teardown() {
 # regardless of whether the host installs them in /usr/bin, /usr/sbin, or a
 # package-manager bin.
 FM_TEST_PATH_COMMANDS=(awk bash basename cat chmod cp cut date dirname env find git grep head
-  hostname id jq ln lsof mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat
+  hostname id jq ln lsof mkdir mktemp mv node tasks-axi perl ps readlink realpath rm sed sh sleep sort stat
   tail timeout tr uname wc xargs)
 
 make_path_excluding() {  # <case-dir> <fixture-name> <excluded-cmd>...
@@ -2509,8 +2509,8 @@ test_leaked_worktree_process_is_reaped() {
 # Exercise both worktree-removal paths with a real writer that dirties the
 # clean, pushed copy on TERM, before any replayable completion is published.
 test_stop_time_changes_refuse_before_completion() {
-  local backend change case_dir rc pid ready target local_head attempt
-  for backend in tmux orca; do
+  local backend change case_dir rc pid ready target local_head attempt path_without_lsof endpoint_tool
+  for backend in tmux orca orca-no-lsof herdr herdr-projected; do
     for change in tracked untracked; do
       case_dir=$(make_case "stop-write-$backend-$change")
       write_meta "$case_dir" no-mistakes ship
@@ -2520,7 +2520,7 @@ test_stop_time_changes_refuse_before_completion() {
       local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
       append_pr_meta_url "$case_dir"
       seed_backlog_in_flight "$case_dir"
-      if [ "$backend" = orca ]; then
+      if [[ "$backend" = orca* ]]; then
         fm_write_meta "$case_dir/state/task-x1.meta" \
           "window=fm-task-x1" "endpoint_task_id=task-x1" \
           "terminal=term-task-x1" "backend=orca" "orca_worktree_id=wt-task-x1" \
@@ -2544,6 +2544,12 @@ printf '%s\n' "\$*" >> '$case_dir/removal.log'
 SH
         chmod +x "$case_dir/fakebin/treehouse"
       fi
+      if [[ "$backend" = herdr* ]]; then
+        configure_herdr_projection_teardown_case "$case_dir"
+        if [ "$backend" = herdr ]; then
+          rm "$case_dir/state/task-x1.herdr-presentation"
+        fi
+      fi
       cp "$case_dir/state/task-x1.meta" "$case_dir/meta.before"
       target="$case_dir/wt/feature.txt"
       if [ "$change" = untracked ]; then
@@ -2556,11 +2562,12 @@ target=$1
 case_dir=$2
 finish() {
   if [ -e "$case_dir/state/task-x1.backlog-close" ]; then
-    printf 'completion-already-published\n' > "$case_dir/stop-order"
+    order=completion-already-published
   else
-    printf 'completion-not-published\n' > "$case_dir/stop-order"
+    order=completion-not-published
   fi
   printf 'saved during stop\n' > "$target"
+  printf '%s\n' "$order" > "$case_dir/stop-order"
   exit 0
 }
 trap finish TERM
@@ -2568,7 +2575,7 @@ trap finish TERM
 while :; do sleep 0.05; done
 SH
       ready="$case_dir/writer.ready"
-      ( cd "$case_dir/wt" && exec bash "$case_dir/writer.sh" "$target" "$case_dir" ) &
+      ( cd "$case_dir" && exec bash "$case_dir/writer.sh" "$target" "$case_dir" ) &
       pid=$!
       attempt=0
       while [ ! -f "$ready" ] && [ "$attempt" -lt 100 ]; do
@@ -2581,30 +2588,70 @@ SH
         fail "stop-write-$backend-$change: writer did not arm its TERM handler"
       fi
 
+      case "$backend" in
+        tmux) endpoint_tool=tmux ;;
+        orca*) endpoint_tool=orca ;;
+        herdr*) endpoint_tool=herdr ;;
+      esac
+      mv "$case_dir/fakebin/$endpoint_tool" "$case_dir/fakebin/$endpoint_tool.original"
+      cat > "$case_dir/fakebin/$endpoint_tool" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *kill-window*|*'terminal close'*|*'pane close'*)
+    kill -TERM '$pid'
+    for ((i=0; i<100; i++)); do
+      [ ! -e '$case_dir/stop-order' ] || break
+      sleep 0.05
+    done
+    ;;
+esac
+exec '$case_dir/fakebin/$endpoint_tool.original' "\$@"
+SH
+      chmod +x "$case_dir/fakebin/$endpoint_tool"
+      path_without_lsof=$PATH
+      if [ "$backend" = orca-no-lsof ]; then
+        path_without_lsof=$(make_path_without_lsof "$case_dir")
+      fi
       rc=0
-      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      FM_FAKE_HERDR_LOG="$case_dir/herdr.log" \
+      FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
+      FM_FAKE_HERDR_RESTORED="$case_dir/restored" \
+      FM_TEARDOWN_TEST_PATH="$path_without_lsof" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
       kill -KILL "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
       assert_grep "saved during stop" "$target" \
         "stop-write-$backend-$change: writer did not save its change"
       expect_code 1 "$rc" "stop-write-$backend-$change: late work must refuse teardown"
-      assert_grep "uncommitted changes" "$case_dir/stderr" \
-        "stop-write-$backend-$change: refusal did not name late work"
+      if [ "$backend" != orca-no-lsof ]; then
+        assert_grep "uncommitted changes" "$case_dir/stderr" \
+          "stop-write-$backend-$change: refusal did not name late work"
+      fi
       assert_grep "completion-not-published" "$case_dir/stop-order" \
         "stop-write-$backend-$change: close marker was published before stopping writers"
       assert_absent "$case_dir/state/task-x1.backlog-close" \
         "stop-write-$backend-$change: refusal left a replayable completion"
-      assert_absent "$case_dir/removal.log" \
-        "stop-write-$backend-$change: refusal reached worktree removal"
+      if [[ "$backend" = orca* ]]; then
+        if [ -f "$case_dir/removal.log" ]; then
+          ! grep -q 'worktree remove' "$case_dir/removal.log" \
+            || fail "stop-write-$backend-$change: refusal reached worktree removal"
+        fi
+      else
+        assert_absent "$case_dir/removal.log" \
+          "stop-write-$backend-$change: refusal reached worktree removal"
+      fi
       assert_equals "$local_head" "$(git -C "$case_dir/wt" rev-parse fm/task-x1)" \
         "stop-write-$backend-$change: refusal deleted or changed the task branch"
       cmp -s "$case_dir/meta.before" "$case_dir/state/task-x1.meta" \
         || fail "stop-write-$backend-$change: refusal changed the task record"
+      if [ "$backend" = herdr-projected ]; then
+        assert_present "$case_dir/state/task-x1.herdr-presentation" \
+          "stop-write-$backend-$change: refusal retired the retry journal"
+      fi
       assert_equals in_flight "$(backlog_row_state "$case_dir")" \
         "stop-write-$backend-$change: refusal closed the unfinished row"
     done
   done
-  pass "stop-time tracked and hidden untracked writes preserve branch, records, and row on both removal paths"
+  pass "stop-time tracked and hidden untracked writes preserve branch, records, and row on every endpoint shutdown path"
 }
 
 test_leaked_tasktmp_process_is_reaped() {
