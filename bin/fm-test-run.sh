@@ -1177,8 +1177,7 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
-    .agents/skills/bro/THIRD_PARTY_NOTICES.md|.agents/skills/test-audit/*.md|\
-    .agents/skills/test-audit/references/*.md)
+    .agents/skills/bro/THIRD_PARTY_NOTICES.md|.agents/skills/test-audit/*.md)
       # Bundled skill prose selects the same contract family as SKILL.md.
       printf '%s\n' pure-contract-unit
       ;;
