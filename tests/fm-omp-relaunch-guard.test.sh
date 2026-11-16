@@ -486,7 +486,7 @@ test_omp_relaunch_refuses_missing_worktree() {
 # Existing cases cover missing paths, artifacts and endpoint identity, not a
 # valid record restored onto a primary copy. This must refuse before launch.
 test_omp_relaunch_isolation() {
-  local shape=$1 rec id out status task_copy recorded_project git_dir= git_work_tree=
+  local shape=$1 rec id out status task_copy recorded_project git_dir='' git_work_tree=''
   id=$(case_id "isolation-$shape")
   rec=$(make_relaunch_case "isolation-$shape" "$id")
   read_relaunch_record "$rec"
