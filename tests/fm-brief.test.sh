@@ -653,6 +653,32 @@ test_secondmate_marked_request_reporting_contract() {
   pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
 }
 
+# The steering doorbell names "$FM_TASK_INBOX" and the short inbox name, so the
+# generated brief's full inbox path is the fallback for a worker launched
+# without that export: every scaffold kind must keep it, with the same
+# list/ack-by-mv contract the doorbell states.
+test_inbox_section_stays_consistent_with_the_doorbell() {
+  local home id kind brief state
+  home="$TMP_ROOT/inbox-section-home"
+  write_registry "$home"
+  mkdir -p "$home/state"; state="$home/state"
+  for kind in ship scout secondmate; do
+    id="inbox-$kind-a1"
+    case "$kind" in
+      ship) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 ;;
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 ;;
+      secondmate) FM_HOME="$home" FM_SECONDMATE_CHARTER=x "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep "durable message files in '$state/$id.inbox'" "$brief" "$kind: brief lost the full inbox path fallback"
+    assert_grep "list '$state/$id.inbox'/*.msg" "$brief" "$kind: brief lost the list instruction"
+    assert_grep "numeric order" "$brief" "$kind: brief lost the ordered-processing rule"
+    assert_grep "mv '$state/$id.inbox'/NNN.msg '$state/$id.inbox'/handled/" "$brief" "$kind: brief lost the handled/ acknowledgement"
+  done
+  pass "fm-brief.sh: every scaffold keeps the full inbox path and ack contract the doorbell relies on"
+}
+
 test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   local root home data_override state_override brief baseline err status
   root="$TMP_ROOT/relative-directory-inputs"
@@ -1474,6 +1500,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
+test_inbox_section_stays_consistent_with_the_doorbell
 test_scouting_delegation_section_in_ship_and_scout
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_captain_hold_policy
