@@ -9,7 +9,8 @@
 #
 # Each child runs under env -i with the shared filesystem-composed PATH, HOME,
 # FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. RunPod commands also
-# receive the validated FM_TREEHOUSE_LOCAL_ROOT. Commands receive their
+# receive the validated FM_TREEHOUSE_LOCAL_ROOT; the library header owns the
+# optional USER and LOGNAME passthrough. Commands receive their
 # captured stdin and have a 360-second default timeout. Their stdout and stderr
 # are independently constrained to the job library's 1048576-byte bound. A
 # record is marked done only after its bounded outputs and numeric exit status
@@ -578,6 +579,9 @@ worker_run_job() { # <account-home> <job-dir>
   if [ -n "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" ]; then
     child_env+=("FM_REMOTE_JOB_PLATFORM_OVERRIDE=$FM_REMOTE_JOB_PLATFORM_OVERRIDE")
   fi
+  # macOS credential lookups key on the login identity; see the library header.
+  [ -z "${USER:-}" ] || child_env+=("USER=$USER")
+  [ -z "${LOGNAME:-}" ] || child_env+=("LOGNAME=$LOGNAME")
   remaining=$((deadline - $(date +%s)))
   [ "$remaining" -gt 0 ] || {
     worker_cleanup_output_capture "$job" "$stdout_reader" "$stderr_reader"

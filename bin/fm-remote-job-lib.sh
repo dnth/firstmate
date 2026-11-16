@@ -28,7 +28,10 @@
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
 # PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. RunPod
-# children also receive the validated FM_TREEHOUSE_LOCAL_ROOT. The PATH
+# children also receive the validated FM_TREEHOUSE_LOCAL_ROOT. USER and LOGNAME
+# are added only when nonempty in the worker's environment, since macOS
+# credential lookups key on the login identity; they never override the fields
+# above. The PATH
 # is intentionally filesystem-discovered rather than login-shell-derived:
 # ~/.local/bin; nvm, asdf, and mise shims/install bins; Nix; Homebrew; and the
 # system tail. No shell startup files are evaluated.
@@ -701,10 +704,12 @@ fm_remote_job_worker_ready_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.r
 fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.identity"; }
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
 
+# Pin LC_ALL=C so lstart is locale-invariant: an owner recorded under one locale
+# must still verify under another, or a live owner looks dead.
 fm_remote_job_process_start() {
   local pid=$1 ps_bin value
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
-  value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  value=$(LC_ALL=C "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s\n' "$value"
