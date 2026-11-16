@@ -443,6 +443,27 @@ function todoAutosyncScopeApplies(extensionRoot: string, state: string): boolean
 	return todoAutosyncScope;
 }
 
+function todoAutosyncOwnsLock(state: string): boolean {
+	try {
+		const lockPid = readFleetMetaFile(resolve(state, ".lock")).trim();
+		if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return false;
+		let pid = String(process.pid);
+		for (let depth = 0; depth < 8; depth++) {
+			if (pid === lockPid) return true;
+			const parent = spawnSync("ps", ["-o", "ppid=", "-p", pid], {
+				encoding: "utf8", timeout: READ_ONLY_TIMEOUT_MS,
+			});
+			if (parent.status !== 0) return false;
+			pid = parent.stdout.trim();
+			if (!/^[0-9]+$/.test(pid) || pid === "1") break;
+		}
+	} catch {
+	}
+	return false;
+}
+
+let todoAutosyncGeneration = 0;
+
 // Sessions whose projection pass is still running, and the projection each
 // session was already offered. The first prevents a slow projection from
 // overlapping itself when turns arrive faster than `--emit` returns; the second
@@ -455,12 +476,15 @@ async function syncSessionTodo(pi: ExtensionAPI, ctx: unknown): Promise<void> {
 		const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 		const fmHome = process.env.FM_HOME || extensionRoot;
 		const state = process.env.FM_STATE_OVERRIDE || resolve(fmHome, "state");
-		if (!todoAutosyncScopeApplies(extensionRoot, state)) return;
+		if (!todoAutosyncScopeApplies(extensionRoot, state) || !todoAutosyncOwnsLock(state)) return;
 		const data = process.env.FM_DATA_OVERRIDE || resolve(fmHome, "data");
 		const boardPath = resolve(data, "backlog.md");
 		let version = boardVersion(boardPath);
 		if (!version) return;
 		const sessionId = todoAutosyncSessionId(ctx);
+		const generation = todoAutosyncGeneration;
+		const passIsCurrent = () => generation === todoAutosyncGeneration
+			&& todoAutosyncSessionId(ctx) === sessionId && todoAutosyncOwnsLock(state);
 		const recordPath = resolve(state, TODO_AUTOSYNC_STATE_DIR, `${createHash("sha256").update(sessionId || "session").digest("hex").slice(0, 16)}.json`);
 		const memoryKey = `${recordPath}\u0000${sessionId}`;
 		if (autosyncInFlight.has(memoryKey)) return;
@@ -478,6 +502,7 @@ async function syncSessionTodo(pi: ExtensionAPI, ctx: unknown): Promise<void> {
 					phases = parseTodoProjection(output);
 				} catch {
 				}
+				if (!passIsCurrent()) return;
 				const record: TodoAutosyncRecord = { ...previous, ...version, dateKey };
 				if (phases) {
 					const hash = todoProjectionHash(phases);
@@ -485,9 +510,11 @@ async function syncSessionTodo(pi: ExtensionAPI, ctx: unknown): Promise<void> {
 					if ((live && todoProjectionHash(live) === hash)
 						|| previous?.hash === hash || offeredProjections.get(memoryKey) === hash) {
 						record.hash = hash;
+						offeredProjections.set(memoryKey, hash);
 					} else {
 						const content = buildTodoAutosyncInstruction(phases);
 						if (content) {
+							if (!passIsCurrent()) return;
 							pi.sendMessage(
 								{
 									customType: "firstmate-todo-projection",
@@ -503,6 +530,7 @@ async function syncSessionTodo(pi: ExtensionAPI, ctx: unknown): Promise<void> {
 						}
 					}
 				}
+				if (!passIsCurrent()) return;
 				writeTodoAutosyncRecord(recordPath, record);
 				const nextVersion = boardVersion(boardPath);
 				const nextDate = new Date().toISOString().slice(0, 10);
@@ -525,6 +553,10 @@ function register(pi: ExtensionAPI, event: string, handler: (event: any, ctx: an
 }
 
 export default function fmFleetHooks(pi: ExtensionAPI): void {
+	register(pi, "session_switch", () => {
+		todoAutosyncGeneration++;
+	});
+
 	register(pi, "tool_result", (event) => {
 		try {
 			const content = redactToolResultContent(event?.content);

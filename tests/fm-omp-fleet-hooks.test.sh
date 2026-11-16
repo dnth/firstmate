@@ -179,7 +179,7 @@ const { default: extension } = await import(process.env.FM_HOOKS);
 const handlers = new Map();
 const sent = [];
 extension({ on(name, handler) { handlers.set(name, handler); }, sendMessage(message, options) { sent.push({ message, options }); } });
-assert.deepEqual([...handlers.keys()], ["tool_result", "todo_reminder", "turn_end", "session.compacting"]);
+assert.deepEqual([...handlers.keys()], ["session_switch", "tool_result", "todo_reminder", "turn_end", "session.compacting"]);
 assert.equal(await handlers.get("tool_result")({ content: null }), undefined);
 const reminder = await handlers.get("todo_reminder")({}, {});
 assert.equal(reminder, undefined);
@@ -287,6 +287,8 @@ const turnEnd = handlers.get("turn_end");
 const initialTodo = [{ name: "Active", tasks: [{ content: "ship-1 - Ship Alpha", status: "pending" }] }];
 const todoResult = phases => ({ type: "message", message: { role: "toolResult", toolName: "todo", details: { phases } } });
 const ctx = { sessionManager: { getSessionId: () => "primary-session-a", getBranch: () => [todoResult(initialTodo)] } };
+const lockPath = join(process.env.FM_STATE_OVERRIDE, ".lock");
+writeFileSync(lockPath, `${process.pid}\n`);
 const stateDir = join(process.env.FM_STATE_OVERRIDE, "omp-todo-autosync");
 const board = process.env.FM_FIXTURE_BOARD;
 const emitLog = process.env.FM_FAKE_EMIT_LOG;
@@ -438,6 +440,72 @@ for (const mode of ["catchup", "catchup-fail", "catchup-bad", "churn"]) {
   assert.match(sent.at(-1).message.content, /queued-1 - Queue Beta/);
 }
 process.env.FM_FAKE_EMIT_MODE = "ok";
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+const cycleCtx = { sessionManager: { getSessionId: () => "cycle-session", getBranch: () => [todoResult(initialTodo)] } };
+const cycleOffers = sent.length;
+await turnEnd({}, cycleCtx);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, cycleOffers + 1);
+process.env.FM_FAKE_PROJECTION = '[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]';
+appendFileSync(board, "cycle A\n");
+await turnEnd({}, cycleCtx);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, cycleOffers + 1);
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+appendFileSync(board, "cycle B\n");
+await turnEnd({}, cycleCtx);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, cycleOffers + 2);
+
+const lockCtx = { sessionManager: { getSessionId: () => "lock-session", getBranch: () => [] } };
+const lockedEmits = emitCount();
+const lockedOffers = sent.length;
+const lockedState = readdirSync(stateDir);
+for (const lock of [undefined, "invalid", "1", "99999999"]) {
+  if (lock === undefined) unlinkSync(lockPath);
+  else writeFileSync(lockPath, lock);
+  appendFileSync(board, "foreign lock\n");
+  await turnEnd({}, lockCtx);
+  await settle();
+  assert.equal(emitCount(), lockedEmits);
+  assert.equal(sent.length, lockedOffers);
+  assert.deepEqual(readdirSync(stateDir), lockedState);
+}
+writeFileSync(lockPath, `${process.pid}\n`);
+await turnEnd({}, lockCtx);
+await waitForEmits(lockedEmits + 1);
+assert.equal(sent.length, lockedOffers + 1);
+
+writeFileSync(lockPath, `${process.ppid}\n`);
+await freshTurn("ancestor-lock", () => [], 1);
+writeFileSync(lockPath, `${process.pid}\n`);
+
+for (const boundary of ["switch", "identity", "lock", "lock-fail", "lock-bad"]) {
+  process.env.FM_FAKE_EMIT_MODE = boundary === "lock-fail" ? "catchup-fail"
+    : boundary === "lock-bad" ? "catchup-bad" : "catchup";
+  try { unlinkSync(`${emitLog}.rewrite`); } catch {}
+  const boundaryOffers = sent.length;
+  const boundaryState = readdirSync(stateDir).map(file => [file, readFileSync(join(stateDir, file), "utf8")]);
+  let sessionId = `before-${boundary}`;
+  let branchReads = 0;
+  const boundaryCtx = { sessionManager: { getSessionId: () => sessionId, getBranch: () => { branchReads++; return []; } } };
+  await turnEnd({}, boundaryCtx);
+  const deadline = Date.now() + 8000;
+  while (!existsSync(`${emitLog}.rewrite`) && Date.now() < deadline) await sleep(10);
+  assert.ok(existsSync(`${emitLog}.rewrite`));
+  if (boundary === "switch") handlers.get("session_switch")({}, boundaryCtx);
+  if (boundary === "identity") sessionId = "after-identity";
+  if (boundary.startsWith("lock")) writeFileSync(lockPath, "99999999");
+  await sleep(500);
+  assert.equal(sent.length, boundaryOffers, boundary);
+  assert.equal(branchReads, 0, boundary);
+  assert.deepEqual(readdirSync(stateDir).map(file => [file, readFileSync(join(stateDir, file), "utf8")]), boundaryState, boundary);
+  writeFileSync(lockPath, `${process.pid}\n`);
+  process.env.FM_FAKE_EMIT_MODE = "ok";
+  await turnEnd({}, boundaryCtx);
+  await waitForEmits(emitCount() + 1);
+  assert.equal(sent.length, boundaryOffers + 1, `${boundary} recovery`);
+}
 console.log("ok - OMP turn-end autosync offers one bounded projection per board change");
 JS
 autosync_status=$?
