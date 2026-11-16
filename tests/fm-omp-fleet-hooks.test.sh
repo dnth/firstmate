@@ -179,7 +179,7 @@ const { default: extension } = await import(process.env.FM_HOOKS);
 const handlers = new Map();
 const sent = [];
 extension({ on(name, handler) { handlers.set(name, handler); }, sendMessage(message, options) { sent.push({ message, options }); } });
-assert.deepEqual([...handlers.keys()], ["tool_result", "todo_reminder", "session.compacting"]);
+assert.deepEqual([...handlers.keys()], ["tool_result", "todo_reminder", "turn_end", "session.compacting"]);
 assert.equal(await handlers.get("tool_result")({ content: null }), undefined);
 const reminder = await handlers.get("todo_reminder")({}, {});
 assert.equal(reminder, undefined);
@@ -219,6 +219,186 @@ after_handler=$(fixture_digest)
 [ "$before_handler" = "$after_handler" ] \
   || fail "OMP fleet handlers mutated the observable board or state bytes"
 pass "OMP fleet drift and compaction handlers leave board and state bytes unchanged"
+
+AUTOSYNC_ROOT="$TMP_ROOT/autosync-home"
+mkdir -p "$AUTOSYNC_ROOT/.omp/extensions" "$AUTOSYNC_ROOT/bin" "$AUTOSYNC_ROOT/state" "$AUTOSYNC_ROOT/data"
+cp "$FM_HOOKS" "$AUTOSYNC_ROOT/.omp/extensions/fm-fleet-hooks.ts"
+cp "$ROOT/bin/fm-primary-scope-lib.sh" "$AUTOSYNC_ROOT/bin/fm-primary-scope-lib.sh"
+printf 'fixture home\n' > "$AUTOSYNC_ROOT/AGENTS.md"
+printf '## In flight\n- [ ] ship-1 - Ship Alpha\n' > "$AUTOSYNC_ROOT/data/backlog.md"
+git -C "$AUTOSYNC_ROOT" init -q
+cat > "$AUTOSYNC_ROOT/bin/fm-todo-project.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = "--emit" ] || exit 2
+[ -z "${FM_FAKE_EMIT_LOG:-}" ] || printf 'emit\n' >> "$FM_FAKE_EMIT_LOG"
+projection='[{"phase":"Active","items":["ship-1 - Ship Alpha"]}]'
+[ -z "${FM_FAKE_PROJECTION:-}" ] || projection=$FM_FAKE_PROJECTION
+case "${FM_FAKE_EMIT_MODE:-ok}" in
+  ok) printf '%s\n' "$projection" ;;
+  fail) printf '%s\n' 'projection backend unavailable' >&2 ; exit 3 ;;
+  badjson) printf '%s\n' '{"phase":"Active"' ;;
+  shape) printf '%s\n' '[{"phase":"Active","items":[7]}]' ;;
+  empty) printf '%s\n' '[]' ;;
+  hang)
+    [ -z "${FM_FAKE_EMIT_PID:-}" ] || printf '%s\n' "$$" > "$FM_FAKE_EMIT_PID"
+    exec sleep 60
+    ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$AUTOSYNC_ROOT/bin/fm-todo-project.sh"
+AUTOSYNC_HOOKS="$AUTOSYNC_ROOT/.omp/extensions/fm-fleet-hooks.ts"
+CHANGED_PROJECTION='[{"phase":"Active","items":["ship-1 - Ship Alpha"]},{"phase":"Ready","items":["queued-1 - Queue Beta"]}]'
+BOARD="$AUTOSYNC_ROOT/data/backlog.md"
+EMIT_LOG="$TMP_ROOT/autosync-emit.log"
+EMIT_PID="$TMP_ROOT/autosync-emit.pid"
+
+env -u FM_TASK_ID FM_HOOKS="$AUTOSYNC_HOOKS" FM_HOME="$AUTOSYNC_ROOT" FM_STATE_OVERRIDE="$AUTOSYNC_ROOT/state" \
+FM_CHANGED_PROJECTION="$CHANGED_PROJECTION" FM_FAKE_EMIT_LOG="$EMIT_LOG" FM_FAKE_EMIT_PID="$EMIT_PID" \
+FM_FIXTURE_BOARD="$BOARD" node --experimental-strip-types --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const { default: extension } = await import(process.env.FM_HOOKS);
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+const handlers = new Map();
+const sent = [];
+extension({ on(name, handler) { handlers.set(name, handler); }, sendMessage(message, options) { sent.push({ message, options }); } });
+const turnEnd = handlers.get("turn_end");
+const ctx = { sessionManager: { getSessionId: () => "primary-session-a" } };
+const stateDir = join(process.env.FM_STATE_OVERRIDE, "omp-todo-autosync");
+const board = process.env.FM_FIXTURE_BOARD;
+const emitLog = process.env.FM_FAKE_EMIT_LOG;
+const emitCount = () => {
+  try { return readFileSync(emitLog, "utf8").split("\n").filter(Boolean).length; } catch { return 0; }
+};
+const waitForEmits = async count => {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    if (emitCount() >= count) { await sleep(200); return; }
+    await sleep(20);
+  }
+  throw new Error(`projection subprocess stayed at ${emitCount()}, waiting for ${count}`);
+};
+const settle = async () => { await sleep(300); };
+
+// A fresh session already applied the board at session start: the first turn
+// only records a baseline, so an unchanged board stays silent.
+await turnEnd({}, ctx);
+await waitForEmits(1);
+assert.equal(sent.length, 0);
+const baselineFiles = readdirSync(stateDir);
+assert.equal(baselineFiles.length, 1);
+const baseline = JSON.parse(readFileSync(join(stateDir, baselineFiles[0]), "utf8"));
+assert.match(baseline.hash, /^[0-9a-f]{64}$/);
+
+// AC2: repeated turns on an unchanged board inject nothing and cost no
+// projection subprocess at all.
+await turnEnd({}, ctx);
+await turnEnd({}, ctx);
+await settle();
+assert.equal(emitCount(), 1);
+assert.equal(sent.length, 0);
+
+// AC1: the turn that observes a board write offers one bounded instruction
+// carrying the projection the todo tool must re-initialize from.
+appendFileSync(board, "- [ ] queued-1 - Queue Beta\n");
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+await turnEnd({}, ctx);
+await waitForEmits(2);
+assert.equal(sent.length, 1);
+assert.equal(sent[0].message.customType, "firstmate-todo-projection");
+assert.equal(sent[0].message.display, false);
+assert.match(sent[0].message.content, /\{"op":"init","list":\[/);
+assert.match(sent[0].message.content, /queued-1 - Queue Beta/);
+assert.match(sent[0].message.content, /board projection, not a new request/);
+assert.ok(sent[0].message.content.length <= 8000);
+assert.deepEqual(sent[0].options, { deliverAs: "nextTurn", triggerTurn: true });
+
+// AC2: the same changed projection never repeats, however many turns follow.
+await turnEnd({}, ctx);
+await turnEnd({}, ctx);
+await turnEnd({}, ctx);
+await settle();
+assert.equal(emitCount(), 2);
+assert.equal(sent.length, 1);
+
+// A board write that leaves the projection identical re-runs the projection
+// once and still offers nothing.
+appendFileSync(board, "\n");
+await turnEnd({}, ctx);
+await waitForEmits(3);
+assert.equal(sent.length, 1);
+
+// AC3: a failing, malformed, or wrongly shaped projection injects nothing,
+// never throws, and is not retried while the board version is unchanged.
+for (const mode of ["fail", "badjson", "shape"]) {
+  process.env.FM_FAKE_EMIT_MODE = mode;
+  appendFileSync(board, `# ${mode}\n`);
+  const before = emitCount();
+  await turnEnd({}, ctx);
+  await waitForEmits(before + 1);
+  assert.equal(sent.length, 1);
+  await turnEnd({}, ctx);
+  await turnEnd({}, ctx);
+  await settle();
+  assert.equal(emitCount(), before + 1);
+  assert.equal(sent.length, 1);
+}
+
+// AC3: a hung projection never blocks the turn that observes it.
+process.env.FM_FAKE_EMIT_MODE = "hang";
+appendFileSync(board, "# hang\n");
+const started = Date.now();
+await turnEnd({}, ctx);
+assert.ok(Date.now() - started < 100, `turn end blocked for ${Date.now() - started}ms`);
+const pidDeadline = Date.now() + 8000;
+while (Date.now() < pidDeadline && !existsSync(process.env.FM_FAKE_EMIT_PID)) await sleep(20);
+assert.ok(existsSync(process.env.FM_FAKE_EMIT_PID), "hung projection subprocess never started");
+process.kill(-Number(readFileSync(process.env.FM_FAKE_EMIT_PID, "utf8").trim()), "SIGKILL");
+await settle();
+assert.equal(sent.length, 1);
+process.env.FM_FAKE_EMIT_MODE = "ok";
+
+// An empty board is a real projection: its rebuild instruction clears the todo.
+appendFileSync(board, "# empty\n");
+process.env.FM_FAKE_PROJECTION = "[]";
+await turnEnd({}, ctx);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, 2);
+assert.match(sent[1].message.content, /"list":\[\]/);
+
+// A different session in the same home keeps its own record and starts from
+// its own baseline, so sibling sessions never inherit this one's projection.
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+const ctxB = { sessionManager: { getSessionId: () => "primary-session-b" } };
+await turnEnd({}, ctxB);
+await waitForEmits(emitCount() + 1);
+assert.equal(sent.length, 2);
+assert.equal(readdirSync(stateDir).length, 2);
+console.log("ok - OMP turn-end autosync offers one bounded projection per board change");
+JS
+autosync_status=$?
+expect_code 0 "$autosync_status" "OMP turn-end todo autosync assertions should pass"
+
+env -u FM_TASK_ID FM_HOOKS="$AUTOSYNC_HOOKS" FM_HOME="$AUTOSYNC_ROOT" FM_STATE_OVERRIDE="$AUTOSYNC_ROOT/state" \
+FM_CHANGED_PROJECTION="$CHANGED_PROJECTION" FM_TASK_ID="ship-9" node --experimental-strip-types --input-type=module <<'JS'
+import assert from "node:assert/strict";
+const { default: extension } = await import(process.env.FM_HOOKS);
+const handlers = new Map();
+const sent = [];
+extension({ on(name, handler) { handlers.set(name, handler); }, sendMessage(message, options) { sent.push({ message, options }); } });
+process.env.FM_FAKE_PROJECTION = process.env.FM_CHANGED_PROJECTION;
+await handlers.get("turn_end")({}, { sessionManager: { getSessionId: () => "primary-session-a" } });
+await new Promise(resolve => setTimeout(resolve, 500));
+assert.equal(sent.length, 0);
+console.log("ok - an fm-spawn task worker never replaces its own todo with the board");
+JS
+scope_status=$?
+expect_code 0 "$scope_status" "OMP todo autosync should stay silent inside a task worker"
+pass "OMP turn-end todo autosync stays bounded, fail-open, and primary-only"
+
 
 mkfifo "$HOME_FIXTURE/state/a-fifo.meta"
 FM_HOOKS="$HANDLER_HOOKS" FM_HOME="$HOME_FIXTURE" FM_STATE_OVERRIDE="$HOME_FIXTURE/state" \

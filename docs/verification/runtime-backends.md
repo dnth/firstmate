@@ -438,6 +438,28 @@ omp/18.1.14
 ok - OMP keeps normal todo operation while suppressing reminder-initiated turns
 ```
 
+The extension surface for the session todo list was inspected on 2026-11-16 against OMP 18.18.6 in the installed `@oh-my-pi/pi-coding-agent` package; no extension API sets the list live.
+
+```sh
+omp --version
+grep -n 'interface ExtensionAPI' -A 120 src/extensibility/extensions/types.ts
+grep -n 'todo' src/extensibility/extensions/types.ts
+grep -rn 'setTodos\|syncFromBranch()' src --include=*.ts
+grep -rn 'appendEntry' src/modes/runtime-init.ts
+```
+
+```text
+omp/18.18.6
+src/extensibility/extensions/types.ts:1168  ExtensionAPI: no todo mutator (tools, commands, messages, flags, model/tool state only)
+src/extensibility/extensions/types.ts:1238  only todo surface is `on("todo_reminder", ...)`, gated by `todo.reminders` (src/session/todo-tracker.ts:207)
+src/modes/interactive-mode.ts:5133         setTodos lives on the TUI mode controller, not the extension context
+src/modes/controllers/event-controller.ts:1628  todo UI state applies from a `todo` tool result's `details.phases`
+src/modes/controllers/todo-command-controller.ts:462  `/todo` edits persist `user_todo_edit` custom entries
+src/modes/runtime-init.ts:83                ExtensionAPI.appendEntry is sessionManager.appendCustomEntry; the todo tracker rehydrates it only through syncFromBranch on branch/rewind/session transition
+```
+
+`ExtensionAPI.appendEntry("user_todo_edit", { phases })` therefore persists a list that only rehydrates on a later branch or session transition, so it is not a live update. `tests/fm-omp-fleet-hooks.test.sh` proves the turn-end autosync path the extension uses instead: one bounded `--emit` projection instruction per board change, silence on an unchanged board and on a failed or malformed projection, and no board replacement inside an `fm-spawn` task worker.
+
 ### OMP native orchestration opt-in
 
 The agent-runtime launch and activation contract is owned by the [harness-adapters skill](../../.agents/skills/harness-adapters/SKILL.md); this page records its verification evidence without restating that contract.
