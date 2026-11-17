@@ -2490,6 +2490,7 @@ fm_backend_herdr_report_agent_label() {  # <target> <harness> [<model>] [<effort
 # Background worker: its caller owns descriptor detachment and warning log.
 fm_backend_herdr_publish_agent_label() {  # <target> <session> <pane> <label>
   local target=$1 session=$2 pane=$3 label=$4 err rc
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   if err=$(fm_run_timed 2 bash -c '
     . "$1/bin/backends/herdr.sh"
     shift
