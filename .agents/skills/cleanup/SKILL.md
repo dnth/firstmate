@@ -1,6 +1,6 @@
 ---
 name: cleanup
-description: Report-first review of finished scouts and workers, stale working copies, leftover panes or processes, and reclaimable disk space. Use when the captain invokes /cleanup (e.g. "/cleanup", "what can we clean up", "free up disk space") or asks to list or clean up finished scouts, merged or done work, stale working copies, leftover resources, or disk space.
+description: Report-first review of finished scouts and workers, stale working copies, leftover panes or processes, and reclaimable disk space. Use when the captain invokes /cleanup or /cleanup sweep (e.g. "/cleanup", "/cleanup sweep", "sweep the finished copies", "sweep once", "what can we clean up", "free up disk space") or asks to list or clean up finished scouts, merged or done work, stale working copies, leftover resources, or disk space.
 user-invocable: true
 metadata:
   internal: true
@@ -10,6 +10,7 @@ metadata:
 
 `/cleanup` is a report-first, on-demand review of fleet resources that may be ready to remove: finished scouts and workers still open, stale pooled working copies, leftover panes or processes, and reclaimable disk space.
 It removes nothing on its own, never forces, and runs only when the captain asks: it gathers evidence, reports, waits for the captain's word, and then executes only the removals the captain names.
+`/cleanup sweep` is the narrow on-demand mode: it reports only pooled working copies, then runs the approved clean-tier pass once.
 
 ## Safety rules
 
@@ -44,6 +45,23 @@ For each recorded task whose endpoint or working copy may still be live:
 - Give every damaged or orphaned slot one inventory row: measured size, the last owner when a readable claim or a prior state record names one, and whether any content looks recoverable - a working `git status` means readable content, while a broken admin link, a missing backing repository, or an unreadable tree means the content cannot be verified.
 - Removal of a damaged copy never goes through a sweep tier: the captain names its exact path, and the removal stays a manual act, because a broken copy can still hold a live foreign consumer.
 - Remote second mates' pools are report-only through the existing remote path: `bin/fm-on.sh <secondmate-id> fm-treehouse-sweep.sh --all` for each remote record in `data/secondmates.md`, with no removal through that route.
+
+## Sweep mode
+
+`/cleanup sweep` is the narrow on-demand mode: it reports only pooled working copies, then runs the approved clean-tier pass once.
+It composes the "Stale working copies for done or merged tasks" rules above and adds no authority; that section still owns the tiers, the ownership proof, and every guard.
+
+- Check the opt-in flag first: when the `config/treehouse-sweep-clean` flag under the Firstmate home is absent, say so, name the flag, and stop, because `--apply-clean` refuses without it.
+- Run `bin/fm-treehouse-sweep.sh --all` for the read-only classification and keep its slot rows; its header owns the tier definitions, and no row's tier is re-decided here.
+- Measure each listed copy with `du -sk <path>`: the clean-tier reclaim figure is the sum of the measured clean rows, because treehouse's own reclaim line covers its whole stale set rather than this clean tier.
+- For each `clean` row, run `find <path> ! -user "$(id -u)" -print -quit 2>/dev/null`; flag a printed path as foreign-owned and a potential deletion obstacle, without predicting failure or recommending sudo removal before a failure occurs.
+- Show one short table with columns tier, path, measured size, and suggestion; the clean rows total is the reclaim figure for the pass.
+- Clean rows suggest the `--apply-clean` pass; every other row is report-only with the existing suggestion - `not ready` for skipped, damaged, claimed, leased, occupied, or unverifiable copies, and for a dirty slot only `bin/fm-treehouse-sweep.sh --apply-slot <path> --captain-approved` with the exact path, which this mode never runs.
+- Stop and wait for one word: that word approves the clean-tier pass wholesale, which is the approval the "Stale working copies" rules already require, and it never authorizes a per-slot removal.
+- On that word, capture `df -h` and `df -k` for each filesystem holding pooled copies, then run `bin/fm-treehouse-sweep.sh --apply-clean` once and preserve its exit status and output.
+- Whether the pass succeeds, refuses, or fails partway, repeat those filesystem measurements and the `--all` classification, then report which copies were removed and every copy left behind, comparing the before and after available blocks to report the observed filesystem space change, including partial deletion within surviving copies.
+- Report a refusal or a failed slot plainly and stop: no retry, no second pass, no `--force`, no workaround.
+- When a failed or partly deleted copy holds paths the current user does not own, list each one as an exact `sudo rm -rf <path>` line for the captain to run; firstmate never runs sudo.
 
 ## Panes and processes
 
