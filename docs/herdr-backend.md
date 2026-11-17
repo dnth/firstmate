@@ -209,11 +209,11 @@ The label is published through `herdr pane report-metadata <pane> --source first
 Workspace and tab labels are never touched, because they stay the task identity and recovery key described above.
 
 Publishing is best effort by contract.
-Publication runs in the background so launch completion, presentation-lock release, and readiness checks never wait for it.
+Publication makes one synchronous CLI call with a two-second bound through `bin/fm-timeout-lib.sh`, completing before the spawn continues.
 A failing or unsupported call prints one warning naming the pane, the label, and the CLI's own reason.
 Support is detected from the installed CLI's own refusal rather than a version comparison, so a build without `report-metadata` costs one warning and nothing else.
-The background publisher uses Python 3 to enforce a two-second CLI deadline, with no retry, polling, or read-back.
-A timeout or unavailable Python 3 costs one warning and leaves spawning successful.
+There is no retry, polling, read-back, or background publisher left holding the caller's captured output.
+When the bound expires, the runner terminates the child process group and publication costs exactly one warning while leaving spawning successful.
 
 Verified presentation limits, live against Herdr 0.9.5 protocol 22 and recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr):
 

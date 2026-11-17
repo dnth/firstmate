@@ -77,6 +77,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-timeout-lib.sh"
 
 # Shared, backend-neutral normalized-transition shape and the single-owner
 # status->action policy table (bin/fm-transition-lib.sh). This adapter's event
@@ -2464,37 +2465,29 @@ fm_backend_herdr_agent_display_label() {  # <harness> [<model>] [<effort>]
 }
 
 fm_backend_herdr_report_agent_label() {  # <target> <harness> [<model>] [<effort>]
-  local target=$1 label
+  local target=$1 label err rc
   shift
   label=$(fm_backend_herdr_agent_display_label "$@") || return 0
   fm_backend_herdr_parse_target "$target" || return 0
-  if ! command -v python3 >/dev/null 2>&1; then
-    printf 'warning: herdr pane %s was not given its display label; python3 unavailable\n' "$target" >&2
+  if err=$(fm_run_timed 2 bash -c '
+    . "$1/bin/backends/herdr.sh"
+    shift
+    fm_backend_herdr_cli "$@"
+  ' _ "$FM_BACKEND_HERDR_ROOT" "$FM_BACKEND_HERDR_SESSION" \
+    pane report-metadata "$FM_BACKEND_HERDR_PANE" --source firstmate \
+    --display-agent "$label" 2>&1 >/dev/null); then
     return 0
+  else
+    rc=$?
   fi
-  HERDR_SESSION="$FM_BACKEND_HERDR_SESSION" python3 - "$target" "$label" \
-    "$FM_BACKEND_HERDR_PANE" "$FM_BACKEND_HERDR_SESSION" <<'PYTHON' >/dev/null &
-import subprocess
-import sys
-
-target, label, pane, session = sys.argv[1:]
-try:
-    result = subprocess.run(
-        ["herdr", "pane", "report-metadata", pane, "--source", "firstmate",
-         "--display-agent", label, "--session", session],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE, timeout=2, text=True, errors="replace",
-    )
-    if result.returncode == 0:
-        sys.exit(0)
-    reason = result.stderr.splitlines()[0] if result.stderr else "report-metadata failed"
-except subprocess.TimeoutExpired:
-    reason = "report-metadata timed out after 2 seconds"
-except OSError as error:
-    reason = str(error).splitlines()[0]
-print(f'warning: herdr pane {target} was not given its display label "{label}": {reason}',
-      file=sys.stderr)
-PYTHON
+  if fm_timed_out "$rc"; then
+    err='report-metadata timed out after 2 seconds'
+  else
+    err=${err%%$'\n'*}
+    err=${err:-report-metadata failed}
+  fi
+  printf 'warning: herdr pane %s was not given its display label "%s": %s\n' \
+    "$target" "$label" "$err" >&2
   return 0
 }
 
