@@ -54,11 +54,12 @@ It composes the "Stale working copies for done or merged tasks" rules above and 
 - Check the opt-in flag first: when the `config/treehouse-sweep-clean` flag under the Firstmate home is absent, say so, name the flag, and stop, because `--apply-clean` refuses without it.
 - Run `bin/fm-treehouse-sweep.sh --all` for the read-only classification and keep its slot rows; its header owns the tier definitions, and no row's tier is re-decided here.
 - Measure each listed copy with `du -sk <path>`: the clean-tier reclaim figure is the sum of the measured clean rows, because treehouse's own reclaim line covers its whole stale set rather than this clean tier.
-- For each `clean` row, run `find <path> ! -user "$(id -u)" -print -quit 2>/dev/null`; a printed path means `--apply-clean` will stop inside that copy, so the row carries the exact `sudo rm -rf <path>` line the captain may run before approving.
+- For each `clean` row, run `find <path> ! -user "$(id -u)" -print -quit 2>/dev/null`; flag a printed path as foreign-owned and a potential deletion obstacle, without predicting failure or recommending sudo removal before a failure occurs.
 - Show one short table with columns tier, path, measured size, and suggestion; the clean rows total is the reclaim figure for the pass.
 - Clean rows suggest the `--apply-clean` pass; every other row is report-only with the existing suggestion - `not ready` for skipped, damaged, claimed, leased, occupied, or unverifiable copies, and for a dirty slot only `bin/fm-treehouse-sweep.sh --apply-slot <path> --captain-approved` with the exact path, which this mode never runs.
 - Stop and wait for one word: that word approves the clean-tier pass wholesale, which is the approval the "Stale working copies" rules already require, and it never authorizes a per-slot removal.
-- On that word run `bin/fm-treehouse-sweep.sh --apply-clean` once, then re-measure with `df -h` for the filesystem holding the pool plus a fresh `--all` classification, and report which copies were removed, the space freed, and every copy the pass left behind.
+- On that word, capture `df -h` and `df -k` for each filesystem holding pooled copies, then run `bin/fm-treehouse-sweep.sh --apply-clean` once and preserve its exit status and output.
+- Whether the pass succeeds, refuses, or fails partway, repeat those filesystem measurements and the `--all` classification, then report which copies were removed and every copy left behind, comparing the before and after available blocks to report the observed filesystem space change, including partial deletion within surviving copies.
 - Report a refusal or a failed slot plainly and stop: no retry, no second pass, no `--force`, no workaround.
 - When a failed or partly deleted copy holds paths the current user does not own, list each one as an exact `sudo rm -rf <path>` line for the captain to run; firstmate never runs sudo.
 
