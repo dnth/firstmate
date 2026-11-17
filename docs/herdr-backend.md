@@ -201,7 +201,7 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 Every successful crewmate, scout, and second-mate Herdr spawn publishes the pane's display-only agent label as `<harness> · <model> <effort>` from the values `fm-spawn.sh` records in the task metadata.
 A recorded model or effort meaning "unset" (empty, `-`, `default`) is omitted, so a launch with no model shows only the harness and one with no effort shows `<harness> · <model>`.
 An effort is omitted whenever no model survives, because it names a model's reasoning budget rather than a launch of its own.
-A raw launch command carries no verified adapter identity and takes no model flag, so it is never labeled.
+A raw launch command is labeled with its recorded executable identity as the harness, omitting unset model and effort values.
 
 `bin/backends/herdr.sh` owns composition and publishing (`fm_backend_herdr_agent_display_label`, `fm_backend_herdr_report_agent_label`).
 `fm-spawn.sh` reports the label once, immediately after the launch command lands in the pane, so one hook covers every launch shape: a fresh spawn, a relaunch that reuses a retained idle shell, and a relaunch that recreates a proven-absent pane all submit their launch there.
@@ -209,9 +209,11 @@ The label is published through `herdr pane report-metadata <pane> --source first
 Workspace and tab labels are never touched, because they stay the task identity and recovery key described above.
 
 Publishing is best effort by contract.
-A failing or unsupported call prints one warning naming the pane, the label, and the CLI's own reason, then the spawn continues unchanged.
+Publication runs in the background so launch completion, presentation-lock release, and readiness checks never wait for it.
+A failing or unsupported call prints one warning naming the pane, the label, and the CLI's own reason.
 Support is detected from the installed CLI's own refusal rather than a version comparison, so a build without `report-metadata` costs one warning and nothing else.
-The call is single-shot with no retry, no polling, and no read-back.
+The background publisher uses Python 3 to enforce a two-second CLI deadline, with no retry, polling, or read-back.
+A timeout or unavailable Python 3 costs one warning and leaves spawning successful.
 
 Verified presentation limits, live against Herdr 0.9.5 protocol 22 and recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr):
 

@@ -1098,6 +1098,29 @@ test_herdr_unsupported_display_label_never_fails_the_spawn() {
   pass "fm-spawn --relaunch: an unsupported display label warns once and the spawn still succeeds"
 }
 
+test_herdr_raw_launch_publishes_recorded_harness() {
+  local rec id pane
+  id=$(case_id herdr-raw-label)
+  rec=$(make_case herdr-raw-label "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" herdr "$WT_DIR" "$PROJ_DIR" claude
+  sed 's/^model=.*/model=default/; s/^effort=.*/effort=default/' "$HOME_DIR/state/$id.meta" > "$CASE_DIR/raw.meta"
+  mv "$CASE_DIR/raw.meta" "$HOME_DIR/state/$id.meta"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  cp "$(type -P true)" "$FAKEBIN_DIR/custom-agent"
+
+  SPAWN_OUT=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" "$SPAWN" "$id" "$PROJ_DIR" --relaunch \
+    --harness "$FAKEBIN_DIR/custom-agent --flag" 2>&1)
+  SPAWN_STATUS=$?
+  expect_code 0 "$SPAWN_STATUS" "a raw Herdr launch should succeed; got: $SPAWN_OUT"
+  assert_grep 'harness=custom-agent' "$HOME_DIR/state/$id.meta" "the raw executable identity was not recorded"
+  pane=$(sed -n 's/^herdr_pane_id=//p' "$HOME_DIR/state/$id.meta" | grep . | tail -1)
+  assert_grep $'\x1f''pane'$'\x1f''report-metadata'$'\x1f'"$pane"$'\x1f''--source'$'\x1f''firstmate'$'\x1f''--display-agent'$'\x1f''custom-agent'$'\x1f''--session' \
+    "$CASE_DIR/fake/herdr.log" "a raw launch did not publish its bare recorded harness label"
+  pass "fm-spawn --relaunch: a raw Herdr launch publishes its recorded harness"
+}
+
 test_herdr_drifted_pane_gets_one_cd() {
   local rec id
   id=$(case_id herdr-drift)
@@ -1418,6 +1441,7 @@ test_gone_relaunch_no_ownership_evidence_refuses
 test_gone_relaunch_foreign_lease_refuses
 test_herdr_gone_server_relaunch_recreates
 test_herdr_unsupported_display_label_never_fails_the_spawn
+test_herdr_raw_launch_publishes_recorded_harness
 test_herdr_drifted_pane_gets_one_cd
 test_herdr_drift_refuses_when_shell_wont_go
 test_zellij_absent_relaunch_recreates

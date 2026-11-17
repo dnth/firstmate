@@ -2463,29 +2463,38 @@ fm_backend_herdr_agent_display_label() {  # <harness> [<model>] [<effort>]
   fi
 }
 
-# fm_backend_herdr_report_agent_label <target> <harness> [<model>] [<effort>]:
-# publish this task's launch values as its pane's display-only agent label.
-# Best effort by contract: the label is presentation only, never task state or
-# ownership authority, so a failing or unsupported call prints one concise
-# warning and returns success. Support is detected from the installed CLI's own
-# refusal (an unknown subcommand exits non-zero), never from a version
-# comparison, so a newer or older herdr that still accepts report-metadata works
-# and one that does not is skipped. The call is single-shot - no retry, no poll,
-# no read-back - so the label can never hold up a spawn; the source is
-# "firstmate" so the label never collides with an agent's own lifecycle reports
-# (docs/herdr-backend.md "Pane display-agent label" owns the verified limits).
 fm_backend_herdr_report_agent_label() {  # <target> <harness> [<model>] [<effort>]
-  local target=$1 label err
+  local target=$1 label
   shift
   label=$(fm_backend_herdr_agent_display_label "$@") || return 0
   fm_backend_herdr_parse_target "$target" || return 0
-  if err=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" \
-    pane report-metadata "$FM_BACKEND_HERDR_PANE" --source firstmate \
-    --display-agent "$label" 2>&1 >/dev/null); then
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'warning: herdr pane %s was not given its display label; python3 unavailable\n' "$target" >&2
     return 0
   fi
-  printf 'warning: herdr pane %s was not given its display label "%s"; this pane may show its agent name instead: %s\n' \
-    "$target" "$label" "$(printf '%s\n' "$err" | sed -n '1p')" >&2
+  HERDR_SESSION="$FM_BACKEND_HERDR_SESSION" python3 - "$target" "$label" \
+    "$FM_BACKEND_HERDR_PANE" "$FM_BACKEND_HERDR_SESSION" <<'PYTHON' >/dev/null &
+import subprocess
+import sys
+
+target, label, pane, session = sys.argv[1:]
+try:
+    result = subprocess.run(
+        ["herdr", "pane", "report-metadata", pane, "--source", "firstmate",
+         "--display-agent", label, "--session", session],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE, timeout=2, text=True, errors="replace",
+    )
+    if result.returncode == 0:
+        sys.exit(0)
+    reason = result.stderr.splitlines()[0] if result.stderr else "report-metadata failed"
+except subprocess.TimeoutExpired:
+    reason = "report-metadata timed out after 2 seconds"
+except OSError as error:
+    reason = str(error).splitlines()[0]
+print(f'warning: herdr pane {target} was not given its display label "{label}": {reason}',
+      file=sys.stderr)
+PYTHON
   return 0
 }
 

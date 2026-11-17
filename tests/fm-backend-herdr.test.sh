@@ -472,6 +472,41 @@ test_report_agent_label_failure_warns_once_and_returns_success() {
   pass "fm_backend_herdr_report_agent_label: an unsupported call warns once and still succeeds"
 }
 
+test_report_agent_label_hung_cli_does_not_block_the_caller() {
+  local dir
+  dir="$TMP_ROOT/agent-label-hung"
+  mkdir -p "$dir/fakebin"
+  printf '#!/usr/bin/env bash\nexec sleep 30\n' > "$dir/fakebin/herdr"
+  chmod +x "$dir/fakebin/herdr"
+  PATH="$dir/fakebin:$PATH" python3 - "$ROOT" "$dir" <<'PYTHON'
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+root, directory = sys.argv[1:]
+marker = Path(directory) / "returned"
+with (Path(directory) / "warning").open("w") as warning:
+    process = subprocess.Popen(
+        ["bash", "-c", '. "$1/bin/backends/herdr.sh"; '
+         'fm_backend_herdr_report_agent_label fmtest:w9:p3 omp some-model high; '
+         'printf returned > "$2/returned"; wait', "_", root, directory],
+        stdout=subprocess.DEVNULL, stderr=warning,
+    )
+    deadline = time.monotonic() + 1.5
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    returned_promptly = marker.exists()
+    process.wait(timeout=4)
+assert returned_promptly, "display publication blocked launch completion"
+assert process.returncode == 0, "a metadata timeout failed the caller"
+lines = (Path(directory) / "warning").read_text().splitlines()
+assert len(lines) == 1 and "timed out after 2 seconds" in lines[0], lines
+PYTHON
+  expect_code 0 "$?" "a hung metadata CLI must return immediately and warn once after its deadline"
+  pass "fm_backend_herdr_report_agent_label: a hung CLI does not block and is bounded"
+}
+
 test_report_agent_label_without_a_composable_label_skips_the_cli() {
   local dir log resp fb rc
   dir="$TMP_ROOT/agent-label-skip"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5461,6 +5496,7 @@ test_agent_display_label_omits_unset_parts
 test_agent_display_label_without_harness_prints_nothing
 test_report_agent_label_publishes_the_composed_label
 test_report_agent_label_failure_warns_once_and_returns_success
+test_report_agent_label_hung_cli_does_not_block_the_caller
 test_report_agent_label_without_a_composable_label_skips_the_cli
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_launcher_identity_absent_without_a_herdr_pane
