@@ -440,11 +440,12 @@ test_report_agent_label_publishes_the_composed_label() {
   local dir log resp fb rc err
   dir="$TMP_ROOT/agent-label-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
-  err=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_agent_label fmtest:w9:p3 omp opencode-go-dnth-1/deepseek-v4.1-flash high' \
+  err=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$dir" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_agent_label fmtest:w9:p3 omp opencode-go-dnth-1/deepseek-v4.1-flash high; rc=$?; wait; exit "$rc"' \
     "$ROOT" 2>&1 >/dev/null); rc=$?
   expect_code 0 "$rc" "publishing a display label should succeed"
   [ -z "$err" ] || fail "a successful publish should stay silent, got: $err"
+  [ ! -s "$dir/state/herdr-agent-label.log" ] || fail "a successful publish should not log a warning"
   assert_contains "$(cat "$log")" \
     "HERDR_SESSION=fmtest"$'\x1f''pane'$'\x1f''report-metadata'$'\x1f''w9:p3'$'\x1f''--source'$'\x1f''firstmate'$'\x1f''--display-agent'$'\x1f''omp · opencode-go-dnth-1/deepseek-v4.1-flash high'$'\x1f''--session'$'\x1f''fmtest' \
     "the pane was not given its composed label from source firstmate in its own session"
@@ -459,10 +460,11 @@ test_report_agent_label_failure_warns_once_and_returns_success() {
   # does: refuse the command and exit non-zero (verified live: exit 2).
   printf 'error: unrecognized subcommand report-metadata\n' > "$resp/1.err"
   printf '2\n' > "$resp/1.exit"
-  err=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_agent_label fmtest:w9:p3 omp some-model high' \
+  err=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$dir" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_agent_label fmtest:w9:p3 omp some-model high; rc=$?; wait; exit "$rc"' \
     "$ROOT" 2>&1 >/dev/null); rc=$?
   expect_code 0 "$rc" "an unsupported report-metadata call must not fail its caller"
+  err=$(cat "$dir/state/herdr-agent-label.log")
   lines=$(printf '%s\n' "$err" | grep -c .)
   [ "$lines" = 1 ] || fail "an unsupported call should warn exactly once, got $lines line(s): $err"
   assert_contains "$err" "warning:" "the failure was not reported as a warning"
@@ -476,9 +478,14 @@ test_report_agent_label_hung_cli_does_not_block_the_caller() {
   local dir
   dir="$TMP_ROOT/agent-label-hung"
   mkdir -p "$dir/fakebin"
-  printf '#!/usr/bin/env bash\n(trap "" TERM; exec sleep 30) &\nwait\n' > "$dir/fakebin/herdr"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+(trap "" TERM; exec sleep 30) &
+printf '%s\n' "$!" > "$FM_HOME/descendant.pid"
+wait
+SH
   chmod +x "$dir/fakebin/herdr"
-  PATH="$dir/fakebin:$PATH" python3 - "$ROOT" <<'PYTHON'
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" python3 - "$ROOT" <<'PYTHON'
 import os
 import signal
 import subprocess
@@ -497,16 +504,27 @@ try:
 except subprocess.TimeoutExpired:
     os.killpg(process.pid, signal.SIGKILL)
     raise AssertionError("a descendant kept combined-output capture open beyond the bound")
-assert time.monotonic() - started < 5, "publication exceeded its deadline and cleanup allowance"
+assert time.monotonic() - started < 0.75, "metadata publication delayed combined-output capture"
 assert process.returncode == 0, process.returncode
-lines = output.splitlines()
-assert len(lines) == 2 and lines[-1] == "rc=0", lines
-assert lines[0].startswith("warning:"), lines
+assert output.strip() == "rc=0", output
+# Await the bounded publisher before the fixture disappears. Its warning is
+# emitted only after the timeout runner has cleaned up the command group.
+from pathlib import Path
+log = Path(os.environ["FM_HOME"]) / "state/herdr-agent-label.log"
+deadline = time.monotonic() + 6
+while not log.exists() or not log.read_text().strip():
+    assert time.monotonic() < deadline, "publisher did not finish with a warning"
+    time.sleep(0.02)
+lines = log.read_text().splitlines()
+assert len(lines) == 1 and lines[0].startswith("warning:"), lines
+pid = (Path(os.environ["FM_HOME"]) / "descendant.pid").read_text().strip()
+state = subprocess.run(["ps", "-o", "stat=", "-p", pid], capture_output=True, text=True).stdout.strip()
+assert not state or state.startswith("Z"), f"metadata descendant survived timeout: {pid} {state}"
 for expected in ("fmtest:w9:p3", "omp · some-model high", "timed out after 2 seconds"):
     assert expected in lines[0], lines
 PYTHON
-  expect_code 0 "$?" "a hung metadata CLI must end combined-output capture with success and one warning"
-  pass "fm_backend_herdr_report_agent_label: a hung CLI and its descendants stay bounded under output capture"
+  expect_code 0 "$?" "a hung metadata CLI must promptly release capture and log one warning after cleanup"
+  pass "fm_backend_herdr_report_agent_label: a hung CLI releases capture promptly and cleans up its descendants"
 }
 
 test_report_agent_label_without_a_composable_label_skips_the_cli() {

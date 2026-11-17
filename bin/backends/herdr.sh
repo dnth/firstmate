@@ -2465,16 +2465,37 @@ fm_backend_herdr_agent_display_label() {  # <harness> [<model>] [<effort>]
 }
 
 fm_backend_herdr_report_agent_label() {  # <target> <harness> [<model>] [<effort>]
-  local target=$1 label err rc
+  local target=$1 label
   shift
   label=$(fm_backend_herdr_agent_display_label "$@") || return 0
   fm_backend_herdr_parse_target "$target" || return 0
+  # Never leave a publisher holding the spawn's output pipes open. Diagnostics
+  # go to the owning home's log even when the caller captures combined output.
+  local log="$FM_HOME/state/herdr-agent-label.log"
+  if ! mkdir -p "${log%/*}" || ! : >> "$log"; then
+    printf 'warning: herdr pane %s display label could not be queued: cannot open %s\n' "$target" "$log" >&2
+    return 0
+  fi
+  # Exec a fresh shell so Bash's saved redirection descriptors cannot keep
+  # a command substitution's pipe open in the background child.
+  bash -c '
+    . "$1/bin/backends/herdr.sh"
+    shift
+    fm_backend_herdr_publish_agent_label "$@"
+  ' _ "$FM_BACKEND_HERDR_ROOT" "$target" "$FM_BACKEND_HERDR_SESSION" \
+    "$FM_BACKEND_HERDR_PANE" "$label" </dev/null >/dev/null 2>> "$log" &
+  return 0
+}
+
+# Background worker: its caller owns descriptor detachment and warning log.
+fm_backend_herdr_publish_agent_label() {  # <target> <session> <pane> <label>
+  local target=$1 session=$2 pane=$3 label=$4 err rc
   if err=$(fm_run_timed 2 bash -c '
     . "$1/bin/backends/herdr.sh"
     shift
     fm_backend_herdr_cli "$@"
-  ' _ "$FM_BACKEND_HERDR_ROOT" "$FM_BACKEND_HERDR_SESSION" \
-    pane report-metadata "$FM_BACKEND_HERDR_PANE" --source firstmate \
+  ' _ "$FM_BACKEND_HERDR_ROOT" "$session" \
+    pane report-metadata "$pane" --source firstmate \
     --display-agent "$label" 2>&1 >/dev/null); then
     return 0
   else

@@ -1089,11 +1089,18 @@ test_herdr_unsupported_display_label_never_fails_the_spawn() {
   FM_FAKE_HERDR_REPORT_METADATA_FAIL=1 run_spawn "$CASE_DIR" "$HOME_DIR" "$id"
   expect_code 0 "$SPAWN_STATUS" "an unsupported display-label call must not fail the spawn; got: $SPAWN_OUT"
   assert_contains "$SPAWN_OUT" "spawned $id" "the spawn did not report success after an unsupported display label"
+  local warning_log="$HOME_DIR/state/herdr-agent-label.log" poll
+  for poll in {1..100}; do
+    [ ! -s "$warning_log" ] || break
+    sleep 0.05
+  done
+  local diagnostics
+  diagnostics=$(cat "$warning_log")
   assert_grep $'\x1f''pane'$'\x1f''report-metadata' "$CASE_DIR/fake/herdr.log" \
     "the spawn never attempted the display label it was supposed to warn about"
-  warnings=$(printf '%s\n' "$SPAWN_OUT" | grep -c 'was not given its display label')
-  [ "$warnings" = 1 ] || fail "an unsupported display label should warn exactly once, got $warnings: $SPAWN_OUT"
-  assert_contains "$SPAWN_OUT" "unrecognized subcommand" "the warning did not carry the CLI's own refusal reason"
+  warnings=$(printf '%s\n' "$diagnostics" | grep -c 'was not given its display label')
+  [ "$warnings" = 1 ] || fail "an unsupported display label should warn exactly once, got $warnings: $diagnostics"
+  assert_contains "$diagnostics" "unrecognized subcommand" "the warning did not carry the CLI's own refusal reason"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "the spawn did not complete its recorded launch"
   pass "fm-spawn --relaunch: an unsupported display label warns once and the spawn still succeeds"
 }
