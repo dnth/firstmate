@@ -1089,8 +1089,8 @@ test_herdr_unsupported_display_label_never_fails_the_spawn() {
   FM_FAKE_HERDR_REPORT_METADATA_FAIL=1 run_spawn "$CASE_DIR" "$HOME_DIR" "$id"
   expect_code 0 "$SPAWN_STATUS" "an unsupported display-label call must not fail the spawn; got: $SPAWN_OUT"
   assert_contains "$SPAWN_OUT" "spawned $id" "the spawn did not report success after an unsupported display label"
-  local warning_log="$HOME_DIR/state/herdr-agent-label.log" poll
-  for poll in {1..100}; do
+  local warning_log="$HOME_DIR/state/herdr-agent-label.log" _
+  for _ in {1..100}; do
     [ ! -s "$warning_log" ] || break
     sleep 0.05
   done
