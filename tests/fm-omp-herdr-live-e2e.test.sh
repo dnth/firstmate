@@ -278,6 +278,12 @@ pane_missing() {
   printf '%s' "$out" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1
 }
 
+# The display-only pane label a captain reads at a glance. docs/herdr-backend.md
+# "Pane display-agent label" owns its composition and its best-effort contract.
+display_agent_of() { # <target>
+  lab pane get "$(pane_id "$1")" 2>/dev/null | jq -r '.result.pane.display_agent // empty' 2>/dev/null
+}
+
 session_file_for() {
   agent_json "$1" | jq -r 'select(.result.agent.agent_session.kind == "path") | .result.agent.agent_session.value // empty' 2>/dev/null
 }
@@ -557,6 +563,10 @@ WORKER_WORKSPACE=$(sed -n 's/^herdr_workspace_id=//p' "$WORKER_META")
 [ -n "$WORKER_WORKSPACE" ] && [ "$WORKER_WORKSPACE" = "$PRIMARY_WORKSPACE" ] \
   || fail "Herdr worker workspace '$WORKER_WORKSPACE' did not match primary live workspace '$PRIMARY_WORKSPACE'"
 assert_grep "worktree=$WORKER_WT" "$WORKER_META" "Herdr worker did not enter its isolated worktree"
+# The pane must publish the spawn's own launch values as its display-only
+# label, before and after the harness starts reporting its own state.
+[ "$(display_agent_of "$WORKER_TARGET")" = 'omp · openai-codex/gpt-5.6-luna low' ] \
+  || fail "Herdr worker pane did not publish its launch label at spawn time; got '$(display_agent_of "$WORKER_TARGET")'"
 # Turn-end markers are per generation (state/<id>.turn-ended.<spawn_gen>).
 WORKER_GEN=$(sed -n 's/^spawn_gen=//p' "$WORKER_META" | tail -1)
 [ -n "$WORKER_GEN" ] || fail "worker metadata lost its spawn_gen"
@@ -564,6 +574,8 @@ WORKER_TURNEND="$HOME_DIR/state/$WORKER_ID.turn-ended.$WORKER_GEN"
 wait_for "worker extension readiness" file_exists "$HOME_DIR/state/$WORKER_ID.omp-ready"
 wait_for "worker first turn" file_exists "$WORKER_TURNEND"
 wait_for "exact idle worker identity" agent_is "$WORKER_TARGET" omp 'idle done'
+[ "$(display_agent_of "$WORKER_TARGET")" = 'omp · openai-codex/gpt-5.6-luna low' ] \
+  || fail "Herdr worker pane lost its launch label once the harness reported its own agent state; got '$(display_agent_of "$WORKER_TARGET")'"
 WORKER_SESSION=$(session_file_for "$WORKER_TARGET")
 case "$WORKER_SESSION" in "/tmp/fm-$WORKER_ID/omp-sessions/"*.jsonl) ;; *) fail "worker Herdr identity did not bind its task-owned session" ;; esac
 file_has "$WORKER_SESSION" 'Herdr worker is ready.' || fail "worker launch brief did not complete"
@@ -684,6 +696,8 @@ SCOUT_WT=$(sed -n 's/^worktree=//p' "$SCOUT_META")
 assert_grep 'harness=omp' "$SCOUT_META" "Herdr scout metadata lost exact OMP identity"
 assert_grep 'kind=scout' "$SCOUT_META" "Herdr scout changed delivery semantics"
 assert_grep "worktree=$SCOUT_WT" "$SCOUT_META" "Herdr scout did not enter its isolated worktree"
+[ "$(display_agent_of "$SCOUT_TARGET")" = 'omp · openai-codex/gpt-5.6-luna low' ] \
+  || fail "Herdr scout pane did not publish its launch label; got '$(display_agent_of "$SCOUT_TARGET")'"
 wait_for "scout extension readiness" file_exists "$HOME_DIR/state/$SCOUT_ID.omp-ready"
 wait_for "scout first turn" file_exists "$HOME_DIR/state/$SCOUT_ID.turn-ended"
 wait_for "exact idle scout identity" agent_is "$SCOUT_TARGET" omp 'idle done'
@@ -759,6 +773,8 @@ SECONDMATE_META="$HOME_DIR/state/$SECONDMATE_ID.meta"
 SECONDMATE_TARGET=$(sed -n 's/^window=//p' "$SECONDMATE_META")
 assert_grep 'harness=omp' "$SECONDMATE_META" "Herdr secondmate metadata lost exact OMP identity"
 assert_grep 'kind=secondmate' "$SECONDMATE_META" "Herdr secondmate metadata lost its role"
+[ "$(display_agent_of "$SECONDMATE_TARGET")" = 'omp · openai-codex/gpt-5.6-luna low' ] \
+  || fail "Herdr secondmate pane did not publish its launch label; got '$(display_agent_of "$SECONDMATE_TARGET")'"
 wait_for "secondmate primary integration" file_nonempty "$SECOND_HOME/state/.omp-primary-extension-loaded"
 wait_for_fresh_watcher "secondmate fresh watcher beacon" "$SECOND_HOME/state"
 wait_for "exact idle secondmate identity" agent_is "$SECONDMATE_TARGET" omp 'idle done'
@@ -778,6 +794,10 @@ wait_for "exact secondmate pane absence" pane_missing "$SECONDMATE_TARGET"
 spawn_secondmate >/dev/null || fail "production OMP Herdr secondmate exact-session recovery failed"
 RESUMED_TARGET=$(sed -n 's/^window=//p' "$SECONDMATE_META")
 wait_for "resumed exact secondmate identity" agent_is "$RESUMED_TARGET" omp 'idle done'
+# The respawned pane is a replacement endpoint, so the label must converge back
+# onto it rather than living only on the pane that died.
+[ "$(display_agent_of "$RESUMED_TARGET")" = 'omp · openai-codex/gpt-5.6-luna low' ] \
+  || fail "respawned Herdr secondmate pane did not re-report its launch label; got '$(display_agent_of "$RESUMED_TARGET")'"
 [ "$(cat "$SECOND_HOME/state/.omp-session")" = "$SECONDMATE_SESSION" ] \
   || fail "secondmate recovery changed the retained session identity"
 set +e

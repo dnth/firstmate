@@ -77,6 +77,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-timeout-lib.sh"
 
 # Shared, backend-neutral normalized-transition shape and the single-owner
 # status->action policy table (bin/fm-transition-lib.sh). This adapter's event
@@ -2439,6 +2440,77 @@ fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+}
+
+# fm_backend_herdr_agent_display_label <harness> [<model>] [<effort>]: compose
+# the display-only pane label "<harness> · <model> <effort>" from a task's
+# recorded launch values (docs/herdr-backend.md "Pane display-agent label" owns
+# the contract). The recorded metadata sentinels meaning "unset" (empty, "-",
+# "default") are omitted rather than printed, and effort is omitted whenever no
+# model survives because it names a model's reasoning budget, not a launch of
+# its own. An unknown harness prints nothing and fails: it is the one part
+# every label needs. Prints the label on success.
+fm_backend_herdr_agent_display_label() {  # <harness> [<model>] [<effort>]
+  local harness=${1:-} model=${2:-} effort=${3:-}
+  case "$harness" in ''|-|default) return 1 ;; esac
+  case "$model" in ''|-|default) model= ;; esac
+  case "$effort" in ''|-|default) effort= ;; esac
+  if [ -z "$model" ]; then
+    printf '%s' "$harness"
+  elif [ -z "$effort" ]; then
+    printf '%s · %s' "$harness" "$model"
+  else
+    printf '%s · %s %s' "$harness" "$model" "$effort"
+  fi
+}
+
+fm_backend_herdr_report_agent_label() {  # <target> <harness> [<model>] [<effort>]
+  local target=$1 label
+  shift
+  label=$(fm_backend_herdr_agent_display_label "$@") || return 0
+  fm_backend_herdr_parse_target "$target" || return 0
+  # Never leave a publisher holding the spawn's output pipes open. Diagnostics
+  # go to the owning home's log even when the caller captures combined output.
+  local log="$FM_HOME/state/herdr-agent-label.log"
+  if ! mkdir -p "${log%/*}" || ! : >> "$log"; then
+    printf 'warning: herdr pane %s display label could not be queued: cannot open %s\n' "$target" "$log" >&2
+    return 0
+  fi
+  # Exec a fresh shell so Bash's saved redirection descriptors cannot keep
+  # a command substitution's pipe open in the background child.
+  bash -c '
+    . "$1/bin/backends/herdr.sh"
+    shift
+    fm_backend_herdr_publish_agent_label "$@"
+  ' _ "$FM_BACKEND_HERDR_ROOT" "$target" "$FM_BACKEND_HERDR_SESSION" \
+    "$FM_BACKEND_HERDR_PANE" "$label" </dev/null >/dev/null 2>> "$log" &
+  return 0
+}
+
+# Background worker: its caller owns descriptor detachment and warning log.
+fm_backend_herdr_publish_agent_label() {  # <target> <session> <pane> <label>
+  local target=$1 session=$2 pane=$3 label=$4 err rc
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  if err=$(fm_run_timed 2 bash -c '
+    . "$1/bin/backends/herdr.sh"
+    shift
+    fm_backend_herdr_cli "$@"
+  ' _ "$FM_BACKEND_HERDR_ROOT" "$session" \
+    pane report-metadata "$pane" --source firstmate \
+    --display-agent "$label" 2>&1 >/dev/null); then
+    return 0
+  else
+    rc=$?
+  fi
+  if fm_timed_out "$rc"; then
+    err='report-metadata timed out after 2 seconds'
+  else
+    err=${err%%$'\n'*}
+    err=${err:-report-metadata failed}
+  fi
+  printf 'warning: herdr pane %s was not given its display label "%s": %s\n' \
+    "$target" "$label" "$err" >&2
+  return 0
 }
 
 # fm_backend_herdr_send_text_line: wait until the exact pane holds one proven

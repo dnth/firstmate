@@ -417,6 +417,15 @@ case "$cmd" in
       send-text|send-keys|close)
         [ "$sub" = "close" ] && jq_state --arg p "${3:-}" '.tabs |= [.[]|select(.pane_id != $p)]' | save || true
         ;;
+      report-metadata)
+        # The display-label publish. FM_FAKE_HERDR_REPORT_METADATA_FAIL models
+        # an installed Herdr with no report-metadata subcommand: refuse the
+        # call the way the real CLI does and exit non-zero.
+        [ -z "${FM_FAKE_HERDR_REPORT_METADATA_FAIL:-}" ] || {
+          printf 'error: unrecognized subcommand report-metadata\n' >&2
+          exit 2
+        }
+        ;;
     esac
     ;;
   agent)
@@ -1057,7 +1066,72 @@ test_herdr_gone_server_relaunch_recreates() {
   assert_grep "$WT_DIR" "$CASE_DIR/fake/herdr.log" "replacement tab was not created in the recorded worktree"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "herdr relaunch did not keep the recorded worktree"
   assert_grep "herdr_pane_id=" "$HOME_DIR/state/$id.meta" "herdr relaunch did not publish a fresh pane id"
+  # A recreated pane carries no display label, so the relaunch must re-report
+  # the recorded launch values onto the replacement pane.
+  local pane
+  pane=$(sed -n 's/^herdr_pane_id=//p' "$HOME_DIR/state/$id.meta" | grep . | tail -1)
+  assert_grep $'\x1f''pane'$'\x1f''report-metadata'$'\x1f'"$pane"$'\x1f''--source'$'\x1f''firstmate'$'\x1f''--display-agent'$'\x1f''omp · openai-codex/gpt-5.6-luna high' \
+    "$CASE_DIR/fake/herdr.log" "the relaunched herdr pane was not given its display label from the recorded launch values"
   pass "fm-spawn --relaunch: a stopped herdr session server recreates the endpoint in the worktree"
+}
+
+test_herdr_unsupported_display_label_never_fails_the_spawn() {
+  local rec id warnings
+  id=$(case_id herdr-label-fail)
+  rec=$(make_case herdr-label-fail "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" herdr "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+
+  # An installed Herdr with no report-metadata subcommand must cost exactly one
+  # warning line, never the spawn.
+  FM_FAKE_HERDR_REPORT_METADATA_FAIL=1 run_spawn "$CASE_DIR" "$HOME_DIR" "$id"
+  expect_code 0 "$SPAWN_STATUS" "an unsupported display-label call must not fail the spawn; got: $SPAWN_OUT"
+  assert_contains "$SPAWN_OUT" "spawned $id" "the spawn did not report success after an unsupported display label"
+  local warning_log="$HOME_DIR/state/herdr-agent-label.log" _
+  for _ in {1..100}; do
+    [ ! -s "$warning_log" ] || break
+    sleep 0.05
+  done
+  local diagnostics
+  diagnostics=$(cat "$warning_log")
+  assert_grep $'\x1f''pane'$'\x1f''report-metadata' "$CASE_DIR/fake/herdr.log" \
+    "the spawn never attempted the display label it was supposed to warn about"
+  warnings=$(printf '%s\n' "$diagnostics" | grep -c 'was not given its display label')
+  [ "$warnings" = 1 ] || fail "an unsupported display label should warn exactly once, got $warnings: $diagnostics"
+  assert_contains "$diagnostics" "unrecognized subcommand" "the warning did not carry the CLI's own refusal reason"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "the spawn did not complete its recorded launch"
+  pass "fm-spawn --relaunch: an unsupported display label warns once and the spawn still succeeds"
+}
+
+test_herdr_raw_launch_publishes_recorded_harness() {
+  local rec id pane
+  id=$(case_id herdr-raw-label)
+  rec=$(make_case herdr-raw-label "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" herdr "$WT_DIR" "$PROJ_DIR" claude
+  sed 's/^model=.*/model=default/; s/^effort=.*/effort=default/' "$HOME_DIR/state/$id.meta" > "$CASE_DIR/raw.meta"
+  mv "$CASE_DIR/raw.meta" "$HOME_DIR/state/$id.meta"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  cp "$(type -P true)" "$FAKEBIN_DIR/custom-agent"
+
+  SPAWN_OUT=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" "$SPAWN" "$id" "$PROJ_DIR" --relaunch \
+    --harness "$FAKEBIN_DIR/custom-agent --flag" 2>&1)
+  SPAWN_STATUS=$?
+  expect_code 0 "$SPAWN_STATUS" "a raw Herdr launch should succeed; got: $SPAWN_OUT"
+  assert_grep 'harness=custom-agent' "$HOME_DIR/state/$id.meta" "the raw executable identity was not recorded"
+  pane=$(sed -n 's/^herdr_pane_id=//p' "$HOME_DIR/state/$id.meta" | grep . | tail -1)
+  # Publication is asynchronous; await its observable CLI call before checking
+  # the label rather than racing the newly queued publisher.
+  for _ in $(seq 1 100); do
+    grep -Fq $'\x1f''report-metadata'$'\x1f'"$pane"$'\x1f' "$CASE_DIR/fake/herdr.log" && break
+    sleep 0.02
+  done
+  assert_grep $'\x1f''pane'$'\x1f''report-metadata'$'\x1f'"$pane"$'\x1f''--source'$'\x1f''firstmate'$'\x1f''--display-agent'$'\x1f''custom-agent'$'\x1f''--session' \
+    "$CASE_DIR/fake/herdr.log" "a raw launch did not publish its bare recorded harness label"
+  pass "fm-spawn --relaunch: a raw Herdr launch publishes its recorded harness"
 }
 
 test_herdr_drifted_pane_gets_one_cd() {
@@ -1379,6 +1453,8 @@ test_gone_relaunch_foreign_slot_owner_refuses
 test_gone_relaunch_no_ownership_evidence_refuses
 test_gone_relaunch_foreign_lease_refuses
 test_herdr_gone_server_relaunch_recreates
+test_herdr_unsupported_display_label_never_fails_the_spawn
+test_herdr_raw_launch_publishes_recorded_harness
 test_herdr_drifted_pane_gets_one_cd
 test_herdr_drift_refuses_when_shell_wont_go
 test_zellij_absent_relaunch_recreates

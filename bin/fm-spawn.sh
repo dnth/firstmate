@@ -5643,6 +5643,9 @@ else
   sleep 0.3
   spawn_send_key "$T" Enter
 fi
+if [ "$BACKEND" = herdr ]; then
+  fm_backend_herdr_report_agent_label "$T" "$HARNESS" "$MODEL" "$EFFORT"
+fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
