@@ -1123,6 +1123,12 @@ test_herdr_raw_launch_publishes_recorded_harness() {
   expect_code 0 "$SPAWN_STATUS" "a raw Herdr launch should succeed; got: $SPAWN_OUT"
   assert_grep 'harness=custom-agent' "$HOME_DIR/state/$id.meta" "the raw executable identity was not recorded"
   pane=$(sed -n 's/^herdr_pane_id=//p' "$HOME_DIR/state/$id.meta" | grep . | tail -1)
+  # Publication is asynchronous; await its observable CLI call before checking
+  # the label rather than racing the newly queued publisher.
+  for _ in $(seq 1 100); do
+    grep -Fq $'\x1f''report-metadata'$'\x1f'"$pane"$'\x1f' "$CASE_DIR/fake/herdr.log" && break
+    sleep 0.02
+  done
   assert_grep $'\x1f''pane'$'\x1f''report-metadata'$'\x1f'"$pane"$'\x1f''--source'$'\x1f''firstmate'$'\x1f''--display-agent'$'\x1f''custom-agent'$'\x1f''--session' \
     "$CASE_DIR/fake/herdr.log" "a raw launch did not publish its bare recorded harness label"
   pass "fm-spawn --relaunch: a raw Herdr launch publishes its recorded harness"
