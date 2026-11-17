@@ -2441,6 +2441,54 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
+# fm_backend_herdr_agent_display_label <harness> [<model>] [<effort>]: compose
+# the display-only pane label "<harness> · <model> <effort>" from a task's
+# recorded launch values (docs/herdr-backend.md "Pane display-agent label" owns
+# the contract). The recorded metadata sentinels meaning "unset" (empty, "-",
+# "default") are omitted rather than printed, and effort is omitted whenever no
+# model survives because it names a model's reasoning budget, not a launch of
+# its own. An unknown harness prints nothing and fails: it is the one part
+# every label needs. Prints the label on success.
+fm_backend_herdr_agent_display_label() {  # <harness> [<model>] [<effort>]
+  local harness=${1:-} model=${2:-} effort=${3:-}
+  case "$harness" in ''|-|default) return 1 ;; esac
+  case "$model" in ''|-|default) model= ;; esac
+  case "$effort" in ''|-|default) effort= ;; esac
+  if [ -z "$model" ]; then
+    printf '%s' "$harness"
+  elif [ -z "$effort" ]; then
+    printf '%s · %s' "$harness" "$model"
+  else
+    printf '%s · %s %s' "$harness" "$model" "$effort"
+  fi
+}
+
+# fm_backend_herdr_report_agent_label <target> <harness> [<model>] [<effort>]:
+# publish this task's launch values as its pane's display-only agent label.
+# Best effort by contract: the label is presentation only, never task state or
+# ownership authority, so a failing or unsupported call prints one concise
+# warning and returns success. Support is detected from the installed CLI's own
+# refusal (an unknown subcommand exits non-zero), never from a version
+# comparison, so a newer or older herdr that still accepts report-metadata works
+# and one that does not is skipped. The call is single-shot - no retry, no poll,
+# no read-back - so the label can never hold up a spawn; the source is
+# "firstmate" so the label never collides with an agent's own lifecycle reports
+# (docs/herdr-backend.md "Pane display-agent label" owns the verified limits).
+fm_backend_herdr_report_agent_label() {  # <target> <harness> [<model>] [<effort>]
+  local target=$1 label err
+  shift
+  label=$(fm_backend_herdr_agent_display_label "$@") || return 0
+  fm_backend_herdr_parse_target "$target" || return 0
+  if err=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" \
+    pane report-metadata "$FM_BACKEND_HERDR_PANE" --source firstmate \
+    --display-agent "$label" 2>&1 >/dev/null); then
+    return 0
+  fi
+  printf 'warning: herdr pane %s was not given its display label "%s"; this pane may show its agent name instead: %s\n' \
+    "$target" "$label" "$(printf '%s\n' "$err" | sed -n '1p')" >&2
+  return 0
+}
+
 # fm_backend_herdr_send_text_line: wait until the exact pane holds one proven
 # idle foreground shell, then submit TEXT atomically. A newly created Herdr
 # pane can still be running terminal-startup work after creation returns, while

@@ -395,6 +395,94 @@ test_workspace_label_different_secondmates_get_different_labels() {
   pass "fm_backend_herdr_workspace_label: two different secondmate homes get two different, non-colliding labels"
 }
 
+# --- agent display label: the pane label a captain reads at a glance ---------
+#
+# docs/herdr-backend.md "Pane display-agent label" owns the contract: the label
+# is composed from the task's recorded launch values and published as
+# display-only pane metadata from source "firstmate", and a failure to publish
+# it must never fail or delay the spawn.
+
+test_agent_display_label_composes_harness_model_effort() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_display_label omp opencode-go-dnth-1/deepseek-v4.1-flash high' "$ROOT")
+  [ "$out" = 'omp · opencode-go-dnth-1/deepseek-v4.1-flash high' ] \
+    || fail "a full launch profile should compose '<harness> · <model> <effort>', got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_display_label claude anthropic/claude-sonnet-5-5' "$ROOT")
+  [ "$out" = 'claude · anthropic/claude-sonnet-5-5' ] \
+    || fail "a missing effort should compose '<harness> · <model>', got '$out'"
+  pass "fm_backend_herdr_agent_display_label: composes harness, model, and effort in that order"
+}
+
+test_agent_display_label_omits_unset_parts() {
+  local out
+  # The metadata sentinels for "unset" must never reach a captain's pane.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_display_label omp default default' "$ROOT")
+  [ "$out" = 'omp' ] || fail "unset model+effort should compose the bare harness, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_display_label omp - -' "$ROOT")
+  [ "$out" = 'omp' ] || fail "dash sentinels should compose the bare harness, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_display_label omp "" high' "$ROOT")
+  [ "$out" = 'omp' ] || fail "effort without a model should compose the bare harness, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_display_label omp some-model default' "$ROOT")
+  [ "$out" = 'omp · some-model' ] || fail "an unset effort should compose '<harness> · <model>', got '$out'"
+  pass "fm_backend_herdr_agent_display_label: omits unset parts instead of printing their sentinels"
+}
+
+test_agent_display_label_without_harness_prints_nothing() {
+  local out rc
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_display_label "" some-model high' "$ROOT"); rc=$?
+  [ "$out" = "" ] && [ "$rc" -ne 0 ] || fail "an unknown harness should compose nothing and fail, got '$out' rc=$rc"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_display_label default' "$ROOT"); rc=$?
+  [ "$out" = "" ] && [ "$rc" -ne 0 ] || fail "the 'default' harness sentinel should compose nothing and fail, got '$out' rc=$rc"
+  pass "fm_backend_herdr_agent_display_label: refuses to compose a label without a harness"
+}
+
+test_report_agent_label_publishes_the_composed_label() {
+  local dir log resp fb rc err
+  dir="$TMP_ROOT/agent-label-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  err=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_agent_label fmtest:w9:p3 omp opencode-go-dnth-1/deepseek-v4.1-flash high' \
+    "$ROOT" 2>&1 >/dev/null); rc=$?
+  expect_code 0 "$rc" "publishing a display label should succeed"
+  [ -z "$err" ] || fail "a successful publish should stay silent, got: $err"
+  assert_contains "$(cat "$log")" \
+    "HERDR_SESSION=fmtest"$'\x1f''pane'$'\x1f''report-metadata'$'\x1f''w9:p3'$'\x1f''--source'$'\x1f''firstmate'$'\x1f''--display-agent'$'\x1f''omp · opencode-go-dnth-1/deepseek-v4.1-flash high'$'\x1f''--session'$'\x1f''fmtest' \
+    "the pane was not given its composed label from source firstmate in its own session"
+  pass "fm_backend_herdr_report_agent_label: publishes the composed label as display-only pane metadata"
+}
+
+test_report_agent_label_failure_warns_once_and_returns_success() {
+  local dir log resp fb rc err lines
+  dir="$TMP_ROOT/agent-label-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  # Exactly what an installed herdr that has no report-metadata subcommand
+  # does: refuse the command and exit non-zero (verified live: exit 2).
+  printf 'error: unrecognized subcommand report-metadata\n' > "$resp/1.err"
+  printf '2\n' > "$resp/1.exit"
+  err=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_agent_label fmtest:w9:p3 omp some-model high' \
+    "$ROOT" 2>&1 >/dev/null); rc=$?
+  expect_code 0 "$rc" "an unsupported report-metadata call must not fail its caller"
+  lines=$(printf '%s\n' "$err" | grep -c .)
+  [ "$lines" = 1 ] || fail "an unsupported call should warn exactly once, got $lines line(s): $err"
+  assert_contains "$err" "warning:" "the failure was not reported as a warning"
+  assert_contains "$err" "omp · some-model high" "the warning does not name the label it could not publish"
+  assert_contains "$err" "fmtest:w9:p3" "the warning does not name the affected pane"
+  assert_contains "$err" "unrecognized subcommand" "the warning does not carry the CLI's own refusal reason"
+  pass "fm_backend_herdr_report_agent_label: an unsupported call warns once and still succeeds"
+}
+
+test_report_agent_label_without_a_composable_label_skips_the_cli() {
+  local dir log resp fb rc
+  dir="$TMP_ROOT/agent-label-skip"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_agent_label fmtest:w9:p3 ""' "$ROOT" 2>/dev/null; rc=$?
+  expect_code 0 "$rc" "an uncompostable label must not fail its caller"
+  [ -s "$log" ] && fail "an uncompostable label should not reach the CLI at all, got: $(cat "$log")"
+  pass "fm_backend_herdr_report_agent_label: makes no CLI call when there is nothing to label"
+}
+
 # --- fm_backend_herdr_cli: session targeting (2026-07-02 incident fix) -------
 
 test_cli_helper_sets_env_and_appends_trailing_session_flag() {
@@ -5368,6 +5456,12 @@ test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
+test_agent_display_label_composes_harness_model_effort
+test_agent_display_label_omits_unset_parts
+test_agent_display_label_without_harness_prints_nothing
+test_report_agent_label_publishes_the_composed_label
+test_report_agent_label_failure_warns_once_and_returns_success
+test_report_agent_label_without_a_composable_label_skips_the_cli
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set

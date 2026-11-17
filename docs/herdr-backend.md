@@ -196,6 +196,34 @@ A Herdr pane id contains a colon, so the adapter splits `window=` on the first c
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
 
+## Pane display-agent label
+
+Every successful crewmate, scout, and second-mate Herdr spawn publishes the pane's display-only agent label as `<harness> · <model> <effort>` from the values `fm-spawn.sh` records in the task metadata.
+A recorded model or effort meaning "unset" (empty, `-`, `default`) is omitted, so a launch with no model shows only the harness and one with no effort shows `<harness> · <model>`.
+An effort is omitted whenever no model survives, because it names a model's reasoning budget rather than a launch of its own.
+A raw launch command carries no verified adapter identity and takes no model flag, so it is never labeled.
+
+`bin/backends/herdr.sh` owns composition and publishing (`fm_backend_herdr_agent_display_label`, `fm_backend_herdr_report_agent_label`).
+`fm-spawn.sh` reports the label once, immediately after the launch command lands in the pane, so one hook covers every launch shape: a fresh spawn, a relaunch that reuses a retained idle shell, and a relaunch that recreates a proven-absent pane all submit their launch there.
+The label is published through `herdr pane report-metadata <pane> --source firstmate --display-agent <label>`.
+Workspace and tab labels are never touched, because they stay the task identity and recovery key described above.
+
+Publishing is best effort by contract.
+A failing or unsupported call prints one warning naming the pane, the label, and the CLI's own reason, then the spawn continues unchanged.
+Support is detected from the installed CLI's own refusal rather than a version comparison, so a build without `report-metadata` costs one warning and nothing else.
+The call is single-shot with no retry, no polling, and no read-back.
+
+Verified presentation limits, live against Herdr 0.9.5 protocol 22 and recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr):
+
+- `pane get` exposes the label as `.result.pane.display_agent`; a report made without `--ttl-ms` still read back after 45 seconds of foreground work and again after that foreground process exited.
+- The label is pane-scoped, so closing the pane destroys it and a replacement pane starts unlabeled; a relaunch converges it back.
+- The most recent `display-agent` report wins across sources, while `--clear-display-agent` clears only the reporting source.
+- An agent's own lifecycle reports do not rewrite it: `pane report-agent` and `pane release-agent` set or release the agent identity and leave `display_agent` alone.
+- No installed Herdr integration writes `display_agent`; the installed OMP integration reports only session identity and agent lifecycle, so a firstmate label is not overwritten by the harness it labels. A future integration that does report one would win until the next launch re-reports.
+- The label mirrors recorded launch values, not live state, so an in-session model switch is not tracked.
+
+tmux, zellij, cmux, and orca have no equivalent display-only surface: their only label is the identity-bearing window, tab, workspace, or terminal title that placement and recovery match on (`fm-<id>`, home-scoped for cmux and zellij), so a model label there would break recovery rather than inform.
+
 ## Current transport behavior
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
@@ -344,6 +372,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Ghost and placeholder recognition depends on ANSI de-emphasis and fails safely to pending when unavailable.
 - Mid-session backend agent-identity probing remains session-start-only; see [Restart and liveness behavior](#restart-and-liveness-behavior).
 - Only tmux and Herdr can host the away-mode supervisor terminal.
+- A pane's display-agent label mirrors its recorded launch values and is best effort, so a Herdr build without `report-metadata` shows no model label and costs one spawn warning.
 
 ## Regression entry points
 

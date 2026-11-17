@@ -5643,6 +5643,17 @@ else
   sleep 0.3
   spawn_send_key "$T" Enter
 fi
+# A Herdr pane carries a display-only agent label the captain reads at a
+# glance, so report this task's launch values right after the launch lands.
+# This is the one convergence point for every launch shape - a fresh spawn, a
+# relaunch that reuses a retained idle shell, and a relaunch that recreates a
+# proven-gone pane - because each of them submits the launch here. A raw launch
+# carries no verified adapter identity or model flag, so it is left alone
+# rather than mislabeled. The call is best effort by contract and never fails
+# or delays the spawn (docs/herdr-backend.md "Pane display-agent label").
+if [ "$BACKEND" = herdr ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  fm_backend_herdr_report_agent_label "$T" "$HARNESS" "$MODEL" "$EFFORT"
+fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release

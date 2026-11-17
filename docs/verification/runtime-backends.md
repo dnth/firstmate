@@ -1045,6 +1045,69 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
 
+### Pane display-agent label
+
+Verified on 2026-11-17 against `herdr 0.9.5` (protocol 22) on linux x64, in named non-default lab sessions provisioned, driven, and torn down only through `bin/fm-herdr-lab.sh`, with the default-session tripwire intact.
+`docs/herdr-backend.md` "Pane display-agent label" owns the contract this evidence supports.
+
+The display-only surface itself was measured with the guarded helper:
+
+```sh
+HERDR_LAB_HELPER=/home/dnth/Desktop/firstmate/bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-model-label)
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane report-metadata <pane> --source firstmate --display-agent 'omp · deepseek-v4.1-flash high'
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get <pane>
+```
+
+Observed guarantees from those runs:
+
+```text
+baseline pane:            {"display_agent":null}
+firstmate report:         {"display_agent":"omp · A high"}
+other-source report:      {"display_agent":"omp · B low"}
+firstmate report again:   {"display_agent":"omp · A high"}
+after pane report-agent:  {"display_agent":"omp · A high","agent":null}
+after pane release-agent: {"display_agent":"omp · A high","agent":null}
+other-source clear:       {"display_agent":"omp · A high"}
+after 45 seconds:         {"display_agent":"omp · A high"}
+after foreground exit:    {"display_agent":"omp · C xhigh"}
+fresh pane:               {"display_agent":null}
+closed pane:              {"error":{"code":"pane_not_found"}}
+unknown subcommand exit:  2
+```
+
+The production spawn path was then exercised through the real `bin/fm-spawn.sh` against a real lab server, with a prepared git worktree published through a stub `treehouse` and a stub `claude` whose only job is to hold a foreground process; the label depends only on firstmate's recorded launch values and Herdr's real API, so the harness stub changes nothing about the verified surface:
+
+```sh
+env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_SOCKET_PATH \
+  FM_HOME=<lab-home> FM_STATE_OVERRIDE=<lab-home>/state FM_DATA_OVERRIDE=<lab-home>/data \
+  FM_CONFIG_OVERRIDE=<lab-home>/config FM_PROJECTS_OVERRIDE=<lab-home>/projects \
+  FM_BACKEND=herdr HERDR_SESSION=<guarded-lab-session> FM_SPAWN_NO_GUARD=1 \
+  bin/fm-spawn.sh label-live-worker <project> --harness claude \
+    --model deepseek-v4.1-flash --effort high --mode no-mistakes --yolo off
+"$HERDR_LAB_HELPER" run <guarded-lab-session> pane get <pane>
+```
+
+Observed:
+
+```text
+spawned label-live-worker harness=claude kind=ship mode=no-mistakes yolo=off window=<lab>:w1:p2 worktree=<pool>/17/proj
+pane get w1:p2:        {"display_agent":"claude · deepseek-v4.1-flash high","agent":null}
+after 20s of work:     {"display_agent":"claude · deepseek-v4.1-flash high"}
+after agent Ctrl-C:    {"display_agent":"claude · deepseek-v4.1-flash high"}
+after pane close:      {"error":{"code":"pane_not_found"}}
+after --relaunch:      window=<lab>:w2:p2, {"display_agent":"claude · deepseek-v4.1-flash high"}
+workspace list:        {"workspace_id":"w2","label":"firstmate"}
+tab list:              {"tab_id":"w2:t2","label":"fm-label-live-worker"}
+```
+
+Reading: a live crewmate pane reports the launch values its metadata records; the label is not written by the harness's own agent lifecycle reports and survives the agent process exiting; a replacement pane starts unlabeled and the relaunch path re-reports it; workspace and tab labels keep the identity grammar unchanged.
+
+Deterministic coverage owns composition, the CLI contract, and the never-fail-the-spawn behavior (`tests/fm-backend-herdr.test.sh`, `tests/fm-spawn-relaunch-dead-endpoint.test.sh`), which is what CI runs.
+The live records above are dated empirical surface facts, not a per-release claim.
+
 ### OMP lifecycle
 
 The focused Herdr submit guard ran on 2026-08-26 against OMP 18.0.4 and Herdr 0.8.2 in one guarded non-default lab session.
