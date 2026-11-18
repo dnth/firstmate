@@ -644,14 +644,14 @@ for (const target of process.argv.slice(2)) {
 NODE
   measure_classes=()
   for i in "${!measure_paths[@]}"; do
-    measure_classes[$i]=damaged/unreported
+    measure_classes[i]=damaged/unreported
   done
   for repo in "${pools[@]}"; do
     sweep_classify_pool "$repo" || die "pool $repo could not be classified; measurement incomplete"
     for i in "${!measure_paths[@]}"; do
       for j in "${!SWEEP_PATHS[@]}"; do
         [ "${measure_paths[$i]}" = "${SWEEP_PATHS[$j]}" ] || continue
-        measure_classes[$i]=${SWEEP_CLASSES[$j]}
+        measure_classes[i]=${SWEEP_CLASSES[$j]}
       done
     done
   done
