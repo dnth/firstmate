@@ -10,7 +10,7 @@ metadata:
 
 `/cleanup` is a report-first, on-demand review of fleet resources that may be ready to remove: finished scouts and workers still open, stale pooled working copies, leftover panes or processes, and reclaimable disk space.
 It removes nothing on its own, never forces, and runs only when the captain asks: it gathers evidence, reports, waits for the captain's word, and then executes only the removals the captain names.
-`/cleanup sweep` is the narrow on-demand mode: it reports only pooled working copies, then runs the approved clean-tier pass once.
+`/cleanup sweep` is the narrow on-demand mode: it reports only pooled working copies, then runs the approved local clean-tier pass once.
 
 ## Safety rules
 
@@ -56,7 +56,7 @@ This section is the single owner of the local and remote slot-clearing procedure
 
 ### Removal tiers
 
-- Proven clean slots are removable only through the config-gated `--apply-clean` tier when the captain approves that clean-tier pass wholesale; clean slots are never removed per slot.
+- Proven clean slots are removable locally only through the config-gated `--apply-clean` tier when the captain approves that clean-tier pass wholesale; clean slots are never removed per slot.
 - Dirty or unpushed slots are report-only until the captain names the exact path; then remove only through `--apply-slot <path> --captain-approved`.
   Claimed, meta-named, occupied, or damaged slots remain `not ready`.
 - Removal of a damaged or orphaned copy never goes through a sweep tier, because a broken copy can still hold a live foreign consumer.
@@ -69,30 +69,36 @@ This section is the single owner of the local and remote slot-clearing procedure
 ### Remote second mates
 
 - Report each remote pool through `bin/fm-on.sh <secondmate-id> fm-treehouse-sweep.sh --all`, for each remote record in `data/secondmates.md`.
-- The same approved clean-tier pass runs remotely as `bin/fm-on.sh <secondmate-id> fm-treehouse-sweep.sh --apply-clean`.
-  The remote home's own `config/treehouse-sweep-clean` flag gates it; a missing flag is reported as a refusal, never created unasked.
 - A remote dirty slot is removed only when the captain names its exact path, through `bin/fm-on.sh <secondmate-id> fm-treehouse-sweep.sh --apply-slot <path> --captain-approved`.
-  Run that tracked command; never send the removal as a free-text steer to the remote agent.
+  Run one named path per invocation; never send the removal as a free-text steer to the remote agent.
+  Remote clean slots remain report-only; there is no remote bulk removal route.
 - A remote damaged or orphaned slot is `not ready` for the tracked route, because `--apply-slot` refuses it.
   Report the exact host commands from the removal tiers for the captain to approve and run on that host; never send them as a free-text steer.
 
 ### Stopping an in-flight removal
 
-- A running `--apply-clean` pass checks the home's `state/treehouse-sweep-stop` marker before the first slot and between every slot.
-  Request the stop with `bin/fm-treehouse-sweep.sh --stop` locally, or `bin/fm-on.sh <secondmate-id> fm-treehouse-sweep.sh --stop` remotely.
+- A running local `--apply-clean` pass checks the home's `state/treehouse-sweep-stop` marker before the first slot and between every slot.
+  Request the local stop with `bin/fm-treehouse-sweep.sh --stop`.
   The pass consumes the marker, names the slots it removed and the slots it did not attempt, and exits with its stopped status; its header owns the exact output and code.
   A marker left by a crashed pass makes the next apply pass stop before removing anything; it is consumed once, and the pass is re-run only after the captain's approval still stands.
 - A single-slot `--apply-slot` pass consumes a marker before it removes anything and refuses with nothing changed.
 - The marker is honored only between slots.
   A slot already inside `treehouse destroy` finishes, or an external kill can leave it partly removed; the marker cannot interrupt it.
+- A remote invocation is synchronous and not preemptible through `bin/fm-on.sh`.
+  On a stop request, issue no further per-path invocation; the in-flight path finishes or is left partial and must be measured.
+  Do not queue `--stop` behind the remote invocation as an interruption mechanism.
 - After any stop, before saying "stopped", "paused", or naming what survived, re-measure every named path on the host that owns the pool: path existence, `du -sk`, and a fresh read-only classification.
-  On a remote host, take that measurement through the same tracked commands with `bin/fm-on.sh`, never from a local copy of the paths.
+  Use `bin/fm-treehouse-sweep.sh --measure <path>` locally, repeating `--measure <path>` for every named path.
+  On a remote host, use `bin/fm-on.sh <secondmate-id> fm-treehouse-sweep.sh --measure <path>` with the same repeated arguments, never a local copy of the paths.
+  Preserve the before-removal measurements for comparison; existence, size, and classification alone cannot prove surviving content is unchanged.
+  If measurement refuses or fails, report the stop as unverified.
   Report each named path as fully removed (the path is gone), partly removed (the path exists and its content is incomplete or unverifiable), or untouched (unchanged).
   An acknowledged steer is never evidence of a stop, and a pass's own removed/untouched list is a starting point, not the host measurement.
 
 ## Sweep mode
 
-`/cleanup sweep` is the narrow on-demand mode: it reports only pooled working copies, then runs the approved clean-tier pass once.
+`/cleanup sweep` is the narrow on-demand mode: it reports only pooled working copies, then runs the approved local clean-tier pass once.
+Remote pools follow "Remote second mates" above; this mode runs a clean-tier removal pass only locally.
 It composes the "Pooled working copies (slots)" rules above and adds no authority; that section still owns the tiers, the ownership proof, and every guard.
 
 - Check the opt-in flag first: when the `config/treehouse-sweep-clean` flag under the Firstmate home is absent, say so, name the flag, and stop, because `--apply-clean` refuses without it.
@@ -143,7 +149,7 @@ Buckets and their owning commands:
 - Output one short table per category with columns: item, evidence, what removal costs, and a suggestion of `remove`, `keep for now`, or `not ready`.
 - Then stop and wait for the captain's word; the report itself changes nothing.
 - Execute only the removals the captain names: task teardowns through guarded `bin/fm-teardown.sh`, the approved clean tier through `bin/fm-treehouse-sweep.sh --apply-clean`, dirty or unpushed slots through `--apply-slot <path> --captain-approved`, and each named disk item through the owning command its row names, each under its own existing checks.
-  A remote second mate's removal uses the same tracked commands through `bin/fm-on.sh` and the same approvals.
+  A remote second mate's removal follows "Remote second mates" above, one exact captain-named dirty path per tracked invocation.
 - After the named removals, re-run `bin/fm-todo-project.sh --emit` to refresh the session projection.
 
 ## What this skill is not

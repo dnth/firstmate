@@ -144,6 +144,61 @@ assert_contains "$out" "unregistered or orphaned worktree" "empty state did not 
 printf '%s\n' "$state_json" > "$POOL/treehouse-state.json"
 pass "empty state keeps unregistered slots inspect-only"
 
+mkdir -p "$(slot 9)"
+printf 'surviving partial data\n' > "$(slot 9)/payload"
+: > "$CALLS"
+out=$(run_sweep --pool "$REPO" --measure "$(slot 1)" --measure "$(slot 5)" \
+  --measure "$(slot 9)" --measure "$(slot 10)") || fail "measurement failed: $out"
+assert_contains "$out" "classification: clean" "measurement lost the clean classification"
+assert_contains "$out" "classification: damaged" "measurement lost the damaged classification"
+assert_contains "$out" "classification: damaged/unreported" "unreported surviving content was not identified"
+assert_contains "$out" "existence: present" "measurement did not report surviving content"
+assert_contains "$out" "existence: absent" "measurement did not report the removed path"
+assert_contains "$out" "size_kib: 0 (absent)" "removed path size was not reported"
+for n in 1 5 9; do
+  expected_size=$(du -sk "$(slot "$n")")
+  assert_contains "$out" "$expected_size" "measurement did not return the host du size for slot $n"
+done
+[ -f "$(slot 9)/payload" ] || fail "measurement removed partial data"
+if grep -Eq 'destroy|prune' "$CALLS"; then
+  fail "measurement called a removal or prune verb: $(cat "$CALLS")"
+fi
+printf '{"worktrees":[]}\n' > "$POOL/treehouse-state.json"
+saved_status=$(<"$FM_SWEEP_STATUS_JSON")
+printf '[]\n' > "$FM_SWEEP_STATUS_JSON"
+out=$(run_sweep --pool "$REPO" --measure "$(slot 10)") \
+  || fail "measurement failed after all slot registrations were removed: $out"
+assert_contains "$out" "existence: absent" "empty pool did not report the removed path"
+printf '%s\n' "$saved_status" > "$FM_SWEEP_STATUS_JSON"
+printf '%s\n' "$state_json" > "$POOL/treehouse-state.json"
+pass "read-only measurement reports clean, damaged, partial, and fully removed paths"
+
+mkdir -p "$TMP_ROOT/outside"
+ln -s "$TMP_ROOT/outside" "$POOL/linked"
+for invalid in "$TMP_ROOT/outside" "$POOL/linked/repo" "$POOL/1/../outside"; do
+  if out=$(run_sweep --pool "$REPO" --measure "$invalid" 2>&1); then
+    fail "measurement accepted an outside, symlinked, or traversal path: $invalid"
+  fi
+  assert_contains "$out" "inside a pool" "measurement refusal did not identify the path boundary"
+done
+if out=$(run_sweep --pool "$REPO" --measure 2>&1); then
+  fail "measurement accepted an unnamed path"
+fi
+assert_contains "$out" "requires an exact slot" "unnamed measurement refusal is missing"
+for mode in --apply-clean --stop; do
+  if out=$(run_sweep --measure "$(slot 1)" "$mode" 2>&1); then
+    fail "measurement accepted $mode"
+  fi
+done
+if out=$(run_sweep --measure "$(slot 2)" --apply-slot "$(slot 2)" --captain-approved 2>&1); then
+  fail "measurement accepted single-slot removal"
+fi
+[ ! -e "$HOME_DIR/state/treehouse-sweep-stop" ] || fail "measurement wrote a stop marker"
+if grep -Eq 'destroy|prune' "$CALLS"; then
+  fail "a refused measurement executed a removal or prune verb: $(cat "$CALLS")"
+fi
+pass "measurement refuses unnamed, outside, symlinked, traversal, and mutating requests"
+
 # --- --apply-clean requires the config flag -----------------------------------
 
 if out=$(run_sweep --pool "$REPO" --apply-clean 2>&1); then

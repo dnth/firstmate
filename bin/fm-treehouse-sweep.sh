@@ -16,6 +16,10 @@
 #   fm-treehouse-sweep.sh --apply-slot <path> --captain-approved
 #                                                       destroy ONE dirty-tier
 #                                                       slot by exact path
+#   fm-treehouse-sweep.sh --measure <path>              read-only existence,
+#                                                       du -sk, and classification
+#                                                       (repeatable; exclusive
+#                                                       of apply and stop)
 #   fm-treehouse-sweep.sh --stop                        write the stop marker
 #                                                       that apply passes read
 #                                                       before each slot
@@ -66,6 +70,12 @@
 # `treehouse destroy` finishes, or an external kill leaves it partial; the
 # marker cannot interrupt it, so measure the host before reporting.
 #
+# Measurement requires an absolute normalized <pool>/<slot>/<worktree> path,
+# a surviving pool treehouse-state.json with a worktrees array, and no symlink
+# components. Removed paths need not remain registered; absent status entries
+# report damaged/unreported, never clean. Failed du or classification fails the
+# measurement instead of claiming a size or safe tier. Measurement changes nothing.
+#
 # The cleanup skill owns the approval, inventory, reporting, and remote
 # invocation procedure; this header owns only the mechanics above.
 #
@@ -102,11 +112,16 @@ apply_clean=0
 apply_slot=
 captain_approved=0
 stop_requested=0
+measure_paths=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --all) ;;
     --stop) stop_requested=1 ;;
+    --measure)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || die "--measure requires an exact slot worktree path"
+      measure_paths+=("$2"); shift
+      ;;
     --pool)
       [ "$#" -ge 2 ] || die "--pool requires a backing-repo path"
       pools+=("$2"); shift
@@ -140,6 +155,11 @@ done
   || die "--stop is exclusive; it writes only the stop marker"
 [ "$stop_requested" = 0 ] || [ "${#pools[@]}" -eq 0 ] \
   || die "--stop is exclusive; it writes only the stop marker"
+
+if [ "${#measure_paths[@]}" -gt 0 ]; then
+  [ "$apply_clean" = 0 ] && [ -z "$apply_slot" ] && [ "$captain_approved" = 0 ] && [ "$stop_requested" = 0 ] \
+    || die "--measure is read-only and cannot accompany apply, approval, or stop"
+fi
 
 if [ "$stop_requested" = 1 ]; then
   mkdir -p -- "$STATE" \
@@ -591,6 +611,59 @@ sweep_stop_report() {  # <index of the first clean slot not attempted>
 # The cross-home record scan must be armed before ANY pass - classification
 # reads it silently, and an apply pass without it would skip nothing.
 collect_local_firstmate_states "$STATE" || exit 1
+
+if [ "${#measure_paths[@]}" -gt 0 ]; then
+  node - "${measure_paths[@]}" <<'NODE' || die "--measure requires exact non-symlink paths inside a pool with readable treehouse-state.json"
+const fs = require("fs");
+const path = require("path");
+for (const target of process.argv.slice(2)) {
+  try {
+    if (!path.isAbsolute(target) || path.normalize(target) !== target) process.exit(1);
+    const pool = path.dirname(path.dirname(target));
+    const statePath = path.join(pool, "treehouse-state.json");
+    if (fs.lstatSync(statePath).isSymbolicLink()) process.exit(1);
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    if (!Array.isArray(state.worktrees)) process.exit(1);
+    let ancestor = target;
+    while (true) {
+      try {
+        if (fs.lstatSync(ancestor).isSymbolicLink()) process.exit(1);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) break;
+      ancestor = parent;
+    }
+  } catch { process.exit(1); }
+}
+NODE
+  measure_classes=()
+  for i in "${!measure_paths[@]}"; do
+    measure_classes[$i]=damaged/unreported
+  done
+  for repo in "${pools[@]}"; do
+    sweep_classify_pool "$repo" || die "pool $repo could not be classified; measurement incomplete"
+    for i in "${!measure_paths[@]}"; do
+      for j in "${!SWEEP_PATHS[@]}"; do
+        [ "${measure_paths[$i]}" = "${SWEEP_PATHS[$j]}" ] || continue
+        measure_classes[$i]=${SWEEP_CLASSES[$j]}
+      done
+    done
+  done
+  for i in "${!measure_paths[@]}"; do
+    target=${measure_paths[$i]}
+    printf 'path %s\n  classification: %s\n' "$target" "${measure_classes[$i]}"
+    if [ -e "$target" ]; then
+      echo "  existence: present"
+      du -sk -- "$target" || die "size measurement failed for $target"
+    else
+      echo "  existence: absent"
+      echo "  size_kib: 0 (absent)"
+    fi
+  done
+  exit 0
+fi
 
 if [ -n "$apply_slot" ]; then
   [ "$captain_approved" = 1 ] \
