@@ -16,6 +16,13 @@
 #   fm-treehouse-sweep.sh --apply-slot <path> --captain-approved
 #                                                       destroy ONE dirty-tier
 #                                                       slot by exact path
+#   fm-treehouse-sweep.sh --measure <path>              read-only existence,
+#                                                       du -sk, and classification
+#                                                       (repeatable; exclusive
+#                                                       of apply and stop)
+#   fm-treehouse-sweep.sh --stop                        write the stop marker
+#                                                       that apply passes read
+#                                                       before each slot
 #
 # Scope defaults to "$FM_ROOT" plus every clone under "$FM_HOME/projects"
 # (overridable via FM_ROOT_OVERRIDE / FM_HOME / FM_PROJECTS_OVERRIDE), matching
@@ -35,6 +42,10 @@
 #      commits, and HEAD merged into the backing repo's default ref; failure
 #      demotes the slot to the dirty tier.
 # Leased or destroying entries are skipped by definition.
+# Retired secondmate role markers (.fm-secondmate-home/.fm-secondmate-parent)
+# demote an otherwise clean slot to dirty and are named in its report: these
+# gitignored files evade porcelain checks but make a reused task slot read as a
+# secondmate home.
 #
 # Resulting tiers:
 #   clean    - provably returnable; --apply-clean removes each one with a
@@ -55,6 +66,23 @@
 # `--include-in-use` and `--include-leased` are never forwarded: those remain
 # explicit per-slot `treehouse destroy` acts by the captain outside the sweep.
 #
+# A stop marker at "$STATE/treehouse-sweep-stop" is read before the first and
+# between every --apply-clean slot: the pass removes the marker, lists the
+# slots it removed and the slots it did not attempt, and exits 3. --apply-slot
+# consumes the marker before it starts and refuses with nothing changed.
+# `--stop` writes the marker and changes nothing else. A slot already inside
+# `treehouse destroy` finishes, or an external kill leaves it partial; the
+# marker cannot interrupt it.
+#
+# Measurement requires an absolute normalized <pool>/<slot>/<worktree> path,
+# a surviving pool treehouse-state.json with a worktrees array, and no symlink
+# components. Removed paths need not remain registered; absent status entries
+# report damaged/unreported, never clean. Failed du or classification fails the
+# measurement instead of claiming a size or safe tier. Measurement changes nothing.
+#
+# The cleanup skill owns the approval, inventory, reporting, and remote
+# invocation procedure; this header owns only the mechanics above.
+#
 # Apply passes refuse when another pool operation holds the shared project
 # lock (fm_treehouse_project_lock_path) or when any scanned slot carries an
 # unreadable claim or unprovable occupancy.
@@ -65,6 +93,7 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+SWEEP_STOP_FILE="$STATE/treehouse-sweep-stop"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
@@ -86,10 +115,17 @@ pools=()
 apply_clean=0
 apply_slot=
 captain_approved=0
+stop_requested=0
+measure_paths=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --all) ;;
+    --stop) stop_requested=1 ;;
+    --measure)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || die "--measure requires an exact slot worktree path"
+      measure_paths+=("$2"); shift
+      ;;
     --pool)
       [ "$#" -ge 2 ] || die "--pool requires a backing-repo path"
       pools+=("$2"); shift
@@ -115,6 +151,33 @@ done
   && die "--apply-clean and --apply-slot are separate passes; run them one at a time"
 [ "$captain_approved" = 0 ] || [ -n "$apply_slot" ] \
   || die "--captain-approved only accompanies --apply-slot"
+[ "$stop_requested" = 0 ] || [ "$apply_clean" = 0 ] \
+  || die "--stop is exclusive; it writes only the stop marker"
+[ "$stop_requested" = 0 ] || [ -z "$apply_slot" ] \
+  || die "--stop is exclusive; it writes only the stop marker"
+[ "$stop_requested" = 0 ] || [ "$captain_approved" = 0 ] \
+  || die "--stop is exclusive; it writes only the stop marker"
+[ "$stop_requested" = 0 ] || [ "${#pools[@]}" -eq 0 ] \
+  || die "--stop is exclusive; it writes only the stop marker"
+
+if [ "${#measure_paths[@]}" -gt 0 ]; then
+  [ "$apply_clean" = 0 ] && [ -z "$apply_slot" ] && [ "$captain_approved" = 0 ] && [ "$stop_requested" = 0 ] \
+    || die "--measure is read-only and cannot accompany apply, approval, or stop"
+fi
+
+if [ "$stop_requested" = 1 ]; then
+  mkdir -p -- "$STATE" \
+    || die "cannot create the state directory $STATE; no stop marker was written"
+  stop_tmp=$(mktemp "$STATE/.treehouse-sweep-stop.XXXXXX") \
+    || die "cannot stage the stop marker under $STATE"
+  printf 'epoch=%s\npid=%s\n' "$(date +%s)" "$$" > "$stop_tmp" \
+    || { rm -f -- "$stop_tmp"; die "cannot write the stop marker under $STATE"; }
+  mv -f -- "$stop_tmp" "$SWEEP_STOP_FILE" \
+    || { rm -f -- "$stop_tmp"; die "cannot publish the stop marker $SWEEP_STOP_FILE"; }
+  echo "sweep: stop marker written at $SWEEP_STOP_FILE; a running --apply-clean stops between slots and the next apply pass stops before removing anything"
+  exit 0
+fi
+
 command -v treehouse >/dev/null 2>&1 \
   || die "treehouse is not on PATH; nothing was classified"
 command -v node >/dev/null 2>&1 \
@@ -516,11 +579,95 @@ sweep_release_batch_locks() {
 }
 trap 'sweep_release_pool_lock; sweep_release_batch_locks' EXIT
 
+# A stop marker is honored only at slot boundaries: before the first clean slot
+# and between clean slots. It never interrupts a running `treehouse destroy`.
+sweep_stop_marker_present() {
+  [ -e "$SWEEP_STOP_FILE" ] || [ -L "$SWEEP_STOP_FILE" ]
+}
+
+sweep_drop_stop_marker() {
+  rm -f -- "$SWEEP_STOP_FILE" \
+    || warn "could not remove the stop marker $SWEEP_STOP_FILE; remove it before the next apply pass"
+}
+
+sweep_stop_report() {  # <index of the first clean slot not attempted>
+  local first=$1 i
+  sweep_drop_stop_marker
+  echo "sweep: stop requested; no further slot will be removed"
+  if [ "$first" -gt 0 ]; then
+    echo "sweep: removed this pass:"
+    for ((i = 0; i < first; i++)); do
+      printf '  slot %s %s\n' "${clean_names[$i]}" "${clean_paths[$i]}"
+    done
+  else
+    echo "sweep: removed this pass: none"
+  fi
+  echo "sweep: untouched this pass:"
+  for ((i = first; i < ${#clean_paths[@]}; i++)); do
+    printf '  slot %s %s\n' "${clean_names[$i]}" "${clean_paths[$i]}"
+  done
+  echo "sweep: re-measure every named path on this host before reporting the stop"
+  exit 3
+}
+
 # --- apply passes ------------------------------------------------------------
 
 # The cross-home record scan must be armed before ANY pass - classification
 # reads it silently, and an apply pass without it would skip nothing.
 collect_local_firstmate_states "$STATE" || exit 1
+
+if [ "${#measure_paths[@]}" -gt 0 ]; then
+  node - "${measure_paths[@]}" <<'NODE' || die "--measure requires exact non-symlink paths inside a pool with readable treehouse-state.json"
+const fs = require("fs");
+const path = require("path");
+for (const target of process.argv.slice(2)) {
+  try {
+    if (!path.isAbsolute(target) || path.normalize(target) !== target) process.exit(1);
+    const pool = path.dirname(path.dirname(target));
+    const statePath = path.join(pool, "treehouse-state.json");
+    if (fs.lstatSync(statePath).isSymbolicLink()) process.exit(1);
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    if (!Array.isArray(state.worktrees)) process.exit(1);
+    let ancestor = target;
+    while (true) {
+      try {
+        if (fs.lstatSync(ancestor).isSymbolicLink()) process.exit(1);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) break;
+      ancestor = parent;
+    }
+  } catch { process.exit(1); }
+}
+NODE
+  measure_classes=()
+  for i in "${!measure_paths[@]}"; do
+    measure_classes[i]=damaged/unreported
+  done
+  for repo in "${pools[@]}"; do
+    sweep_classify_pool "$repo" || die "pool $repo could not be classified; measurement incomplete"
+    for i in "${!measure_paths[@]}"; do
+      for j in "${!SWEEP_PATHS[@]}"; do
+        [ "${measure_paths[$i]}" = "${SWEEP_PATHS[$j]}" ] || continue
+        measure_classes[i]=${SWEEP_CLASSES[$j]}
+      done
+    done
+  done
+  for i in "${!measure_paths[@]}"; do
+    target=${measure_paths[$i]}
+    printf 'path %s\n  classification: %s\n' "$target" "${measure_classes[$i]}"
+    if [ -e "$target" ]; then
+      echo "  existence: present"
+      du -sk -- "$target" || die "size measurement failed for $target"
+    else
+      echo "  existence: absent"
+      echo "  size_kib: 0 (absent)"
+    fi
+  done
+  exit 0
+fi
 
 if [ -n "$apply_slot" ]; then
   [ "$captain_approved" = 1 ] \
@@ -562,6 +709,10 @@ if [ -n "$apply_slot" ]; then
     || die "an unreadable slot-owner claim exists in pool $target_repo; nothing was changed"
   [ "$SWEEP_UNPROVABLE" = 0 ] \
     || die "slot occupancy is unprovable in pool $target_repo; nothing was changed"
+  if sweep_stop_marker_present; then
+    sweep_drop_stop_marker
+    die "a stop was requested; nothing was changed"
+  fi
   for i in "${!SWEEP_PATHS[@]}"; do
     canon=$(canonical_existing_dir "${SWEEP_PATHS[$i]}") || continue
     [ "$canon" = "$target" ] || continue
@@ -570,6 +721,10 @@ if [ -n "$apply_slot" ]; then
     echo "sweep: captain-approved destroy of dirty slot ${SWEEP_NAMES[$i]} at $canon"
     ( cd "$target_repo" && treehouse destroy "$canon" --include-unlanded --yes ) \
       || die "treehouse destroy failed for $canon"
+    if sweep_stop_marker_present; then
+      sweep_drop_stop_marker
+      echo "sweep: a stop arrived during the single-slot destroy; that slot completed and the marker was cleared"
+    fi
     exit 0
   done
   die "$apply_slot disappeared during validation; nothing was changed"
@@ -614,6 +769,9 @@ if [ "$apply_clean" = 1 ]; then
   for repo in "${pools[@]}"; do
     sweep_acquire_batch_lock "$repo"
   done
+  if sweep_stop_marker_present; then
+    sweep_stop_report 0
+  fi
   for i in "${!clean_paths[@]}"; do
     repo=${clean_repos[$i]}
     canon=${clean_paths[$i]}
@@ -635,12 +793,19 @@ if [ "$apply_clean" = 1 ]; then
       || die "clean slot $canon changed state during validation; nothing was changed"
   done
   for i in "${!clean_paths[@]}"; do
+    if sweep_stop_marker_present; then
+      sweep_stop_report "$i"
+    fi
     repo=${clean_repos[$i]}
     canon=${clean_paths[$i]}
     echo "sweep: removing clean slot ${clean_names[$i]} at $canon"
     ( cd "$repo" && treehouse destroy "$canon" --yes ) \
       || die "treehouse destroy failed for clean slot $canon"
   done
+  if sweep_stop_marker_present; then
+    sweep_drop_stop_marker
+    echo "sweep: a stop arrived after the last clean slot; the approved pass completed and the marker was cleared"
+  fi
   sweep_release_batch_locks
 fi
 exit "$sweep_rc"

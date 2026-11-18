@@ -33,13 +33,14 @@ git -C "$REPO" push -q origin main
 git -C "$REPO" remote set-head origin main >/dev/null
 
 # Slots: 1 clean, 2 dirty, 3 claimed by another task, 4 meta-named, 5 damaged,
-# 7 clean except for a retired secondmate's leftover role markers.
+# 7 clean except for a retired secondmate's leftover role markers, 8 clean.
 slot() { printf '%s/%s/repo\n' "$POOL" "$1"; }
 git -C "$REPO" worktree add --detach "$(slot 1)" -q
 git -C "$REPO" worktree add --detach "$(slot 2)" -q
 git -C "$REPO" worktree add --detach "$(slot 3)" -q
 git -C "$REPO" worktree add --detach "$(slot 4)" -q
 git -C "$REPO" worktree add --detach "$(slot 7)" -q
+git -C "$REPO" worktree add --detach "$(slot 8)" -q
 mkdir -p "$(slot 5)"
 printf 'uncommitted\n' > "$(slot 2)/dirty-file"
 printf 'task=other-task\nhome=/elsewhere\n' > "$(dirname "$(slot 3)")/.fm-slot-owner"
@@ -47,8 +48,8 @@ printf 'worktree=%s\n' "$(slot 4)" > "$HOME_DIR/state/other.meta"
 # Role markers are gitignored: porcelain-clean slots can still carry them.
 printf 'retired-mate\n' > "$(slot 7)/.fm-secondmate-home"
 printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=/nowhere\n' > "$(slot 7)/.fm-secondmate-parent"
-printf '{"worktrees":[{"path":"%s"},{"path":"%s"},{"path":"%s"},{"path":"%s"},{"path":"%s"}]}\n' \
-  "$(slot 1)" "$(slot 2)" "$(slot 3)" "$(slot 4)" "$(slot 7)" > "$POOL/treehouse-state.json"
+printf '{"worktrees":[{"path":"%s"},{"path":"%s"},{"path":"%s"},{"path":"%s"},{"path":"%s"},{"path":"%s"}]}\n' \
+  "$(slot 1)" "$(slot 2)" "$(slot 3)" "$(slot 4)" "$(slot 7)" "$(slot 8)" > "$POOL/treehouse-state.json"
 
 json_entries() {
   node - "$POOL" <<'NODE'
@@ -65,6 +66,7 @@ process.stdout.write("[" + [
   mk("5", "damaged"),
   mk("6", "leased", {lease_holder: "fm-interactive-1"}),
   mk("7", "available"),
+  mk("8", "available"),
 ].join(",") + "]");
 NODE
 }
@@ -83,6 +85,7 @@ case "$1" in
       *" --yes "*) echo "destroyed (fake)" ;;
       *) echo "destroy dry run (fake)" ;;
     esac
+    if [ -n "${FM_SWEEP_TOUCH_STOP:-}" ]; then : > "$FM_SWEEP_TOUCH_STOP"; fi
     ;;
 esac
 SH
@@ -141,6 +144,61 @@ assert_contains "$out" "unregistered or orphaned worktree" "empty state did not 
 printf '%s\n' "$state_json" > "$POOL/treehouse-state.json"
 pass "empty state keeps unregistered slots inspect-only"
 
+mkdir -p "$(slot 9)"
+printf 'surviving partial data\n' > "$(slot 9)/payload"
+: > "$CALLS"
+out=$(run_sweep --pool "$REPO" --measure "$(slot 1)" --measure "$(slot 5)" \
+  --measure "$(slot 9)" --measure "$(slot 10)") || fail "measurement failed: $out"
+assert_contains "$out" "classification: clean" "measurement lost the clean classification"
+assert_contains "$out" "classification: damaged" "measurement lost the damaged classification"
+assert_contains "$out" "classification: damaged/unreported" "unreported surviving content was not identified"
+assert_contains "$out" "existence: present" "measurement did not report surviving content"
+assert_contains "$out" "existence: absent" "measurement did not report the removed path"
+assert_contains "$out" "size_kib: 0 (absent)" "removed path size was not reported"
+for n in 1 5 9; do
+  expected_size=$(du -sk "$(slot "$n")")
+  assert_contains "$out" "$expected_size" "measurement did not return the host du size for slot $n"
+done
+[ -f "$(slot 9)/payload" ] || fail "measurement removed partial data"
+if grep -Eq 'destroy|prune' "$CALLS"; then
+  fail "measurement called a removal or prune verb: $(cat "$CALLS")"
+fi
+printf '{"worktrees":[]}\n' > "$POOL/treehouse-state.json"
+saved_status=$(<"$FM_SWEEP_STATUS_JSON")
+printf '[]\n' > "$FM_SWEEP_STATUS_JSON"
+out=$(run_sweep --pool "$REPO" --measure "$(slot 10)") \
+  || fail "measurement failed after all slot registrations were removed: $out"
+assert_contains "$out" "existence: absent" "empty pool did not report the removed path"
+printf '%s\n' "$saved_status" > "$FM_SWEEP_STATUS_JSON"
+printf '%s\n' "$state_json" > "$POOL/treehouse-state.json"
+pass "read-only measurement reports clean, damaged, partial, and fully removed paths"
+
+mkdir -p "$TMP_ROOT/outside"
+ln -s "$TMP_ROOT/outside" "$POOL/linked"
+for invalid in "$TMP_ROOT/outside" "$POOL/linked/repo" "$POOL/1/../outside"; do
+  if out=$(run_sweep --pool "$REPO" --measure "$invalid" 2>&1); then
+    fail "measurement accepted an outside, symlinked, or traversal path: $invalid"
+  fi
+  assert_contains "$out" "inside a pool" "measurement refusal did not identify the path boundary"
+done
+if out=$(run_sweep --pool "$REPO" --measure 2>&1); then
+  fail "measurement accepted an unnamed path"
+fi
+assert_contains "$out" "requires an exact slot" "unnamed measurement refusal is missing"
+for mode in --apply-clean --stop; do
+  if out=$(run_sweep --measure "$(slot 1)" "$mode" 2>&1); then
+    fail "measurement accepted $mode"
+  fi
+done
+if out=$(run_sweep --measure "$(slot 2)" --apply-slot "$(slot 2)" --captain-approved 2>&1); then
+  fail "measurement accepted single-slot removal"
+fi
+[ ! -e "$HOME_DIR/state/treehouse-sweep-stop" ] || fail "measurement wrote a stop marker"
+if grep -Eq 'destroy|prune' "$CALLS"; then
+  fail "a refused measurement executed a removal or prune verb: $(cat "$CALLS")"
+fi
+pass "measurement refuses unnamed, outside, symlinked, traversal, and mutating requests"
+
 # --- --apply-clean requires the config flag -----------------------------------
 
 if out=$(run_sweep --pool "$REPO" --apply-clean 2>&1); then
@@ -151,15 +209,19 @@ touch "$HOME_DIR/config/treehouse-sweep-clean"
 canon1=$(cd "$(slot 1)" && pwd -P)
 canon2=$(cd "$(slot 2)" && pwd -P)
 canon4=$(cd "$(slot 4)" && pwd -P)
+canon8=$(cd "$(slot 8)" && pwd -P)
 : > "$CALLS"
 out=$(run_sweep --pool "$REPO" --apply-clean) || fail "--apply-clean failed: $out"
 assert_contains "$out" "removing clean slot 1" "--apply-clean did not remove the clean slot"
+assert_contains "$out" "removing clean slot 8" "--apply-clean did not remove the second clean slot"
 grep -Fqx "destroy $canon1 --yes" "$CALLS" \
   || fail "the clean slot was not destroyed via per-slot destroy --yes: $(cat "$CALLS")"
+grep -Fqx "destroy $canon8 --yes" "$CALLS" \
+  || fail "the second clean slot was not destroyed via per-slot destroy --yes: $(cat "$CALLS")"
 if grep -Eq "destroy $canon2|destroy $canon4|prune --yes" "$CALLS"; then
   fail "--apply-clean touched a non-clean slot or ran pool-wide prune: $(cat "$CALLS")"
 fi
-pass "--apply-clean removes only the proven-clean slot, behind the config flag"
+pass "--apply-clean removes only the proven-clean slots, behind the config flag"
 
 # --- --apply-slot gates --------------------------------------------------------
 
@@ -188,6 +250,23 @@ grep -Fqx "destroy $canon2 --include-unlanded --yes" "$CALLS" \
   || fail "the dirty slot was not destroyed with --include-unlanded --yes: $(cat "$CALLS")"
 pass "--apply-slot destroys only the named dirty slot, captain-approved"
 
+# --- --apply-slot refuses an unnamed or out-of-pool path -----------------------
+
+: > "$CALLS"
+if out=$(run_sweep --pool "$REPO" --apply-slot 2>&1); then
+  fail "--apply-slot ran without a path"
+fi
+assert_contains "$out" "requires an exact slot worktree path" "the unnamed-path refusal is missing"
+mkdir -p "$TMP_ROOT/outside"
+if out=$(run_sweep --pool "$REPO" --apply-slot "$TMP_ROOT/outside" --captain-approved 2>&1); then
+  fail "--apply-slot destroyed a path outside the pool"
+fi
+assert_contains "$out" "not a managed unleased pool slot in scope" "the out-of-pool refusal is missing"
+if grep -q 'destroy' "$CALLS" 2>/dev/null; then
+  fail "a refused --apply-slot still called treehouse destroy: $(cat "$CALLS")"
+fi
+pass "--apply-slot refuses an unnamed or out-of-pool path"
+
 # --- --include-* verbs are never forwarded ------------------------------------
 
 if out=$(run_sweep --pool "$REPO" --apply-slot "$(slot 2)" --captain-approved --include-in-use 2>&1); then
@@ -195,6 +274,63 @@ if out=$(run_sweep --pool "$REPO" --apply-slot "$(slot 2)" --captain-approved --
 fi
 assert_contains "$out" "never forwarded" "the --include-in-use refusal is missing"
 pass "risky treehouse verbs stay manual"
+
+# --- stop marker: --stop writes it, an apply pass consumes it ------------------
+
+STOP_FILE="$HOME_DIR/state/treehouse-sweep-stop"
+rm -f "$STOP_FILE"
+out=$(run_sweep --stop) || fail "--stop failed: $out"
+[ -f "$STOP_FILE" ] || fail "--stop did not write $STOP_FILE"
+assert_contains "$out" "stop marker written" "the --stop confirmation is missing"
+: > "$CALLS"
+out=$(run_sweep --pool "$REPO" --apply-clean 2>&1)
+rc=$?
+[ "$rc" -eq 3 ] || fail "an apply pass with a stop marker exited $rc, not 3: $out"
+assert_contains "$out" "stop requested" "the stopped pass did not name the stop"
+assert_contains "$out" "removed this pass: none" "the stopped pass did not report that nothing was removed"
+printf '%s\n' "$out" | grep -Fq "  slot 1 $canon1" \
+  || fail "the stopped pass did not list clean slot 1 as untouched: $out"
+printf '%s\n' "$out" | grep -Fq "  slot 8 $canon8" \
+  || fail "the stopped pass did not list clean slot 8 as untouched: $out"
+[ -e "$STOP_FILE" ] && fail "the stopped pass left the marker in place"
+if grep -q 'destroy' "$CALLS" 2>/dev/null; then
+  fail "a stopped apply pass still called treehouse destroy: $(cat "$CALLS")"
+fi
+pass "--stop writes the marker and the next apply pass stops before removing anything"
+
+# --- --apply-slot consumes a pending stop marker -------------------------------
+
+out=$(run_sweep --stop) || fail "--stop failed: $out"
+: > "$CALLS"
+if out=$(run_sweep --pool "$REPO" --apply-slot "$(slot 2)" --captain-approved 2>&1); then
+  fail "--apply-slot ran with a stop marker pending"
+fi
+assert_contains "$out" "a stop was requested" "the single-slot stop refusal is missing"
+[ -e "$STOP_FILE" ] && fail "the single-slot pass left the stop marker in place"
+if grep -q 'destroy' "$CALLS" 2>/dev/null; then
+  fail "a stopped --apply-slot still called treehouse destroy: $(cat "$CALLS")"
+fi
+pass "--apply-slot consumes a pending stop marker and removes nothing"
+
+# --- stop marker is honored between clean slots --------------------------------
+
+rm -f "$STOP_FILE"
+: > "$CALLS"
+out=$(env "${SWEEP_ENV[@]}" "FM_SWEEP_TOUCH_STOP=$STOP_FILE" \
+  "$ROOT/bin/fm-treehouse-sweep.sh" --pool "$REPO" --apply-clean 2>&1)
+rc=$?
+[ "$rc" -eq 3 ] || fail "a stop during the pass exited $rc, not 3: $out"
+assert_contains "$out" "removing clean slot 1" "the pass did not remove the first clean slot before the stop"
+assert_contains "$out" "stop requested" "the stopped pass did not name the stop"
+printf '%s\n' "$out" | grep -Fq "  slot 1 $canon1" \
+  || fail "the stopped pass did not list clean slot 1 as removed: $out"
+printf '%s\n' "$out" | grep -Fq "  slot 8 $canon8" \
+  || fail "the stopped pass did not list clean slot 8 as untouched: $out"
+if grep -Fq "destroy $canon8 --yes" "$CALLS"; then
+  fail "the pass removed a clean slot after the stop marker appeared: $(cat "$CALLS")"
+fi
+[ -e "$STOP_FILE" ] && fail "the stopped pass left the marker in place"
+pass "a stop marker is honored between clean slots"
 
 # --- unsafe claim refuses the apply pass ---------------------------------------
 

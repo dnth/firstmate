@@ -268,12 +268,11 @@ See [`python-guard.md`](python-guard.md) for the command policy, checkout scope,
 
 ## Treehouse pool sweep (config/treehouse-sweep-clean)
 
-`bin/fm-treehouse-sweep.sh` classifies every unleased Treehouse pool slot under the home's backing repos as clean, dirty, damaged, or skipped, using `treehouse status --json` plus the same `.fm-slot-owner` claim and cross-home `state/*.meta` ownership proof teardown applies.
-A slot still carrying `.fm-secondmate-home` or `.fm-secondmate-parent` residue from a retired secondmate is reported as dirty with the marker named, because those gitignored files are invisible to the porcelain check but would make an ordinary task placed there read as a secondmate home.
-The default pass is classify + dry-run only and never executes `prune --yes` or `destroy`.
-The optional local, gitignored `config/treehouse-sweep-clean` presence flag opts the home into `--apply-clean`, which removes only the proven clean tier via per-slot `treehouse destroy <path> --yes`; it is default off because deleting warm slots is a resource-policy choice.
-Dirty, damaged, leased, claimed, meta-named, and live-occupied slots are never auto-removed; `--apply-slot <path> --captain-approved` destroys exactly one dirty-tier slot, and `--include-in-use`/`--include-leased`/claim removal are never forwarded.
-The script's header and `--help` own the exact flags, classification order, and refusal cases.
+`config/treehouse-sweep-clean` is an optional local, gitignored presence flag under `FM_CONFIG_OVERRIDE` when set, otherwise under the script's effective `$FM_HOME/config`.
+Present, it opts the home into the clean-tier removal pass of `bin/fm-treehouse-sweep.sh`; absent, `--apply-clean` refuses removal.
+It is default off because deleting warm slots is a resource-policy choice, and it is not inherited by secondmate homes.
+`bin/fm-treehouse-sweep.sh`'s header and `--help` own the exact flags, tier classification, and refusal cases.
+The `cleanup` skill owns the local and remote slot-clearing operating procedure: what evidence the report carries, what the captain must name, and how a pass is stopped and re-measured.
 
 ## Gate defaults (.no-mistakes.yaml)
 
