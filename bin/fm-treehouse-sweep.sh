@@ -42,6 +42,10 @@
 #      commits, and HEAD merged into the backing repo's default ref; failure
 #      demotes the slot to the dirty tier.
 # Leased or destroying entries are skipped by definition.
+# Retired secondmate role markers (.fm-secondmate-home/.fm-secondmate-parent)
+# demote an otherwise clean slot to dirty and are named in its report: these
+# gitignored files evade porcelain checks but make a reused task slot read as a
+# secondmate home.
 #
 # Resulting tiers:
 #   clean    - provably returnable; --apply-clean removes each one with a
@@ -68,7 +72,7 @@
 # consumes the marker before it starts and refuses with nothing changed.
 # `--stop` writes the marker and changes nothing else. A slot already inside
 # `treehouse destroy` finishes, or an external kill leaves it partial; the
-# marker cannot interrupt it, so measure the host before reporting.
+# marker cannot interrupt it.
 #
 # Measurement requires an absolute normalized <pool>/<slot>/<worktree> path,
 # a surviving pool treehouse-state.json with a worktrees array, and no symlink

@@ -268,7 +268,7 @@ See [`python-guard.md`](python-guard.md) for the command policy, checkout scope,
 
 ## Treehouse pool sweep (config/treehouse-sweep-clean)
 
-`config/treehouse-sweep-clean` is an optional local, gitignored presence flag in the effective home: `FM_CONFIG_OVERRIDE`, else `$FM_HOME/config`, else the primary checkout's `config/`.
+`config/treehouse-sweep-clean` is an optional local, gitignored presence flag under `FM_CONFIG_OVERRIDE` when set, otherwise under the script's effective `$FM_HOME/config`.
 Present, it opts the home into the clean-tier removal pass of `bin/fm-treehouse-sweep.sh`; absent, `--apply-clean` refuses removal.
 It is default off because deleting warm slots is a resource-policy choice, and it is not inherited by secondmate homes.
 `bin/fm-treehouse-sweep.sh`'s header and `--help` own the exact flags, tier classification, and refusal cases.
