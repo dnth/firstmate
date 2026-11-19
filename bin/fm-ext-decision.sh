@@ -93,15 +93,16 @@
 #
 # threads [--thread <id>]
 #   Prints one JSON line per Discord thread that holds a decision post, with
-#   or without buttons: {thread_id, open, closed, last_posted_at, keys}; --thread
-#   reads only that thread. Unpublished progress records are ignored.
+#   or without buttons: {thread_id, open, closed, last_posted_at, keys}.
+#   --thread limits the summary to that thread and checks for replacements
+#   of its decision keys in other threads. Unpublished records are ignored.
 #   A post is closed once it is settled, replaced by
 #   a newer post, or its own lifecycle of its decision is decided or
 #   superseded in the ledgers; a decision whose state cannot be read counts
 #   as open. last_posted_at is the newest post's posting time (epoch seconds,
-#   0 when unknown). The gateway poster reads it when a reply marks a thread
-#   needs-you, and again to clear that marker once no decision in the thread
-#   is open. Read-only.
+#   0 when unknown), and keys lists the thread's distinct decision keys.
+#   See "Topic threads" in docs/configuration.md for how the gateway uses
+#   this summary. Read-only.
 #
 # finalized
 #   Records the displayed content or legacy button state, so posts lists it

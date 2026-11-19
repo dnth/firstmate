@@ -1136,12 +1136,12 @@ Legacy label-plus-time names remain valid for the same source message when no va
 Anything else falls back to the fresh derivation.
 Once a thread exists, a plain later `--thread-title` does not replace its name; an explicit retitle sets its new base even when both title flags are present.
 A retitle passes the same screen and bounds as a creating title and becomes the stored base name for later markers, auto-clear, and reconciliation.
-It preserves the marker Discord currently shows (`❓ `, `✅ `, or none), falling back to the recorded state only when the live name cannot be read; an explicit state on the same reply sets the marker instead.
+With no open decision or explicit state on the same reply, a retitle preserves the marker Discord currently shows (`❓ `, `✅ `, or none), falling back to the recorded state when the live name cannot be read.
 The [emit header and help](../bin/fm-ext-emit.sh) own the title flags and rejection warnings, the [ask header](../bin/fm-ext-ask.sh) owns their passthrough, and the [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#name-the-thread-then-mark-its-state) owns when Firstmate retitles.
 A retitle shares a marker's eligibility and is equally best effort: it only ever reaches a thread this home created in the dedicated channel, and a refused, unusable, or ineligible one is ignored with the reply text still posted.
 A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
 Emit requires a title on any reply that may create the thread and an explicit state on every `answer` and `final`; the [emit header](../bin/fm-ext-emit.sh) owns both refusals.
-The [Decision buttons](#decision-buttons) contract owns the button requirement and exemptions for `needs-you` replies.
+The [Decision buttons](#decision-buttons) section covers how to record choices and free-text questions, and when to use `--no-buttons`.
 The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name to match the requested state.
 Any open decision keeps the thread marked `❓ ` and defers a later reply's `none` or `done` until the last decision closes.
 If the decision ledger is unavailable, the poster leaves the live name intact and saves the requested marker or retitle for reconciliation once the ledger can be read.
@@ -1149,7 +1149,8 @@ Before trusting a stored name that already matches, the poster reads the name Di
 Both the request that created the thread and a later request of any origin that arrived inside it - a typed message, a decision-button click, or a `/fm` command - may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.
 Only a thread this home created in the dedicated channel is renamed; a captain-made thread, a non-dedicated channel, or a DM is never renamed, and once a thread's record has aged out it can no longer be identified and is left alone.
 A decision-associated `needs-you` clears itself: once every decision post in the thread is closed in the ledgers - a click Firstmate recorded, a typed answer, or a captain call answered - the gateway's 30-second full decision sweep reconciles the posts, then applies the state a later reply asked for while that decision was open (`✅ ` for `done`, the bare name otherwise), so Firstmate never has to emit a separate `none`.
-The same sweep re-asserts `❓ ` on an eligible Firstmate-created thread with an open decision, preserving the live base title under the same best-effort and archived-thread rules as a reply's rename.
+The same sweep restores a missing `❓ ` on an eligible Firstmate-created thread with an open decision, under the same best-effort and archived-thread rules as a reply's rename.
+It uses the current Discord title for the marker repair when it can read it, with the stored title as a fallback and any pending explicit retitle taking precedence.
 A `needs-you` reminder while a decision is open belongs to that decision and preserves any deferred state.
 Only a `needs-you` marked when no decision post in the thread was open and after its newest one was asked is a newer question that stands until a reply clears it.
 [`bin/fm-ext-decision.sh`](../bin/fm-ext-decision.sh) `threads` owns which decision posts count as open.
@@ -1234,11 +1235,12 @@ For a worker's existing keyed status decision, use `bin/fm-ext-emit.sh --decisio
 If its file omits `sections`, the whole post is treated as protected question text.
 The [emit header's choice guard](../bin/fm-ext-emit.sh) owns the matching rules, including digit-selection cues and standalone choice headings followed by at least two option lines, and routes refused plain-text choices to `bin/fm-ext-ask.sh`.
 `--no-buttons "<reason>"` posts a deliberate plain list anyway and records the reason in the outbox payload as `no_buttons_reason`; the emit header owns the exact detection rule, and it belongs to a post that asks the captain nothing back, such as informational status.
-An `answer`, `followup`, or `final` marked `needs-you` must therefore carry `--decision-file` or `--no-buttons "<reason>"`, so a thread that asks the captain to act always records what it asks or says why it asks nothing; an `ack` is exempt, and [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh) passes both flags through for a thread it opens.
+Emit requires `--decision-file` or `--no-buttons "<reason>"` on an `answer`, `followup`, or `final` marked `needs-you`.
+An `ack` is exempt, and [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh) passes both flags through for a thread it opens.
 Use [`bin/fm-ext-ask.sh`](../bin/fm-ext-ask.sh) `--free-text` or a `--decision-file` with an empty option list to record a question the captain answers in words, with no buttons.
 The [Topic threads contract](#topic-threads-one-thread-per-request) owns the markers for all recorded decisions.
 A decision with no options refuses choice-shaped text: a choice always carries its options.
-Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every post that carries options also carries a Discuss button, `fmd:<key>:d`.
+Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every post with option buttons also carries a Discuss button, `fmd:<key>:d`.
 Channel members can read a `custom_id` through the Discord API, so the key is never written into a label or the post text, and emit refuses a post that names the key or its task id.
 A decision post goes where every reply to its request goes: into the request's topic thread or Discord thread when it has one, otherwise its channel.
 A click is checked against, and its request filed from, the thread or channel the post actually landed in, so Firstmate answers a click in that same conversation.
@@ -1264,7 +1266,8 @@ A recommended option that also needs confirmation still needs its second click.
 A click from a standing-rule author is that author's explicit word for that one decision only, never standing authority, and merge authority stays where `AGENTS.md` puts it.
 
 Each post is bound to the lifecycle of its decision that was open when it was posted, so a captain call re-held or a worker key reopened for a new question is a different decision to it.
-When Firstmate records an answer on any channel, only the last chunk of a new post is edited with a bold outcome header above its exact original text whenever both fit Discord's 2,000-character limit; earlier chunks stay unchanged.
+When Firstmate records an answer on any channel, the gateway edits only the last chunk of a post that carried buttons.
+For a new post, it adds a bold outcome header above the exact original text whenever both fit Discord's 2,000-character limit.
 The uniquely chosen option is success-colored and gains a `✓`; every other option and Discuss are grey, and all buttons are disabled.
 When no single option matches, every button is grey; a click waiting for Firstmate to record it still highlights the clicked option.
 The outcome names the clicker when the recorded answer matches that post's click, and otherwise names the captain when the answer names exactly one option by number or label; `✅ Decided <time>` covers answers without one unique option, and `Closed - no longer needed <time>` covers a decision closed without an answer or replaced by a later lifecycle.

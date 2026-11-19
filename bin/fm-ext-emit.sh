@@ -41,11 +41,9 @@
 # retitle is dropped with a warning while the reply still posts. Both title
 # flags may be given; the explicit retitle sets the existing thread's base,
 # while --thread-title only names a thread at creation.
-# --thread-state renames the existing topic thread: needs-you prefixes "❓ ",
-# done prefixes "✅ ", none removes the prefix. docs/configuration.md
-# "Topic threads" owns marker preservation and state overrides, rename
-# eligibility, best-effort delivery, auto-clear, and retry behaviour;
-# the ext-respond skill owns when Firstmate retitles.
+# --thread-state requests a marker on the existing topic thread.
+# "Topic threads" in docs/configuration.md owns marker handling, and the
+# ext-respond skill owns when Firstmate requests a marker or retitle.
 #
 # Writes state/ext-outbox/<slug>.<kind>.<generation>.json once. Re-emitting the
 # same identity is a no-op success. A posting marker without a receipt is
@@ -56,16 +54,17 @@
 # bin/fm-ext-open.sh opened; slash when the context predates it), which tells
 # the gateway poster whether it can react to the original message.
 #
-# --decision-file attaches option buttons to an answer, followup, or final.
+# --decision-file attaches a decision to an answer, followup, or final.
 # The file is JSON:
 #   {"key": "hold:<task-id>" | "key:<task-id>:<slug>",
 #    "mode": "done" | "release",
 #    "options": [{"label": "<text>", "confirm": true|false, "recommended": true|false}, ...],
 #    "sections": {"question": "<text>", "explanation": "<text>",
 #                 "options": "<numbered list>", "cue": "<reply cue>"}}
-# with 1-5 options whose input and displayed labels are distinct, 1-80 characters, and free of
-# control characters, in the same order as the post text numbers them; option
-# ids are 1-based in that order. "mode" (captain calls only, default done)
+# Supply 1-5 options for a choice, ordered as the post text numbers them.
+# Input and displayed labels must be distinct, 1-80 characters, and free of
+# control characters. Option ids are 1-based in that order.
+# "mode" (captain calls only, default done)
 # chooses how a chosen option closes the call, as in fm-captain-hold.sh
 # answers. "confirm" and "recommended" are optional booleans, default false.
 # "sections" is optional; when present, its question, explanation, option list,
@@ -80,8 +79,9 @@
 # At most one option may set "recommended": true; emit adds "⭐ " unless the
 # label already starts with ⭐, and stores the displayed label in the payload.
 # The key must name a decision that is open right now (a held captain
-# call, or a worker's open keyed status decision) and must fit Discord's
-# 100-character custom_id as fmd:<key>:<n>. An option needs a confirmation
+# call, or a worker's open keyed status decision). For a decision with options,
+# the key must fit Discord's 100-byte custom_id as fmd:<key>:d, the Discuss
+# button ID. An option needs a confirmation
 # click when it declares confirm, and always when its label matches
 # FM_EXT_DECISION_CONFIRM_PATTERN in bin/fm-ext-lib.sh - the deletion, money,
 # credential, and irreversible-destruction labels. A merge, a deploy, or another

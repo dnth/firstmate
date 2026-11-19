@@ -40,14 +40,12 @@ Firstmate's own messages.
 A decision payload carries buttons only on the final chunk and only when it
 names options and ``decisions.buttons_ready(bot_user_id)`` confirms click
 routing; otherwise it stays plain text. Progress keeps the decision, button
-state, chunk ids, and posting time. An empty option list records a free-text
-question, which never carries buttons.
+state, chunk ids, and posting time.
 Structured sections keep options together on the final chunk and reserve room
 for a later outcome header.
 ``reconcile_decision_posts`` edits only that final message under the display
-rules in docs/configuration.md, "Decision buttons". ``reconcile_thread_states`` then
-keeps an open decision's marker, applies a state a later reply deferred, and
-retries failed renames.
+rules in docs/configuration.md, "Decision buttons". ``reconcile_thread_states``
+follows the "Topic threads" contract in the same reference.
 
 A payload with ``media`` uploads its staged files with its last chunk as one
 multipart message; docs/configuration.md, "Outbound media", owns the single
@@ -915,20 +913,18 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     the evidence that a rename decision depends on.
 
     ``topic_name`` is the name Discord was last seen showing, ``thread_state``
-    the state last asked for and ``state_at`` when it was asked, and
-    ``rename`` the outcome of the last attempt to show that state, so a failed
-    rename stays visible and can be retried. It keeps ``name``, ``at``, and
-    ``outcome`` (applied, unchanged, or failed); a failure also keeps ``error``,
-    ``retryable``, and ``attempts`` (consecutive failed attempts).
+    the effective marker target, even if the Discord rename failed. An
+    explicit marker request can update ``state_at`` even if the target stays
+    unchanged. ``rename`` records the last outcome so a failed or deferred
+    request can be retried. A failure keeps ``error``, ``retryable``, and
+    ``attempts`` (consecutive failed attempts).
     ``creating_title`` is the title the creating reply supplied, kept so a
-    stored name can be re-derived from it. ``retitle`` is the base name a later
-    reply replaced that title with, kept once set so every later marker,
-    auto-clear, and reconciliation builds on the name the thread now wears.
+    stored name can be re-derived from it. ``retitle`` stores an explicit base
+    title separately so it can be retried or used when the live title is absent.
     ``marked_open`` records whether the marker was associated with an open
     decision, preserving that association when a reminder postdates it.
-    ``deferred_state`` holds a state a reply asked for while a decision was
-    still open; the sweep applies it when the last decision closes, and an
-    empty value clears it.
+    ``deferred_state`` stores a pending ``none`` or ``done`` separately from
+    the marker target. An empty value clears it.
 
     A private state artifact beside the outbox, written with the same guards
     the shell publication helper enforces: a regular single-link file at mode
@@ -1284,15 +1280,10 @@ def apply_thread_state(
     require_current: bool = False,
     decision_view: tuple[int, dict] | None = None,
 ) -> str:
-    """Show ``state`` on one recorded topic thread and record the outcome.
+    """Apply the requested marker or retitle under the Topic threads contract.
 
-    Returns the outcome written to the record's ``rename`` field - applied,
-    unchanged, or failed - or skipped when the thread may not or cannot be
-    renamed, which records nothing. A stored name that already matches is
-    checked against the name Discord shows before it is trusted, so a manual
-    rename can never wedge a later marker; an unreadable name renames anyway.
-    ``retitle`` replaces the base name the state is applied to and is stored
-    with it, so later markers build on the new name. Never raises.
+    Returns the Discord rename outcome (applied, unchanged, or failed), or
+    skipped when no rename was attempted, including a request saved for replay.
 
     ``recorded`` may be minutes old when the sweep reaches a thread, so the
     record is re-read under ``_THREAD_RECORD_LOCK`` before the state is
@@ -1521,11 +1512,7 @@ def maybe_rename_topic_thread(
 
 
 def decision_threads(home: Path, thread_id: str = "") -> dict[str, dict] | None:
-    """Each thread holding a decision post: {open, closed, last_posted_at}.
-
-    Read from ``bin/fm-ext-decision.sh threads``, only for ``thread_id`` when
-    given; None when it cannot be read.
-    """
+    """Read the thread summaries owned by ``bin/fm-ext-decision.sh threads``."""
     args = [str(_decision_cli()), "threads"] + (["--thread", thread_id] if thread_id else [])
     try:
         result = subprocess.run(args, check=False, env=_env_for(home),
