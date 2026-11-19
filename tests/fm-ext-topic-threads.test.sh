@@ -2384,7 +2384,7 @@ test_36c_retry_and_retitle_cannot_hide_an_open_decision() {
   intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message >/dev/null
   emit_as "$home" "$RID" answer 1 "Looking into it." "Aceh · long chats" none >/dev/null
   deliver "$home" >/dev/null
-  emit_as "$home" "$RID" followup 2 "The review is complete." "" done >/dev/null
+  emit_as "$home" "$RID" followup 2 "The review is complete." "" "done" >/dev/null
   deliver "$home" '{"kind":"rename-fail","outcome":"transient"}' >/dev/null
   open_decision_key "$home" north
   emit_decision_post "$home" "$RID" 3 north
@@ -2409,7 +2409,7 @@ test_36c_retry_and_retitle_cannot_hide_an_open_decision() {
   open_decision_key "$home" south
   emit_decision_post "$home" "$RID" 6 south needs-you
   deliver "$home" >/dev/null
-  emit_as "$home" "$RID" followup 7 "The remaining work is complete." "" done >/dev/null
+  emit_as "$home" "$RID" followup 7 "The remaining work is complete." "" "done" >/dev/null
   deliver "$home" '{"kind":"decision-ledger-offline"}' >/dev/null
   emit_as "$home" "$RID" followup 8 "Still waiting for your direction." "" needs-you >/dev/null
   out=$(deliver "$home")
@@ -2431,7 +2431,7 @@ test_36d_sweep_rechecks_after_concurrent_publication() {
   open_decision_key "$home" north
   emit_decision_post "$home" "$RID" 2 north needs-you
   deliver "$home" >/dev/null
-  emit_as "$home" "$RID" followup 3 "The review is complete." "" done >/dev/null
+  emit_as "$home" "$RID" followup 3 "The review is complete." "" "done" >/dev/null
   deliver "$home" >/dev/null
   resolve_decision_key "$home" north North
   open_decision_key "$home" south

@@ -550,7 +550,7 @@ test_13_free_text_asks_a_question_without_buttons() {
   fi
   printf '%s\n' '1. Tuesday' 'Reply with the number.' > "$home/choice.txt"
   if out=$(home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
-    --task "$TASK" --title "Cutover window" --repo sample --reason "cutover window pending" --mode done \
+    --task "$TASK" --title "Cutover window" --repo sample --reason "cutover window pending" --mode "done" \
     --text-file "$home/body.txt" --explanation-file "$home/choice.txt" --free-text 2>&1); then
     fail "--free-text must refuse a choice embedded in the explanation"
   fi
@@ -580,7 +580,7 @@ test_13_free_text_asks_a_question_without_buttons() {
   jq -e '.text | endswith("Reply here with your answer.")' "$payload" >/dev/null \
     || fail "the free-text cue must ask for a written answer"
   if out=$(home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 2 \
-    --task answer --title "Cutover window" --repo sample --reason "cutover window pending" --mode done \
+    --task answer --title "Cutover window" --repo sample --reason "cutover window pending" --mode "done" \
     --text-file "$home/body.txt" --free-text 2>&1); then
     fail "an ask must refuse a cue that exposes its task id"
   fi
@@ -590,7 +590,7 @@ test_13_free_text_asks_a_question_without_buttons() {
   fi
   printf -v long_task 'route-%084d' 0
   if out=$(home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 2 \
-    --task "$long_task" --title "Cutover window" --repo sample --reason "cutover window pending" --mode done \
+    --task "$long_task" --title "Cutover window" --repo sample --reason "cutover window pending" --mode "done" \
     --text-file "$home/body.txt" --option "Tuesday" 2>&1); then
     fail "a choice must refuse a key that does not fit a component id"
   fi
@@ -599,7 +599,7 @@ test_13_free_text_asks_a_question_without_buttons() {
     fail "a refused component id must leave no captain hold"
   fi
   home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 2 \
-    --task "$long_task" --title "Cutover window" --repo sample --reason "cutover window pending" --mode done \
+    --task "$long_task" --title "Cutover window" --repo sample --reason "cutover window pending" --mode "done" \
     --text-file "$home/body.txt" --free-text >/dev/null \
     || fail "a buttonless ask must accept a valid task id beyond the component limit"
   jq -e --arg key "hold:$long_task" '.decision.key == $key and .decision.options == []' \

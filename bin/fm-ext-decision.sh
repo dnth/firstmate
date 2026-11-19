@@ -228,6 +228,7 @@ post_table_load() {
   [ "$POST_TABLE_LOADED" = 1 ] && return 0
   POST_TABLE_LOADED=1
   if [ -n "$thread" ]; then
+    # shellcheck disable=SC2016  # $topic and $thread are jq variables.
     keys=$(set -o pipefail; progress_files "$thread" | tr '\n' '\0' \
       | xargs -0 jq -c --arg thread "$thread" '
           select((.topic_thread_id // "" | tostring) as $topic
