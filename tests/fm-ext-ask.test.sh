@@ -548,6 +548,16 @@ test_13_free_text_asks_a_question_without_buttons() {
   if home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open "$TASK" >/dev/null 2>&1; then
     fail "a refused free-text ask must not hold the call"
   fi
+  printf '%s\n' '1. Tuesday' 'Reply with the number.' > "$home/choice.txt"
+  if out=$(home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
+    --task "$TASK" --title "Cutover window" --repo sample --reason "cutover window pending" --mode done \
+    --text-file "$home/body.txt" --explanation-file "$home/choice.txt" --free-text 2>&1); then
+    fail "--free-text must refuse a choice embedded in the explanation"
+  fi
+  assert_contains "$out" "cannot offer a choice" "the free-text refusal must name the detected choice"
+  if home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open "$TASK" >/dev/null 2>&1; then
+    fail "a refused choice must not leave a captain hold"
+  fi
   home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
     --task "$TASK" --title "Cutover window" --repo sample --reason "cutover window pending" --mode "done" \
     --text-file "$home/body.txt" --explanation-file "$home/explanation.txt" --free-text \

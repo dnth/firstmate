@@ -27,10 +27,9 @@
 # an option: no --option, --recommended, --confirm, or --no-recommendation may
 # be given, the decision file records an empty options list, and the post
 # carries the question, optional explanation, and a written-answer cue with no
-# buttons. The thread keeps its needs-you marker until the captain's answer is
-# recorded through the decision's own ledger, bin/fm-captain-hold.sh answer (or
-# answers) for this captain call, so a question never depends on Firstmate
-# remembering to clear the marker. A choice always uses --option lines.
+# buttons. Record the answer using bin/fm-captain-hold.sh answer (or answers).
+# The Topic threads contract in docs/configuration.md owns marker lifetime.
+# A choice always uses --option lines.
 # The post text keeps the question, optional explanation, numbered option
 # lines, and reply cue as separate sections for safe chunking and settlement.
 # The numbered option lines follow button order, and a recommended option shows
@@ -228,6 +227,9 @@ if [ "$FREE_TEXT" = 1 ]; then
   LINES=
   CUE='Reply here with your answer.'
   FULL_TEXT=$(printf '%s\n%s' "$BODY" "$CUE")
+  if fm_ext_text_choice_shaped "$FULL_TEXT"; then
+    die "--free-text cannot offer a choice; give its options with --option"
+  fi
 else
   LINES=$(jq -r '. as $o | range(0; length) as $i
     | $o[$i] | "\($i + 1). " + (if (.recommended // false) and ((.label | startswith("⭐")) | not) then "⭐ " + .label else .label end)' \

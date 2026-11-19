@@ -142,7 +142,7 @@ deliver() {
   local home=$1
   shift
   home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$@" <<'PY'
-import json, os, sys
+import io, json, os, sys
 from pathlib import Path
 sys.path.insert(0, os.environ["PYTHONPATH"])
 import outbox_poster
@@ -176,7 +176,27 @@ def fake_read(thread_id):
         return actual[thread_id]
     return outbox_poster.load_thread_record_by_id(thread_id, home).get("topic_name", "")
 outbox_poster.discord_thread_name = fake_read
-results = outbox_poster.drain_outbox(send=send, home=home, create_thread=fake_create, rename_thread=fake_rename)
+if any(item["kind"] == "decision-ledger-offline" for item in extra):
+    outbox_poster._decision_cli = lambda: home / "missing-decision-cli"
+if any(item["kind"] == "discord-http" for item in extra):
+    os.environ["DISCORD_BOT_TOKEN"] = "fixture-token"
+    bot_id = "888888888888888888"
+    outbox_poster.decisions.buttons_ready = lambda user_id: user_id == bot_id
+
+    def respond(request, timeout):
+        if request.full_url.endswith("/users/@me") and request.get_method() == "GET":
+            return io.BytesIO(json.dumps({"id": bot_id}).encode())
+        assert request.get_method() == "POST" and request.full_url.endswith("/messages"), request
+        body = json.loads(request.data)
+        thread_id = request.full_url.split("/")[-2]
+        posted.append({"thread": thread_id, "text": body["content"]})
+        print("discord-post=%s" % json.dumps(body, ensure_ascii=False))
+        return io.BytesIO(json.dumps({"id": "9%09d" % len(posted), "channel_id": thread_id}).encode())
+
+    outbox_poster.urllib.request.urlopen = respond
+    send = None
+results = outbox_poster.drain_outbox(send=send, home=home, react=lambda *args: None,
+                                   create_thread=fake_create, rename_thread=fake_rename)
 print("results=" + ",".join(sorted(results)))
 for entry in sends:
     print("thread-create=%s" % "/".join(entry["create"]))
@@ -202,11 +222,20 @@ os.environ["FM_HOME"] = str(home)
 extra = [json.loads(a) for a in sys.argv[2:]]
 actual = {item["thread_id"]: item["name"] for item in extra if item.get("kind") == "actual"}
 failing = [item["outcome"] for item in extra if item.get("kind") == "rename-fail"]
+publish = [item["file"] for item in extra if item.get("kind") == "post-during-rename"]
 renames = []
 def fake_rename(thread_id, name):
     if failing:
         raise outbox_poster.DiscordSendError(failing[0], "discord HTTP 429", 429)
     renames.append([thread_id, name])
+    actual[thread_id] = name
+    if publish:
+        file = home / "state" / "ext-outbox" / publish.pop()
+        result = outbox_poster.deliver_one(file, home=home, react=lambda *args: None,
+                                          send=lambda payload: {"discord_message_id": "900000000001"},
+                                          rename_thread=fake_rename)
+        if result != "sent":
+            raise RuntimeError("could not publish the decision during rename: %s" % result)
 def fake_read(thread_id):
     if thread_id in actual:
         return actual[thread_id]
@@ -2250,6 +2279,9 @@ test_35_open_decisions_keep_the_marker_and_defer_the_reply_state() {
     || fail "a done while a decision is open must not rename the thread: $out"
   jq -e '.thread_state == "needs-you" and .deferred_state == "done"' "$record" >/dev/null \
     || fail "the newest requested state must replace the earlier one: $(cat "$record")"
+  emit_as "$home" "$RID" followup 5 "Still waiting for your direction." "" needs-you >/dev/null
+  out=$(deliver "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "a reminder must keep the question marker: $out"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "the open decision must keep the marker: $out"
   resolve_decision_key "$home" north North
@@ -2261,9 +2293,9 @@ test_35_open_decisions_keep_the_marker_and_defer_the_reply_state() {
     || fail "the applied deferred state must be recorded and cleared: $(cat "$record")"
   # The same rule for none: a deferral applies the bare name.
   open_decision_key "$home" south
-  emit_decision_post "$home" "$RID" 5 south needs-you
+  emit_decision_post "$home" "$RID" 6 south needs-you
   deliver "$home" >/dev/null
-  emit_as "$home" "$RID" followup 6 "Nothing else is waiting." "" none >/dev/null
+  emit_as "$home" "$RID" followup 7 "Nothing else is waiting." "" none >/dev/null
   out=$(deliver "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "the second question must keep its marker: $out"
   resolve_decision_key "$home" south South
@@ -2304,6 +2336,9 @@ test_36_sweep_reasserts_a_marker_an_open_decision_needs() {
     || fail "the re-asserted marker must be recorded as the decision's: $(cat "$record")"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "an already-marked thread must not be renamed again: $out"
+  out=$(sweep "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"Aceh · long chats"}')
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "the sweep must repair a marker manually removed from Discord"
   pass "36 the sweep re-asserts a marker an open decision needs"
 }
 
@@ -2333,6 +2368,60 @@ test_36b_reassert_stays_best_effort_and_never_unarchives() {
   pass "36b reassert stays best effort and never unarchives"
 }
 
+test_36c_retry_and_retitle_cannot_hide_an_open_decision() {
+  local home out
+  home="$TMP_ROOT/c36c"
+  setup_home "$home"
+  intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message >/dev/null
+  emit_as "$home" "$RID" answer 1 "Looking into it." "Aceh · long chats" none >/dev/null
+  deliver "$home" >/dev/null
+  emit_as "$home" "$RID" followup 2 "The review is complete." "" done >/dev/null
+  deliver "$home" '{"kind":"rename-fail","outcome":"transient"}' >/dev/null
+  open_decision_key "$home" north
+  emit_decision_post "$home" "$RID" 3 north
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "the retry of done must show the newly posted decision instead"
+  emit_as "$home" "$RID" followup 4 "Naming this for the migration." "" "" "Aceh · migration" >/dev/null
+  out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"Aceh · long chats"}')
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · migration" \
+    "a retitle must restore a missing marker while a decision is open"
+  emit_as "$home" "$RID" followup 5 "Continuing." "" none >/dev/null
+  out=$(deliver "$home" '{"kind":"decision-ledger-offline"}')
+  assert_contains "$out" "results=sent" "an unavailable ledger must leave delivery intact"
+  [ "$(renames_in "$out")" = 0 ] || fail "an unavailable ledger must not clear a marker: $out"
+  resolve_decision_key "$home" north North
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · migration" \
+    "the earlier failed done must land once the decision closes"
+  pass "36c retries and retitles honor the decision ledger"
+}
+
+test_36d_sweep_rechecks_after_concurrent_publication() {
+  local home slug out
+  home="$TMP_ROOT/c36d"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  emit_as "$home" "$RID" answer 1 "Looking into it." "Aceh · long chats" none >/dev/null
+  deliver "$home" >/dev/null
+  open_decision_key "$home" north
+  emit_decision_post "$home" "$RID" 2 north needs-you
+  deliver "$home" >/dev/null
+  emit_as "$home" "$RID" followup 3 "The review is complete." "" done >/dev/null
+  deliver "$home" >/dev/null
+  resolve_decision_key "$home" north North
+  open_decision_key "$home" south
+  emit_decision_post "$home" "$RID" 4 south
+  out=$(sweep "$home" '{"kind":"post-during-rename","file":"'"$slug"'.followup.4.json"}')
+  [ "$(sed -n 's/^thread-rename=//p' <<<"$out" | tail -n 1)" = "777777777777777777/❓ Aceh · long chats" ] \
+    || fail "a decision published during auto-clear must restore the live question marker: $out"
+  resolve_decision_key "$home" south South
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · long chats" \
+    "auto-clear must retain the deferred done through a concurrent publication"
+  pass "36d a stale sweep restores the question marker"
+}
+
 # --- 37. a free-text question is a decision with no buttons -----------------
 #
 # A needs-you question can record a decision with no options, so the thread
@@ -2341,7 +2430,7 @@ test_36b_reassert_stays_best_effort_and_never_unarchives() {
 # is planned for it.
 
 test_37_free_text_question_records_a_decision_without_buttons() {
-  local home slug record out threads
+  local home slug record out threads message
   home="$TMP_ROOT/c37"
   setup_home "$home"
   slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
@@ -2362,15 +2451,16 @@ Reply with the number."
     fail "a zero-option decision must refuse choice-shaped text"
   fi
   assert_contains "$out" "no options" "the refusal must say a choice needs its options"
-  out=$(deliver "$home")
+  out=$(deliver "$home" '{"kind":"discord-http"}')
   assert_contains "$out" "posted-to=777777777777777777 Which way should the migration go?" \
     "the free-text question must land in the thread as plain text"
+  message=$(sed -n 's/^discord-post=//p' <<<"$out")
+  jq -e 'has("components") | not' <<<"$message" >/dev/null \
+    || fail "the free-text Discord message must have no interactive components: $message"
   jq -e '.thread_state == "needs-you" and .marked_open == true' "$record" >/dev/null \
     || fail "the free-text question must mark the thread needs-you: $(cat "$record")"
   threads=$(home_env "$home" "$DECISION" threads --thread 777777777777777777)
   assert_contains "$threads" '"open":1' "the free-text question must count as an open decision"
-  out=$(home_env "$home" "$DECISION" posts --settled-only)
-  [ -z "$out" ] || fail "a decision with no options must plan no button edit: $out"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "the open question must keep the marker: $out"
   resolve_decision_key "$home" north "go north"
@@ -2379,6 +2469,12 @@ Reply with the number."
     "recording the answer must clear the question's marker"
   jq -e '.thread_state == "none"' "$record" >/dev/null \
     || fail "the cleared free-text question must be recorded: $(cat "$record")"
+  open_decision_key "$home" south
+  emit_decision_post "$home" "$RID" 3 south needs-you
+  out=$(deliver "$home" '{"kind":"discord-http"}')
+  message=$(sed -n 's/^discord-post=//p' <<<"$out")
+  jq -e 'any(.components[].components[]; .type == 2 and .label == "Discuss")' <<<"$message" >/dev/null \
+    || fail "the same Discord sender and click route must publish buttons for a choice: $message"
   pass "37 a free-text question is a decision with no buttons"
 }
 
@@ -2421,6 +2517,8 @@ test_34_emit_requires_creating_title_and_terminal_state
 test_35_open_decisions_keep_the_marker_and_defer_the_reply_state
 test_36_sweep_reasserts_a_marker_an_open_decision_needs
 test_36b_reassert_stays_best_effort_and_never_unarchives
+test_36c_retry_and_retitle_cannot_hide_an_open_decision
+test_36d_sweep_rechecks_after_concurrent_publication
 test_37_free_text_question_records_a_decision_without_buttons
 
 echo "all fm-ext-topic-threads tests passed"

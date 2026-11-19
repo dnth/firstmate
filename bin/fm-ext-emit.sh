@@ -72,10 +72,9 @@
 # and cue must reproduce the post text exactly. Without it, the whole post is
 # protected question text. fm-ext-ask.sh writes these boundaries explicitly.
 # An empty "options" list records a free-text question instead of a choice: the
-# post carries no buttons, the thread's needs-you marker stays until the
-# answer is recorded in the decision's own ledger (bin/fm-captain-hold.sh for a
-# captain call, bin/fm-send.sh --resolve-key for a worker's key), and a
-# choice-shaped post is refused because a choice needs its options.
+# post carries no buttons and refuses choice-shaped text. Record the answer in
+# the decision's own ledger (bin/fm-captain-hold.sh for a captain call,
+# bin/fm-send.sh --resolve-key for a worker's key).
 # A decision post reserves room for its later outcome header and keeps the
 # option list on the final button-carrying chunk.
 # At most one option may set "recommended": true; emit adds "⭐ " unless the
