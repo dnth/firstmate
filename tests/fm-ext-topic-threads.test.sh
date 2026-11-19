@@ -21,6 +21,7 @@ TMP_ROOT=$(fm_test_tmproot fm-ext-topic-threads)
 
 INTAKE="$ROOT/bin/fm-ext-intake.sh"
 EMIT="$ROOT/bin/fm-ext-emit.sh"
+DECISION="$ROOT/bin/fm-ext-decision.sh"
 OPEN="$ROOT/bin/fm-ext-open.sh"
 OUTBOX="$ROOT/bin/fm-ext-outbox.sh"
 LINK="$ROOT/bin/fm-ext-link.sh"
@@ -246,6 +247,23 @@ emit_decision_post() {
     emit_reply "$home" --request-id "$rid" --kind followup --generation "$generation" \
       --text-file "$home/post-$generation.txt" --decision-file "$home/decision-$generation.json" >/dev/null
   fi || fail "emit refused the decision post for $key"
+}
+
+# emit_free_text_decision <home> <rid> <generation> <key-slug> [state]: a
+# needs-you question recorded as a decision with no option buttons, so the
+# thread marker clears only when the decision ledger records an answer.
+emit_free_text_decision() {
+  local home=$1 rid=$2 generation=$3 key=$4 state=${5:-}
+  printf '{"key":"key:route-fix:%s","options":[]}' "$key" > "$home/decision-$generation.json"
+  write_text "$home/post-$generation.txt" "Which way should the migration go?"
+  if [ -n "$state" ]; then
+    emit_reply "$home" --request-id "$rid" --kind followup --generation "$generation" \
+      --text-file "$home/post-$generation.txt" --decision-file "$home/decision-$generation.json" \
+      --thread-state "$state" >/dev/null
+  else
+    emit_reply "$home" --request-id "$rid" --kind followup --generation "$generation" \
+      --text-file "$home/post-$generation.txt" --decision-file "$home/decision-$generation.json" >/dev/null
+  fi || fail "emit refused the free-text decision post for $key"
 }
 
 # --- 1. a top-level request gets its replies in one new thread ---------------
@@ -2198,6 +2216,172 @@ test_34_emit_requires_creating_title_and_terminal_state() {
   pass "34 emit requires a creating title and an answer or final state"
 }
 
+# --- 35. an open decision owns the marker until the last one closes ---------
+#
+# A later reply may ask for none or done, but an open question in the thread
+# must stay visible: the thread keeps needs-you, and the requested state lands
+# only once the last decision post closes. Two requests in a row defer in
+# order, so the newest asked-for state is the one that lands.
+
+test_35_open_decisions_keep_the_marker_and_defer_the_reply_state() {
+  local home slug record out
+  home="$TMP_ROOT/c35"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  record="$home/state/ext-outbox/$slug.thread.json"
+  emit_as "$home" "$RID" answer 1 "Two calls for you below." "Aceh · long chats" needs-you >/dev/null
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  open_decision_key "$home" north
+  emit_decision_post "$home" "$RID" 2 north needs-you
+  out=$(deliver "$home")
+  [ "$(renames_in "$out")" = 0 ] \
+    || fail "a thread already marked needs-you must not be renamed again: $out"
+  jq -e '.thread_state == "needs-you"' "$record" >/dev/null \
+    || fail "the decision post must keep the thread needs-you: $(cat "$record")"
+  emit_as "$home" "$RID" followup 3 "Carrying on with the rest." "" none >/dev/null
+  out=$(deliver "$home")
+  [ "$(renames_in "$out")" = 0 ] \
+    || fail "a none while a decision is open must not rename the thread: $out"
+  jq -e '.thread_state == "needs-you" and .deferred_state == "none"' "$record" >/dev/null \
+    || fail "the deferred none must be recorded behind the open decision: $(cat "$record")"
+  emit_as "$home" "$RID" followup 4 "Everything else landed." "" "done" >/dev/null
+  out=$(deliver "$home")
+  [ "$(renames_in "$out")" = 0 ] \
+    || fail "a done while a decision is open must not rename the thread: $out"
+  jq -e '.thread_state == "needs-you" and .deferred_state == "done"' "$record" >/dev/null \
+    || fail "the newest requested state must replace the earlier one: $(cat "$record")"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "the open decision must keep the marker: $out"
+  resolve_decision_key "$home" north North
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · long chats" \
+    "the deferred done must land when the last decision closes"
+  jq -e '.thread_state == "done" and .topic_name == "✅ Aceh · long chats"
+    and (has("deferred_state") | not)' "$record" >/dev/null \
+    || fail "the applied deferred state must be recorded and cleared: $(cat "$record")"
+  # The same rule for none: a deferral applies the bare name.
+  open_decision_key "$home" south
+  emit_decision_post "$home" "$RID" 5 south needs-you
+  deliver "$home" >/dev/null
+  emit_as "$home" "$RID" followup 6 "Nothing else is waiting." "" none >/dev/null
+  out=$(deliver "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "the second question must keep its marker: $out"
+  resolve_decision_key "$home" south South
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
+    "a deferred none must restore the bare name when the last decision closes"
+  jq -e '.thread_state == "none" and (has("deferred_state") | not)' "$record" >/dev/null \
+    || fail "the applied none must be recorded and cleared: $(cat "$record")"
+  pass "35 open decisions keep the marker and defer the reply's state"
+}
+
+# --- 36. the sweep re-asserts a marker an open decision needs ---------------
+#
+# A decision post delivered without a thread state can leave an eligible
+# thread with an open question and no marker. The periodic pass re-asserts
+# needs-you under the same eligibility and best-effort rules as any rename: a
+# captain-made thread is never touched, a permanent refusal (an archived
+# thread) is recorded and left for the next reply, and that reply retries.
+
+test_36_sweep_reasserts_a_marker_an_open_decision_needs() {
+  local home slug record out
+  home="$TMP_ROOT/c36"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  record="$home/state/ext-outbox/$slug.thread.json"
+  emit_as "$home" "$RID" answer 1 "Looking into it." "Aceh · long chats" none >/dev/null
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  jq -e '.thread_state == "none"' "$record" >/dev/null \
+    || fail "the creating reply must record its state"
+  open_decision_key "$home" north
+  emit_decision_post "$home" "$RID" 2 north
+  out=$(deliver "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "an unmarked decision post must not rename by itself: $out"
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "the sweep must re-assert needs-you on a thread with an open decision"
+  jq -e '.thread_state == "needs-you" and .marked_open == true' "$record" >/dev/null \
+    || fail "the re-asserted marker must be recorded as the decision's: $(cat "$record")"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "an already-marked thread must not be renamed again: $out"
+  pass "36 the sweep re-asserts a marker an open decision needs"
+}
+
+test_36b_reassert_stays_best_effort_and_never_unarchives() {
+  local home slug record out
+  home="$TMP_ROOT/c36b"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  record="$home/state/ext-outbox/$slug.thread.json"
+  emit_as "$home" "$RID" answer 1 "Looking into it." "Aceh · long chats" none >/dev/null
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  open_decision_key "$home" north
+  emit_decision_post "$home" "$RID" 2 north
+  deliver "$home" >/dev/null
+  out=$(sweep "$home" '{"kind":"rename-fail","outcome":"permanent"}')
+  [ "$(renames_in "$out")" = 0 ] || fail "a refused rename must never fail the sweep: $out"
+  jq -e '.rename.outcome == "failed" and .rename.retryable == false' "$record" >/dev/null \
+    || fail "an archived thread's refusal must be recorded as permanent: $(cat "$record")"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "the sweep must not retry a permanent refusal: $out"
+  emit_as "$home" "$RID" followup 3 "Still need your call." "" needs-you >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
+    "the next reply in the thread must retry the refused marker"
+  jq -e '.rename.outcome == "applied" and .thread_state == "needs-you"' "$record" >/dev/null \
+    || fail "the reply's retry must be recorded: $(cat "$record")"
+  pass "36b reassert stays best effort and never unarchives"
+}
+
+# --- 37. a free-text question is a decision with no buttons -----------------
+#
+# A needs-you question can record a decision with no options, so the thread
+# keeps its marker and clears it only when the answer reaches the decision's
+# own ledger - here a typed reply recorded on the worker's key. No button post
+# is planned for it.
+
+test_37_free_text_question_records_a_decision_without_buttons() {
+  local home slug record out threads
+  home="$TMP_ROOT/c37"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  record="$home/state/ext-outbox/$slug.thread.json"
+  emit_as "$home" "$RID" answer 1 "Looking into it." "Aceh · long chats" none >/dev/null
+  deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
+  open_decision_key "$home" north
+  emit_free_text_decision "$home" "$RID" 2 north needs-you
+  jq -e '.decision.options == []' "$home/state/ext-outbox/$slug.followup.2.json" >/dev/null \
+    || fail "the free-text question must record a decision with no options"
+  write_text "$home/post-3.txt" "Pick a route:
+1. North
+2. South
+Reply with the number."
+  if out=$(emit_reply "$home" --request-id "$RID" --kind followup --generation 3 \
+    --text-file "$home/post-3.txt" --decision-file "$home/decision-2.json" \
+    --thread-state needs-you 2>&1); then
+    fail "a zero-option decision must refuse choice-shaped text"
+  fi
+  assert_contains "$out" "no options" "the refusal must say a choice needs its options"
+  out=$(deliver "$home")
+  assert_contains "$out" "posted-to=777777777777777777 Which way should the migration go?" \
+    "the free-text question must land in the thread as plain text"
+  jq -e '.thread_state == "needs-you" and .marked_open == true' "$record" >/dev/null \
+    || fail "the free-text question must mark the thread needs-you: $(cat "$record")"
+  threads=$(home_env "$home" "$DECISION" threads --thread 777777777777777777)
+  assert_contains "$threads" '"open":1' "the free-text question must count as an open decision"
+  out=$(home_env "$home" "$DECISION" posts --settled-only)
+  [ -z "$out" ] || fail "a decision with no options must plan no button edit: $out"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "the open question must keep the marker: $out"
+  resolve_decision_key "$home" north "go north"
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
+    "recording the answer must clear the question's marker"
+  jq -e '.thread_state == "none"' "$record" >/dev/null \
+    || fail "the cleared free-text question must be recorded: $(cat "$record")"
+  pass "37 a free-text question is a decision with no buttons"
+}
+
 test_1_top_level_replies_share_one_thread
 test_2_in_thread_stays_and_slash_keeps_working
 test_3_thread_failure_falls_back_without_loss
@@ -2234,5 +2418,9 @@ test_31_retitle_follows_the_conversation
 test_32_retitles_are_screened_and_never_leave_home
 test_33_retitle_retries_and_opened_threads_follow
 test_34_emit_requires_creating_title_and_terminal_state
+test_35_open_decisions_keep_the_marker_and_defer_the_reply_state
+test_36_sweep_reasserts_a_marker_an_open_decision_needs
+test_36b_reassert_stays_best_effort_and_never_unarchives
+test_37_free_text_question_records_a_decision_without_buttons
 
 echo "all fm-ext-topic-threads tests passed"

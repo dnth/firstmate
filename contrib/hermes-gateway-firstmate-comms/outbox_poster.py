@@ -37,14 +37,17 @@ Each chunk-progress record keeps the Discord ids Firstmate posted for its
 request, which is how ``firstmate_post_for`` recognises a reply to one of
 Firstmate's own messages.
 
-A decision payload carries buttons only on the final chunk and only when
-``decisions.buttons_ready(bot_user_id)`` confirms click routing; otherwise it stays plain
-text. Progress keeps the decision, button state, chunk ids, and posting time.
+A decision payload carries buttons only on the final chunk and only when it
+names options and ``decisions.buttons_ready(bot_user_id)`` confirms click
+routing; otherwise it stays plain text. Progress keeps the decision, button
+state, chunk ids, and posting time. An empty option list records a free-text
+question, which never carries buttons.
 Structured sections keep options together on the final chunk and reserve room
 for a later outcome header.
 ``reconcile_decision_posts`` edits only that final message under the display
 rules in docs/configuration.md, "Decision buttons". ``reconcile_thread_states`` then
-clears answered needs-you threads and retries failed renames.
+keeps an open decision's marker, applies a state a later reply deferred, and
+retries failed renames.
 
 A payload with ``media`` uploads its staged files with its last chunk as one
 multipart message; docs/configuration.md, "Outbound media", owns the single
@@ -793,7 +796,9 @@ def _read_thread_record(path: Path) -> dict:
             "retitle": retitle if isinstance(retitle, str) else "",
             "state_at": _epoch(state_at),
             "rename": rename if isinstance(rename, dict) else {},
-            "marked_open": data.get("marked_open") is True}
+            "marked_open": data.get("marked_open") is True,
+            "deferred_state": (data.get("deferred_state")
+                               if isinstance(data.get("deferred_state"), str) else "")}
 
 
 def _epoch(value: object) -> float:
@@ -887,6 +892,7 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
                        creator: str = "",
                        state_at: float | None = None, rename: dict | None = None,
                        marked_open: bool | None = None,
+                       deferred_state: str | None = None,
                        open_attempt: bool | None = None,
                        opening_posted: bool | None = None) -> None:
     """Write one thread record atomically, preserving any prior unset field.
@@ -908,6 +914,9 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     auto-clear, and reconciliation builds on the name the thread now wears.
     ``marked_open`` records whether the marker was associated with an open
     decision, preserving that association when a reminder postdates it.
+    ``deferred_state`` holds a state a reply asked for while a decision was
+    still open; the sweep applies it when the last decision closes, and an
+    empty value clears it.
 
     A private state artifact beside the outbox, written with the same guards
     the shell publication helper enforces: a regular single-link file at mode
@@ -922,14 +931,15 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     with _THREAD_RECORD_LOCK:
         _merge_thread_record(path, request_id, thread_id, topic_name, thread_state,
                              creating_title, retitle, creator, state_at, rename,
-                             marked_open, open_attempt, opening_posted)
+                             marked_open, deferred_state, open_attempt, opening_posted)
 
 
 def _merge_thread_record(path: Path, request_id: object, thread_id: str,
                          topic_name: str, thread_state: str,
                          creating_title: str, retitle: str | None,
                          creator: str, state_at: float | None, rename: dict | None,
-                         marked_open: bool | None, open_attempt: bool | None,
+                         marked_open: bool | None, deferred_state: str | None,
+                         open_attempt: bool | None,
                          opening_posted: bool | None) -> None:
     if path.is_symlink():
         raise RuntimeError("thread record is a symlink")
@@ -963,6 +973,9 @@ def _merge_thread_record(path: Path, request_id: object, thread_id: str,
         record["rename"] = kept_rename
     if (marked_open if marked_open is not None else prior.get("marked_open")) is True:
         record["marked_open"] = True
+    kept_deferred = deferred_state if deferred_state is not None else prior.get("deferred_state")
+    if isinstance(kept_deferred, str) and kept_deferred:
+        record["deferred_state"] = kept_deferred
     if (open_attempt if open_attempt is not None else prior.get("open_attempt")) is True:
         record["open_attempt"] = True
     if (opening_posted if opening_posted is not None else prior.get("opening_posted")) is True:
@@ -1261,6 +1274,7 @@ def apply_thread_state(
     thread_owner=None,
     read_thread=None,
     marked_open: bool | None = None,
+    deferred_state: str | None = None,
     retitle: str = "",
     require_current: bool = False,
     decision_posts: tuple | None = None,
@@ -1273,7 +1287,9 @@ def apply_thread_state(
     checked against the name Discord shows before it is trusted, so a manual
     rename can never wedge a later marker; an unreadable name renames anyway.
     ``retitle`` replaces the base name the state is applied to and is stored
-    with it, so later markers build on the new name. Never raises.
+    with it, so later markers build on the new name. ``deferred_state`` writes
+    the state a reply asked for while a decision stayed open; it is never
+    applied here. Never raises.
 
     ``recorded`` may be minutes old when the sweep reaches a thread, so the
     record is re-read under ``_THREAD_RECORD_LOCK`` before the state is
@@ -1358,7 +1374,8 @@ def apply_thread_state(
                                        thread_state=state, creator=provenance,
                                        creating_title=recorded.get("creating_title") or "",
                                        retitle=retitle or None,
-                                       state_at=state_at, rename=rename, marked_open=marked_open)
+                                       state_at=state_at, rename=rename, marked_open=marked_open,
+                                       deferred_state=deferred_state)
         except Exception as err:
             print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
         if changed:
@@ -1367,6 +1384,7 @@ def apply_thread_state(
             recorded = current
             state = current.get("thread_state")
             state_at = marked_open = None
+            deferred_state = None
             retitle = ""
             require_current = True
             decision_posts = None
@@ -1415,7 +1433,7 @@ def maybe_rename_topic_thread(
         recorded = load_thread_record_by_id(thread_id, home)
         if not recorded:
             return thread_id
-    state_at = marked_open = None
+    state_at = marked_open = deferred = None
     retry = state is None and not retitle
     if retry:
         if (recorded.get("rename") or {}).get("outcome") != "failed":
@@ -1425,14 +1443,20 @@ def maybe_rename_topic_thread(
             return thread_id
     elif state is not None:
         state_at = _epoch(payload.get("recorded_at")) or time.time()
-        # A needs-you marked while a decision post in the thread is still
-        # open belongs to that decision, however late the reminder came.
-        marked_open = False
+        deferred = ""
+        open_decisions = 0
+        try:
+            open_decisions = decision_threads(home, thread_id).get(thread_id, {}).get("open", 0)
+        except Exception:
+            open_decisions = 0
         if state == "needs-you":
-            try:
-                marked_open = decision_threads(home, thread_id).get(thread_id, {}).get("open", 0) > 0
-            except Exception:
-                marked_open = False
+            # A needs-you marked while a decision post in the thread is still
+            # open belongs to that decision, however late the reminder came.
+            marked_open = open_decisions > 0
+        elif open_decisions > 0:
+            # An open question owns the marker: a later reply's none or done
+            # waits in the record until the last decision closes.
+            deferred, state, state_at, marked_open = state, "needs-you", time.time(), True
     if retitle:
         # The retitle becomes this thread's stored base name, so this rename
         # and every later marker, auto-clear, and reconciliation builds on it.
@@ -1452,7 +1476,7 @@ def maybe_rename_topic_thread(
                     state = "none"
     apply_thread_state(recorded, state, home, state_at=state_at, rename_thread=rename_thread,
                        thread_owner=thread_owner, read_thread=read_thread, marked_open=marked_open,
-                       retitle=retitle, require_current=retry)
+                       deferred_state=deferred, retitle=retitle, require_current=retry)
     return thread_id
 
 
@@ -1485,9 +1509,9 @@ def reconcile_thread_states(
 ) -> list[str]:
     """The periodic pass over this home's own topic threads.
 
-    docs/configuration.md's topic-thread contract owns auto-clear and retry
-    eligibility. Returns the threads it tried to rename. The watcher catches
-    failures so this pass cannot interrupt reply delivery.
+    docs/configuration.md's topic-thread contract owns auto-clear, re-assert,
+    and retry eligibility. Returns the threads it tried to rename. The watcher
+    catches failures so this pass cannot interrupt reply delivery.
     """
     home = home or firstmate_home()
     directory = state_dir(home) / "ext-outbox"
@@ -1506,18 +1530,32 @@ def reconcile_thread_states(
         if (_creating_request(record).get("channel_id") or "") != channel:
             continue
         state = record.get("thread_state")
+        if summaries is None:
+            with _THREAD_RECORD_LOCK:
+                decision_posts = _decision_post_snapshot(home)
+            summaries = decision_threads(home)
+        summary = summaries.get(record["topic_thread_id"])
+        if summary and summary["open"] > 0 and state != "needs-you":
+            # An open question owns the marker even when the reply that asked
+            # it carried no state; re-assert it under the ordinary rename
+            # rules, so an archived thread's refusal waits for the next reply.
+            apply_thread_state(record, "needs-you", home, state_at=time.time(),
+                               rename_thread=rename_thread, read_thread=read_thread,
+                               marked_open=True, require_current=True,
+                               decision_posts=decision_posts)
+            touched.append(record["topic_thread_id"])
+            continue
         if state == "needs-you":
-            if summaries is None:
-                with _THREAD_RECORD_LOCK:
-                    decision_posts = _decision_post_snapshot(home)
-                summaries = decision_threads(home)
-            summary = summaries.get(record["topic_thread_id"])
             if (decision_posts is not None and summary and summary["open"] == 0 and summary["closed"] > 0
                     and (record.get("marked_open")
                          or record.get("state_at", 0) <= summary["last_posted_at"])):
-                apply_thread_state(record, "none", home, state_at=time.time(),
+                # The state a reply asked for while this decision was open
+                # lands now; otherwise the marker is simply cleared.
+                deferred = record.get("deferred_state")
+                next_state = deferred if state_prefix(deferred) is not None else "none"
+                apply_thread_state(record, next_state, home, state_at=time.time(),
                                    rename_thread=rename_thread, read_thread=read_thread,
-                                   marked_open=False, require_current=True,
+                                   marked_open=False, deferred_state="", require_current=True,
                                    decision_posts=decision_posts)
                 touched.append(record["topic_thread_id"])
                 continue
@@ -1788,7 +1826,8 @@ def discord_send(payload: dict) -> dict:
         message.update(nonce=payload["nonce"], enforce_nonce=True)
     decision = payload.get("decision")
     last_chunk = int(payload.get("chunk_index") or 0) + 1 >= int(payload.get("chunk_count") or 1)
-    buttons = isinstance(decision, dict) and last_chunk and decisions.buttons_ready(_bot_user_id(token))
+    buttons = (isinstance(decision, dict) and bool(decision.get("options"))
+               and last_chunk and decisions.buttons_ready(_bot_user_id(token)))
     if buttons:
         message["components"] = decisions.components_for(decision)
     files = payload.get("files") or []

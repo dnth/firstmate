@@ -1142,17 +1142,18 @@ A retitle shares a marker's eligibility and is equally best effort: it only ever
 A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
 Emit requires a title on any reply that may create the thread and an explicit state on every `answer` and `final`; the [emit header](../bin/fm-ext-emit.sh) owns both refusals.
 The [Decision buttons](#decision-buttons) contract owns the button requirement and exemptions for `needs-you` replies.
-The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name to match the requested state.
+The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name to match the requested state, except that an open decision post owns the marker: while one is open in the thread the thread keeps `❓ ` whatever a later reply asks for, and that reply's `none` or `done` is held and applied once the last decision closes.
 Before trusting a stored name that already matches, the poster reads the name Discord shows, so a manual rename never wedges a later marker; when that name cannot be read it renames anyway.
 Both the request that created the thread and a later request of any origin that arrived inside it - a typed message, a decision-button click, or a `/fm` command - may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.
 Only a thread this home created in the dedicated channel is renamed; a captain-made thread, a non-dedicated channel, or a DM is never renamed, and once a thread's record has aged out it can no longer be identified and is left alone.
-A decision-associated `needs-you` clears itself: once every decision post in the thread is closed in the ledgers - a click Firstmate recorded, a typed answer, or a captain call answered - the gateway's 30-second full decision sweep reconciles the posts, then renames the thread to the bare name, so Firstmate never has to emit a separate `none`.
+A decision-associated `needs-you` clears itself: once every decision post in the thread is closed in the ledgers - a click Firstmate recorded, a typed answer, or a captain call answered - the gateway's 30-second full decision sweep reconciles the posts, then applies the state a later reply asked for while that decision was open (`✅ ` for `done`, the bare name otherwise), so Firstmate never has to emit a separate `none`.
+The same sweep re-asserts `❓ ` on an eligible Firstmate-created thread that has an open decision post and shows no marker, under the same eligibility, best-effort, and archived-thread rules as a reply's rename.
 Two open decisions keep the marker until the second one closes, and a `needs-you` marked while a decision post in the thread is still open, such as a reminder, belongs to that decision and clears with it.
 Only a `needs-you` marked when no decision post in the thread was open and after its newest one was asked is a newer question that stands until a reply clears it.
 [`bin/fm-ext-decision.sh`](../bin/fm-ext-decision.sh) `threads` owns which decision posts count as open.
 A rename failure, including a rate limit, is logged, recorded, and never blocks or loses the reply.
 The record keeps the wanted state and the failure; the next reply in that thread retries any failed rename, and the periodic sweep also retries one that did not fail permanently.
-Permanent failures, such as an archived thread refusing the rename, wait for the next reply; the periodic sweep never unarchives a thread just to remove a marker.
+Permanent failures, such as an archived thread refusing the rename, wait for the next reply; the periodic sweep never unarchives a thread just to change its marker.
 A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
 
 Firstmate can also open a topic thread no captain request started, for example one thread per tracked item, with [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh).
@@ -1230,9 +1231,11 @@ The [ask header](../bin/fm-ext-ask.sh) owns that refusal.
 For a worker's existing keyed status decision, use `bin/fm-ext-emit.sh --decision-file` directly; its [header](../bin/fm-ext-emit.sh) owns the file format and validation.
 If its file omits `sections`, the whole post is treated as protected question text.
 The [emit header's choice guard](../bin/fm-ext-emit.sh) owns the matching rules, including digit-selection cues and standalone choice headings followed by at least two option lines, and routes refused plain-text choices to `bin/fm-ext-ask.sh`.
-`--no-buttons "<reason>"` posts a deliberate plain list anyway and records the reason in the outbox payload as `no_buttons_reason`; the emit header owns the exact detection rule.
-An `answer`, `followup`, or `final` marked `needs-you` must therefore carry `--decision-file` or `--no-buttons "<reason>"`, so a thread that asks the captain to act always carries the buttons for its choice or the recorded reason it asks none; an `ack` is exempt, and [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh) passes both flags through for a thread it opens.
-Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every decision post also carries a Discuss button, `fmd:<key>:d`.
+`--no-buttons "<reason>"` posts a deliberate plain list anyway and records the reason in the outbox payload as `no_buttons_reason`; the emit header owns the exact detection rule, and it belongs to a post that asks the captain nothing back, such as informational status.
+An `answer`, `followup`, or `final` marked `needs-you` must therefore carry `--decision-file` or `--no-buttons "<reason>"`, so a thread that asks the captain to act always records what it asks or says why it asks nothing; an `ack` is exempt, and [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh) passes both flags through for a thread it opens.
+A question the captain answers in words records the same decision with an empty option list - [`bin/fm-ext-ask.sh`](../bin/fm-ext-ask.sh) `--free-text`, or a `--decision-file` with no options - so it posts as plain text with no buttons and the thread keeps `❓ ` until the answer is recorded in that decision's own ledger, exactly as a button post clears.
+A decision with no options refuses choice-shaped text: a choice always carries its options.
+Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every post that carries options also carries a Discuss button, `fmd:<key>:d`.
 Channel members can read a `custom_id` through the Discord API, so the key is never written into a label or the post text, and emit refuses a post that names the key or its task id.
 A decision post goes where every reply to its request goes: into the request's topic thread or Discord thread when it has one, otherwise its channel.
 A click is checked against, and its request filed from, the thread or channel the post actually landed in, so Firstmate answers a click in that same conversation.

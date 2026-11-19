@@ -520,6 +520,58 @@ test_12_force_push_flags_require_confirmation() {
   pass "12 force-push flags confirm with intervening targets while ordinary pushes take one click"
 }
 
+# --- 13. --free-text asks a question in words and records a decision --------
+#
+# A question with no option list records the same captain-call decision, so
+# the thread keeps its needs-you marker until the answer reaches the ledger.
+# Its post carries no numbered options, and mixing options into it is refused
+# before anything is held.
+
+test_13_free_text_asks_a_question_without_buttons() {
+  local home=$TMP_ROOT/c13 TASK=route-question payload out
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: 13 needs tasks-axi for the captain-call board"; return 0; }
+  BASE_PATH="$(dirname "$(command -v tasks-axi)"):$BASE_PATH"
+  setup_home "$home"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  mkdir -p "$home/data"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  ln -sf "$(command -v tasks-axi)" "$home/fakebin/tasks-axi"
+  fm_fake_exit0 "$home/fakebin" treehouse no-mistakes gh gh-axi
+  printf 'Which cutover window do you want?' > "$home/body.txt"
+  printf 'The migration can run Tuesday or Thursday night.' > "$home/explanation.txt"
+  if out=$(home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
+    --task "$TASK" --reason "cutover window pending" --mode "done" \
+    --text-file "$home/body.txt" --option "Tuesday" --free-text 2>&1); then
+    fail "--free-text must refuse an --option"
+  fi
+  assert_contains "$out" "no --option" "the free-text refusal must name the excluded flag"
+  if home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open "$TASK" >/dev/null 2>&1; then
+    fail "a refused free-text ask must not hold the call"
+  fi
+  home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 1 \
+    --task "$TASK" --title "Cutover window" --repo sample --reason "cutover window pending" --mode "done" \
+    --text-file "$home/body.txt" --explanation-file "$home/explanation.txt" --free-text \
+    || fail "--free-text refused a valid question"
+  home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open "$TASK" >/dev/null \
+    || fail "the free-text question must hold its call"
+  payload=$(payload_of "$home" followup 1)
+  jq -e '.thread_state == "needs-you" and .decision.options == []
+    and .decision.sections == {
+      "question":"Which cutover window do you want?",
+      "explanation":"The migration can run Tuesday or Thursday night.",
+      "options":"",
+      "cue":"Reply here with your answer.",
+      "structured":true
+    }' "$payload" >/dev/null \
+    || fail "wrong free-text decision block: $(jq -c .decision "$payload")"
+  if jq -r '.text' "$payload" | grep -qE '^[0-9]+\. '; then
+    fail "a free-text question must carry no option lines"
+  fi
+  jq -e '.text | endswith("Reply here with your answer.")' "$payload" >/dev/null \
+    || fail "the free-text cue must ask for a written answer"
+  pass "13 --free-text asks a question without buttons"
+}
+
 test_1_ask_holds_and_posts_buttons_in_text_order
 test_2_mode_is_required_and_pre_hold_refusals
 test_3_emit_refuses_a_choice_without_buttons
@@ -532,3 +584,4 @@ test_9_plural_choice_cues_require_buttons
 test_10_digit_choice_cues_and_headings_require_buttons
 test_11_bold_headings_allow_colons_inside_or_outside
 test_12_force_push_flags_require_confirmation
+test_13_free_text_asks_a_question_without_buttons

@@ -1310,7 +1310,8 @@ fm_ext_split_thread_legacy() {
 
 # fm_ext_outbox_schema_valid <file>: payload has required fields and matching
 # slug. An optional decision carries its key, close mode, lifecycle, option
-# buttons, and the post text the buttons answer. Optional media names this
+# buttons (none for a free-text question), and the post text the buttons
+# answer. Optional media names this
 # generation's staged folder and its generically named files, which
 # bin/fm-ext-media.sh owns.
 fm_ext_outbox_schema_valid() {
@@ -1344,7 +1345,7 @@ fm_ext_outbox_schema_valid() {
         and (.mode == "done" or .mode == "release")
         and (.occurrence | type == "string" and length >= 1)
         and (.text | type == "string")
-        and (.options | type == "array" and length >= 1 and length <= $max_options
+        and (.options | type == "array" and length <= $max_options
           and all(.[]; type == "object"
             and (.id | type == "number")
             and (.label | type == "string" and length >= 1 and length <= $label_max)

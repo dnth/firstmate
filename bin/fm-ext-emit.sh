@@ -71,6 +71,11 @@
 # "sections" is optional; when present, its question, explanation, option list,
 # and cue must reproduce the post text exactly. Without it, the whole post is
 # protected question text. fm-ext-ask.sh writes these boundaries explicitly.
+# An empty "options" list records a free-text question instead of a choice: the
+# post carries no buttons, the thread's needs-you marker stays until the
+# answer is recorded in the decision's own ledger (bin/fm-captain-hold.sh for a
+# captain call, bin/fm-send.sh --resolve-key for a worker's key), and a
+# choice-shaped post is refused because a choice needs its options.
 # A decision post reserves room for its later outcome header and keeps the
 # option list on the final button-carrying chunk.
 # At most one option may set "recommended": true; emit adds "⭐ " unless the
@@ -100,11 +105,13 @@
 # NEEDS-YOU REPLIES. An answer, followup, or final that passes --thread-state
 # needs-you is refused unless it also carries --decision-file or
 # --no-buttons "<reason>". A needs-you thread asks the captain to act, so the
-# reply that marks it must carry the buttons for that choice or say why it asks
-# none, and an ack is exempt. Use bin/fm-ext-ask.sh to ask a choice;
-# --no-buttons is for a thread that needs the captain without a choice, such as
-# a status reminder. bin/fm-ext-open.sh passes both flags through for the first
-# message of a thread it opens.
+# reply that marks it must record what it asks as a decision - the buttons for
+# a choice, or a free-text question with no options - or say why it asks
+# nothing, and an ack is exempt. Use bin/fm-ext-ask.sh to ask a choice and its
+# --free-text form to ask a question in words; --no-buttons is for a thread
+# that needs the captain without asking anything back, such as a status
+# reminder. bin/fm-ext-open.sh passes both flags through for the first message
+# of a thread it opens.
 #
 # CHOICE GUARD. An answer, followup, or final whose text has the shape of a choice is refused unless --decision-file is given, so a choice cannot go out as plain text by mistake.
 # Detection is case-insensitive, cues match within one line, and it uses these rules:
@@ -293,7 +300,7 @@ esac
 case "$KIND:$THREAD_STATE" in
   answer:needs-you|followup:needs-you|final:needs-you)
     if [ -z "$DECISION_FILE" ] && [ -z "$NO_BUTTONS_SET" ]; then
-      die "a needs-you $KIND must carry decision buttons; post the choice with bin/fm-ext-ask.sh (or --decision-file), or pass --no-buttons \"<reason>\" when it asks no choice"
+      die "a needs-you $KIND must record what it asks as a decision: post a choice with bin/fm-ext-ask.sh (or --decision-file), post a free-text question with bin/fm-ext-ask.sh --free-text or a decision file with no options, or pass --no-buttons \"<reason>\" for an informational post that asks nothing"
     fi
     ;;
 esac
@@ -355,7 +362,7 @@ if [ -n "$DECISION_FILE" ]; then
     type == "object"
     and (.key | type == "string")
     and ((.mode // "done") | . == "done" or . == "release")
-    and (.options | type == "array" and length >= 1 and length <= $max_options)
+    and (.options | type == "array" and length <= $max_options)
     and all(.options[]; type == "object"
       and (.label | type == "string" and length >= 1 and length <= $label_max
         and (explode | all(. >= 32 and . != 127))
@@ -374,13 +381,16 @@ if [ -n "$DECISION_FILE" ]; then
         and (.cue | type == "string"))
       else true end)
   ' "$DECISION_FILE" >/dev/null 2>&1 \
-    || die "decision file must hold {key, mode, options:[{label, confirm, recommended}], sections?} with 1-$FM_EXT_DECISION_MAX_OPTIONS distinct labels of 1-$FM_EXT_DECISION_LABEL_MAX characters and at most one recommended option"
+    || die "decision file must hold {key, mode, options:[{label, confirm, recommended}], sections?} with 0-$FM_EXT_DECISION_MAX_OPTIONS distinct labels of 1-$FM_EXT_DECISION_LABEL_MAX characters and at most one recommended option"
   if [ -n "$NO_RECOMMENDATION_SET" ] \
     && jq -e '[.options[] | select(.recommended // false)] | length > 0' "$DECISION_FILE" >/dev/null 2>&1; then
     die "--no-recommendation cannot accompany a decision that marks a recommended option"
   fi
   DECISION_KEY=$(jq -r '.key' "$DECISION_FILE")
   DECISION_MODE=$(jq -r '.mode // "done"' "$DECISION_FILE")
+  if [ "$(jq '.options | length' "$DECISION_FILE")" = 0 ] && fm_ext_text_choice_shaped "$TEXT"; then
+    die "a decision with no options records a free-text question, so its text cannot offer a choice; give the options in the decision file or post them with bin/fm-ext-ask.sh"
+  fi
   DECISION_TASK=$(fm_ext_decision_key_task "$DECISION_KEY") \
     || die "decision key must be hold:<task-id> or key:<task-id>:<slug>"
   case "$DECISION_KEY:$DECISION_MODE" in
