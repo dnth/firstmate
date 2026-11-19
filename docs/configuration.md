@@ -1144,11 +1144,12 @@ Emit requires a title on any reply that may create the thread and an explicit st
 The [Decision buttons](#decision-buttons) contract owns the button requirement and exemptions for `needs-you` replies.
 The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name to match the requested state.
 Any open decision keeps the thread marked `❓ ` and defers a later reply's `none` or `done` until the last decision closes.
+If the decision ledger is unavailable, the poster leaves the live name intact and saves the requested marker or retitle for reconciliation once the ledger can be read.
 Before trusting a stored name that already matches, the poster reads the name Discord shows, so a manual rename never wedges a later marker; when that name cannot be read it renames anyway.
 Both the request that created the thread and a later request of any origin that arrived inside it - a typed message, a decision-button click, or a `/fm` command - may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.
 Only a thread this home created in the dedicated channel is renamed; a captain-made thread, a non-dedicated channel, or a DM is never renamed, and once a thread's record has aged out it can no longer be identified and is left alone.
 A decision-associated `needs-you` clears itself: once every decision post in the thread is closed in the ledgers - a click Firstmate recorded, a typed answer, or a captain call answered - the gateway's 30-second full decision sweep reconciles the posts, then applies the state a later reply asked for while that decision was open (`✅ ` for `done`, the bare name otherwise), so Firstmate never has to emit a separate `none`.
-The same sweep re-asserts `❓ ` on an eligible Firstmate-created thread that has an open decision post and shows no marker, under the same eligibility, best-effort, and archived-thread rules as a reply's rename.
+The same sweep re-asserts `❓ ` on an eligible Firstmate-created thread with an open decision, preserving the live base title under the same best-effort and archived-thread rules as a reply's rename.
 A `needs-you` reminder while a decision is open belongs to that decision and preserves any deferred state.
 Only a `needs-you` marked when no decision post in the thread was open and after its newest one was asked is a newer question that stands until a reply clears it.
 [`bin/fm-ext-decision.sh`](../bin/fm-ext-decision.sh) `threads` owns which decision posts count as open.

@@ -536,6 +536,11 @@ FM_EXT_DECISION_TEXT_MAX=1000
 # Longest Discord component custom_id.
 # shellcheck disable=SC2034 # Read by the sourcing emit script.
 FM_EXT_DECISION_CUSTOM_ID_MAX=100
+
+fm_ext_decision_button_key_fits() {
+  [ "$(printf 'fmd:%s:d' "$1" | wc -c)" -le "$FM_EXT_DECISION_CUSTOM_ID_MAX" ]
+}
+
 # The bin/fm-ext-emit.sh header owns the choice-shaped text detection rules.
 FM_EXT_CHOICE_OPTION_RE='^[[:space:]]*((-|\*|•)[[:space:]]+)?(\(?[0-9]{1,2}[.):]|[A-Za-z][0-9]{1,2}[.):]?)([[:space:]]+[^[:space:]]|$)'
 FM_EXT_CHOICE_CUE_RE='(^|[^[:alnum:]_])((reply|respond|answer|type|send|pick|choose|select|tap|click)([^[:alnum:]_.!?]|[^[:alnum:]_.!?][^.!?]{0,38}[^[:alnum:]_.!?])(number|code|letter|option|choice)s?|which (one|options?)|(pick|choose) one)([^[:alnum:]_]|$)'

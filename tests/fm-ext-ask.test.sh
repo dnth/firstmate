@@ -528,7 +528,7 @@ test_12_force_push_flags_require_confirmation() {
 # before anything is held.
 
 test_13_free_text_asks_a_question_without_buttons() {
-  local home=$TMP_ROOT/c13 TASK=route-question payload out
+  local home=$TMP_ROOT/c13 TASK=route-question payload out long_task
   command -v tasks-axi >/dev/null 2>&1 || { echo "skip: 13 needs tasks-axi for the captain-call board"; return 0; }
   BASE_PATH="$(dirname "$(command -v tasks-axi)"):$BASE_PATH"
   setup_home "$home"
@@ -579,6 +579,31 @@ test_13_free_text_asks_a_question_without_buttons() {
   fi
   jq -e '.text | endswith("Reply here with your answer.")' "$payload" >/dev/null \
     || fail "the free-text cue must ask for a written answer"
+  if out=$(home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 2 \
+    --task answer --title "Cutover window" --repo sample --reason "cutover window pending" --mode done \
+    --text-file "$home/body.txt" --free-text 2>&1); then
+    fail "an ask must refuse a cue that exposes its task id"
+  fi
+  assert_contains "$out" "must not name the task id" "the assembled cue must pass the public body check"
+  if home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open answer >/dev/null 2>&1; then
+    fail "a refused cue must leave no captain hold"
+  fi
+  printf -v long_task 'route-%084d' 0
+  if out=$(home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 2 \
+    --task "$long_task" --title "Cutover window" --repo sample --reason "cutover window pending" --mode done \
+    --text-file "$home/body.txt" --option "Tuesday" 2>&1); then
+    fail "a choice must refuse a key that does not fit a component id"
+  fi
+  assert_contains "$out" "too long for a Discord button" "the component limit must apply to choices"
+  if home_env "$home" "$ROOT/bin/fm-captain-hold.sh" open "$long_task" >/dev/null 2>&1; then
+    fail "a refused component id must leave no captain hold"
+  fi
+  home_env "$home" "$ASK" --request-id "$RID" --kind followup --generation 2 \
+    --task "$long_task" --title "Cutover window" --repo sample --reason "cutover window pending" --mode done \
+    --text-file "$home/body.txt" --free-text >/dev/null \
+    || fail "a buttonless ask must accept a valid task id beyond the component limit"
+  jq -e --arg key "hold:$long_task" '.decision.key == $key and .decision.options == []' \
+    "$(payload_of "$home" followup 2)" >/dev/null || fail "the long free-text key must be published"
   pass "13 --free-text asks a question without buttons"
 }
 

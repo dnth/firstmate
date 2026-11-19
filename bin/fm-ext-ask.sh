@@ -215,11 +215,6 @@ if [ -n "$EXPLANATION_FILE" ]; then
   EXPLANATION=$(cat -- "$EXPLANATION_FILE")
 fi
 
-if { printf '%s\n' "$TEXT" "$EXPLANATION"; jq -r '.[].label' <<<"$OPTIONS_JSON"; } \
-  | grep -qiF -e "$TASK" -e "$KEY"; then
-  die "the text and labels must not name the task id"
-fi
-
 # Numbered lines in button order, with the same label the button shows.
 BODY=$TEXT
 [ -z "$EXPLANATION" ] || BODY=$(printf '%s\n\n%s' "$TEXT" "$EXPLANATION")
@@ -236,6 +231,15 @@ else
     <<<"$OPTIONS_JSON") || die "could not number the options" 1
   CUE='Tap a button, or reply with the number.'
   FULL_TEXT=$(printf '%s\n\n%s\n%s' "$BODY" "$LINES" "$CUE")
+fi
+
+if { printf '%s\n' "$FULL_TEXT"; jq -r '.[].label' <<<"$OPTIONS_JSON"; } \
+  | grep -qiF -e "$TASK" -e "$KEY"; then
+  die "the text and labels must not name the task id"
+fi
+
+if [ "$OPTION_COUNT" -gt 0 ] && ! fm_ext_decision_button_key_fits "$KEY"; then
+  die "decision key is too long for a Discord button"
 fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-ext-ask.XXXXXX") || die "could not make a scratch directory" 1

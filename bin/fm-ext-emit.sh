@@ -387,7 +387,8 @@ if [ -n "$DECISION_FILE" ]; then
   fi
   DECISION_KEY=$(jq -r '.key' "$DECISION_FILE")
   DECISION_MODE=$(jq -r '.mode // "done"' "$DECISION_FILE")
-  if [ "$(jq '.options | length' "$DECISION_FILE")" = 0 ] && fm_ext_text_choice_shaped "$TEXT"; then
+  DECISION_OPTIONS=$(jq '.options | length' "$DECISION_FILE")
+  if [ "$DECISION_OPTIONS" -eq 0 ] && fm_ext_text_choice_shaped "$TEXT"; then
     die "a decision with no options records a free-text question, so its text cannot offer a choice; give the options in the decision file or post them with bin/fm-ext-ask.sh"
   fi
   DECISION_TASK=$(fm_ext_decision_key_task "$DECISION_KEY") \
@@ -395,8 +396,9 @@ if [ -n "$DECISION_FILE" ]; then
   case "$DECISION_KEY:$DECISION_MODE" in
     key:*:release) die "mode release only applies to a captain call (hold:<task-id>)" ;;
   esac
-  [ "$(printf 'fmd:%s:d' "$DECISION_KEY" | wc -c)" -le "$FM_EXT_DECISION_CUSTOM_ID_MAX" ] \
-    || die "decision key is too long for a Discord button; post the numbered text without buttons"
+  if [ "$DECISION_OPTIONS" -gt 0 ] && ! fm_ext_decision_button_key_fits "$DECISION_KEY"; then
+    die "decision key is too long for a Discord button"
+  fi
   # Public safety: the post and its labels are public; only the custom_ids
   # carry the key.
   if { printf '%s\n' "$TEXT"; jq -r '.options[].label' "$DECISION_FILE"; } \

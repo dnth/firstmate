@@ -2336,9 +2336,18 @@ test_36_sweep_reasserts_a_marker_an_open_decision_needs() {
     || fail "the re-asserted marker must be recorded as the decision's: $(cat "$record")"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "an already-marked thread must not be renamed again: $out"
-  out=$(sweep "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"Aceh · long chats"}')
-  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
-    "the sweep must repair a marker manually removed from Discord"
+  out=$(sweep "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"❓ Aceh · compaction recap"}')
+  [ "$(renames_in "$out")" = 0 ] || fail "a manual title with the correct marker must stay: $out"
+  out=$(sweep "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"✅ Aceh · compaction recap"}')
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · compaction recap" \
+    "the sweep must repair the marker while preserving the manual title"
+  resolve_decision_key "$home" north North
+  emit_as "$home" "$RID" followup 3 "Naming this for the migration." "" "" "Aceh · migration" >/dev/null
+  out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"✅ Aceh · compaction recap"}')
+  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · migration" \
+    "a retitle after the answer must preserve the live terminal marker"
+  out=$(sweep "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "auto-clear must leave the recorded terminal marker: $out"
   pass "36 the sweep re-asserts a marker an open decision needs"
 }
 
@@ -2386,14 +2395,29 @@ test_36c_retry_and_retitle_cannot_hide_an_open_decision() {
   out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"Aceh · long chats"}')
   assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · migration" \
     "a retitle must restore a missing marker while a decision is open"
-  emit_as "$home" "$RID" followup 5 "Continuing." "" none >/dev/null
+  emit_as "$home" "$RID" followup 5 "Continuing." "" none "Aceh · rollout" >/dev/null
   out=$(deliver "$home" '{"kind":"decision-ledger-offline"}')
   assert_contains "$out" "results=sent" "an unavailable ledger must leave delivery intact"
   [ "$(renames_in "$out")" = 0 ] || fail "an unavailable ledger must not clear a marker: $out"
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · rollout" \
+    "recovery must apply the requested title while the question is still open"
   resolve_decision_key "$home" north North
   out=$(sweep "$home")
-  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · migration" \
-    "the earlier failed done must land once the decision closes"
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · rollout" \
+    "the latest marker requested during the outage must land after the decision closes"
+  open_decision_key "$home" south
+  emit_decision_post "$home" "$RID" 6 south needs-you
+  deliver "$home" >/dev/null
+  emit_as "$home" "$RID" followup 7 "The remaining work is complete." "" done >/dev/null
+  deliver "$home" '{"kind":"decision-ledger-offline"}' >/dev/null
+  emit_as "$home" "$RID" followup 8 "Still waiting for your direction." "" needs-you >/dev/null
+  out=$(deliver "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "a reminder after recovery must preserve the question marker: $out"
+  resolve_decision_key "$home" south South
+  out=$(sweep "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · rollout" \
+    "a reminder immediately after recovery must keep the terminal state requested during the outage"
   pass "36c retries and retitles honor the decision ledger"
 }
 
@@ -2420,6 +2444,36 @@ test_36d_sweep_rechecks_after_concurrent_publication() {
   assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · long chats" \
     "auto-clear must retain the deferred done through a concurrent publication"
   pass "36d a stale sweep restores the question marker"
+}
+
+test_36e_targeted_lookup_includes_cross_thread_replacements() {
+  local home slug out
+  home="$TMP_ROOT/c36e"
+  setup_home "$home"
+  slug=$(intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message)
+  open_decision_key "$home" north
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$RID" <<'PY'
+import sys
+from pathlib import Path
+from outbox_poster import write_progress
+
+home = Path(sys.argv[1])
+payload = {"slug": sys.argv[2], "kind": "followup", "generation": 1}
+progress = {"request_id": sys.argv[3], "topic_thread_id": "777777777777777777",
+            "decision": {"key": "key:route-fix:north"}, "buttons": True,
+            "discord_message_ids": ["900000000000000001"], "posted_at": 1}
+write_progress(payload, progress, home)
+write_progress(dict(payload, generation=2), dict(progress, topic_thread_id="888888888888888888",
+               discord_message_ids=["900000000000000002"], posted_at=2), home)
+(home / "state" / "ext-outbox" / "000-unrelated.progress.json").write_text('{"decision":invalid')
+PY
+  then fail "could not publish the test decision posts"
+  fi
+  out=$(home_env "$home" "$DECISION" threads --thread 777777777777777777) \
+    || fail "a targeted lookup must skip malformed progress in unrelated threads"
+  jq -es 'length == 1 and .[0].open == 0 and .[0].closed == 1' <<<"$out" >/dev/null \
+    || fail "a newer button post in a different thread must supersede the old one: $out"
+  pass "36e targeted lookups skip unrelated progress and honor cross-thread replacements"
 }
 
 # --- 37. a free-text question is a decision with no buttons -----------------
@@ -2519,6 +2573,7 @@ test_36_sweep_reasserts_a_marker_an_open_decision_needs
 test_36b_reassert_stays_best_effort_and_never_unarchives
 test_36c_retry_and_retitle_cannot_hide_an_open_decision
 test_36d_sweep_rechecks_after_concurrent_publication
+test_36e_targeted_lookup_includes_cross_thread_replacements
 test_37_free_text_question_records_a_decision_without_buttons
 
 echo "all fm-ext-topic-threads tests passed"
