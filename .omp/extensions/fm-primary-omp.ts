@@ -2,7 +2,7 @@
 // OMP-native session, stop, tool-call, and shutdown events stay in this adapter.
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -177,6 +177,31 @@ function durableWakeQueueHasRows(): boolean {
   );
 }
 
+// Unread rows this main session can present or retire; bin/fm-wake-lib.sh's
+// fm_wake_actor_pending_count owns the per-actor count. The turn-end check
+// that reads it must never wedge a session, so an unreadable count is zero.
+function mainWakeRowsPending(): Promise<number> {
+  return new Promise((resolveCount) => {
+    const child = spawn(
+      "bash",
+      ["-c", '. "$1/bin/fm-wake-lib.sh"; fm_wake_actor_pending_count main', "fm-main-wake-count", fmRoot],
+      {
+        env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state },
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+    let stdout = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.on("error", () => resolveCount(0));
+    child.on("close", (code) => {
+      const count = Number(stdout.trim());
+      resolveCount(code === 0 && Number.isInteger(count) && count > 0 ? count : 0);
+    });
+  });
+}
+
 function runChecker(script: string, flag: "--command" | "--tool", value: string): Promise<ProcessResult> {
   return new Promise((resolveResult) => {
     const child = spawn(`${fmRoot}/bin/${script}`, [flag, value], {
@@ -232,6 +257,8 @@ function runGuard(event: SessionStopEvent): Promise<ProcessResult> {
     });
     child.on("error", () => settle({ code: 0, stderr: "" }));
     child.on("close", (code) => settle({ code: code ?? 0, stderr }));
+    // A guard that exits before reading its payload must not crash the session.
+    child.stdin.on("error", () => {});
     child.stdin.end(JSON.stringify({
       session_id: event.session_id,
       stop_hook_active: event.stop_hook_active,
@@ -363,26 +390,38 @@ export default function (omp: ExtensionAPI) {
   // Attempt-private native error evidence for the secondmate launch ack. Read
   // only fresh message_end events, never errors replayed from a resumed pane.
   const launchErrorFile = process.env.FM_OMP_LAUNCH_ERROR;
-  if (launchErrorFile && isAbsolute(launchErrorFile)) {
-    omp.on("message_end", (event) => {
-      const message = event.message;
-      if (message.role !== "assistant") return;
-      if (message.stopReason !== "error" || !message.errorMessage) {
-        try { unlinkSync(launchErrorFile); } catch { /* No current error. */ }
-        return;
-      }
-      const temporary = `${launchErrorFile}.tmp.${process.pid}.${randomUUID()}`;
-      try {
-        writeFileSync(temporary, JSON.stringify({
-          version: 1, pid: process.pid, errorMessage: message.errorMessage,
-          provider: message.provider, model: message.model,
-        }) + "\n", { mode: 0o600, flag: "wx" });
-        renameSync(temporary, launchErrorFile);
-      } catch {
-        try { unlinkSync(temporary); } catch { /* Reporting must not break OMP. */ }
-      }
-    });
-  }
+  const journalLaunchErrors = Boolean(launchErrorFile && isAbsolute(launchErrorFile));
+  // A provider classifier refusal in the current run. The turn-end check names
+  // it, so the model that takes over answers the requester instead of leaving
+  // the request silent; a terminal agent_end forgets it.
+  let providerRefusal = "";
+  omp.on("message_end", (event) => {
+    const message = event.message;
+    if (message.role !== "assistant") return;
+    const stopType = message.stopDetails?.type;
+    if (
+      message.stopReason === "error" &&
+      (stopType === "refusal" || stopType === "sensitive" || /^Refusal\b/.test(message.errorMessage ?? ""))
+    ) {
+      const detail = (message.errorMessage ?? "").split(/\r?\n/, 1)[0].slice(0, 160);
+      providerRefusal = `${message.provider}/${message.model}: ${detail}`;
+    }
+    if (!journalLaunchErrors || !launchErrorFile) return;
+    if (message.stopReason !== "error" || !message.errorMessage) {
+      try { unlinkSync(launchErrorFile); } catch { /* No current error. */ }
+      return;
+    }
+    const temporary = `${launchErrorFile}.tmp.${process.pid}.${randomUUID()}`;
+    try {
+      writeFileSync(temporary, JSON.stringify({
+        version: 1, pid: process.pid, errorMessage: message.errorMessage,
+        provider: message.provider, model: message.model,
+      }) + "\n", { mode: 0o600, flag: "wx" });
+      renameSync(temporary, launchErrorFile);
+    } catch {
+      try { unlinkSync(temporary); } catch { /* Reporting must not break OMP. */ }
+    }
+  });
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, { observeTurns: false, deferUntilTurnStart: true });
   installSilentWakeTurns(omp);
   let pendingStartupNudge = "";
@@ -610,16 +649,52 @@ export default function (omp: ExtensionAPI) {
     }
   });
 
-  omp.on("session_stop", async (event): Promise<SessionStopEventResult | undefined> => {
-    if (event.stop_hook_active) return undefined;
-    const result = await runGuard(event);
-    if (result.code !== 2) return undefined;
+  omp.on("agent_end", (event) => {
+    if (event.willContinue) return;
+    providerRefusal = "";
+    watch.mainSettled();
+  });
+
+  // Two turn-end checks share OMP's one-continuation bound (stop_hook_active):
+  // missing supervision, then main-owned wake rows nobody acknowledged. The
+  // second only runs for the lock-owning session outside away mode, because
+  // those are the only states in which this session is the one that drains.
+  omp.on("session_stop", async (event, ctx): Promise<SessionStopEventResult | undefined> => {
+    if (!event.stop_hook_active) {
+      const result = await runGuard(event);
+      if (result.code === 2) {
+        const additionalContext = encodeOperationalInput(
+          "turn-end-guard",
+          "TURN WOULD END BLIND - supervision is off. " +
+            "The watcher cycle is missing, failed, or unhealthy. " +
+            "Follow the OMP supervision recovery instruction below before ending the turn.\n\n" +
+            result.stderr,
+        );
+        return { continue: true, additionalContext };
+      }
+    }
+    const pending = watch.ownsLock() && !existsSync(`${state}/.afk`) ? await mainWakeRowsPending() : 0;
+    if (pending === 0) return undefined;
+    if (event.stop_hook_active) {
+      // The bound is spent; the turn may end, but never silently.
+      ctx?.ui?.notify?.(
+        `Firstmate ended a turn with ${pending} unacknowledged wake row(s) after one forced continuation; ` +
+          "the next watcher wake will force a turn. Run bin/fm-wake-drain.sh to inspect.",
+        "warning",
+      );
+      return undefined;
+    }
+    const refusal = providerRefusal
+      ? `\n\nA provider refusal interrupted this run (${providerRefusal}) and OMP continued on a fallback model. ` +
+        "For any request it affected, post a visible ack with the ext-respond skill now instead of leaving it silent, " +
+        "and phrase any brief for the work in its plain legitimate purpose."
+      : "";
     const additionalContext = encodeOperationalInput(
       "turn-end-guard",
-      "TURN WOULD END BLIND - supervision is off. " +
-        "The watcher cycle is missing, failed, or unhealthy. " +
-        "Follow the OMP supervision recovery instruction below before ending the turn.\n\n" +
-        result.stderr,
+      `TURN WOULD END WITH ${pending} unacknowledged main wake row(s). ` +
+        "Run `bin/fm-wake-drain.sh`, handle every row - answer each EXT REQUESTS AWAITING ANSWER entry with the ext-respond skill - " +
+        "and run the printed `--ack-through` acknowledgement before ending the turn." +
+        refusal,
     );
     return { continue: true, additionalContext };
   });

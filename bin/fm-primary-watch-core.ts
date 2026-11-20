@@ -31,7 +31,10 @@
 // turn-forcing send, bounded to one forced delivery per interval, so an idle
 // or streaming main that never starts a turn for the hidden send is not deaf
 // for the rest of the session. Decision-owned wakes bypass coalescing and the
-// bound entirely. A check close is never finished as merely covered at the
+// bound entirely. An open episode stops suppressing once the adapter reports a
+// settled main (mainSettled) and no turn has started since: the run it relied
+// on ended without draining, so the next close forces a turn. A check close
+// is never finished as merely covered at the
 // boundary that closes its episode while the adapter's sink predicate still
 // reports it pending: it is released for delivery instead, because an
 // acknowledgement can retire the row that would otherwise have presented it. A
@@ -171,6 +174,10 @@ type SessionGeneration = {
   mainFallbackWakeConsumedAtMs: number | null;
   lastTurnStartAtMs: number | null;
   lastTurnEndAtMs: number | null;
+  // True from a terminal agent run end the adapter reported (mainSettled)
+  // until the next turn_start: no active handler exists for an open episode to
+  // protect.
+  mainIdle: boolean;
   // Recent main hand-offs by ledger wake id, so the turn that finally carries
   // a wake can be tied back to its close and hand-off time. Diagnostic only.
   sentWakes: Map<string, { content: string; close: string; sentAtMs: number; consumed: boolean }>;
@@ -202,7 +209,8 @@ export type PrimaryWatchCoreOptions = {
   // A forceTurn option asks the runtime adapter to choose a transport that
   // starts an agent-initiated turn even while the session is streaming or
   // agent-initiated turns are deferred; the core requests it only for a stale
-  // in-flight re-delivery or a decision-owned wake.
+  // in-flight re-delivery, a decision-owned wake, or a close behind an open
+  // episode while main is idle.
   sendFollowUp: (content: string, options?: { forceTurn?: boolean; delivery?: WakeDeliveryEvidence }) => Promise<void> | void;
   // Optional supervision-branch dispatch handshake. A synchronous non-null
   // settlement means the branch accepted handling. The core never waits on it
@@ -251,6 +259,8 @@ export type PrimaryWatchCore = {
   // runtimes where the injection path emits no before_agent_start.
   turnStart: () => void;
   turnEnd: () => void;
+  // The main agent run ended with no scheduled continuation: main is idle.
+  mainSettled: () => void;
 };
 
 // Single producer of the OMP native process identity pair. Both the loaded
@@ -371,6 +381,7 @@ function createGeneration(): SessionGeneration {
     mainFallbackWakeConsumedAtMs: null,
     lastTurnStartAtMs: null,
     lastTurnEndAtMs: null,
+    mainIdle: false,
     sentWakes: new Map(),
   };
 }
@@ -634,6 +645,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           `last_consume_at_ms=${owner.mainFallbackWakeConsumedAtMs ?? 0}`,
           `last_turn_start_at_ms=${owner.lastTurnStartAtMs ?? 0}`,
           `last_turn_end_at_ms=${owner.lastTurnEndAtMs ?? 0}`,
+          `main_idle=${owner.mainIdle ? 1 : 0}`,
           `updated_at_ms=${Date.now()}`,
           "",
         ].join("\n"),
@@ -1034,7 +1046,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     message: string,
     pending: PendingActionableClose,
   ): Promise<MainWakeOutcome> {
-    // Two bypasses ahead of ordinary episode coalescing. A stale in-flight
+    // Three bypasses ahead of ordinary episode coalescing. A stale in-flight
     // marker - accepted but unconsumed past
     // FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS - no longer earns suppression; the
     // wake re-delivers through the runtime's turn-forcing send so a main that
@@ -1044,9 +1056,16 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     // (docs/omp-supervision-branch.md). In both cases the superseded marker is
     // retired exactly as the turnEnd stale bound does: its pending record
     // finishes, while the durable rows stay until a drain acknowledges them.
+    // An open episode with no in-flight marker while main is idle is the third:
+    // the run that owned the episode ended without acknowledging its rows, so
+    // the close forces a turn instead of waiting on a drain that will not come.
+    // Each forced send opens a turn that makes main busy again, so this costs at
+    // most one forced delivery per settled idle period.
     const staleInFlight = coalesceMainFallbackWakes && inFlightWakeUnconsumedPastBound(owner);
     const decisionBypass = coalesceMainFallbackWakes && Boolean(isDecisionOwnedWake?.(message));
-    const forceTurn = staleInFlight || decisionBypass;
+    const idleEpisode = coalesceMainFallbackWakes && owner.mainFallbackEpisode &&
+      !owner.mainFallbackWakeInFlight && owner.mainIdle;
+    const forceTurn = staleInFlight || decisionBypass || idleEpisode;
     if (forceTurn && owner.mainFallbackWakeInFlight) {
       consumeWake(owner, owner.mainFallbackWakeInFlight, staleInFlight ? "inflight-bound" : "decision-bypass");
     }
@@ -1802,6 +1821,14 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     return new Set((result.stdout || "").split(/\r?\n/).filter(Boolean));
   }
 
+  // The main agent run settled with no scheduled continuation; the next
+  // turn_start clears this. deliverMainWake reads it for an open episode.
+  function mainSettled(): void {
+    const owner = generation;
+    owner.mainIdle = true;
+    if (coalesceMainFallbackWakes && generationIsLive(owner)) persistEpisodeState(owner);
+  }
+
   // A main turn opened. An idle-main injection drives agent.prompt() directly,
   // which emits no before_agent_start and arrives as a custom-role message, so
   // the first turn boundary after an accepted send is itself the consumption
@@ -1811,6 +1838,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   function turnStart(): void {
     const owner = generation;
     owner.lastTurnStartAtMs = Date.now();
+    owner.mainIdle = false;
     if (!coalesceMainFallbackWakes || !generationIsLive(owner)) return;
     if (owner.mainFallbackWakeInFlight) consumeWake(owner, owner.mainFallbackWakeInFlight, "turn_start");
     persistEpisodeState(owner);
@@ -2020,5 +2048,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     sessionStart,
     turnStart,
     turnEnd,
+    mainSettled,
   };
 }

@@ -2808,6 +2808,217 @@ JS
   pass "OMP forces a turn after an unconsumed in-flight wake outlives its bound"
 }
 
+# 2026-11-20 idle gap: a main-fallback episode opened by a wake main never
+# acknowledged kept suppressing every later close - two Discord requests and
+# their overdue reminders included - while main sat idle at the prompt. An idle
+# main has no active handler for coalescing to protect, so the next close after
+# a terminal agent_end must force a turn; while a run is live, coalescing holds.
+test_native_omp_idle_main_hears_wake_behind_open_episode() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-idle-episode)
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-stop" ]; do
+  if [ -e "$state/wake-now-$count" ]; then
+    printf 'signal: idle-close-%s\n' "$count"
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const handlers = new Map();
+const wakes = [];
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message, options) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push({ content: String(message.content ?? ""), options });
+  },
+};
+let seq = 0;
+const appendRow = (key) => {
+  seq += 1;
+  writeFileSync(`${state}/.wake-queue.seq`, `${seq}\n`);
+  appendFileSync(`${state}/.wake-queue`, `0\t${seq}\tsignal\t${key}\tsignal: ${key}\n`);
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8").trim()) : 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await sleep(10); }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const forced = (wake) => wake?.options?.deliverAs === "followUp" && wake?.options?.triggerTurn === true;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?idle-episode=${Date.now()}`);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+
+// The incident shape: OMP stages the hidden wake behind a streaming run and
+// raises before_agent_start, the run ends, and nobody acknowledges the row.
+appendRow("crew-one.turn-ended");
+writeFileSync(`${state}/wake-now-1`, "go\n");
+await waitFor(() => wakes.length === 1 && count() === 2, "first fallback wake");
+await handlers.get("before_agent_start")({ prompt: wakes[0].content }, context);
+await handlers.get("turn_start")({ type: "turn_start" }, context);
+await handlers.get("turn_end")({ type: "turn_end" }, context);
+await handlers.get("agent_end")({ type: "agent_end", messages: [], willContinue: false }, context);
+
+// Main is idle with the episode still open: the next close must be heard.
+appendRow("crew-two.turn-ended");
+writeFileSync(`${state}/wake-now-2`, "go\n");
+await waitFor(() => count() === 3, "successor arm after the idle close");
+await waitFor(() => wakes.length === 2, "idle main hears the close behind the open episode");
+if (!wakes[1].content.includes("signal: idle-close-2")) throw new Error(`idle wake mismatched its close: ${wakes[1].content}`);
+if (!forced(wakes[1])) throw new Error(`idle wake did not force a turn: ${JSON.stringify(wakes[1].options)}`);
+
+// Negative controls: while a run is live, or about to continue, coalescing
+// still protects the active handler.
+await handlers.get("turn_start")({ type: "turn_start" }, context);
+appendRow("crew-three.turn-ended");
+writeFileSync(`${state}/wake-now-3`, "go\n");
+await waitFor(() => count() === 4, "successor arm after the busy close");
+await sleep(300);
+if (wakes.length !== 2) throw new Error(`a close preempted a live run: ${wakes.length} wakes`);
+await handlers.get("turn_end")({ type: "turn_end" }, context);
+await handlers.get("agent_end")({ type: "agent_end", messages: [], willContinue: true }, context);
+appendRow("crew-four.turn-ended");
+writeFileSync(`${state}/wake-now-4`, "go\n");
+await waitFor(() => count() === 5, "successor arm after the continuing close");
+await sleep(300);
+if (wakes.length !== 2) throw new Error(`a close preempted a scheduled continuation: ${wakes.length} wakes`);
+
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
+console.log("omp-idle-episode-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP idle main behind an open episode"
+  assert_contains "$out" omp-idle-episode-ok "an idle main stayed deaf behind an open fallback episode: $out"
+  pass "OMP forces a turn for a close that arrives while main is idle behind an open episode"
+}
+
+# 2026-11-20 idle gap: a turn ended text-only on a fallback model after a
+# provider refusal, with ten unacknowledged wake rows and two unanswered
+# Discord requests, and the turn-end guard let it end because the watcher was
+# healthy. Unacknowledged main-owned rows must force one bounded continuation,
+# and the bounded second stop must warn the captain instead of ending silently.
+test_native_omp_turn_end_with_unacked_wakes_continues_once() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-unacked-turn-end)
+  write_queue_watcher "$fixture"
+  FM_STATE_OVERRIDE="$fixture/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check ext-request:abc "ext-request abc"' _ "$fixture" \
+    || fail "the OMP unacked fixture could not seed a durable wake row"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const handlers = new Map();
+const notices = [];
+const api = {
+  zod: { object: () => ({}) },
+  // OMP runs every handler registered for an event, as the adapter relies on.
+  on(name, handler) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+  registerCommand() {}, registerTool() {}, sendMessage() {},
+};
+const fire = async (name, event, ctx) => {
+  let result;
+  for (const handler of handlers.get(name) ?? []) result = await handler(event, ctx);
+  return result;
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8").trim()) : 0;
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await new Promise((r) => setTimeout(r, 10)); }
+  throw new Error(`timeout waiting for ${label}`);
+}
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?unacked=${Date.now()}`);
+module.default(api);
+const context = {
+  sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" },
+  ui: { notify(message, level) { notices.push({ message, level }); } },
+};
+await fire("session_start", { type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+const stop = (active) => fire("session_stop", {
+  type: "session_stop", messages: [], turn_id: 1, session_id: "sess-one",
+  stop_hook_active: active, signal: new AbortController().signal,
+}, context);
+
+await fire("message_end", { message: {
+  role: "assistant", stopReason: "error", provider: "anthropic", model: "primary-model", content: [],
+  errorMessage: "Refusal (cyber): Cyber safeguards flagged this message.",
+} }, context);
+const first = await stop(false);
+if (first?.continue !== true) throw new Error(`unacknowledged rows let the turn end: ${JSON.stringify(first)}`);
+for (const needle of ["encoded:turn-end-guard:", "1 unacknowledged", "bin/fm-wake-drain.sh", "ext-respond", "Refusal (cyber)"]) {
+  if (!first.additionalContext.includes(needle)) throw new Error(`continuation lacks ${needle}: ${first.additionalContext}`);
+}
+if (notices.length !== 0) throw new Error(`the forced continuation warned early: ${JSON.stringify(notices)}`);
+
+// The bounded second stop may end, but never silently.
+if (await stop(true) !== undefined) throw new Error("the bounded second stop recursed");
+if (notices.length !== 1 || notices[0].level !== "warning" || !notices[0].message.includes("1 unacknowledged")) {
+  throw new Error(`the bounded stop with rows left was silent: ${JSON.stringify(notices)}`);
+}
+await fire("agent_end", { type: "agent_end", messages: [], willContinue: false }, context);
+
+// A settled run forgets its refusal.
+const later = await stop(false);
+if (later?.continue !== true || later.additionalContext.includes("Refusal")) {
+  throw new Error(`a later run inherited a settled refusal: ${JSON.stringify(later)}`);
+}
+
+// Away mode owns delivery; a session that does not own the lock cannot drain.
+writeFileSync(`${state}/.afk`, "afk\n");
+if (await stop(false) !== undefined) throw new Error("the guard competed with away-mode delivery");
+rmSync(`${state}/.afk`);
+const holder = spawn("sleep", ["30"], { stdio: "ignore" });
+writeFileSync(`${state}/.lock`, `${holder.pid}\n`);
+if (await stop(false) !== undefined) throw new Error("a lock-refused session was sent to drain");
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+holder.kill();
+
+// Acknowledged: nothing left, nothing forced, nothing warned.
+writeFileSync(`${state}/.wake-queue`, "");
+const before = notices.length;
+if (await stop(false) !== undefined || await stop(true) !== undefined || notices.length !== before) {
+  throw new Error("an acknowledged queue still blocked or warned the turn end");
+}
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await fire("session_shutdown", { type: "session_shutdown" }, context);
+console.log("omp-unacked-turn-end-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP turn end with unacknowledged wakes"
+  assert_contains "$out" omp-unacked-turn-end-ok "a turn ended silently with unacknowledged wakes: $out"
+  pass "OMP forces one continuation and then warns when a turn would end with unacknowledged wakes"
+}
+
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification() {
   local fixture out status=0
   fixture=$(make_omp_queue_fixture native-queue-delivered-handoff)
@@ -3402,6 +3613,8 @@ test_native_omp_main_fallback_coalesces_burst
 test_native_omp_suppressed_check_redelivers_at_episode_close
 test_native_omp_idle_main_wake_consumption_and_stale_bound
 test_native_omp_unconsumed_inflight_wake_forces_turn_after_bound
+test_native_omp_idle_main_hears_wake_behind_open_episode
+test_native_omp_turn_end_with_unacked_wakes_continues_once
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification
 test_native_omp_mid_turn_wake_reaches_idle_main
 test_fm_guard_warns_on_stale_omp_inflight_wake
