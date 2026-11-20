@@ -66,9 +66,10 @@ History you read is sent to the AI provider that runs Firstmate, so never copy i
 To ask the captain a choice, run `bin/fm-ext-ask.sh`; it is the one way to ask.
 It places or refreshes the captain hold, writes the decision file, appends the numbered option lines to your text in button order, and posts through `bin/fm-ext-emit.sh --decision-file` with the thread marked needs-you.
 Its header owns the flags, and the [decision buttons reference](../../../docs/configuration.md#decision-buttons) owns the contract.
+A question the captain answers in words is a decision too: pass `--free-text` to record the hold and post the question with no buttons.
 The [emit header's choice guard](../../../bin/fm-ext-emit.sh) owns detection of plain-text choices and routes refused posts to `bin/fm-ext-ask.sh`.
 An ask of two or more options must mark one `--recommended`, and `--no-recommendation "<reason>"` records the rare genuine tie.
-Emit refuses a `needs-you` answer, followup, or final without `--decision-file` or a `--no-buttons "<reason>"`, so a status reminder says why it asks no choice.
+Emit refuses a `needs-you` answer, followup, or final without a `--decision-file` or a `--no-buttons "<reason>"`; `--no-buttons` is only for an informational post that asks the captain nothing back, because a question the captain must answer belongs in a recorded decision.
 
 - Pass `--task` for the work the call gates, plus `--title` and `--repo` only when that task does not exist yet; the call is keyed `hold:<task-id>` for you.
   A worker's own open keyed decision (`key:<task-id>:<slug>`) is the one case outside it: post that with `bin/fm-ext-emit.sh --decision-file` directly, per the emit header.
@@ -105,9 +106,10 @@ Emit refuses a reply that would create the thread without `--thread-title`, and 
 
 - **Title the creating reply** with `<Project> · <2-5 word topic>` (for example `Aceh · ingestion status`), especially when the request is vague, long, or procedural.
 - **Retitle** (`--thread-retitle`) only when the thread's live topic has clearly moved on from its name: rename it on that reply as `<Project> · <current topic>`, not on every reply, and the contract above owns what a retitle does to later markers.
-- **Mark needs-you** when the reply asks the captain to decide.
-- **Mark done** with the terminal answer or final; pass `none` on an answer that neither asks nor finishes.
-- **Clear the marker** when work resumes on an independent question, as defined by the topic-thread contract above.
+- **Mark needs-you** only with the reply that carries the decision: a choice through `bin/fm-ext-ask.sh`, or a question in words through `bin/fm-ext-ask.sh --free-text`.
+- **Mark done** with the terminal answer or final when nothing is left open in the thread.
+- **Pass none** on an answer that neither asks nor finishes: work continuing, or a status update with no question.
+- **Record every question as a decision.** Use `--no-buttons` only for informational status that asks the captain nothing back.
 
 Titles are public: the same safety rules as reply text apply (no task ids, branch names, paths, hostnames, or secrets).
 

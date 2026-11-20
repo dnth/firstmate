@@ -93,15 +93,16 @@
 #
 # threads [--thread <id>]
 #   Prints one JSON line per Discord thread that holds a decision post, with
-#   or without buttons: {thread_id, open, closed, last_posted_at}; --thread
-#   reads only that thread. Unpublished progress records are ignored.
+#   or without buttons: {thread_id, open, closed, last_posted_at, keys}.
+#   --thread limits the summary to that thread and checks for replacements
+#   of its decision keys in other threads. Unpublished records are ignored.
 #   A post is closed once it is settled, replaced by
 #   a newer post, or its own lifecycle of its decision is decided or
 #   superseded in the ledgers; a decision whose state cannot be read counts
 #   as open. last_posted_at is the newest post's posting time (epoch seconds,
-#   0 when unknown). The gateway poster reads it when a reply marks a thread
-#   needs-you, and again to clear that marker once no decision in the thread
-#   is open. Read-only.
+#   0 when unknown), and keys lists the thread's distinct decision keys.
+#   See "Topic threads" in docs/configuration.md for how the gateway uses
+#   this summary. Read-only.
 #
 # finalized
 #   Records the displayed content or legacy button state, so posts lists it
@@ -183,13 +184,13 @@ post_stem_valid() {
 # progress_files: every chunk-progress record that belongs to a decision post.
 # A plain-text grep keeps the many ordinary reply records out of the jq reads.
 progress_files() {
-  local file
+  local file pattern=${1:-'"decision"'}
   [ -d "$OUTBOX" ] && [ ! -L "$OUTBOX" ] || return 0
   while IFS= read -r file; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
     printf '%s\n' "$file"
   done < <(find "$OUTBOX" -maxdepth 1 -type f -name '*.progress.json' -print0 2>/dev/null \
-    | xargs -0 grep -l -F '"decision"' 2>/dev/null)
+    | xargs -0 grep -l -F -e "$pattern" 2>/dev/null)
 }
 
 # post_for_message <message-id>: the stem of the decision post that carries it.
@@ -223,10 +224,20 @@ POST_TABLE=
 POST_TABLE_LOADED=0
 
 post_table_load() {
+  local thread=${1:-} keys
   [ "$POST_TABLE_LOADED" = 1 ] && return 0
   POST_TABLE_LOADED=1
+  if [ -n "$thread" ]; then
+    # shellcheck disable=SC2016  # $topic and $thread are jq variables.
+    keys=$(set -o pipefail; progress_files "$thread" | tr '\n' '\0' \
+      | xargs -0 jq -c --arg thread "$thread" '
+          select((.topic_thread_id // "" | tostring) as $topic
+            | (if $topic != "" then $topic else (.request_id // "" | split(":")[3]) end) == $thread)
+          | .decision.key // empty' | sort -u) || return 1
+    [ -n "$keys" ] || return 0
+  fi
   # shellcheck disable=SC2016  # jq program: $all, $x, $best, $stem, $newer, $p are jq variables.
-  POST_TABLE=$(progress_files | tr '\n' '\0' \
+  POST_TABLE=$(set -o pipefail; progress_files "${keys:-}" | tr '\n' '\0' \
     | xargs -0 jq -c '{file: input_filename, post: .}' 2>/dev/null \
     | jq -rn '
     [inputs | .file as $file | .post
@@ -254,7 +265,6 @@ post_table_load() {
        (if $newer != null and $newer.p > .p
         then ($newer.f | split("/") | last | sub("\\.progress\\.json$"; "")) else "" end), (.raw | tojson)]
     | map(tostring) | join("\u001f")' 2>/dev/null)
-  return 0
 }
 
 # post_row <stem>: this stem's table row, when the pass reached it.
@@ -849,7 +859,7 @@ command_threads() {
       ;;
     *) usage; exit 2 ;;
   esac
-  post_table_load
+  post_table_load "$only" || die "could not read decision posts"
   while IFS=$'\x1f' read -r stem haskey key occ posted buttons hasmessages message \
     sections topic request newer newer_stem progress; do
     [ -n "$stem" ] || continue
@@ -867,14 +877,15 @@ command_threads() {
     case "$posted" in
       ''|*[!0-9.]*) posted=0 ;;
     esac
-    jq -cn --arg thread "$thread" --arg state "$state" --argjson posted "$posted" \
-      '{thread_id:$thread, state:$state, posted_at:$posted}'
+    jq -cn --arg thread "$thread" --arg state "$state" --argjson posted "$posted" --arg key "$key" \
+      '{thread_id:$thread, state:$state, posted_at:$posted, key:$key}'
   done <<<"$POST_TABLE" \
     | jq -sc 'group_by(.thread_id)[]
         | {thread_id: .[0].thread_id,
            open: (map(select(.state == "open")) | length),
            closed: (map(select(.state == "closed")) | length),
-           last_posted_at: (map(.posted_at) | max)}'
+           last_posted_at: (map(.posted_at) | max),
+           keys: (map(.key) | unique)}'
 }
 
 command_finalized() {

@@ -41,11 +41,9 @@
 # retitle is dropped with a warning while the reply still posts. Both title
 # flags may be given; the explicit retitle sets the existing thread's base,
 # while --thread-title only names a thread at creation.
-# --thread-state renames the existing topic thread: needs-you prefixes "❓ ",
-# done prefixes "✅ ", none removes the prefix. docs/configuration.md
-# "Topic threads" owns marker preservation and state overrides, rename
-# eligibility, best-effort delivery, auto-clear, and retry behaviour;
-# the ext-respond skill owns when Firstmate retitles.
+# --thread-state requests a marker on the existing topic thread.
+# "Topic threads" in docs/configuration.md owns marker handling, and the
+# ext-respond skill owns when Firstmate requests a marker or retitle.
 #
 # Writes state/ext-outbox/<slug>.<kind>.<generation>.json once. Re-emitting the
 # same identity is a no-op success. A posting marker without a receipt is
@@ -56,28 +54,34 @@
 # bin/fm-ext-open.sh opened; slash when the context predates it), which tells
 # the gateway poster whether it can react to the original message.
 #
-# --decision-file attaches option buttons to an answer, followup, or final.
+# --decision-file attaches a decision to an answer, followup, or final.
 # The file is JSON:
 #   {"key": "hold:<task-id>" | "key:<task-id>:<slug>",
 #    "mode": "done" | "release",
 #    "options": [{"label": "<text>", "confirm": true|false, "recommended": true|false}, ...],
 #    "sections": {"question": "<text>", "explanation": "<text>",
 #                 "options": "<numbered list>", "cue": "<reply cue>"}}
-# with 1-5 options whose input and displayed labels are distinct, 1-80 characters, and free of
-# control characters, in the same order as the post text numbers them; option
-# ids are 1-based in that order. "mode" (captain calls only, default done)
+# Supply 1-5 options for a choice, ordered as the post text numbers them.
+# Input and displayed labels must be distinct, 1-80 characters, and free of
+# control characters. Option ids are 1-based in that order.
+# "mode" (captain calls only, default done)
 # chooses how a chosen option closes the call, as in fm-captain-hold.sh
 # answers. "confirm" and "recommended" are optional booleans, default false.
 # "sections" is optional; when present, its question, explanation, option list,
 # and cue must reproduce the post text exactly. Without it, the whole post is
 # protected question text. fm-ext-ask.sh writes these boundaries explicitly.
+# An empty "options" list records a free-text question instead of a choice: the
+# post carries no buttons and refuses choice-shaped text. Record the answer in
+# the decision's own ledger (bin/fm-captain-hold.sh for a captain call,
+# bin/fm-send.sh --resolve-key for a worker's key).
 # A decision post reserves room for its later outcome header and keeps the
 # option list on the final button-carrying chunk.
 # At most one option may set "recommended": true; emit adds "⭐ " unless the
 # label already starts with ⭐, and stores the displayed label in the payload.
 # The key must name a decision that is open right now (a held captain
-# call, or a worker's open keyed status decision) and must fit Discord's
-# 100-character custom_id as fmd:<key>:<n>. An option needs a confirmation
+# call, or a worker's open keyed status decision). For a decision with options,
+# the key must fit Discord's 100-byte custom_id as fmd:<key>:d, the Discuss
+# button ID. An option needs a confirmation
 # click when it declares confirm, and always when its label matches
 # FM_EXT_DECISION_CONFIRM_PATTERN in bin/fm-ext-lib.sh - the deletion, money,
 # credential, and irreversible-destruction labels. A merge, a deploy, or another
@@ -100,11 +104,13 @@
 # NEEDS-YOU REPLIES. An answer, followup, or final that passes --thread-state
 # needs-you is refused unless it also carries --decision-file or
 # --no-buttons "<reason>". A needs-you thread asks the captain to act, so the
-# reply that marks it must carry the buttons for that choice or say why it asks
-# none, and an ack is exempt. Use bin/fm-ext-ask.sh to ask a choice;
-# --no-buttons is for a thread that needs the captain without a choice, such as
-# a status reminder. bin/fm-ext-open.sh passes both flags through for the first
-# message of a thread it opens.
+# reply that marks it must record what it asks as a decision - the buttons for
+# a choice, or a free-text question with no options - or say why it asks
+# nothing, and an ack is exempt. Use bin/fm-ext-ask.sh to ask a choice and its
+# --free-text form to ask a question in words; --no-buttons is for a thread
+# that needs the captain without asking anything back, such as a status
+# reminder. bin/fm-ext-open.sh passes both flags through for the first message
+# of a thread it opens.
 #
 # CHOICE GUARD. An answer, followup, or final whose text has the shape of a choice is refused unless --decision-file is given, so a choice cannot go out as plain text by mistake.
 # Detection is case-insensitive, cues match within one line, and it uses these rules:
@@ -293,7 +299,7 @@ esac
 case "$KIND:$THREAD_STATE" in
   answer:needs-you|followup:needs-you|final:needs-you)
     if [ -z "$DECISION_FILE" ] && [ -z "$NO_BUTTONS_SET" ]; then
-      die "a needs-you $KIND must carry decision buttons; post the choice with bin/fm-ext-ask.sh (or --decision-file), or pass --no-buttons \"<reason>\" when it asks no choice"
+      die "a needs-you $KIND must record what it asks as a decision: post a choice with bin/fm-ext-ask.sh (or --decision-file), post a free-text question with bin/fm-ext-ask.sh --free-text or a decision file with no options, or pass --no-buttons \"<reason>\" for an informational post that asks nothing"
     fi
     ;;
 esac
@@ -355,7 +361,7 @@ if [ -n "$DECISION_FILE" ]; then
     type == "object"
     and (.key | type == "string")
     and ((.mode // "done") | . == "done" or . == "release")
-    and (.options | type == "array" and length >= 1 and length <= $max_options)
+    and (.options | type == "array" and length <= $max_options)
     and all(.options[]; type == "object"
       and (.label | type == "string" and length >= 1 and length <= $label_max
         and (explode | all(. >= 32 and . != 127))
@@ -374,20 +380,25 @@ if [ -n "$DECISION_FILE" ]; then
         and (.cue | type == "string"))
       else true end)
   ' "$DECISION_FILE" >/dev/null 2>&1 \
-    || die "decision file must hold {key, mode, options:[{label, confirm, recommended}], sections?} with 1-$FM_EXT_DECISION_MAX_OPTIONS distinct labels of 1-$FM_EXT_DECISION_LABEL_MAX characters and at most one recommended option"
+    || die "decision file must hold {key, mode, options:[{label, confirm, recommended}], sections?} with 0-$FM_EXT_DECISION_MAX_OPTIONS distinct labels of 1-$FM_EXT_DECISION_LABEL_MAX characters and at most one recommended option"
   if [ -n "$NO_RECOMMENDATION_SET" ] \
     && jq -e '[.options[] | select(.recommended // false)] | length > 0' "$DECISION_FILE" >/dev/null 2>&1; then
     die "--no-recommendation cannot accompany a decision that marks a recommended option"
   fi
   DECISION_KEY=$(jq -r '.key' "$DECISION_FILE")
   DECISION_MODE=$(jq -r '.mode // "done"' "$DECISION_FILE")
+  DECISION_OPTIONS=$(jq '.options | length' "$DECISION_FILE")
+  if [ "$DECISION_OPTIONS" -eq 0 ] && fm_ext_text_choice_shaped "$TEXT"; then
+    die "a decision with no options records a free-text question, so its text cannot offer a choice; give the options in the decision file or post them with bin/fm-ext-ask.sh"
+  fi
   DECISION_TASK=$(fm_ext_decision_key_task "$DECISION_KEY") \
     || die "decision key must be hold:<task-id> or key:<task-id>:<slug>"
   case "$DECISION_KEY:$DECISION_MODE" in
     key:*:release) die "mode release only applies to a captain call (hold:<task-id>)" ;;
   esac
-  [ "$(printf 'fmd:%s:d' "$DECISION_KEY" | wc -c)" -le "$FM_EXT_DECISION_CUSTOM_ID_MAX" ] \
-    || die "decision key is too long for a Discord button; post the numbered text without buttons"
+  if [ "$DECISION_OPTIONS" -gt 0 ] && ! fm_ext_decision_button_key_fits "$DECISION_KEY"; then
+    die "decision key is too long for a Discord button"
+  fi
   # Public safety: the post and its labels are public; only the custom_ids
   # carry the key.
   if { printf '%s\n' "$TEXT"; jq -r '.options[].label' "$DECISION_FILE"; } \

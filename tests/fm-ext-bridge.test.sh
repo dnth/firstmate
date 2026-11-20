@@ -3651,7 +3651,7 @@ def seed(state="needs-you", failed=None):
         topic_name="Topic", thread_state=state, creator="firstmate",
         state_at=1, marked_open=True, retitle="", rename=failed or {"outcome": "applied"})
 
-def summaries(home):
+def summaries(home, thread_id=""):
     poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
                               thread_state="done", state_at=3)
     return {os.environ["THREAD"]: {"open": 0, "closed": 1, "last_posted_at": 2}}
@@ -3752,7 +3752,9 @@ for phase in ("summary", "apply", "rename"):
     seed()
     renamed.clear()
     remote[os.environ["THREAD"]] = "❓ Topic"
-    def snapshot(home):
+    def snapshot(home, thread_id=""):
+        if thread_id:
+            return real_summaries(home, thread_id)
         summary = real_summaries(home)
         assert summary[os.environ["THREAD"]]["open"] == 0
         if phase == "summary":
@@ -3770,7 +3772,7 @@ for phase in ("summary", "apply", "rename"):
         rename(*args)
     if phase == "rename":
         sweep = threading.Thread(target=poster.reconcile_thread_states, args=(home,),
-            kwargs={"rename_thread": clearing_rename, "read_thread": lambda tid: "other"})
+            kwargs={"rename_thread": clearing_rename, "read_thread": remote.get})
         sweep.start()
         assert entered.wait(3)
         try:
@@ -3781,13 +3783,30 @@ for phase in ("summary", "apply", "rename"):
         assert not sweep.is_alive()
     else:
         poster.reconcile_thread_states(home, rename_thread=rename,
-                                       read_thread=lambda tid: "other")
+                                       read_thread=remote.get)
         assert not renamed
     assert real_summaries(home)[os.environ["THREAD"]]["open"] == 1
     assert poster._read_thread_record(path)["thread_state"] == "needs-you"
     assert remote[os.environ["THREAD"]] == "❓ Topic"
     assert poster._read_thread_record(path)["marked_open"]
 poster.apply_thread_state = real_apply
+poster.decision_threads = real_summaries
+
+published_path.unlink()
+seed()
+renamed.clear()
+remote[os.environ["THREAD"]] = "❓ Topic"
+def unrelated_publication(home, thread_id=""):
+    summary = real_summaries(home, thread_id)
+    if not thread_id:
+        poster.write_progress(dict(publication, generation=3),
+            dict(progress, topic_thread_id="888888888888888888",
+                 decision={"key": "key:route-fix:unrelated"}), home)
+    return summary
+poster.decision_threads = unrelated_publication
+poster.reconcile_thread_states(home, rename_thread=rename, read_thread=remote.get)
+assert renamed == ["Topic"], renamed
+assert poster._read_thread_record(path)["thread_state"] == "none"
 poster.decision_threads = real_summaries
 
 print(json.dumps({"missing": missing, "record": record}))

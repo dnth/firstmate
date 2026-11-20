@@ -10,6 +10,8 @@
 #     [--option <label> [--recommended] [--confirm]] ... (1-5 options)
 #     [--no-recommendation "<reason>"]
 #     --mode done|release [--thread-title <text>] [--thread-retitle <text>]
+#   fm-ext-ask.sh ... --free-text [--thread-title <text>] [--thread-retitle <text>]
+#     (the same flags, with no --option, for a question answered in words)
 #
 # This is the one way to post a choice. It does the three steps a choice post
 # needs, in order, so none can be skipped:
@@ -21,6 +23,13 @@
 #   3. posts through bin/fm-ext-emit.sh --decision-file with
 #      --thread-state needs-you; --thread-title and --thread-retitle pass
 #      straight through to that post, and the emit header owns what each does.
+# --free-text asks a question the captain answers in words instead of picking
+# an option: no --option, --recommended, --confirm, or --no-recommendation may
+# be given, the decision file records an empty options list, and the post
+# carries the question, optional explanation, and a written-answer cue with no
+# buttons. Record the answer using bin/fm-captain-hold.sh answer (or answers).
+# The Topic threads contract in docs/configuration.md owns marker lifetime.
+# A choice always uses --option lines.
 # The post text keeps the question, optional explanation, numbered option
 # lines, and reply cue as separate sections for safe chunking and settlement.
 # The numbered option lines follow button order, and a recommended option shows
@@ -73,6 +82,7 @@ usage: fm-ext-ask.sh --request-id discord:<guild>:<channel>:<thread>:<message>
          --option <label> [--recommended] [--confirm] [--option <label> ...]
          [--no-recommendation "<reason>"]
          --mode done|release [--thread-title <text>] [--thread-retitle <text>]
+       fm-ext-ask.sh ... --free-text (the same flags, with no --option)
 EOF
 }
 
@@ -97,6 +107,7 @@ THREAD_RETITLE=
 OPTIONS_JSON='[]'
 NO_RECOMMENDATION=
 NO_RECOMMENDATION_SET=
+FREE_TEXT=0
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
   '') usage; exit 2 ;;
@@ -118,6 +129,7 @@ while [ "$#" -gt 0 ]; do
     --thread-title) shift; THREAD_TITLE=${1:-} ;;
     --thread-retitle) shift; THREAD_RETITLE=${1:-} ;;
     --no-recommendation) shift; NO_RECOMMENDATION=${1:-}; NO_RECOMMENDATION_SET=1 ;;
+    --free-text) FREE_TEXT=1 ;;
     --option)
       shift
       OPTIONS_JSON=$(jq -c --arg lbl "${1:-}" '. + [{"label": $lbl}]' <<<"$OPTIONS_JSON") \
@@ -152,16 +164,22 @@ esac
 case "$TASK" in
   ''|*[!A-Za-z0-9._-]*|[-.]*) die "task must be a task id (letters, digits, dot, underscore, dash)" ;;
 esac
+if [ "$FREE_TEXT" = 1 ]; then
+  [ "$OPTIONS_JSON" = '[]' ] || die "--free-text asks a question in words; it takes no --option"
+  [ -z "$NO_RECOMMENDATION_SET" ] || die "--free-text takes no --no-recommendation"
+fi
 
-jq -e --argjson max "$FM_EXT_DECISION_MAX_OPTIONS" --argjson label_max "$FM_EXT_DECISION_LABEL_MAX" '
-  length >= 1 and length <= $max
-  and all(.[]; (.label | length >= 1 and length <= $label_max
-      and (explode | all(. >= 32 and . != 127)) and test("^\\S(.*\\S)?$"))
-    and ((.recommended // false) | type == "boolean"))
-  and ([.[] | select(.recommended // false)] | length <= 1)
-  and ([.[].label | ascii_downcase] | length == (unique | length))
-' <<<"$OPTIONS_JSON" >/dev/null 2>&1 \
-  || die "give 1-$FM_EXT_DECISION_MAX_OPTIONS distinct --option labels of 1-$FM_EXT_DECISION_LABEL_MAX characters, at most one --recommended"
+if [ "$FREE_TEXT" = 0 ]; then
+  jq -e --argjson max "$FM_EXT_DECISION_MAX_OPTIONS" --argjson label_max "$FM_EXT_DECISION_LABEL_MAX" '
+    length >= 1 and length <= $max
+    and all(.[]; (.label | length >= 1 and length <= $label_max
+        and (explode | all(. >= 32 and . != 127)) and test("^\\S(.*\\S)?$"))
+      and ((.recommended // false) | type == "boolean"))
+    and ([.[] | select(.recommended // false)] | length <= 1)
+    and ([.[].label | ascii_downcase] | length == (unique | length))
+  ' <<<"$OPTIONS_JSON" >/dev/null 2>&1 \
+    || die "give 1-$FM_EXT_DECISION_MAX_OPTIONS distinct --option labels of 1-$FM_EXT_DECISION_LABEL_MAX characters, at most one --recommended"
+fi
 
 # The captain's standing rule: a choice of two or more options carries one
 # starred recommendation, and a real tie says why in the recorded reason.
@@ -197,19 +215,32 @@ if [ -n "$EXPLANATION_FILE" ]; then
   EXPLANATION=$(cat -- "$EXPLANATION_FILE")
 fi
 
-if { printf '%s\n' "$TEXT" "$EXPLANATION"; jq -r '.[].label' <<<"$OPTIONS_JSON"; } \
+# Numbered lines in button order, with the same label the button shows.
+BODY=$TEXT
+[ -z "$EXPLANATION" ] || BODY=$(printf '%s\n\n%s' "$TEXT" "$EXPLANATION")
+if [ "$FREE_TEXT" = 1 ]; then
+  LINES=
+  CUE='Reply here with your answer.'
+  FULL_TEXT=$(printf '%s\n%s' "$BODY" "$CUE")
+  if fm_ext_text_choice_shaped "$FULL_TEXT"; then
+    die "--free-text cannot offer a choice; give its options with --option"
+  fi
+else
+  LINES=$(jq -r '. as $o | range(0; length) as $i
+    | $o[$i] | "\($i + 1). " + (if (.recommended // false) and ((.label | startswith("⭐")) | not) then "⭐ " + .label else .label end)' \
+    <<<"$OPTIONS_JSON") || die "could not number the options" 1
+  CUE='Tap a button, or reply with the number.'
+  FULL_TEXT=$(printf '%s\n\n%s\n%s' "$BODY" "$LINES" "$CUE")
+fi
+
+if { printf '%s\n' "$FULL_TEXT"; jq -r '.[].label' <<<"$OPTIONS_JSON"; } \
   | grep -qiF -e "$TASK" -e "$KEY"; then
   die "the text and labels must not name the task id"
 fi
 
-# Numbered lines in button order, with the same label the button shows.
-LINES=$(jq -r '. as $o | range(0; length) as $i
-  | $o[$i] | "\($i + 1). " + (if (.recommended // false) and ((.label | startswith("⭐")) | not) then "⭐ " + .label else .label end)' \
-  <<<"$OPTIONS_JSON") || die "could not number the options" 1
-CUE='Tap a button, or reply with the number.'
-BODY=$TEXT
-[ -z "$EXPLANATION" ] || BODY=$(printf '%s\n\n%s' "$TEXT" "$EXPLANATION")
-FULL_TEXT=$(printf '%s\n\n%s\n%s' "$BODY" "$LINES" "$CUE")
+if [ "$OPTION_COUNT" -gt 0 ] && ! fm_ext_decision_button_key_fits "$KEY"; then
+  die "decision key is too long for a Discord button"
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-ext-ask.XXXXXX") || die "could not make a scratch directory" 1
 trap 'rm -rf "$WORK"' EXIT
