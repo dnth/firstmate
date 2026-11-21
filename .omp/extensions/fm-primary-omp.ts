@@ -2,7 +2,7 @@
 // OMP-native session, stop, tool-call, and shutdown events stay in this adapter.
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -19,6 +19,7 @@ import {
   MERGE_NOTE_BOAT,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
+import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import { installTaskInboxDoorbell } from "./lib/fm-task-inbox-doorbell.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
@@ -177,6 +178,54 @@ function durableWakeQueueHasRows(): boolean {
   );
 }
 
+// Work this main session still owes at a turn boundary: unread main-owned wake
+// rows (fm_wake_actor_pending_count in bin/fm-wake-lib.sh) and Communication
+// Officer requests still owed an answer (fm_ext_owed_requests in
+// bin/fm-ext-overdue-lib.sh, which owns the reply and live-task rules).
+// OMP drops a session_stop result past its 30 s handler deadline, so the
+// handler stops WAITING after PENDING_WORK_BUDGET_MS and reports the scan as
+// inconclusive rather than clear. The scan itself is never killed: its
+// live-task lookup runs bin/fm-crew-state.sh, which can be recording an
+// accepted local head in task metadata, so it finishes on its own and its late
+// result is discarded. A nonzero scan-process exit or malformed output also
+// yields an inconclusive result.
+type PendingWork = { rows: number; owed: number; unreplied: number; inconclusive: boolean };
+const PENDING_WORK_BUDGET_MS = 15000;
+const PENDING_WORK_SCRIPT = [
+  'rows=$(. "$1/bin/fm-wake-lib.sh" && fm_wake_actor_pending_count main) || rows=0',
+  'owed="0 0"',
+  'if . "$1/bin/fm-ext-overdue-lib.sh" 2>/dev/null; then owed=$(fm_ext_owed_requests "$2" "$3") || owed="0 0"; fi',
+  'printf "%s %s\\n" "$rows" "$owed"',
+].join("\n");
+const INCONCLUSIVE_WORK: PendingWork = { rows: 0, owed: 0, unreplied: 0, inconclusive: true };
+async function pendingWork(): Promise<PendingWork> {
+  const scan = runCommandAsync("bash", ["-c", PENDING_WORK_SCRIPT, "fm-pending-work", fmRoot, fmHome, state], {
+    env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state },
+  });
+  let timer: NodeJS.Timeout | undefined;
+  const budget = new Promise<null>((resolveBudget) => {
+    timer = setTimeout(() => resolveBudget(null), PENDING_WORK_BUDGET_MS);
+  });
+  const result = await Promise.race([scan, budget]);
+  clearTimeout(timer);
+  if (!result || result.status !== 0) return INCONCLUSIVE_WORK;
+  const fields = result.stdout.trim().split(/\s+/).map(Number);
+  if (fields.length !== 3 || !fields.every((value) => Number.isInteger(value) && value >= 0)) return INCONCLUSIVE_WORK;
+  const [rows, owed, unreplied] = fields;
+  return { rows, owed, unreplied, inconclusive: false };
+}
+
+// Captain- and model-facing phrase for owed work, or "" when nothing is owed.
+function pendingWorkSummary(work: PendingWork): string {
+  if (work.inconclusive) {
+    return `owed work it could not count within ${PENDING_WORK_BUDGET_MS / 1000} s (check the drain and EXT REQUESTS AWAITING ANSWER)`;
+  }
+  const parts: string[] = [];
+  if (work.rows > 0) parts.push(`${work.rows} unacknowledged main wake row(s)`);
+  if (work.owed > 0) parts.push(`${work.owed} Communication Officer request(s) still owed an answer`);
+  return parts.join(" and ");
+}
+
 function runChecker(script: string, flag: "--command" | "--tool", value: string): Promise<ProcessResult> {
   return new Promise((resolveResult) => {
     const child = spawn(`${fmRoot}/bin/${script}`, [flag, value], {
@@ -232,6 +281,8 @@ function runGuard(event: SessionStopEvent): Promise<ProcessResult> {
     });
     child.on("error", () => settle({ code: 0, stderr: "" }));
     child.on("close", (code) => settle({ code: code ?? 0, stderr }));
+    // A guard that exits before reading its payload must not crash the session.
+    child.stdin.on("error", () => {});
     child.stdin.end(JSON.stringify({
       session_id: event.session_id,
       stop_hook_active: event.stop_hook_active,
@@ -363,26 +414,35 @@ export default function (omp: ExtensionAPI) {
   // Attempt-private native error evidence for the secondmate launch ack. Read
   // only fresh message_end events, never errors replayed from a resumed pane.
   const launchErrorFile = process.env.FM_OMP_LAUNCH_ERROR;
-  if (launchErrorFile && isAbsolute(launchErrorFile)) {
-    omp.on("message_end", (event) => {
-      const message = event.message;
-      if (message.role !== "assistant") return;
-      if (message.stopReason !== "error" || !message.errorMessage) {
-        try { unlinkSync(launchErrorFile); } catch { /* No current error. */ }
-        return;
-      }
-      const temporary = `${launchErrorFile}.tmp.${process.pid}.${randomUUID()}`;
-      try {
-        writeFileSync(temporary, JSON.stringify({
-          version: 1, pid: process.pid, errorMessage: message.errorMessage,
-          provider: message.provider, model: message.model,
-        }) + "\n", { mode: 0o600, flag: "wx" });
-        renameSync(temporary, launchErrorFile);
-      } catch {
-        try { unlinkSync(temporary); } catch { /* Reporting must not break OMP. */ }
-      }
-    });
-  }
+  const journalLaunchErrors = Boolean(launchErrorFile && isAbsolute(launchErrorFile));
+  // Whether a provider classifier refusal (typed stopDetails) happened in the
+  // current run. The turn-end check names it, so an affected request gets a
+  // visible reply instead of silence; a terminal agent_end forgets it.
+  let providerRefused = false;
+  // Whether session_stop ran after the latest model call; a terminal
+  // agent_end without it took a path OMP's stop hook never saw.
+  let stopCheckedThisRun = false;
+  omp.on("message_end", (event) => {
+    const message = event.message;
+    if (message.role !== "assistant") return;
+    const stopType = message.stopDetails?.type;
+    if (message.stopReason === "error" && (stopType === "refusal" || stopType === "sensitive")) providerRefused = true;
+    if (!journalLaunchErrors || !launchErrorFile) return;
+    if (message.stopReason !== "error" || !message.errorMessage) {
+      try { unlinkSync(launchErrorFile); } catch { /* No current error. */ }
+      return;
+    }
+    const temporary = `${launchErrorFile}.tmp.${process.pid}.${randomUUID()}`;
+    try {
+      writeFileSync(temporary, JSON.stringify({
+        version: 1, pid: process.pid, errorMessage: message.errorMessage,
+        provider: message.provider, model: message.model,
+      }) + "\n", { mode: 0o600, flag: "wx" });
+      renameSync(temporary, launchErrorFile);
+    } catch {
+      try { unlinkSync(temporary); } catch { /* Reporting must not break OMP. */ }
+    }
+  });
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, { observeTurns: false, deferUntilTurnStart: true });
   installSilentWakeTurns(omp);
   let pendingStartupNudge = "";
@@ -545,6 +605,7 @@ export default function (omp: ExtensionAPI) {
     // An idle-main wake injection opens an agent-initiated turn that emits no
     // before_agent_start; this turn boundary is its consumption evidence.
     watch.turnStart();
+    stopCheckedThisRun = false;
     // A turn can begin while no arm child is live - after an actionable close
     // whose successor restore failed, an exhausted continuity retry, or a lock
     // reclaimed without a follow-up arm - and only the turn-end guard would
@@ -610,18 +671,81 @@ export default function (omp: ExtensionAPI) {
     }
   });
 
-  omp.on("session_stop", async (event): Promise<SessionStopEventResult | undefined> => {
-    if (event.stop_hook_active) return undefined;
-    const result = await runGuard(event);
-    if (result.code !== 2) return undefined;
-    const additionalContext = encodeOperationalInput(
-      "turn-end-guard",
-      "TURN WOULD END BLIND - supervision is off. " +
-        "The watcher cycle is missing, failed, or unhealthy. " +
-        "Follow the OMP supervision recovery instruction below before ending the turn.\n\n" +
-        result.stderr,
+  // Owed work is this session's to drain only while it owns the lock outside
+  // away mode. The scan can take up to PENDING_WORK_BUDGET_MS, so custody is
+  // checked before it starts and again before its result is acted on.
+  const drainsHere = (): boolean => watch.ownsLock() && !existsSync(`${state}/.afk`);
+  const owedWorkHere = async (): Promise<PendingWork | undefined> => {
+    if (!drainsHere()) return undefined;
+    const work = await pendingWork();
+    return drainsHere() ? work : undefined;
+  };
+
+  // A terminal agent_end that no session_stop preceded (OMP skips the stop
+  // hook on some terminal paths) cannot be continued from here, so owed work
+  // gets the captain-visible warning instead of ending silently.
+  omp.on("agent_end", async (event, ctx) => {
+    if (event.willContinue) return;
+    const refused = providerRefused;
+    const checked = stopCheckedThisRun;
+    providerRefused = false;
+    stopCheckedThisRun = false;
+    watch.mainSettled();
+    if (checked) return;
+    const work = await owedWorkHere();
+    const summary = work ? pendingWorkSummary(work) : "";
+    if (!summary) return;
+    ctx?.ui?.notify?.(
+      `Firstmate's turn ended without its stop check while ${summary}` +
+        `${refused ? " after a provider refusal" : ""}. Run bin/fm-wake-drain.sh now.`,
+      "warning",
     );
-    return { continue: true, additionalContext };
+  });
+
+  // Two turn-end checks share OMP's one-continuation bound (stop_hook_active):
+  // missing supervision, then owed work (unacknowledged main-owned wake rows
+  // or Communication Officer requests still owed an answer). Owed work is only
+  // checked for the lock-owning session outside away mode, the only states in
+  // which this session is the one that drains, and it rides along with a
+  // supervision continuation so the single continuation carries both.
+  omp.on("session_stop", async (event, ctx): Promise<SessionStopEventResult | undefined> => {
+    stopCheckedThisRun = true;
+    const guard = event.stop_hook_active ? undefined : await runGuard(event);
+    const work = await owedWorkHere();
+    const summary = work ? pendingWorkSummary(work) : "";
+    if (event.stop_hook_active) {
+      // The bound is spent; the turn may end, but never silently.
+      if (summary) {
+        ctx?.ui?.notify?.(
+          `Firstmate ended a turn with ${summary} after one forced continuation. Run bin/fm-wake-drain.sh to inspect.`,
+          "warning",
+        );
+      }
+      return undefined;
+    }
+    const owedWork = summary
+      ? `TURN WOULD END WITH ${summary}. ` +
+        "Run `bin/fm-wake-drain.sh`, handle every row - answer each EXT REQUESTS AWAITING ANSWER entry with the ext-respond skill - " +
+        "and run the printed `--ack-through` acknowledgement before ending the turn." +
+        (providerRefused && (work?.inconclusive || (work?.unreplied ?? 0) > 0)
+          ? "\n\nA provider refusal occurred during this run. " +
+            "Check each request's reply state with the ext-respond skill and post a visible ack on any that has no reply yet, " +
+            "saying only what is known about it, and phrase any brief for the work in its plain legitimate purpose."
+          : "")
+      : "";
+    if (guard?.code === 2) {
+      const additionalContext = encodeOperationalInput(
+        "turn-end-guard",
+        "TURN WOULD END BLIND - supervision is off. " +
+          "The watcher cycle is missing, failed, or unhealthy. " +
+          "Follow the OMP supervision recovery instruction below before ending the turn.\n\n" +
+          guard.stderr +
+          (owedWork ? `\n\n${owedWork}` : ""),
+      );
+      return { continue: true, additionalContext };
+    }
+    if (!owedWork) return undefined;
+    return { continue: true, additionalContext: encodeOperationalInput("turn-end-guard", owedWork) };
   });
 
   omp.on("tool_call", async (event) => {

@@ -172,6 +172,10 @@ Screen every file yourself before it can post; emit refuses any file without you
 
 Finish every request that needs a reply with `answer` or `final`; the [delivery reaction contract](../../../docs/configuration.md#delivery-reactions) owns how completion is shown on Discord.
 
+A provider refusal never excuses silence.
+When a model refusal interrupts handling and a request has no reply yet, emit an `ack` saying only what is known: that the request is still being handled.
+Write any brief for the work in its legitimate purpose rather than copying classifier-tripping wording; for example, "hide the source code" for an on-prem deployment becomes protecting proprietary code through licensing, built artifacts, container hardening, and contract terms.
+
 Every drained request sorts into one of three cases:
 
 - **Actionable instruction / request** - act through the normal lifecycle.
