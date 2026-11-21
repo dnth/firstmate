@@ -187,8 +187,8 @@ function durableWakeQueueHasRows(): boolean {
 // inconclusive rather than clear. The scan itself is never killed: its
 // live-task lookup runs bin/fm-crew-state.sh, which can be recording an
 // accepted local head in task metadata, so it finishes on its own and its late
-// result is discarded. A scan that fails or prints a malformed result is also
-// inconclusive, never clear.
+// result is discarded. A nonzero scan-process exit or malformed output also
+// yields an inconclusive result.
 type PendingWork = { rows: number; owed: number; unreplied: number; inconclusive: boolean };
 const PENDING_WORK_BUDGET_MS = 15000;
 const PENDING_WORK_SCRIPT = [

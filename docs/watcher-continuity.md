@@ -27,7 +27,8 @@ While supervision is still needed and away mode remains inactive, an actionable 
 ## Actionable wake ordering
 
 After an actionable Pi, OMP, or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
-OMP delivers an ordinary follow-up through its host API as a hidden custom `nextTurn` message with `triggerTurn`, which starts an idle handling turn without touching an editable TUI draft; stale or decision-owned main wakes use the turn-forcing `followUp` transport described in [`omp-supervision-branch.md`](omp-supervision-branch.md#main-fallback-re-entry-coalescing).
+OMP delivers an ordinary follow-up through its host API as a hidden custom `nextTurn` message with `triggerTurn`, which starts an idle handling turn without touching an editable TUI draft.
+The [main-fallback coalescing contract](omp-supervision-branch.md#main-fallback-re-entry-coalescing) owns when OMP uses its turn-forcing transport.
 OMP's delivery-versus-consumption evidence and runtime limits are owned by [Per-actor acknowledgement](omp-supervision-branch.md#per-actor-acknowledgement).
 The durable wake rows are the whole persistence: only `bin/fm-wake-drain.sh` acknowledgement removes them, so an interruption before acknowledgement leaves the rows queued for the next session event to re-notify.
 On `session_start` and `session_switch`, OMP sends at most one hidden notification only when this process owns the session lock, structurally valid durable rows remain, and the core has no undelivered actionable handoff, using the turn-forcing transport when queued decision-owned rows require it.

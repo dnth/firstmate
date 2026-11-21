@@ -1060,11 +1060,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     // (docs/omp-supervision-branch.md). In both cases the superseded marker is
     // retired exactly as the turnEnd stale bound does: its pending record
     // finishes, while the durable rows stay until a drain acknowledges them.
-    // An open episode with no in-flight marker while main is idle is the third:
+    // An open episode while main is idle is the third:
     // the run that owned the episode ended without acknowledging its rows, so
     // the close forces a turn instead of waiting on a drain that will not come.
-    // Each forced send opens a turn that makes main busy again, so this costs at
-    // most one forced delivery per settled idle period.
+    // Any in-flight marker is retired, and the next turn_start clears idle.
     const staleInFlight = coalesceMainFallbackWakes && inFlightWakeUnconsumedPastBound(owner);
     const decisionBypass = coalesceMainFallbackWakes && Boolean(isDecisionOwnedWake?.(message));
     const idleEpisode = coalesceMainFallbackWakes && owner.mainFallbackEpisode && owner.mainIdle;

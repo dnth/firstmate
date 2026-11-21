@@ -45,7 +45,8 @@ fm_ext_overdue_live_task() {  # <state> <slug>
 # the acknowledgement refusal in bin/fm-wake-drain.sh would still hold it (no
 # reply, or a reply emitted without a receipt) or when it has only acks and no
 # live task expected to answer it; unreplied counts the no-reply subset. An
-# inactive bridge prints "0 0". Read-only: reminder cadence is untouched.
+# inactive bridge prints "0 0". Reminder cadence is untouched; the live-task
+# lookup can reconcile task metadata.
 fm_ext_owed_requests() {  # <home> <state>
   local home=${1:-${FM_HOME:?}} state=${2:-} pending slug reply owed=0 unreplied=0
   [ -n "$state" ] || return 1
