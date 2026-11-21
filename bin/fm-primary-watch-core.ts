@@ -163,6 +163,8 @@ type SessionGeneration = {
   // reached its suppression point, so the boundary is replayed once the run
   // settles.
   pendingTurnEnd: boolean;
+  // A terminal settlement that arrived mid-delivery-run, replayed the same way.
+  pendingSettle: boolean;
   mainFallbackWakeInFlight: string | null;
   mainFallbackBaselineRows: Set<string> | null;
   // Wedge evidence for an in-flight fallback wake whose consumption events the
@@ -375,6 +377,7 @@ function createGeneration(): SessionGeneration {
     mainFallbackSuccessorGranted: false,
     episodeCoalesced: new Set(),
     pendingTurnEnd: false,
+    pendingSettle: false,
     mainFallbackWakeInFlight: null,
     mainFallbackBaselineRows: null,
     mainFallbackInFlightRows: null,
@@ -1064,11 +1067,14 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     // most one forced delivery per settled idle period.
     const staleInFlight = coalesceMainFallbackWakes && inFlightWakeUnconsumedPastBound(owner);
     const decisionBypass = coalesceMainFallbackWakes && Boolean(isDecisionOwnedWake?.(message));
-    const idleEpisode = coalesceMainFallbackWakes && owner.mainFallbackEpisode &&
-      !owner.mainFallbackWakeInFlight && owner.mainIdle;
+    const idleEpisode = coalesceMainFallbackWakes && owner.mainFallbackEpisode && owner.mainIdle;
     const forceTurn = staleInFlight || decisionBypass || idleEpisode;
     if (forceTurn && owner.mainFallbackWakeInFlight) {
-      consumeWake(owner, owner.mainFallbackWakeInFlight, staleInFlight ? "inflight-bound" : "decision-bypass");
+      consumeWake(
+        owner,
+        owner.mainFallbackWakeInFlight,
+        staleInFlight ? "inflight-bound" : decisionBypass ? "decision-bypass" : "idle-bypass",
+      );
     }
     if (coalesceMainFallbackWakes && owner.mainFallbackWakeInFlight) {
       owner.mainFallbackEpisode = true;
@@ -1421,6 +1427,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         if (owner.pendingTurnEnd) {
           owner.pendingTurnEnd = false;
           turnEnd();
+        }
+        if (owner.pendingSettle) {
+          owner.pendingSettle = false;
+          if (owner.mainIdle) settleCoalescedClose(owner);
         }
         if (owner.pendingActionables.some((pending) => pending.delivered)) schedulePendingCleanup(owner);
         // No bare arm is launched here. A generation without a child at this
@@ -1833,14 +1843,24 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     const owner = generation;
     owner.mainIdle = true;
     if (!coalesceMainFallbackWakes || !generationIsLive(owner)) return;
-    if (!owner.mainFallbackEpisode || owner.mainFallbackWakeInFlight || owner.restoring) return;
+    settleCoalescedClose(owner);
+  }
+
+  function settleCoalescedClose(owner: SessionGeneration): void {
+    if (owner.restoring) {
+      // A close mid-restore may still reach the branch silently; recheck the
+      // coalesced batch when the delivery run completes.
+      owner.pendingSettle = true;
+      return;
+    }
+    if (!owner.mainFallbackEpisode || owner.mainFallbackWakeInFlight) return;
     const lastHandOffAtMs = owner.mainFallbackWakeSentAtMs ?? 0;
     const candidates = owner.pendingActionables.filter((pending) =>
       !pending.delivered && owner.episodeCoalesced.has(pending.token) &&
       !owner.unconsumedWakes.has(pending.token) && !owner.branchInFlight.has(pending.token) &&
       (pending.suppressedAtMs ?? 0) > lastHandOffAtMs);
     if (candidates.length === 0 || mainOwnedWakeRows() === 0) return;
-    const next = candidates.find(checkWaitsOnMain) ?? candidates[candidates.length - 1];
+    const next = candidates[candidates.length - 1];
     owner.episodeCoalesced.delete(next.token);
     owner.mainFallbackSuccessor = true;
     recordWakeEvent(owner, "granted", [["close", next.token], ["kind", "settle"]]);

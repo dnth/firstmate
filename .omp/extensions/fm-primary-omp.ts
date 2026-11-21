@@ -730,10 +730,10 @@ export default function (omp: ExtensionAPI) {
       ? `TURN WOULD END WITH ${summary}. ` +
         "Run `bin/fm-wake-drain.sh`, handle every row - answer each EXT REQUESTS AWAITING ANSWER entry with the ext-respond skill - " +
         "and run the printed `--ack-through` acknowledgement before ending the turn." +
-        (providerRefused && (work?.unreplied ?? 0) > 0
+        (providerRefused && (work?.inconclusive || (work?.unreplied ?? 0) > 0)
           ? "\n\nA provider refusal occurred during this run. " +
-            "Post a visible ack with the ext-respond skill on each request that has no reply yet, saying only what is known about it, " +
-            "and phrase any brief for the work in its plain legitimate purpose."
+            "Check each request's reply state with the ext-respond skill and post a visible ack on any that has no reply yet, " +
+            "saying only what is known about it, and phrase any brief for the work in its plain legitimate purpose."
           : "")
       : "";
     if (guard?.code === 2) {

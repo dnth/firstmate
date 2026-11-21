@@ -2932,6 +2932,152 @@ JS
   pass "OMP forces a turn for a close that arrives while main is idle behind an open episode"
 }
 
+# Settlement edges of the idle fix: a wake staged but never consumed before
+# the run ended must not keep the next close suppressed; settlement delivers
+# the newest coalesced close even when an older Communication Officer check is
+# also waiting; and a settlement that lands while a delivery run restores a
+# watcher for a close the branch then takes silently is replayed, not lost.
+test_native_omp_settlement_edges() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-settlement-edges)
+  : > "$fixture/config/ext-bridge"
+  printf 'test-secret\n' > "$fixture/config/ext-secret"
+  chmod 600 "$fixture/config/ext-secret"
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+if [ -e "$state/slow-$count" ]; then
+  while [ ! -e "$state/release-$count" ]; do sleep 0.02; done
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-stop" ]; do
+  if [ -e "$state/wake-now-$count" ]; then
+    cat "$state/close-$count" 2>/dev/null || printf 'signal: settle-close-%s\n' "$count"
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    FM_OMP_ARM_READY_TIMEOUT_MS=20000 \
+    node --input-type=module 2>&1 <<'JS'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const handlers = new Map();
+const wakes = [];
+const offers = [];
+const api = {
+  zod: { object: () => ({}) },
+  // A branch double that silently takes only branch-eligible closes.
+  events: {
+    emit(name, offer) {
+      if (name !== "fm-branch-supervision:dispatch" || !offer.message.includes("branch-eligible")) return;
+      offers.push(offer.message);
+      offer.accept(new Promise(() => {}));
+    },
+  },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message, options) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push({ content: String(message.content ?? ""), options });
+  },
+};
+let seq = 0;
+const appendRow = (kind, key) => {
+  seq += 1;
+  writeFileSync(`${state}/.wake-queue.seq`, `${seq}\n`);
+  appendFileSync(`${state}/.wake-queue`, `0\t${seq}\t${kind}\t${key}\t${kind}: ${key}\n`);
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8").trim()) : 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 1000; i += 1) { if (pred()) return; await sleep(10); }
+  throw new Error(`timeout waiting for ${label}: ${JSON.stringify(wakes.map((wake) => wake.content.split("\n")[0]))}`);
+}
+const forced = (wake) => wake?.options?.deliverAs === "followUp" && wake?.options?.triggerTurn === true;
+// Close the live watcher with the given line, then wait for its successor arm.
+const closeWith = async (line) => {
+  const live = count();
+  if (line) writeFileSync(`${state}/close-${live}`, `${line}\n`);
+  writeFileSync(`${state}/wake-now-${live}`, "go\n");
+  await waitFor(() => count() > live, `successor arm after close ${live}`);
+};
+const turn = (name) => handlers.get(name)({ type: name }, context);
+const settle = () => handlers.get("agent_end")({ type: "agent_end", messages: [], willContinue: false }, context);
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?settlement-edges=${Date.now()}`);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+
+// A: the first wake is staged but never consumed before the run ends.
+appendRow("signal", "crew-a.turn-ended");
+await closeWith("");
+await waitFor(() => wakes.length === 1, "first fallback wake");
+await settle();
+appendRow("signal", "crew-b.turn-ended");
+await closeWith("");
+await waitFor(() => wakes.length === 2, "idle main hears a close behind an unconsumed wake");
+if (!forced(wakes[1])) throw new Error(`idle close behind an in-flight wake was not forced: ${JSON.stringify(wakes[1].options)}`);
+await turn("turn_start");
+
+// B: an older check and a newer signal coalesce; settlement picks the newer.
+const slug = "d".repeat(64);
+mkdirSync(`${state}/ext-inbox`, { recursive: true, mode: 0o700 });
+writeFileSync(`${state}/ext-inbox/${slug}.json`, JSON.stringify({ schema_version: 1, slug, request_id: "discord:1:2:3:4", platform: "discord", recorded_at: 1700000000 }), { mode: 0o600 });
+appendRow("check", `ext-request:${slug}`);
+await closeWith(`check: ext-request ${slug}`);
+appendRow("signal", "crew-c.turn-ended");
+await closeWith("signal: newest-signal");
+await sleep(300);
+if (wakes.length !== 2) throw new Error(`a close preempted the live run: ${wakes.length}`);
+await turn("turn_end");
+await settle();
+await waitFor(() => wakes.length === 3, "settlement delivery for the mixed batch");
+if (!wakes[2].content.includes("signal: newest-signal")) throw new Error(`settlement preferred an older close: ${wakes[2].content.split("\n")[0]}`);
+await turn("turn_start");
+
+// C: a newer close coalesces, then a branch-eligible close is mid-restore
+// when the run settles; the branch takes it silently and the replayed
+// settlement must still deliver the coalesced close.
+appendRow("signal", "crew-d.turn-ended");
+await closeWith("signal: coalesced-before-restore");
+const slowArm = count() + 1;
+writeFileSync(`${state}/slow-${slowArm}`, "slow\n");
+appendRow("signal", "crew-e.turn-ended");
+await closeWith("signal: branch-eligible restoring-close");
+await turn("turn_end");
+await settle();
+await sleep(300);
+if (wakes.length !== 3) throw new Error(`settlement delivered before restoration finished: ${wakes.length}`);
+writeFileSync(`${state}/release-${slowArm}`, "go\n");
+await waitFor(() => offers.length === 1, "branch takes the restored close");
+await waitFor(() => wakes.length === 4, "replayed settlement delivers the coalesced close");
+if (!wakes[3].content.includes("signal: coalesced-before-restore") || !forced(wakes[3])) {
+  throw new Error(`replayed settlement sent the wrong close: ${wakes[3].content.split("\n")[0]} ${JSON.stringify(wakes[3].options)}`);
+}
+
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
+console.log("omp-settlement-edges-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP settlement edges"
+  assert_contains "$out" omp-settlement-edges-ok "an idle-fix settlement edge stayed silent: $out"
+  pass "OMP idle fix retires unconsumed wakes, settles to the newest close, and replays settlement after restore"
+}
+
 # 2026-11-20 idle gap: a turn ended text-only on a fallback model after a
 # provider refusal, with ten unacknowledged wake rows and two unanswered
 # Discord requests, and the turn-end guard let it end because the watcher was
@@ -2955,6 +3101,7 @@ exit 2
 SH
   cat > "$fixture/bin/crew-state-stub.sh" <<'SH'
 #!/usr/bin/env bash
+[ ! -e "${FM_STATE_OVERRIDE:?}/slow-crew" ] || sleep 20
 printf 'state: working (stub for %s)\n' "$1"
 SH
   chmod +x "$fixture/bin/fm-turnend-guard.sh" "$fixture/bin/crew-state-stub.sh"
@@ -3061,6 +3208,22 @@ const both = await stop(false);
 if (both?.continue !== true) throw new Error(`watcher-down stop did not continue: ${JSON.stringify(both)}`);
 expectIncludes(both.additionalContext, ["TURN WOULD END BLIND", "guard says supervision is absent", "1 Communication Officer request"], "combined continuation");
 rmSync(`${state}/guard-down`);
+await settle();
+
+// A scan that outlives its budget after a refusal stays owed and keeps the
+// visible-ack instruction, even though no unreplied count could be read.
+writeFileSync(`${state}/slow-crew`, "slow\n");
+writeFileSync(`${state}/task-x.meta`, `ext_request_slug=${slug}\n`);
+await fire("turn_start", { type: "turn_start" }, context);
+await fire("message_end", { message: {
+  role: "assistant", stopReason: "error", provider: "anthropic", model: "primary-model", content: [],
+  errorMessage: "Cyber safeguards flagged this message.", stopDetails: { type: "refusal", category: "cyber" },
+} }, context);
+const slowStop = await stop(false);
+if (slowStop?.continue !== true) throw new Error(`an unfinished scan let the turn end: ${JSON.stringify(slowStop)}`);
+expectIncludes(slowStop.additionalContext, ["could not count", "A provider refusal occurred"], "timed-out continuation");
+rmSync(`${state}/slow-crew`);
+rmSync(`${state}/task-x.meta`);
 await settle();
 
 // A terminal agent_end that no stop check preceded warns instead of ending silently.
@@ -3695,6 +3858,7 @@ test_native_omp_suppressed_check_redelivers_at_episode_close
 test_native_omp_idle_main_wake_consumption_and_stale_bound
 test_native_omp_unconsumed_inflight_wake_forces_turn_after_bound
 test_native_omp_idle_main_hears_wake_behind_open_episode
+test_native_omp_settlement_edges
 test_native_omp_turn_end_with_unacked_wakes_continues_once
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification
 test_native_omp_mid_turn_wake_reaches_idle_main
