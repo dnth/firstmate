@@ -2905,6 +2905,22 @@ await waitFor(() => count() === 5, "successor arm after the continuing close");
 await sleep(300);
 if (wakes.length !== 2) throw new Error(`a close preempted a scheduled continuation: ${wakes.length} wakes`);
 
+// The inverse order: closes coalesced during the run, which then ends with
+// its rows unread and no further close arriving. Settlement itself must force
+// exactly one delivery for the newest of them.
+await handlers.get("agent_end")({ type: "agent_end", messages: [], willContinue: false }, context);
+await waitFor(() => wakes.length === 3, "settlement force-delivers a close coalesced during the run");
+if (!wakes[2].content.includes("signal: idle-close-4")) throw new Error(`settlement delivered the wrong close: ${wakes[2].content}`);
+if (!forced(wakes[2])) throw new Error(`settlement delivery did not force a turn: ${JSON.stringify(wakes[2].options)}`);
+
+// That forced turn also ends without acknowledging; with no close newer than
+// the forced hand-off, a second settlement forces nothing.
+await handlers.get("turn_start")({ type: "turn_start" }, context);
+await handlers.get("turn_end")({ type: "turn_end" }, context);
+await handlers.get("agent_end")({ type: "agent_end", messages: [], willContinue: false }, context);
+await sleep(300);
+if (wakes.length !== 3) throw new Error(`settlement re-forced an already presented batch: ${wakes.length} wakes`);
+
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
 console.log("omp-idle-episode-ok");
@@ -2919,20 +2935,38 @@ JS
 # 2026-11-20 idle gap: a turn ended text-only on a fallback model after a
 # provider refusal, with ten unacknowledged wake rows and two unanswered
 # Discord requests, and the turn-end guard let it end because the watcher was
-# healthy. Unacknowledged main-owned rows must force one bounded continuation,
-# and the bounded second stop must warn the captain instead of ending silently.
+# healthy. Owed work - unacknowledged main-owned rows, or a request with no
+# reply or only acks and no live task - must force one bounded continuation,
+# ride a supervision continuation, and otherwise warn the captain.
 test_native_omp_turn_end_with_unacked_wakes_continues_once() {
   local fixture out status=0
   fixture=$(make_omp_queue_fixture native-unacked-turn-end)
   write_queue_watcher "$fixture"
+  cp "$ROOT/bin/fm-ext-overdue-lib.sh" "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-timeout-lib.sh" "$fixture/bin/"
+  : > "$fixture/config/ext-bridge"
+  printf 'test-secret\n' > "$fixture/config/ext-secret"
+  chmod 600 "$fixture/config/ext-secret"
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+[ -e "${FM_STATE_OVERRIDE:?}/guard-down" ] || exit 0
+printf 'guard says supervision is absent\n' >&2
+exit 2
+SH
+  cat > "$fixture/bin/crew-state-stub.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: working (stub for %s)\n' "$1"
+SH
+  chmod +x "$fixture/bin/fm-turnend-guard.sh" "$fixture/bin/crew-state-stub.sh"
   FM_STATE_OVERRIDE="$fixture/state" bash -c \
     '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check ext-request:abc "ext-request abc"' _ "$fixture" \
     || fail "the OMP unacked fixture could not seed a durable wake row"
   out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
     FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    FM_CREW_STATE_BIN="$fixture/bin/crew-state-stub.sh" \
     node --input-type=module 2>&1 <<'JS'
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const state = process.env.FM_STATE_OVERRIDE;
 const handlers = new Map();
@@ -2953,6 +2987,13 @@ async function waitFor(pred, label) {
   for (let i = 0; i < 500; i += 1) { if (pred()) return; await new Promise((r) => setTimeout(r, 10)); }
   throw new Error(`timeout waiting for ${label}`);
 }
+const expectIncludes = (text, needles, label) => {
+  for (const needle of needles) if (!String(text).includes(needle)) throw new Error(`${label} lacks ${needle}: ${text}`);
+};
+const slug = "a".repeat(64);
+mkdirSync(`${state}/ext-inbox`, { recursive: true, mode: 0o700 });
+mkdirSync(`${state}/ext-outbox`, { recursive: true, mode: 0o700 });
+writeFileSync(`${state}/ext-inbox/${slug}.json`, JSON.stringify({ schema_version: 1, slug, request_id: "discord:1:2:3:4", platform: "discord", recorded_at: 1700000000 }), { mode: 0o600 });
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
 process.argv[1] = process.env.EXTENSION;
 const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?unacked=${Date.now()}`);
@@ -2967,29 +3008,67 @@ const stop = (active) => fire("session_stop", {
   type: "session_stop", messages: [], turn_id: 1, session_id: "sess-one",
   stop_hook_active: active, signal: new AbortController().signal,
 }, context);
+const settle = () => fire("agent_end", { type: "agent_end", messages: [], willContinue: false }, context);
 
+// A typed refusal, one unacknowledged row, and one request with no reply.
+await fire("turn_start", { type: "turn_start" }, context);
 await fire("message_end", { message: {
   role: "assistant", stopReason: "error", provider: "anthropic", model: "primary-model", content: [],
-  errorMessage: "Refusal (cyber): Cyber safeguards flagged this message.",
+  errorMessage: "Cyber safeguards flagged this message.", stopDetails: { type: "refusal", category: "cyber" },
 } }, context);
 const first = await stop(false);
-if (first?.continue !== true) throw new Error(`unacknowledged rows let the turn end: ${JSON.stringify(first)}`);
-for (const needle of ["encoded:turn-end-guard:", "1 unacknowledged", "bin/fm-wake-drain.sh", "ext-respond", "Refusal (cyber)"]) {
-  if (!first.additionalContext.includes(needle)) throw new Error(`continuation lacks ${needle}: ${first.additionalContext}`);
+if (first?.continue !== true) throw new Error(`owed work let the turn end: ${JSON.stringify(first)}`);
+expectIncludes(first.additionalContext, ["encoded:turn-end-guard:", "1 unacknowledged", "1 Communication Officer request", "bin/fm-wake-drain.sh", "ext-respond", "A provider refusal occurred"], "first continuation");
+if (first.additionalContext.includes("Cyber") || first.additionalContext.includes("fallback")) {
+  throw new Error(`continuation copied provider text or claimed a fallback: ${first.additionalContext}`);
 }
 if (notices.length !== 0) throw new Error(`the forced continuation warned early: ${JSON.stringify(notices)}`);
 
-// The bounded second stop may end, but never silently.
+// The bounded second stop may end, but never silently; its own settle adds nothing.
 if (await stop(true) !== undefined) throw new Error("the bounded second stop recursed");
 if (notices.length !== 1 || notices[0].level !== "warning" || !notices[0].message.includes("1 unacknowledged")) {
-  throw new Error(`the bounded stop with rows left was silent: ${JSON.stringify(notices)}`);
+  throw new Error(`the bounded stop with owed work was silent: ${JSON.stringify(notices)}`);
 }
-await fire("agent_end", { type: "agent_end", messages: [], willContinue: false }, context);
+await settle();
+if (notices.length !== 1) throw new Error(`a checked run warned twice: ${JSON.stringify(notices)}`);
 
-// A settled run forgets its refusal.
+// A settled run forgets its refusal, observed on the very next stop with the
+// same never-replied request and no new assistant error.
+await fire("turn_start", { type: "turn_start" }, context);
 const later = await stop(false);
-if (later?.continue !== true || later.additionalContext.includes("Refusal")) {
+if (later?.continue !== true || later.additionalContext.includes("provider refusal")) {
   throw new Error(`a later run inherited a settled refusal: ${JSON.stringify(later)}`);
+}
+await settle();
+
+// Ack-only request, empty queue, no live task: still owed.
+writeFileSync(`${state}/.wake-queue`, "");
+writeFileSync(`${state}/ext-outbox/${slug}.ack.1.receipt.json`, "{}\n", { mode: 0o600 });
+await fire("turn_start", { type: "turn_start" }, context);
+const ackOnly = await stop(false);
+if (ackOnly?.continue !== true) throw new Error(`an ack-only request with no task let the turn end: ${JSON.stringify(ackOnly)}`);
+expectIncludes(ackOnly.additionalContext, ["1 Communication Officer request"], "ack-only continuation");
+if (ackOnly.additionalContext.includes("unacknowledged main wake")) throw new Error(`empty queue reported rows: ${ackOnly.additionalContext}`);
+
+// The same ack with a live linked task is expected to stay unanswered.
+writeFileSync(`${state}/task-x.meta`, `ext_request_slug=${slug}\n`);
+if (await stop(false) !== undefined) throw new Error("an ack with a live linked task blocked the turn end");
+rmSync(`${state}/task-x.meta`);
+
+// Supervision down and work owed: the one continuation carries both.
+writeFileSync(`${state}/guard-down`, "down\n");
+const both = await stop(false);
+if (both?.continue !== true) throw new Error(`watcher-down stop did not continue: ${JSON.stringify(both)}`);
+expectIncludes(both.additionalContext, ["TURN WOULD END BLIND", "guard says supervision is absent", "1 Communication Officer request"], "combined continuation");
+rmSync(`${state}/guard-down`);
+await settle();
+
+// A terminal agent_end that no stop check preceded warns instead of ending silently.
+await fire("turn_start", { type: "turn_start" }, context);
+const beforeTerminal = notices.length;
+await settle();
+if (notices.length !== beforeTerminal + 1 || !notices.at(-1).message.includes("without its stop check")) {
+  throw new Error(`terminal end without a stop check was silent: ${JSON.stringify(notices)}`);
 }
 
 // Away mode owns delivery; a session that does not own the lock cannot drain.
@@ -3002,21 +3081,23 @@ if (await stop(false) !== undefined) throw new Error("a lock-refused session was
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
 holder.kill();
 
-// Acknowledged: nothing left, nothing forced, nothing warned.
-writeFileSync(`${state}/.wake-queue`, "");
+// Nothing owed: nothing forced, nothing warned on any path.
+rmSync(`${state}/ext-inbox/${slug}.json`);
 const before = notices.length;
-if (await stop(false) !== undefined || await stop(true) !== undefined || notices.length !== before) {
-  throw new Error("an acknowledged queue still blocked or warned the turn end");
-}
+await fire("turn_start", { type: "turn_start" }, context);
+if (await stop(false) !== undefined || await stop(true) !== undefined) throw new Error("a clear turn end was blocked");
+await fire("turn_start", { type: "turn_start" }, context);
+await settle();
+if (notices.length !== before) throw new Error(`a clear turn end warned: ${JSON.stringify(notices.slice(before))}`);
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await fire("session_shutdown", { type: "session_shutdown" }, context);
 console.log("omp-unacked-turn-end-ok");
 JS
   ) || status=$?
   printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
-  expect_code 0 "$status" "OMP turn end with unacknowledged wakes"
-  assert_contains "$out" omp-unacked-turn-end-ok "a turn ended silently with unacknowledged wakes: $out"
-  pass "OMP forces one continuation and then warns when a turn would end with unacknowledged wakes"
+  expect_code 0 "$status" "OMP turn end with owed work"
+  assert_contains "$out" omp-unacked-turn-end-ok "a turn ended silently with owed work: $out"
+  pass "OMP continues once for owed wakes or requests, rides supervision repair, and warns otherwise"
 }
 
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification() {

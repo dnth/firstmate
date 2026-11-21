@@ -1,9 +1,10 @@
 # shellcheck shell=bash
 # Overdue-request policy for the sibling local-bridge Communication Officer.
 #
-# Sourced, never executed. Caller: bin/fm-watch.sh's ext_overdue_tick, which
-# appends the durable wake row and rings. This owner decides WHICH request earns
-# the next reminder and records that it rang.
+# Sourced, never executed. Callers: bin/fm-watch.sh's ext_overdue_tick, which
+# appends the durable wake row and rings, and the OMP primary turn-end check,
+# which reads fm_ext_owed_requests. This owner decides WHICH request earns the
+# next reminder and records that it rang, and which requests are still owed.
 #
 # Presentation does not resolve a request: an unanswered record remains eligible
 # for reminders even after a drain showed it. One reminder per request per
@@ -37,6 +38,30 @@ fm_ext_overdue_live_task() {  # <state> <slug>
     case "$current" in working|parked|paused) return 0 ;; esac
   done
   return 1
+}
+
+# fm_ext_owed_requests <home> <state>: print "<owed> <unreplied>" for the
+# turn-end check in .omp/extensions/fm-primary-omp.ts. A request is owed when
+# the acknowledgement refusal in bin/fm-wake-drain.sh would still hold it (no
+# reply, or a reply emitted without a receipt) or when it has only acks and no
+# live task expected to answer it; unreplied counts the no-reply subset. An
+# inactive bridge prints "0 0". Read-only: reminder cadence is untouched.
+fm_ext_owed_requests() {  # <home> <state>
+  local home=${1:-${FM_HOME:?}} state=${2:-} pending slug reply owed=0 unreplied=0
+  [ -n "$state" ] || return 1
+  pending=$(fm_ext_pending_requests "$home" 2>/dev/null) || pending=''
+  while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    reply=$(fm_ext_request_reply_state "$slug" "$home") || reply=none
+    case "$reply" in
+      none) owed=$((owed + 1)); unreplied=$((unreplied + 1)) ;;
+      emitted) owed=$((owed + 1)) ;;
+      ack\ *) fm_ext_overdue_live_task "$state" "$slug" || owed=$((owed + 1)) ;;
+    esac
+  done <<EOF
+$pending
+EOF
+  printf '%s %s\n' "$owed" "$unreplied"
 }
 
 # fm_ext_overdue_ring <home> <state>: print the wake payload of the next
