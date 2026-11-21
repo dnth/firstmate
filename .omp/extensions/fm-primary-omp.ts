@@ -19,6 +19,7 @@ import {
   MERGE_NOTE_BOAT,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
+import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import { installTaskInboxDoorbell } from "./lib/fm-task-inbox-doorbell.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
@@ -181,9 +182,13 @@ function durableWakeQueueHasRows(): boolean {
 // rows (fm_wake_actor_pending_count in bin/fm-wake-lib.sh) and Communication
 // Officer requests still owed an answer (fm_ext_owed_requests in
 // bin/fm-ext-overdue-lib.sh, which owns the reply and live-task rules).
-// OMP drops a session_stop result past its 30 s handler deadline, so a scan
-// that outlives PENDING_WORK_BUDGET_MS is reported as inconclusive rather than
-// as clear; an unreadable count is zero so the check never wedges a session.
+// OMP drops a session_stop result past its 30 s handler deadline, so the
+// handler stops WAITING after PENDING_WORK_BUDGET_MS and reports the scan as
+// inconclusive rather than clear. The scan itself is never killed: its
+// live-task lookup runs bin/fm-crew-state.sh, which can be recording an
+// accepted local head in task metadata, so it finishes on its own and its late
+// result is discarded. A scan that fails or prints a malformed result is also
+// inconclusive, never clear.
 type PendingWork = { rows: number; owed: number; unreplied: number; inconclusive: boolean };
 const PENDING_WORK_BUDGET_MS = 15000;
 const PENDING_WORK_SCRIPT = [
@@ -192,39 +197,22 @@ const PENDING_WORK_SCRIPT = [
   'if . "$1/bin/fm-ext-overdue-lib.sh" 2>/dev/null; then owed=$(fm_ext_owed_requests "$2" "$3") || owed="0 0"; fi',
   'printf "%s %s\\n" "$rows" "$owed"',
 ].join("\n");
-function pendingWork(): Promise<PendingWork> {
-  return new Promise((resolveWork) => {
-    const child = spawn("bash", ["-c", PENDING_WORK_SCRIPT, "fm-pending-work", fmRoot, fmHome, state], {
-      env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state },
-      stdio: ["ignore", "pipe", "ignore"],
-      detached: true,
-    });
-    let stdout = "";
-    let settled = false;
-    const settle = (work: PendingWork): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolveWork(work);
-    };
-    const timer = setTimeout(() => {
-      if (child.pid) {
-        try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already gone. */ }
-      }
-      settle({ rows: 0, owed: 0, unreplied: 0, inconclusive: true });
-    }, PENDING_WORK_BUDGET_MS);
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.on("error", () => settle({ rows: 0, owed: 0, unreplied: 0, inconclusive: false }));
-    child.on("close", () => {
-      const [rows, owed, unreplied] = stdout.trim().split(/\s+/).map((field) => {
-        const value = Number(field);
-        return Number.isInteger(value) && value > 0 ? value : 0;
-      });
-      settle({ rows: rows ?? 0, owed: owed ?? 0, unreplied: unreplied ?? 0, inconclusive: false });
-    });
+const INCONCLUSIVE_WORK: PendingWork = { rows: 0, owed: 0, unreplied: 0, inconclusive: true };
+async function pendingWork(): Promise<PendingWork> {
+  const scan = runCommandAsync("bash", ["-c", PENDING_WORK_SCRIPT, "fm-pending-work", fmRoot, fmHome, state], {
+    env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state },
   });
+  let timer: NodeJS.Timeout | undefined;
+  const budget = new Promise<null>((resolveBudget) => {
+    timer = setTimeout(() => resolveBudget(null), PENDING_WORK_BUDGET_MS);
+  });
+  const result = await Promise.race([scan, budget]);
+  clearTimeout(timer);
+  if (!result || result.status !== 0) return INCONCLUSIVE_WORK;
+  const fields = result.stdout.trim().split(/\s+/).map(Number);
+  if (fields.length !== 3 || !fields.every((value) => Number.isInteger(value) && value >= 0)) return INCONCLUSIVE_WORK;
+  const [rows, owed, unreplied] = fields;
+  return { rows, owed, unreplied, inconclusive: false };
 }
 
 // Captain- and model-facing phrase for owed work, or "" when nothing is owed.
@@ -683,6 +671,16 @@ export default function (omp: ExtensionAPI) {
     }
   });
 
+  // Owed work is this session's to drain only while it owns the lock outside
+  // away mode. The scan can take up to PENDING_WORK_BUDGET_MS, so custody is
+  // checked before it starts and again before its result is acted on.
+  const drainsHere = (): boolean => watch.ownsLock() && !existsSync(`${state}/.afk`);
+  const owedWorkHere = async (): Promise<PendingWork | undefined> => {
+    if (!drainsHere()) return undefined;
+    const work = await pendingWork();
+    return drainsHere() ? work : undefined;
+  };
+
   // A terminal agent_end that no session_stop preceded (OMP skips the stop
   // hook on some terminal paths) cannot be continued from here, so owed work
   // gets the captain-visible warning instead of ending silently.
@@ -693,13 +691,13 @@ export default function (omp: ExtensionAPI) {
     providerRefused = false;
     stopCheckedThisRun = false;
     watch.mainSettled();
-    if (checked || !watch.ownsLock() || existsSync(`${state}/.afk`)) return;
-    const work = await pendingWork();
-    const summary = pendingWorkSummary(work);
+    if (checked) return;
+    const work = await owedWorkHere();
+    const summary = work ? pendingWorkSummary(work) : "";
     if (!summary) return;
     ctx?.ui?.notify?.(
       `Firstmate's turn ended without its stop check while ${summary}` +
-        `${refused ? " after a provider refusal" : ""}; nothing forced a follow-up. Run bin/fm-wake-drain.sh now.`,
+        `${refused ? " after a provider refusal" : ""}. Run bin/fm-wake-drain.sh now.`,
       "warning",
     );
   });
@@ -713,14 +711,13 @@ export default function (omp: ExtensionAPI) {
   omp.on("session_stop", async (event, ctx): Promise<SessionStopEventResult | undefined> => {
     stopCheckedThisRun = true;
     const guard = event.stop_hook_active ? undefined : await runGuard(event);
-    const work = watch.ownsLock() && !existsSync(`${state}/.afk`) ? await pendingWork() : undefined;
+    const work = await owedWorkHere();
     const summary = work ? pendingWorkSummary(work) : "";
     if (event.stop_hook_active) {
       // The bound is spent; the turn may end, but never silently.
       if (summary) {
         ctx?.ui?.notify?.(
-          `Firstmate ended a turn with ${summary} after one forced continuation; ` +
-            "the next watcher wake will force a turn. Run bin/fm-wake-drain.sh to inspect.",
+          `Firstmate ended a turn with ${summary} after one forced continuation. Run bin/fm-wake-drain.sh to inspect.`,
           "warning",
         );
       }

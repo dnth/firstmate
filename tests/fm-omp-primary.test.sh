@@ -2975,10 +2975,11 @@ const wakes = [];
 const offers = [];
 const api = {
   zod: { object: () => ({}) },
-  // A branch double that silently takes only branch-eligible closes.
+  // A branch double that honours the dispatch contract: it may only take an
+  // offer the adapter marked eligible, and it takes only the restoring close.
   events: {
     emit(name, offer) {
-      if (name !== "fm-branch-supervision:dispatch" || !offer.message.includes("branch-eligible")) return;
+      if (name !== "fm-branch-supervision:dispatch" || !offer.eligible || !offer.message.includes("branch-eligible")) return;
       offers.push(offer.message);
       offer.accept(new Promise(() => {}));
     },
@@ -3017,6 +3018,11 @@ process.argv[1] = process.env.EXTENSION;
 const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?settlement-edges=${Date.now()}`);
 module.default(api);
 const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+// Every signal row maps to a task with a project, so offers are genuinely
+// eligible under scopeForUnreadWake's contract.
+for (const task of ["crew-a", "crew-b", "crew-c", "crew-d", "crew-e"]) {
+  writeFileSync(`${state}/${task}.meta`, `project=demo\nwindow=default:w1:${task}\n`);
+}
 await handlers.get("session_start")({ type: "session_start" }, context);
 await waitFor(() => count() === 1, "initial arm");
 
@@ -3101,7 +3107,11 @@ exit 2
 SH
   cat > "$fixture/bin/crew-state-stub.sh" <<'SH'
 #!/usr/bin/env bash
-[ ! -e "${FM_STATE_OVERRIDE:?}/slow-crew" ] || sleep 20
+state=${FM_STATE_OVERRIDE:?}
+if [ -e "$state/slow-crew" ]; then
+  sleep "$(cat "$state/slow-crew")"
+  : > "$state/crew-finished"
+fi
 printf 'state: working (stub for %s)\n' "$1"
 SH
   chmod +x "$fixture/bin/fm-turnend-guard.sh" "$fixture/bin/crew-state-stub.sh"
@@ -3165,7 +3175,7 @@ await fire("message_end", { message: {
 } }, context);
 const first = await stop(false);
 if (first?.continue !== true) throw new Error(`owed work let the turn end: ${JSON.stringify(first)}`);
-expectIncludes(first.additionalContext, ["encoded:turn-end-guard:", "1 unacknowledged", "1 Communication Officer request", "bin/fm-wake-drain.sh", "ext-respond", "A provider refusal occurred"], "first continuation");
+expectIncludes(first.additionalContext, ["encoded:turn-end-guard:", "1 unacknowledged", "1 Communication Officer request", "bin/fm-wake-drain.sh", "A provider refusal occurred", "post a visible ack on any that has no reply yet"], "first continuation");
 if (first.additionalContext.includes("Cyber") || first.additionalContext.includes("fallback")) {
   throw new Error(`continuation copied provider text or claimed a fallback: ${first.additionalContext}`);
 }
@@ -3211,8 +3221,9 @@ rmSync(`${state}/guard-down`);
 await settle();
 
 // A scan that outlives its budget after a refusal stays owed and keeps the
-// visible-ack instruction, even though no unreplied count could be read.
-writeFileSync(`${state}/slow-crew`, "slow\n");
+// visible-ack instruction, and the scan is left to finish instead of being
+// killed mid-way through the live-task lookup.
+writeFileSync(`${state}/slow-crew`, "17\n");
 writeFileSync(`${state}/task-x.meta`, `ext_request_slug=${slug}\n`);
 await fire("turn_start", { type: "turn_start" }, context);
 await fire("message_end", { message: {
@@ -3221,10 +3232,31 @@ await fire("message_end", { message: {
 } }, context);
 const slowStop = await stop(false);
 if (slowStop?.continue !== true) throw new Error(`an unfinished scan let the turn end: ${JSON.stringify(slowStop)}`);
-expectIncludes(slowStop.additionalContext, ["could not count", "A provider refusal occurred"], "timed-out continuation");
-rmSync(`${state}/slow-crew`);
-rmSync(`${state}/task-x.meta`);
+expectIncludes(slowStop.additionalContext, ["could not count", "A provider refusal occurred", "post a visible ack on any that has no reply yet"], "timed-out continuation");
+for (let i = 0; i < 600 && !existsSync(`${state}/crew-finished`); i += 1) await new Promise((r) => setTimeout(r, 10));
+if (!existsSync(`${state}/crew-finished`)) throw new Error("the timed-out scan was killed before its live-task lookup finished");
+rmSync(`${state}/crew-finished`);
 await settle();
+
+// Away mode that starts while the scan runs hands delivery to the daemon:
+// the stale result neither continues the turn nor warns.
+{
+  writeFileSync(`${state}/slow-crew`, "2\n");
+  writeFileSync(`${state}/.wake-queue`, "0\t9\tsignal\tcrew-z.status\tsignal: crew-z.status\n");
+  await fire("turn_start", { type: "turn_start" }, context);
+  const raced = stop(false);
+  await new Promise((r) => setTimeout(r, 500));
+  writeFileSync(`${state}/.afk`, "afk\n");
+  const beforeRace = notices.length;
+  if (await raced !== undefined) throw new Error("a scan result outlived the session's custody");
+  if (await stop(true) !== undefined || notices.length !== beforeRace) throw new Error("away-mode custody still warned");
+  rmSync(`${state}/.afk`);
+  rmSync(`${state}/slow-crew`);
+  rmSync(`${state}/crew-finished`, { force: true });
+  rmSync(`${state}/task-x.meta`);
+  writeFileSync(`${state}/.wake-queue`, "");
+  await settle();
+}
 
 // A terminal agent_end that no stop check preceded warns instead of ending silently.
 await fire("turn_start", { type: "turn_start" }, context);

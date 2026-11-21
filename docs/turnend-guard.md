@@ -62,7 +62,8 @@ Every other direct `FM_GUARD_GRACE` reader (`bin/fm-guard.sh`, the strict-watche
 - OMP listens for its blocking `session_stop` event in `.omp/extensions/fm-primary-omp.ts` and returns `{ continue: true, additionalContext }` once when the guard returns 2.
   The same handler also checks owed work for the lock-owning session outside away mode: unacknowledged main-owned wake rows (`fm_wake_actor_pending_count main`) and Communication Officer requests still owed an answer (`fm_ext_owed_requests` in `bin/fm-ext-overdue-lib.sh`, which counts requests with no reply, a reply still delivering, or only acks with no live linked task).
   Owed work continues the turn once, riding the supervision continuation when both apply, and the prompt adds a visible-ack instruction when a provider refusal occurred in the run and a request has no reply yet or the scan was inconclusive.
-  The scan is bounded at 15 seconds, inside OMP's 30-second handler deadline; a scan that does not finish counts as owed work rather than as clear.
+  The handler stops waiting for the scan after 15 seconds, inside OMP's 30-second handler deadline, and treats an unfinished or failed scan as owed work rather than as clear; it never kills the scan, whose live-task lookup can be recording task metadata.
+  Lock ownership and away mode are checked before the scan and again before its result is acted on.
   If owed work remains on the bounded second stop, the turn ends with a captain-visible warning notification instead of ending silently.
   OMP skips `session_stop` on some terminal paths, so a terminal `agent_end` with no preceding stop check runs the same scan and raises the same captain-visible warning; it cannot continue the turn from there.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
