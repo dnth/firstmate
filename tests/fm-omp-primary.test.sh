@@ -3019,7 +3019,7 @@ const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?settle
 module.default(api);
 const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
 // Every signal row maps to a task with a project, so offers are genuinely
-// eligible under scopeForUnreadWake's contract.
+// eligible under the scopeForUnreadWake contract.
 for (const task of ["crew-a", "crew-b", "crew-c", "crew-d", "crew-e"]) {
   writeFileSync(`${state}/${task}.meta`, `project=demo\nwindow=default:w1:${task}\n`);
 }
