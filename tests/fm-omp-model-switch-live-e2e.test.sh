@@ -352,6 +352,15 @@ send_task() {
   fm_env FM_SEND_SLEEP=0.2 FM_SEND_SETTLE=0 FM_SEND_REMOTE_TYPED=0 "$DRIVER_ROOT/bin/fm-send.sh" "$WORKER_ID" "$@" >/dev/null
 }
 
+# Submit ordinary test prompts as a user would. The persisted session is the
+# delivery oracle, so these prompts do not depend on the typed-plane verifier.
+submit_prompt() {
+  local pane
+  pane=$(pane_id "$WORKER_TARGET")
+  lab pane send-text "$pane" "$1" >/dev/null &&
+    lab pane send-keys "$pane" enter >/dev/null
+}
+
 # --- a real worker through production fm-spawn --------------------------------
 printf 'Reply exactly: switch worker ready.\n' > "$HOME_DIR/data/$WORKER_ID/brief.md"
 printf '%s\n' '- project [direct-PR] - OMP model-switch live fixture (added 2026-11-23)' > "$HOME_DIR/data/projects.md"
@@ -418,13 +427,11 @@ session_has_model_change_after "$WORKER_SESSION" "$idle_offset" "$TO" \
 printf '# extension readback: %s\n' "$(jq -c '{id, outcome, before, after}' "$ack")"
 wait_for "pane label refreshed from meta" pane_label_is "omp · $TO $TO_EFFORT"
 idle_prompt='Reply exactly: idle switch applied.'
-idle_submit=$(PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_ENV=1 HERDR_SESSION="$SESSION" \
-  fm_backend_herdr_send_text_submit "$WORKER_TARGET" "$idle_prompt" 3 0.2 0 "" \
-    omp "$OMP_RUNTIME" "$OMP_BIN") || true
+submit_prompt "$idle_prompt" || fail "could not submit the ordinary post-switch prompt"
 idle_assistant_recorded() {
   [ -n "$(last_assistant_after "$WORKER_SESSION" "$idle_offset")" ]
 }
-wait_for "the turn after the idle switch (submit verdict: ${idle_submit:-none})" idle_assistant_recorded
+wait_for "the turn after the idle switch" idle_assistant_recorded
 wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
 [ "$(last_assistant_after "$WORKER_SESSION" "$idle_offset")" = "$TO" ] \
   || fail "the turn after the switch ran on $(last_assistant_after "$WORKER_SESSION" "$idle_offset"), not $TO"
@@ -524,17 +531,15 @@ wait_for "resumed worker identity" agent_is "$WORKER_TARGET" omp 'idle done'
 [ "$(session_file_for "$WORKER_TARGET")" = "$WORKER_SESSION" ] \
   || fail "the resumed OMP bound a different session than the worker's"
 wait_for "the resumed worker's model-switch channel" resumed_channel_active "$OLD_PID"
-verdict=$(PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_ENV=1 HERDR_SESSION="$SESSION" \
-  fm_backend_herdr_send_text_submit "$WORKER_TARGET" 'Reply exactly: resumed on the switched model.' 3 0.2 0 "" \
-    omp "$OMP_RUNTIME" "$OMP_BIN") || true
+submit_prompt 'Reply exactly: resumed on the switched model.' || fail "could not submit the ordinary resume prompt"
 resume_assistant_recorded() {
   [ -n "$(last_assistant_after "$WORKER_SESSION" "$resume_offset")" ]
 }
 # The assistant message, not the echoed prompt text, proves the resumed turn ran.
-wait_for "the resumed worker's reply (submit verdict: ${verdict:-none})" resume_assistant_recorded
+wait_for "the resumed worker's reply" resume_assistant_recorded
 wait_for "resumed worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
 [ "$(last_assistant_after "$WORKER_SESSION" "$resume_offset")" = "$TO" ] \
-  || fail "the resumed session ran on $(last_assistant_after "$WORKER_SESSION" "$resume_offset"), not the switched model $TO (submit verdict: ${verdict:-none})"
+  || fail "the resumed session ran on $(last_assistant_after "$WORKER_SESSION" "$resume_offset"), not the switched model $TO"
 out=$(control switch-model --status 2>&1) || fail "status on the resumed worker failed: $out"
 case "$out" in *"channel=ready"*"unresolved=0"*) ;; *) fail "the resumed worker's model-switch channel is not ready: $out" ;; esac
 pass "live OMP: the documented resume path (no --model) keeps the switched model $TO, and the resumed worker's channel is live again"

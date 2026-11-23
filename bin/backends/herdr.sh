@@ -2488,6 +2488,8 @@ fm_backend_herdr_report_agent_label() {  # <target> <harness> [<model>] [<effort
 }
 
 fm_backend_herdr_report_agent_label_ordered() {  # <target> <harness> [<model>] [<effort>]
+  # Finish publishing under the caller's control lock so a later publication
+  # cannot be overwritten by a background call carrying older metadata.
   local target=$1 label log="$FM_HOME/state/herdr-agent-label.log"
   shift
   label=$(fm_backend_herdr_agent_display_label "$@") || return 0
@@ -2500,7 +2502,7 @@ fm_backend_herdr_report_agent_label_ordered() {  # <target> <harness> [<model>] 
     "$FM_BACKEND_HERDR_PANE" "$label" 2>> "$log"
 }
 
-# Background worker: its caller owns descriptor detachment and warning log.
+# The caller owns the warning log and any background descriptor detachment.
 fm_backend_herdr_publish_agent_label() {  # <target> <session> <pane> <label>
   local target=$1 session=$2 pane=$3 label=$4 err rc
   # shellcheck disable=SC2016 # Positional parameters expand in the child shell.

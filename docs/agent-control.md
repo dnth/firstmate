@@ -13,7 +13,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 ## What the control plane owns
 
-`bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:
+`bin/fm-control-lib.sh` owns the executable capability tables and can be sourced without side effects:
 
 - The **verb allowlist**: `interrupt`, `exit`, `relaunch`, `switch-model`.
   There is no arbitrary-text and no generic raw-key entry point.
@@ -54,7 +54,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
 
 ## Transactional relaunch
 
-`relaunch` is the only verb that changes durable records, so it runs as a transaction with a journal at `state/<id>.control-relaunch`, the prior record preserved beside it, and a ship or scout's prior instructions preserved when a progress note is appended.
+`relaunch` runs as a transaction with a journal at `state/<id>.control-relaunch`, the prior record preserved beside it, and a ship or scout's prior instructions preserved when a progress note is appended.
 
 1. **Resolve the profile.**
    An explicit `--harness`, `--model`, or `--effort` wins.
@@ -84,7 +84,7 @@ The watcher-triggered stall-recovery path uses the same transactional relaunch u
 
 ### Failure and rollback
 
-- A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
+- A refusal **before** the agent is stopped leaves the checkpointed durable record and the instructions byte-identical.
 - A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.

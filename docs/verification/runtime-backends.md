@@ -1215,30 +1215,23 @@ ok - live OMP: an unknown model and a model without credentials are refused with
 # switched ... model=opencode-go/deepseek-v4.1-flash->opencode-go/qwen3.8-flash effort=low->medium verified=extension-readback meta=updated(model=opencode-go/qwen3.8-flash effort=medium) backend=herdr
 ok - live OMP: an idle worker switches opencode-go/deepseek-v4.1-flash -> opencode-go/qwen3.8-flash and low -> medium; the next turn runs on opencode-go/qwen3.8-flash; meta and the pane label follow; nothing is chat
 # switched ... model=opencode-go/qwen3.8-flash->opencode-go/deepseek-v4.1-flash effort=medium->low verified=extension-readback meta=updated(model=opencode-go/deepseek-v4.1-flash effort=low) backend=herdr
-ok - live OMP: a switch requested mid-task leaves the in-flight request on opencode-go/qwen3.8-flash and the next request runs on opencode-go/deepseek-v4.1-flash; nothing is chat
 ok - live OMP: the documented resume path (no --model) keeps the switched model opencode-go/qwen3.8-flash, and the resumed worker's channel is live again
 ok - live OMP: the global OMP config files are byte-identical before and after
 ok - live OMP model switch: guarded lab torn down with the default-session tripwire intact
 ```
 
-What the guard establishes about the installed OMP, and what the extension's design therefore relies on:
-
-- The mid-task case switches while a foreground tool call is running.
-- The current guard matches the exact Bash command and its result by tool-call ID, requires the receipt before that result, and checks that the old model issued the tool call and every later assistant request uses the new model.
-- This is the behavior of OMP's own `/switch` picker, which calls `AgentSession#setModelTemporary`; the extension API does not expose that method, and `pi.setModel` followed by `pi.setThinkingLevel` is the equivalent it does expose.
-- A model that exists in the registry but has no credentials is told apart from an unknown one through `ctx.modelRegistry.find`, because `ctx.models.resolve` returns nothing for both.
-- The switch is session-only: no global config file changed, and a resume without `--model` restores the switched model from the session's own model-change entry.
+The current mid-task guard checks that the old model issued the foreground `sleep 25` Bash call and that the switch receipt arrived while that call was still running.
+It correlates the result by tool-call ID and checks the provider-qualified model for every later assistant request.
+The timing evidence is bounded to a running tool call.
 
 Throwaway print-mode probes on the same date established three more facts that the committed guard does not exercise, so the portable tests encode them with a fake host instead.
 `ctx.models.resolve` is fuzzy: a bare id resolves, and a trailing `:high` is dropped, so the extension accepts only an exact `provider/id` match.
 `setThinkingLevel` clamps to the model's supported efforts without throwing (`medium` on a model supporting `low,high,max` read back `low`) and leaves the level unset for a string outside the vocabulary, so the extension validates the level and reads it back.
 An explicit `--model` on resume overrides the session's recorded model, which is why the recorded `model=` in task meta must follow a switch.
 
-Print-mode probes on 2026-11-23 (OMP 18.22.2) also showed that OMP does not await extension `turn_end` handlers, so the extension subscribes to no turn event and applies a request as soon as its watcher sees it.
-
 The guard drives Herdr only.
-The channel itself is files in the task's state directory, and worker liveness is the shared agent-state classifier, so the portable verb test covers tmux with a fake terminal backend and no live run does.
-zellij, orca, and cmux report `unverified` there, and the verb then relies on the extension's own ready marker and its live process.
+The portable verb test covers tmux with a fake terminal backend.
+See the [verb header](../../bin/fm-control.sh) for the backend liveness requirements.
 
 ### Workspace-removal focus safety
 

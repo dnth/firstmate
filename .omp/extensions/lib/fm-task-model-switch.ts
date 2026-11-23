@@ -14,14 +14,9 @@ import { dirname, join, resolve } from "node:path";
 // Firstmate's in-session model switch for a live OMP worker.
 //
 // bin/fm-control.sh `switch-model` owns the verb; this file owns the wire
-// contract and the extension side of it. Nothing is typed into the TUI: the
-// request travels as files beside the inbox doorbell's request directory and
-// is applied through OMP's documented extension API (ctx.models.resolve,
-// pi.setModel, pi.setThinkingLevel), which is session-only - it does not
-// rewrite global modelRoles and it appends a model-change entry to the session
-// so a resume keeps the model. OMP's own /switch picker uses the same
-// session-only path through AgentSession#setModelTemporary, which the
-// extension API does not expose; pi.setModel is the equivalent it does.
+// contract and the extension side of it. OMP's picker calls
+// AgentSession#setModelTemporary, which the extension API does not expose.
+// The extension uses the session-scoped pi.setModel and pi.setThinkingLevel.
 //
 // Files in <requestDir> (the doorbell's `<task>.omp-doorbell-ready.requests`;
 // every name carries the model-switch. prefix, so the doorbell never sees them):
@@ -30,27 +25,23 @@ import { dirname, join, resolve } from "node:path";
 //   model-switch.<id>.processing    the request, claimed by this extension
 //   model-switch.<id>.cancelled     the request, cancelled by fm-control
 //   model-switch.<id>.ack.json      the result, published atomically
+//   model-switch.<id>.ack.json.folded  the result, reconciled by fm-control
 //   model-switch.failed             why activation failed, when it did
 //
-// A request is in exactly one state. The claim and the cancel are both an
-// atomic rename away from the pending name, so exactly one of them wins: a
-// request that fm-control renamed to .cancelled can never be applied, and a
-// request that was claimed can no longer be cancelled - its only remaining
-// outcome is its acknowledgement, which a waiter that timed out reads later.
+// Claim and cancellation compete to rename the same pending file.
+// A successful cancellation prevents application. Once claimed, the request's
+// outcome is known only when its acknowledgement arrives.
 //
-// Timing. A request applies as soon as it is seen, whatever the worker is
-// doing, exactly like the picker: the model request already in flight
-// finishes on the old model and the next one uses the new model, even
-// mid-task. Nothing waits for idle and nothing holds a turn off; a request is
-// never delivered as a message.
+// Each request carries the worker generation and a monotonic timestamp for
+// choosing the newest valid request in a drain.
 //
 // Acknowledgement. outcome is applied, partial (the model switched but the
 // thinking level did not land as requested), refused (typed reason), or
 // superseded (a newer request replaced it before it ran). It records the
-// request id, the model and thinking level before and after (read back from the
-// live session). Nothing is rolled back, so a
-// partial or post-apply refusal reports the live state rather than claiming
-// the prior one.
+// request id, worker generation, target, and the model and thinking level
+// before and after (read back from the live session). Consumers order results
+// by the emitted ackSequence. A partial or post-apply refusal reports the
+// live state because the extension does not roll back a change.
 
 export const FM_MODEL_SWITCH_ACK_SCHEMA = "fm-model-switch.ack.v1";
 export const FM_MODEL_SWITCH_READY_SCHEMA = "fm-model-switch.ready.v1";

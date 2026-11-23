@@ -88,50 +88,51 @@
 #              modelRoles are untouched and the session records the change, so
 #              a resume keeps it), and reads the live model back. The wire
 #              contract is owned by .omp/extensions/lib/fm-task-model-switch.ts.
-#              The switch applies at once, like OMP's own /switch picker: the
-#              request already in flight finishes on the old model and the next
-#              model request uses the new one, even mid-task.
+#              The switch applies at once, like OMP's own /switch picker. A
+#              request already in flight uses the old model, and subsequent
+#              requests use the new one, even mid-task. On a Responses-WebSocket
+#              model a reply already streaming can be cut by the switch.
 #              --model is provider/id exactly as `omp models` lists it. --effort
-#              is low|medium|high|xhigh|max, the OMP launch vocabulary, and is
-#              left to the session when omitted. Both are written as separate
-#              arguments (--model <provider/id>). Every request carries a unique id. The
-#              verb waits up to --wait seconds (default 15) for the acknowledgement, checks
-#              that the live model equals the target (and the live thinking
-#              level equals --effort), and only then updates the recorded
-#              model= and effort= in task meta.
-#              The first word of the output is the typed result; every result
-#              but `switched` exits 1. The switch is immediate and session-only,
-#              exactly like the picker: on a Responses-WebSocket model a reply
-#              already streaming can be cut by the switch.
+#              is low|medium|high|xhigh|max and must be supported by the target
+#              model. With no --effort the extension leaves thinking to OMP.
+#              Flags take separate values. The acknowledgement wait uses one
+#              monotonic deadline (--wait, default 15 seconds), with a final
+#              receipt check before attempting withdrawal. A verified success
+#              requires the live model and any requested effort to match.
+#              Task meta records the native thinking readback verbatim, with
+#              an empty effort when OMP reports none. A relaunch on the same
+#              adapter inherits an OMP worker's recorded effort only if it
+#              is in the launch vocabulary.
+#              A typed switch result starts with one of these words.
+#              `switched` exits 0, and the other results exit 1.
 #                switched         the live model (and effort) read back as the
 #                                 target; meta updated.
-#                refused          nothing was applied. reason= is one of
-#                                 unknown-model, no-credentials, model-mismatch
-#                                 (the spec is not an exact provider/id),
+#                refused          the request failed or its result could not be
+#                                 verified. reason= includes unknown-model,
+#                                 no-credentials, model-mismatch,
 #                                 effort-unsupported, stale-incarnation,
-#                                 set-model-failed, invalid-request, readback-mismatch.
-#                                 The reported live model may differ from meta after a
-#                                 readback mismatch.
+#                                 set-model-failed, invalid-request, internal-error,
+#                                 and readback-mismatch. A post-switch refusal
+#                                 can report a live model that differs from meta.
 #                partial          the model switched but the thinking level did
 #                                 not land. Both values are reported, nothing
 #                                 is claimed rolled back, and meta follows the
 #                                 live state.
 #                superseded       a newer request replaced it before it ran.
-#                cancelled        the wait expired and the request was withdrawn
+#                cancelled        the wait ended and the request was withdrawn
 #                                 by an atomic rename before the worker claimed
 #                                 it, so it can never apply. Nothing changed.
-#                pending-unknown  the wait expired after the worker claimed the
-#                                 request and before it acknowledged it, so it
-#                                 may still land. Nothing is claimed unchanged;
-#                                 the request id is named.
+#                pending-unknown  no receipt was visible and withdrawal could
+#                                 not be proved. The switch may still land.
+#                                 The output names the request id.
 #                meta-stale       the live state is as reported but task meta
-#                                 could not be written; the acknowledgement stays
-#                                 unfolded and `switch-model --status` retries.
-#              `switch-model --status` folds every acknowledgement not yet
-#              applied to meta - including a late one - into task meta, and
-#              lists unresolved requests (exit 1 while any remain). Every other
-#              verb folds them first too, so meta never stays divergent from
-#              the live model without being reported.
+#                                 could not be reconciled. An acknowledgement
+#                                 cannot rewrite a different worker generation.
+#              `switch-model --status` tries to reconcile outstanding receipts,
+#              including late ones. It reports the latest acknowledgement by
+#              ackSequence and exits 1 if the channel is unavailable or requests
+#              remain unresolved. Other verbs also try to reconcile outstanding
+#              receipts for supported OMP workers before acting.
 #              Only OMP ships and scouts have this channel. Any other harness,
 #              a secondmate (its OMP runs the primary adapter, which has no
 #              request channel), and a worker launched before the verb existed
@@ -179,6 +180,7 @@
 #   FM_CONTROL_EXIT_WAIT         alive->stopped wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+# These wait knobs apply to lifecycle operations. switch-model uses --wait.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
