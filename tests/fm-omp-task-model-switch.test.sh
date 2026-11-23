@@ -76,7 +76,6 @@ const ok = (name) => console.log(`ok - ${name}`);
 	assert.equal("at" in ready, false, "the ready marker carries no wall-clock timestamp");
 	assert.deepEqual(ack.before, { model: "p/a", thinking: "low" });
 	assert.deepEqual(ack.after, { model: "p/b", thinking: "medium" });
-	assert.equal(ack.modelChanged, true);
 	assert.deepEqual(c.calls, [["setModel", "p/b"], ["setThinkingLevel", "medium"]]);
 	assert.equal(existsSync(`${c.dir}/model-switch.r1.processing`), false, "the claim is retired once acknowledged");
 	ok("applied: the acknowledgement records id, before, after, and the thinking level");
@@ -116,7 +115,6 @@ for (const [reason, options, target, effort, what] of refusals) {
 	const ack = readAck(c.dir, "rf");
 	assert.equal(ack.outcome, "refused", what);
 	assert.equal(ack.reason, reason, what);
-	assert.equal(ack.modelChanged, false, what);
 	assert.deepEqual(ack.after, ack.before, what);
 	assert.equal(c.state.current, "p/a", what);
 	assert.equal(c.state.thinking, "low", what);
@@ -136,7 +134,6 @@ for (const [reason, options, target, effort, what] of refusals) {
 	assert.equal(ack.reason, "thinking-mismatch");
 	assert.deepEqual(ack.before, { model: "p/a", thinking: "low" });
 	assert.deepEqual(ack.after, { model: "p/b", thinking: "low" });
-	assert.equal(ack.modelChanged, true);
 	assert.equal(clamped.state.current, "p/b", "no rollback is performed or claimed");
 	assert.equal(clamped.calls.filter(([name]) => name === "setModel").length, 1);
 	const thrown = fresh({ setThinkingThrows: "thinking refused" });
@@ -154,16 +151,18 @@ for (const [reason, options, target, effort, what] of refusals) {
 // 5. Superseded: only the newest request applies.
 {
 	const c = fresh();
-	ask(c, "old", "q/c", null, { requestedAtMs: 1000 });
-	ask(c, "new", "p/b", null, { requestedAtMs: 2000 });
+	ask(c, "ms-2000-first", "q/c", null, { requestedAtMonotonicUs: 1000 });
+	ask(c, "ms-1000-retry", "p/b", null, { requestedAtMonotonicUs: 2000 });
 	await start(c);
-	await Promise.all([acked(c, "old"), acked(c, "new")]);
-	assert.equal(readAck(c.dir, "old").outcome, "superseded");
-	assert.equal(readAck(c.dir, "old").reason, "newer-request");
-	assert.equal(readAck(c.dir, "new").outcome, "applied");
+	await Promise.all([acked(c, "ms-2000-first"), acked(c, "ms-1000-retry")]);
+	const first = readAck(c.dir, "ms-2000-first");
+	const retry = readAck(c.dir, "ms-1000-retry");
+	assert.equal(first.outcome, "superseded");
+	assert.equal(first.reason, "newer-request");
+	assert.equal(retry.outcome, "applied");
 	assert.deepEqual(c.calls, [["setModel", "p/b"]], "the older request never touches the session");
-	assert.equal(readAck(c.dir, "new").ackSequence > readAck(c.dir, "old").ackSequence, true, "receipts are ordered by sequence");
-	ok("superseded: two queued requests apply only the newest");
+	assert.equal(retry.ackSequence > first.ackSequence, true, "receipts are ordered by sequence");
+	ok("superseded: publication order wins even when the newer request id sorts first");
 	await finish();
 }
 
@@ -214,16 +213,18 @@ for (const [reason, options, target, effort, what] of refusals) {
 	await finish();
 }
 
-// 9. Already on the target: acknowledged without touching the session.
+// 9. Explicitly reselecting the live model goes through OMP's setter.
 {
 	const c = fresh();
 	await start(c);
 	ask(c, "np", "p/a");
 	await acked(c, "np");
-	assert.equal(readAck(c.dir, "np").outcome, "applied");
-	assert.equal(readAck(c.dir, "np").modelChanged, false);
-	assert.deepEqual(c.calls, []);
-	ok("no-op: a request for the live model applies without a setModel call");
+	const ack = readAck(c.dir, "np");
+	assert.equal(ack.outcome, "applied");
+	assert.deepEqual(ack.before, { model: "p/a", thinking: "low" });
+	assert.deepEqual(ack.after, ack.before);
+	assert.deepEqual(c.calls, [["setModel", "p/a"]]);
+	ok("explicit selection: a request for the live model still invokes OMP's model setter");
 	await finish();
 }
 

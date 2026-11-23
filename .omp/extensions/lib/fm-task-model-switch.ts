@@ -48,7 +48,7 @@ import { dirname, join, resolve } from "node:path";
 // thinking level did not land as requested), refused (typed reason), or
 // superseded (a newer request replaced it before it ran). It records the
 // request id, the model and thinking level before and after (read back from the
-// live session), and whether the model changed. Nothing is rolled back, so a
+// live session). Nothing is rolled back, so a
 // partial or post-apply refusal reports the live state rather than claiming
 // the prior one.
 
@@ -103,7 +103,7 @@ type Request = {
 	spawnGen: string;
 	model: string;
 	effort: string | null;
-	requestedAtMs: number;
+	requestedAtMonotonicUs: number;
 };
 type Claim = { id: string; processing: string };
 type AckTarget = Pick<Request, "id" | "model" | "effort">;
@@ -167,9 +167,12 @@ function parseRequest(id: string, text: string): Request | string {
 	const spawnGen = jsonField(raw, "spawnGen");
 	const model = jsonField(raw, "model");
 	const rawEffort = jsonField(raw, "effort");
-	const requestedAtMs = Number(jsonField(raw, "requestedAtMs"));
+	const requestedAtMonotonicUs = jsonField(raw, "requestedAtMonotonicUs");
 	if (jsonField(raw, "id") !== id) return "the request id does not match its file name";
 	if (typeof spawnGen !== "string" || spawnGen === "") return "the request names no worker generation";
+	if (typeof requestedAtMonotonicUs !== "number" || !Number.isSafeInteger(requestedAtMonotonicUs) || requestedAtMonotonicUs < 0) {
+		return "the request has no valid monotonic publication time";
+	}
 	if (typeof model !== "string") return "the request names no model";
 	const slash = model.indexOf("/");
 	if (slash < 1 || slash === model.length - 1 || /\s/.test(model)) return "the model must be written provider/id";
@@ -177,7 +180,7 @@ function parseRequest(id: string, text: string): Request | string {
 	if (effort !== null && (typeof effort !== "string" || !FM_MODEL_SWITCH_EFFORTS.includes(effort))) {
 		return `the effort must be one of ${FM_MODEL_SWITCH_EFFORTS.join(", ")}`;
 	}
-	return { id, spawnGen, model, effort, requestedAtMs: Number.isFinite(requestedAtMs) ? requestedAtMs : 0 };
+	return { id, spawnGen, model, effort, requestedAtMonotonicUs };
 }
 
 export function installTaskModelSwitch(
@@ -234,7 +237,6 @@ export function installTaskModelSwitch(
 				target: { model: request.model, effort: request.effort },
 				before,
 				after,
-				modelChanged: before.model !== after.model,
 				ackSequence: ++ackSequence,
 			});
 			return true;
@@ -275,16 +277,14 @@ export function installTaskModelSwitch(
 					: `${request.model} has no thinking levels, so ${request.effort} cannot be applied`,
 			);
 		}
-		if (before.model !== request.model) {
-			let switched: boolean;
-			try {
-				switched = await omp.setModel(resolved);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				return refuse(/api key|credential/i.test(message) ? "no-credentials" : "set-model-failed", message);
-			}
-			if (!switched) return refuse("no-credentials", `OMP has no usable credentials for ${request.model}`);
+		let switched: boolean;
+		try {
+			switched = await omp.setModel(resolved);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return refuse(/api key|credential/i.test(message) ? "no-credentials" : "set-model-failed", message);
 		}
+		if (!switched) return refuse("no-credentials", `OMP has no usable credentials for ${request.model}`);
 		const afterModel = snapshot(ctx);
 		if (afterModel.model !== request.model) {
 			return writeAck(
@@ -351,7 +351,7 @@ export function installTaskModelSwitch(
 				valid.push({ request: parsed, claim });
 			}
 		}
-		valid.sort((a, b) => a.request.requestedAtMs - b.request.requestedAtMs || (a.request.id < b.request.id ? -1 : 1));
+		valid.sort((a, b) => a.request.requestedAtMonotonicUs - b.request.requestedAtMonotonicUs);
 		const newest = valid.pop();
 		for (const older of valid) {
 			const now = snapshot(ctx);

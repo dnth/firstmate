@@ -319,6 +319,13 @@ for control_arg in "$@"; do
     control_want_value=
     continue
   fi
+  if [ "$VERB" = switch-model ]; then
+    case "${control_arg%%=*}" in
+      --harness|--backend|--note|--note-file|--lock-preheld|--stall-record)
+        die "${control_arg%%=*} applies to 'relaunch' only"
+        ;;
+    esac
+  fi
   case "$control_arg" in
     --harness) control_want_value=harness ;;
     --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
@@ -352,11 +359,7 @@ if [ -n "$control_want_value" ]; then
 fi
 
 case "$VERB" in
-  relaunch) ;;
-  switch-model)
-    [ "$HARNESS_SET" = 0 ] && [ "$BACKEND_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$LOCK_PREHELD" = 0 ] && [ -z "$STALL_RECORD" ] \
-      || die "--harness, --backend, --note, --lock-preheld, and --stall-record apply to 'relaunch' only"
-    ;;
+  relaunch|switch-model) ;;
   *)
     [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$BACKEND_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$LOCK_PREHELD" = 0 ] && [ -z "$STALL_RECORD" ] \
       || die "--harness, --model, --effort, --backend, --note, --lock-preheld, and --stall-record apply to 'relaunch' only (--model and --effort also apply to 'switch-model')"
@@ -712,13 +715,8 @@ ms_path() {  # <request-id> <suffix>
   printf '%s/model-switch.%s.%s' "$MS_DIR" "$1" "$2"
 }
 
-ms_now_ms() {
-  perl -MTime::HiRes=time -e 'printf "%d", time() * 1000' 2>/dev/null \
-    || printf '%s000' "$(date +%s)"
-}
-
-ms_mono_ms() {
-  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%d", clock_gettime(CLOCK_MONOTONIC) * 1000' 2>/dev/null
+ms_mono_us() {
+  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%d", clock_gettime(CLOCK_MONOTONIC) * 1000000' 2>/dev/null
 }
 
 # Bounded acquisition of this task's metadata lock: a reconcile that rides on an
@@ -935,8 +933,15 @@ ms_report_ack() {
   ms_read_ack "$ack" \
     || die "the acknowledgement for request $rid is unreadable ($ack); the live model is unknown"
   [ "$MS_A_ID" = "$rid" ] || die "the acknowledgement at $ack names request $MS_A_ID, not $rid"
-  [ "$MS_A_TARGET_MODEL" = "$NEW_MODEL" ] && [ "$MS_A_TARGET_EFFORT" = "$NEW_EFFORT" ] \
-    || die "the acknowledgement for request $rid names a different target"
+  if [ "$MS_A_GEN" = "$MS_SPAWN_GEN" ]; then
+    case "$MS_A_OUTCOME:$MS_A_REASON" in
+      refused:invalid-request) ;;
+      *)
+        [ "$MS_A_TARGET_MODEL" = "$NEW_MODEL" ] && [ "$MS_A_TARGET_EFFORT" = "$NEW_EFFORT" ] \
+          || die "the acknowledgement for request $rid names a different target"
+        ;;
+    esac
+  fi
   reconcile_model_switch "$ack" || fold_rc=$?
   if [ "$fold_rc" -ne 0 ]; then
     ms_read_ack "$ack" || return 1
@@ -982,43 +987,41 @@ ms_report_ack() {
 }
 
 do_switch_model() {
-  local rid req ack staged started now_ms remaining reason=deadline-before-claim
+  local rid req ack staged started now_us remaining reason=deadline-before-claim
   reconcile_model_switch || true
   ms_channel_ready || die "task $ID's worker cannot take a model switch: $MS_CHANNEL_WHY"
-  now_ms=$(ms_now_ms)
-  rid="ms-$now_ms-$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
+  if ! started=$(ms_mono_us) || [[ ! "$started" =~ ^[0-9]+$ ]]; then
+    die "the Perl Time::HiRes monotonic clock is unavailable; no model-switch request was published"
+  fi
+  printf -v rid 'ms-%016d-%04x%04x' "$started" "$RANDOM" "$RANDOM"
   req=$(ms_path "$rid" request.json)
   ack=$(ms_path "$rid" ack.json)
   staged="$MS_DIR/.model-switch.$rid.staging.${BASHPID:-$$}"
   if ! ( umask 077
          jq -n --arg schema "$MS_REQUEST_SCHEMA" --arg id "$rid" --arg gen "$MS_SPAWN_GEN" \
-           --arg model "$NEW_MODEL" --arg effort "$NEW_EFFORT" --argjson at "$now_ms" \
+           --arg model "$NEW_MODEL" --arg effort "$NEW_EFFORT" --argjson at "$started" \
            '{schema: $schema, id: $id, spawnGen: $gen, model: $model,
-             effort: (if $effort == "" then null else $effort end), requestedAtMs: $at}' > "$staged" ) \
+             effort: (if $effort == "" then null else $effort end), requestedAtMonotonicUs: $at}' > "$staged" ) \
   then
     rm -f -- "$staged"
     die "the model-switch request could not be written under $MS_DIR"
-  fi
-  if ! started=$(ms_mono_ms) || [[ ! "$started" =~ ^[0-9]+$ ]]; then
-    rm -f -- "$staged"
-    die "the Perl Time::HiRes monotonic clock is unavailable; no model-switch request was published"
   fi
   if ! mv -f -- "$staged" "$req"; then
     rm -f -- "$staged"
     die "the model-switch request could not be published under $MS_DIR"
   fi
   while :; do
-    if ! now_ms=$(ms_mono_ms) || [[ ! "$now_ms" =~ ^[0-9]+$ ]]; then
+    if ! now_us=$(ms_mono_us) || [[ ! "$now_us" =~ ^[0-9]+$ ]]; then
       reason=monotonic-clock-unavailable
       break
     fi
-    remaining=$(( MODEL_WAIT * 1000 - (now_ms - started) ))
+    remaining=$(( MODEL_WAIT * 1000000 - (now_us - started) ))
     [ "$remaining" -gt 0 ] || break
     if [ -f "$ack" ]; then
       ms_report_ack "$ack" "$rid"
       return $?
     fi
-    sleep "$(awk -v left="$remaining" 'BEGIN { nap = left / 1000; if (nap > 0.25) nap = 0.25; printf "%.3f", nap }')"
+    sleep "$(awk -v left="$remaining" 'BEGIN { nap = left / 1000000; if (nap > 0.25) nap = 0.25; printf "%.6f", nap }')"
   done
   # One non-waiting look before the outcome is called unknown: a receipt that
   # landed during the last nap is a result, not a pending request.
@@ -1052,8 +1055,7 @@ ms_request_ids() {
   done | LC_ALL=C sort -u
 }
 
-# The id of the newest acknowledgement by its emitted sequence, never by the
-# wall-clock time inside a request id.
+# The id of the newest acknowledgement by its emitted sequence.
 ms_latest_ack_id() {
   local f order
   for f in "$MS_DIR"/model-switch.*.ack.json "$MS_DIR"/model-switch.*.ack.json.folded; do

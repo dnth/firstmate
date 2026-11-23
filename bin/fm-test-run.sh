@@ -1009,6 +1009,9 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-omp-compact-adviser-live-e2e.test.sh"
       ;;
     .omp/extensions/lib/fm-task-model-switch.ts|tests/fm-omp-model-switch-host.mjs)
+      if [ "$path" = .omp/extensions/lib/fm-task-model-switch.ts ]; then
+        printf '%s\n' "__script__:fm-omp-branch-types.test.sh"
+      fi
       printf '%s\n' "__script__:fm-omp-task-model-switch.test.sh"
       printf '%s\n' "__script__:fm-control-switch-model.test.sh"
       printf '%s\n' "__script__:fm-omp-model-switch-live-e2e.test.sh"

@@ -2,10 +2,9 @@
 # Opt-in live guard for fm-control.sh switch-model against a REAL OMP worker in
 # a guarded, non-default Herdr lab. It is the proof that the OMP behaviours the
 # portable tests assume are true of the installed OMP:
-#   - a switch applies at once, like OMP's own /switch picker: a request made
-#     mid-task leaves the model request already in flight on the old model and
-#     the next request runs on the new one, and an idle switch governs the next
-#     turn (the session's own message order shows it);
+#   - a switch during a foreground tool call is acknowledged before that tool
+#     returns, and every later assistant request runs on the new model;
+#   - an idle switch governs the next turn;
 #   - the switch is session-only: the global ~/.omp config files do not change;
 #   - a model the session has no credentials for is told apart from an unknown
 #     one, through the registry the real OMP exposes;
@@ -416,7 +415,7 @@ ack="$REQ_DIR/model-switch.$IDLE_RID.ack.json.folded"
   || fail "the extension's ctx.models.current() readback is not the target: $(jq -c . "$ack")"
 session_has_model_change_after "$WORKER_SESSION" "$idle_offset" "$TO" \
   || fail "the session recorded no model-change entry for $TO"
-printf '# extension readback: %s\n' "$(jq -c '{id, outcome, before, after, modelChanged}' "$ack")"
+printf '# extension readback: %s\n' "$(jq -c '{id, outcome, before, after}' "$ack")"
 wait_for "pane label refreshed from meta" pane_label_is "omp · $TO $TO_EFFORT"
 idle_prompt='Reply exactly: idle switch applied.'
 idle_submit=$(PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_ENV=1 HERDR_SESSION="$SESSION" \
@@ -440,22 +439,31 @@ pass "live OMP: an idle worker switches $FROM -> $TO and $FROM_EFFORT -> $TO_EFF
 # --- AC2: a switch requested mid-task applies at once ------------------------
 busy_offset=$(session_offset "$WORKER_SESSION") || exit 1
 busy_reply='slept through the switch.'
+busy_command='sleep 25'
 # A foreground sleep keeps the tool call in flight for 25 seconds; the guard
 # requires the switch receipt to arrive while that call is still unanswered.
 # (OMP turns a long polling loop into a background job, which would end the
 # turn instead of blocking it.)
-send_task "Run this exact bash command: sleep 25. Then reply exactly: $busy_reply" \
+send_task "Run this exact bash command: $busy_command. Then reply exactly: $busy_reply" \
   || fail "the busy turn was not submitted"
 wait_for "native working worker state" agent_is "$WORKER_TARGET" omp working
-# The worker first reads its inbox message, so the blocked command is the tool
-# call that runs the sleep, not just any tool call.
+blocked_tool_filter='
+  def blocked_tool($command):
+    to_entries as $entries
+    | first($entries[] | select(.value.type == "message" and .value.message.role == "assistant")
+        | .key as $index
+        | .value.message.content[]?
+        | select(.type == "toolCall" and .name == "bash" and .arguments.command == $command
+            and (.id | type == "string" and length > 0))
+        | {index: $index, id}) as $call
+    | {call: $call.index, result: (first($entries[]
+        | select(.key > $call.index and .value.type == "message" and .value.message.role == "toolResult"
+            and .value.message.toolCallId == $call.id)
+        | .key) // null)};
+'
 blocked_tool_pending() {
-  entries_after "$WORKER_SESSION" "$busy_offset" | jq -se '
-    [range(0; length)] as $i | . as $e
-    | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"
-        and (($e[.].message.content // []) | any(.type == "toolCall" and ((.arguments // {}) | tostring | contains("sleep 25")))))) | first) as $call
-    | $call != null
-      and ($i | map(select(. > $call and $e[.].type == "message" and $e[.].message.role == "toolResult")) | length) == 0' >/dev/null 2>&1
+  entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg command "$busy_command" \
+    "$blocked_tool_filter"'blocked_tool($command) | .result == null' >/dev/null 2>&1
 }
 wait_for "the sleep tool call to be recorded and still running" blocked_tool_pending
 out=$(control switch-model --model "$FROM" --effort "$FROM_EFFORT" 2>&1) || fail "mid-task switch-model failed: $out"
@@ -466,21 +474,18 @@ case "$out" in switched\ "$WORKER_ID"\ *"model=$TO->$FROM"*) ;; *) fail "a mid-t
 blocked_tool_pending || fail "the tool returned before the switch receipt arrived, so the switch did not land mid-task"
 wait_for "the busy worker's final reply" session_has_assistant_reply_after "$WORKER_SESSION" "$busy_offset" "$busy_reply"
 wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
-# The tool-call request, in flight when the switch landed, was served by the old
-# model; the session's model-change entry precedes the tool result; every
-# assistant request after the change - the first of which is the final reply -
-# ran on the new model, and none before it did.
-entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg from "$FROM" --arg to "$TO" --arg reply "$busy_reply" '
+# The old model issued the foreground tool call. Its result follows the
+# model-change entry, and all later assistant requests use the new model.
+entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg from "$FROM" --arg to "$TO" \
+  --arg reply "$busy_reply" --arg command "$busy_command" "$blocked_tool_filter"'
   [range(0; length)] as $i
   | . as $e
   | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"))) as $assistant
-  | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"
-      and (($e[.].message.content // []) | any(.type == "toolCall" and ((.arguments // {}) | tostring | contains("sleep 25")))))) | first) as $tool
-  | ($i | map(select($tool != null and . > $tool and $e[.].type == "message" and $e[.].message.role == "toolResult")) | first) as $result
+  | blocked_tool($command) as $tool
   | ($i | map(select($e[.].type == "model_change" and $e[.].model == $from)) | first) as $change
   | ($assistant | map(select($change != null and . > $change)) | first) as $next
-  | $tool != null and $result != null and $change != null and $next != null
-    and $tool < $change and $change < $result and $result < $next
+  | $tool.result != null and $change != null and $next != null
+    and $tool.call < $change and $change < $tool.result and $tool.result < $next
     and ($assistant | map(select(. > $change)) | any($e[.].message.content // [] | any(.type == "text" and (.text | contains($reply)))))
     and ($assistant | map(select(. < $change)) | all("\($e[.].message.provider)/\($e[.].message.model)" == $to))
     and ($assistant | map(select(. > $change)) | all("\($e[.].message.provider)/\($e[.].message.model)" == $from))' >/dev/null 2>&1 \
@@ -495,7 +500,7 @@ entries_after "$WORKER_SESSION" "$busy_offset" \
         | if type == "array" then map(select(.type == "text") | .text) | join("") else . end]
       | . == [] or . == [$fallback]' >/dev/null \
   || fail "the session recorded an unexpected user message during the mid-task switch"
-pass "live OMP: a switch requested mid-task leaves the in-flight request on $TO and the next request runs on $FROM; nothing is chat"
+pass "live OMP: $TO issued the foreground tool call, the switch landed before its result, and every later request ran on $FROM; nothing is chat"
 
 # --- AC4: the documented OMP resume path keeps the switched model ------------
 out=$(control switch-model --model "$TO" --effort "$TO_EFFORT" 2>&1) || fail "the pre-resume switch-model failed: $out"

@@ -32,7 +32,11 @@ PIDS="$TMP_ROOT/pids"
 cleanup() {
   local p
   while IFS= read -r p; do
-    [ -n "$p" ] && kill "$p" 2>/dev/null || true
+    [ -n "$p" ] || continue
+    if kill -TERM "$p" 2>/dev/null; then
+      kill -CONT "$p" 2>/dev/null || true
+    fi
+    wait "$p" 2>/dev/null || true
   done < "$PIDS"
   fm_test_cleanup
 }
@@ -188,6 +192,20 @@ for spec in "nowhere/none:unknown-model" "locked/d:no-credentials"; do
   [ -z "$(host_calls)" ] || fail "a refused switch still touched the worker's session: $(host_calls)"
   pass "switch-model refused $reason: typed reason, meta unchanged, the worker keeps its model"
 done
+
+make_case invalid_request
+start_responder
+LC_ALL=C run_control switch-model --model $'p/b\xe2\x80\x83'
+expect_code 1 "$CONTROL_RC" "the worker must refuse a token ending in EM SPACE"
+case "$CONTROL_OUT" in refused\ "$ID"\ *reason=invalid-request*meta=unchanged) ;; *) fail "the foreground result lost the typed refusal: $CONTROL_OUT" ;; esac
+RID=$(request_id_of "$CONTROL_OUT")
+[ -f "$REQ_DIR/model-switch.$RID.ack.json.folded" ] || fail "the typed refusal was not folded"
+run_control switch-model --status
+expect_code 0 "$CONTROL_RC" "the refusal must leave no unresolved request: $CONTROL_OUT"
+assert_contains "$CONTROL_OUT" "last-request=$RID last-state=refused" "status lost the refused request"
+assert_meta p/a low "invalid request"
+[ -z "$(host_calls)" ] || fail "the invalid request changed the worker session"
+pass "switch-model refused invalid-request: the targetless refusal is reported and folded"
 
 # --- a request made mid-task applies at once ----------------------------------
 
@@ -364,12 +382,22 @@ assert_contains "$CONTROL_OUT" "belongs to worker generation gen0" "a stale gene
 pass "switch-model refuses a non-OMP worker, a secondmate, a worker without the channel, a dead extension, and another generation's marker"
 
 make_case nativeeffort
-start_responder FM_HOST_THINKING=off
-run_control switch-model --model q/c --wait 08
+start_responder 'FM_HOST_MODEL_THINKING={"p/b":"minimal","q/c":null}'
+run_control switch-model --model p/b --wait 08
 expect_code 0 "$CONTROL_RC" "a decimal wait with a leading zero must work: $CONTROL_OUT"
-assert_contains "$CONTROL_OUT" "effort=off->off" "the result must preserve native thinking readback"
-assert_meta q/c off "native thinking outside the launch vocabulary must be recorded"
-pass "switch-model records and reports the native thinking level"
+assert_contains "$CONTROL_OUT" "effort=low->minimal" "the result must report the new native thinking level"
+RID=$(request_id_of "$CONTROL_OUT")
+jq -e '.before.thinking == "low" and .after.thinking == "minimal"' "$REQ_DIR/model-switch.$RID.ack.json.folded" >/dev/null \
+  || fail "the receipt did not record the new native thinking level"
+assert_meta p/b minimal "native thinking outside the launch vocabulary must be recorded"
+run_control switch-model --model q/c
+expect_code 0 "$CONTROL_RC" "a switch without thinking support must succeed: $CONTROL_OUT"
+assert_contains "$CONTROL_OUT" "effort=minimal->-" "the result must report that thinking was cleared"
+RID=$(request_id_of "$CONTROL_OUT")
+jq -e '.before.thinking == "minimal" and (.after | has("thinking") and .thinking == null)' "$REQ_DIR/model-switch.$RID.ack.json.folded" >/dev/null \
+  || fail "the receipt did not record the absence of thinking"
+assert_meta q/c "" "absent native thinking must be cleared"
+pass "switch-model records the new model's native thinking level and clears it when absent"
 
 make_case reconciliation
 start_responder
@@ -443,6 +471,14 @@ for bad in "--model nomodel" "--model p/b --effort default" "--model p/b --effor
   run_control switch-model $bad
   [ "$CONTROL_RC" -ne 0 ] || fail "switch-model accepted the invalid arguments: '$bad'"
 done
+for option in --harness --backend --note --note-file --stall-record; do
+  run_control switch-model --model p/b "$option" ""
+  assert_contains "$CONTROL_OUT" "$option applies to 'relaunch' only" "switch-model consumed $option's empty value"
+  run_control switch-model --status "$option="
+  assert_contains "$CONTROL_OUT" "$option applies to 'relaunch' only" "switch-model status consumed $option's empty value"
+done
+run_control switch-model --model p/b --lock-preheld
+assert_contains "$CONTROL_OUT" "--lock-preheld applies to 'relaunch' only" "switch-model accepted the relaunch lock option"
 run_control interrupt --model p/b
 [ "$CONTROL_RC" -ne 0 ] || fail "interrupt accepted --model"
 assert_contains "$CONTROL_OUT" "apply to 'relaunch' only" "a non-switch verb accepted --model"

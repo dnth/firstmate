@@ -28,6 +28,7 @@ export function model(provider, id, efforts) {
 // idle:false and pending:true make the session look mid-task.
 export function createHost(options = {}) {
 	const catalog = options.catalog ?? [];
+	const modelThinking = options.modelThinking ?? {};
 	const available = new Set(options.available ?? catalog.map(label));
 	const state = {
 		current: options.current ?? null,
@@ -66,6 +67,7 @@ export function createHost(options = {}) {
 			if (options.setModelThrows) throw new Error(options.setModelThrows);
 			if (options.setModelResult === false) return false;
 			state.current = label(target);
+			if (Object.hasOwn(modelThinking, state.current)) state.thinking = modelThinking[state.current] ?? undefined;
 			return true;
 		},
 		getThinkingLevel: () => state.thinking,
@@ -94,10 +96,12 @@ export const requestFile = (dir, id) => join(dir, `model-switch.${id}.request.js
 export const ackFile = (dir, id) => join(dir, `model-switch.${id}.ack.json`);
 export const readAck = (dir, id) => JSON.parse(readFileSync(ackFile(dir, id), "utf8"));
 
-export function writeRequest(dir, { id, spawnGen, model: target, effort = null, requestedAtMs = Date.now() }) {
+export function writeRequest(dir, {
+	id, spawnGen, model: target, effort = null, requestedAtMonotonicUs = Number(process.hrtime.bigint() / 1000n),
+}) {
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(requestFile(dir, id), `${JSON.stringify({
-		schema: "fm-model-switch.request.v1", id, spawnGen, model: target, effort, requestedAtMs,
+		schema: "fm-model-switch.request.v1", id, spawnGen, model: target, effort, requestedAtMonotonicUs,
 	})}\n`);
 }
 
@@ -106,7 +110,7 @@ export function writeRequest(dir, { id, spawnGen, model: target, effort = null, 
 //   FM_HOST_SPAWN_GEN    the generation this "incarnation" answers for
 //   FM_HOST_CATALOG      JSON [{provider,id,efforts?}] - every known model
 //   FM_HOST_AVAILABLE    JSON ["provider/id",...] - models with credentials
-//   FM_HOST_CURRENT, FM_HOST_THINKING, FM_HOST_CLAMP (JSON), FM_HOST_SET_DELAY_MS
+//   FM_HOST_CURRENT, FM_HOST_THINKING, FM_HOST_MODEL_THINKING (JSON), FM_HOST_CLAMP (JSON), FM_HOST_SET_DELAY_MS
 //   FM_HOST_BUSY=1       start mid-task (isIdle() false, messages queued)
 //   FM_HOST_CONTROL_DIR  command file: quit
 //   FM_HOST_LOG          one JSON line per host call
@@ -120,6 +124,7 @@ if (process.argv[2] === "responder") {
 		available: env.FM_HOST_AVAILABLE ? JSON.parse(env.FM_HOST_AVAILABLE) : undefined,
 		current: env.FM_HOST_CURRENT,
 		thinking: env.FM_HOST_THINKING,
+		modelThinking: JSON.parse(env.FM_HOST_MODEL_THINKING ?? "{}"),
 		clamp: env.FM_HOST_CLAMP ? JSON.parse(env.FM_HOST_CLAMP) : undefined,
 		idle: env.FM_HOST_BUSY !== "1",
 		pending: env.FM_HOST_BUSY === "1",

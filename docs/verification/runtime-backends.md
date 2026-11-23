@@ -1223,9 +1223,9 @@ ok - live OMP model switch: guarded lab torn down with the default-session tripw
 
 What the guard establishes about the installed OMP, and what the extension's design therefore relies on:
 
-- `setModel` and `setThinkingLevel` called from the extension apply at once and are session-only: a switch requested while a fixture tool call was blocked, and acknowledged before the tool was released, left the tool-call request, already in flight, on the old model; the session recorded the model-change entry before the tool result, and every later request - the first being the final reply - ran on the new model.
+- The mid-task case switches while a foreground tool call is running.
+- The current guard matches the exact Bash command and its result by tool-call ID, requires the receipt before that result, and checks that the old model issued the tool call and every later assistant request uses the new model.
 - This is the behavior of OMP's own `/switch` picker, which calls `AgentSession#setModelTemporary`; the extension API does not expose that method, and `pi.setModel` followed by `pi.setThinkingLevel` is the equivalent it does expose.
-- On a Responses-WebSocket model, a reply already streaming can be cut by the switch, the same as the picker; the guard does not exercise that transport.
 - A model that exists in the registry but has no credentials is told apart from an unknown one through `ctx.modelRegistry.find`, because `ctx.models.resolve` returns nothing for both.
 - The switch is session-only: no global config file changed, and a resume without `--model` restores the switched model from the session's own model-change entry.
 
