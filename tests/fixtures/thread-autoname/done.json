@@ -1,0 +1,29 @@
+{
+  "title": "Aceh · landing page typo",
+  "request": "Please fix the typo on the Aceh landing page.",
+  "posts": [
+    "On it.",
+    "Fixed and merged: the landing page heading now reads Search the law. Nothing else is needed."
+  ],
+  "jev": {
+    "model": "jev-1.14.0",
+    "answers": {
+      "status": {
+        "type": "choice",
+        "choice": "done",
+        "confidence": 1.0,
+        "probabilities": {
+          "open-question": 0.0,
+          "running": 0.0,
+          "done": 1.0,
+          "blocked": 0.0
+        }
+      },
+      "topic_fits": {
+        "type": "noul",
+        "noul": 0.98
+      }
+    }
+  },
+  "recorded": "jev-latest answered as jev-1.14.0 on 2026-11-23 for this request and posts"
+}

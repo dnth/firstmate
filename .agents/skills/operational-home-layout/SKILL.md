@@ -21,7 +21,7 @@ README.md            public overview and development notes
 .claude/skills       symlink to .agents/skills for claude compatibility
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
 bin/                 helper scripts, committed; read each script's header before first use
-.env                 optional X-mode pairing token (presence-gates AGENTS.md section 14) and typed dispatch resolution key TYPESAFE_API_KEY (presence-gates bin/fm-dispatch-resolve.sh; docs/configuration.md "Typed dispatch resolution"); LOCAL, gitignored
+.env                 optional X-mode pairing token (presence-gates AGENTS.md section 14) and typed dispatch resolution key TYPESAFE_API_KEY (presence-gates bin/fm-dispatch-resolve.sh and topic-thread judging; docs/configuration.md "Typed dispatch resolution"); LOCAL, gitignored
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (AGENTS.md section 4)
 config/crew-harness-fallback  optional predictive crewmate fallback profile; LOCAL, gitignored; format and selection are owned by docs/configuration.md
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task launch profile (AGENTS.md section 4; schema in docs/configuration.md). Inherited by secondmate homes
@@ -101,6 +101,7 @@ state/               volatile runtime signals; gitignored
   ext-inbox/         generated local Communication Officer pending request payloads; ext-respond drains it when the ext-bridge is on; bin/fm-ext-inbox.sh owns clearing dispositions in its header
   ext-context/       generated local Communication Officer destination context, thread-history sidecars, and one-wake offer markers, keyed by request slug; docs/configuration.md "Thread context (name, project, history)" owns the history contract
   ext-outbox/        generated local Communication Officer reply payloads, delivery markers, and recorded no-reply dispositions, plus dedicated waiting-pin snapshots; docs/configuration.md owns their separate delivery contracts
+  ext-autoname/      generated one-time topic-thread judging catch-up list and progress (catch-up.json); docs/configuration.md "Thread title reconciler" owns it
   public-followup/   generated private transport for promised public replies: commitment registrations, typed terminal-result inbox, accepted/rejected ledgers (AGENTS.md section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload

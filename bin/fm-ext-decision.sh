@@ -93,16 +93,20 @@
 #
 # threads [--thread <id>]
 #   Prints one JSON line per Discord thread that holds a decision post, with
-#   or without buttons: {thread_id, open, closed, last_posted_at, keys}.
+#   or without buttons: {thread_id, open, closed, last_posted_at,
+#   last_closed_at, keys}.
 #   --thread limits the summary to that thread and checks for replacements
 #   of its decision keys in other threads. Unpublished records are ignored.
 #   A post is closed once it is settled, replaced by
 #   a newer post, or its own lifecycle of its decision is decided or
 #   superseded in the ledgers; a decision whose state cannot be read counts
 #   as open. last_posted_at is the newest post's posting time (epoch seconds,
-#   0 when unknown), and keys lists the thread's distinct decision keys.
-#   See "Topic threads" in docs/configuration.md for how the gateway uses
-#   this summary. Read-only.
+#   0 when unknown). last_closed_at is the newest closure time: a settled
+#   post's recorded settle time (<stem>.settled.json "at"), or now for a post
+#   the ledgers or a newer post already closed but no settle has recorded yet;
+#   0 when no post is closed. keys lists the thread's distinct decision keys.
+#   See "Thread title reconciler" in docs/configuration.md for how the gateway
+#   uses this summary. Read-only.
 #
 # finalized
 #   Records the displayed content or legacy button state, so posts lists it
@@ -848,7 +852,7 @@ command_posts() {
 
 command_threads() {
   local only='' stem haskey key occ posted buttons hasmessages message sections
-  local topic request newer newer_stem thread state progress
+  local topic request newer newer_stem thread state progress closed_at
   case "${1:-}" in
     '') ;;
     --thread)
@@ -866,7 +870,11 @@ command_threads() {
     [ "$haskey" = 1 ] && [ "$hasmessages" = 1 ] || continue
     thread=$(post_thread_of "$topic" "$request") || continue
     [ -z "$only" ] || [ "$thread" = "$only" ] || continue
-    if settled "$stem" || [ "$newer" = 1 ]; then
+    closed_at=0
+    if settled "$stem"; then
+      state=closed
+      closed_at=$(jq -r '.at // empty' "$OUTBOX/$stem.settled.json" 2>/dev/null) || closed_at=
+    elif [ "$newer" = 1 ]; then
       state=closed
     else
       case "$(fm_ext_decision_key_state "$key" "$occ")" in
@@ -874,17 +882,24 @@ command_threads() {
         *) state=open ;;
       esac
     fi
+    if [ "$state" = closed ]; then
+      case "$closed_at" in
+        ''|0|*[!0-9.]*) closed_at=$NOW ;;
+      esac
+    fi
     case "$posted" in
       ''|*[!0-9.]*) posted=0 ;;
     esac
     jq -cn --arg thread "$thread" --arg state "$state" --argjson posted "$posted" --arg key "$key" \
-      '{thread_id:$thread, state:$state, posted_at:$posted, key:$key}'
+      --argjson closed_at "$closed_at" \
+      '{thread_id:$thread, state:$state, posted_at:$posted, closed_at:$closed_at, key:$key}'
   done <<<"$POST_TABLE" \
     | jq -sc 'group_by(.thread_id)[]
         | {thread_id: .[0].thread_id,
            open: (map(select(.state == "open")) | length),
            closed: (map(select(.state == "closed")) | length),
            last_posted_at: (map(.posted_at) | max),
+           last_closed_at: (map(.closed_at) | max),
            keys: (map(.key) | unique)}'
 }
 

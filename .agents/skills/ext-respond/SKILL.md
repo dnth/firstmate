@@ -103,9 +103,11 @@ When you settle a decision that has a button post any other way, such as a typed
 
 Before composing a dedicated-channel reply, consult the [topic-thread contract](../../../docs/configuration.md#topic-threads-one-thread-per-request); the [emit header and help](../../../bin/fm-ext-emit.sh) own the title, retitle, and state flags.
 Emit refuses a reply that would create the thread without `--thread-title`, and any `answer` or `final` without an explicit `--thread-state`; its header owns both rules.
+Your title and state flags are inputs: the [thread title reconciler](../../../docs/configuration.md#thread-title-reconciler) alone writes the thread's title, paces it, and keeps the captain's own words.
+When the home has the Jev key, the reconciler judges the thread after every post and ignores your state and retitle for the title, but emit still requires them, so keep passing them as below.
 
 - **Title the creating reply** with `<Project> · <2-5 word topic>` (for example `Aceh · ingestion status`), especially when the request is vague, long, or procedural.
-- **Retitle** (`--thread-retitle`) only when the thread's live topic has clearly moved on from its name: rename it on that reply as `<Project> · <current topic>`, not on every reply, and the contract above owns what a retitle does to later markers.
+- **Retitle** (`--thread-retitle`) only when the thread's live topic has clearly moved on from its name: rename it on that reply as `<Project> · <current topic>`, not on every reply; a thread the captain renamed keeps his words.
 - **Mark needs-you** only with the reply that carries the decision: a choice through `bin/fm-ext-ask.sh`, or a question in words through `bin/fm-ext-ask.sh --free-text`.
 - **Mark done** with the terminal answer or final when nothing is left open in the thread.
 - **Pass none** on an answer that neither asks nor finishes: work continuing, or a status update with no question.

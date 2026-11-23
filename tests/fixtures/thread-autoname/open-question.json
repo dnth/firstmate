@@ -1,0 +1,29 @@
+{
+  "title": "Aceh · nightly reindex",
+  "request": "Should the Aceh nightly reindex move earlier?",
+  "posts": [
+    "Looking at the reindex schedule now.",
+    "Two ways to go: move the reindex to 02:00, which clears the batch window, or keep 23:00 and add a second worker. Which do you want?"
+  ],
+  "jev": {
+    "model": "jev-1.14.0",
+    "answers": {
+      "status": {
+        "type": "choice",
+        "choice": "open-question",
+        "confidence": 1.0,
+        "probabilities": {
+          "open-question": 1.0,
+          "running": 0.0,
+          "done": 0.0,
+          "blocked": 0.0
+        }
+      },
+      "topic_fits": {
+        "type": "noul",
+        "noul": 0.99
+      }
+    }
+  },
+  "recorded": "jev-latest answered as jev-1.14.0 on 2026-11-23 for this request and posts"
+}

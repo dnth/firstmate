@@ -28,7 +28,7 @@
 # be given, the decision file records an empty options list, and the post
 # carries the question, optional explanation, and a written-answer cue with no
 # buttons. Record the answer using bin/fm-captain-hold.sh answer (or answers).
-# The Topic threads contract in docs/configuration.md owns marker lifetime.
+# The Thread title reconciler in docs/configuration.md owns marker lifetime.
 # A choice always uses --option lines.
 # The post text keeps the question, optional explanation, numbered option
 # lines, and reply cue as separate sections for safe chunking and settlement.

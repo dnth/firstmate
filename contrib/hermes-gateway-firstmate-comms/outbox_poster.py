@@ -44,8 +44,12 @@ state, chunk ids, and posting time.
 Structured sections keep options together on the final chunk and reserve room
 for a later outcome header.
 ``reconcile_decision_posts`` edits only that final message under the display
-rules in docs/configuration.md, "Decision buttons". ``reconcile_thread_states``
-follows the "Topic threads" contract in the same reference.
+rules in docs/configuration.md, "Decision buttons".
+
+Topic-thread titles are written only by ``thread_title``; a delivery hands
+its thread state, retitle, and decision flag to ``thread_autoname`` through
+``queue_title_inputs``, and ``sweep_thread_titles`` feeds the decision
+ledger. docs/configuration.md, "Thread title reconciler", owns the contract.
 
 A payload with ``media`` uploads its staged files with its last chunk as one
 multipart message; docs/configuration.md, "Outbound media", owns the single
@@ -91,13 +95,9 @@ ThreadFn = Callable[[dict, str], dict]
 _WATCHER_STARTED = False
 _WATCHER_LOCK = threading.Lock()
 # One lock serializes every writer of a request-wide "<slug>.thread.json"
-# record. Delivery (save_request_thread, maybe_rename_topic_thread) and the
-# periodic thread-state sweep both read-merge-write that file, so without it a
-# sweep that has been reconciling for minutes can overwrite a rename a
-# delivery recorded meanwhile.
+# record. Delivery, title inputs, and the title reconciler all
+# read-merge-write that file, so without it one could overwrite another.
 _THREAD_RECORD_LOCK = threading.RLock()
-_DECISION_THREAD_WRITES: dict[tuple[Path, str], int] = {}
-_DECISION_BUTTON_WRITES: dict[tuple[Path, str], int] = {}
 # Time each watcher step separately so a slow drain or reconciliation step
 # can be identified in the journal.
 SLOW_STEP_SECS = 5.0
@@ -556,37 +556,27 @@ def load_progress(payload: dict, home: Path) -> dict | None:
 
 
 def write_progress(payload: dict, progress: dict, home: Path) -> None:
-    with _THREAD_RECORD_LOCK:
-        with _temp_json(progress) as progress_file:
-            result = subprocess.run(
-                [
-                    str(outbox_cli()),
-                    "progress",
-                    "--slug",
-                    payload["slug"],
-                    "--kind",
-                    payload["kind"],
-                    "--generation",
-                    str(payload["generation"]),
-                    "--progress-file",
-                    progress_file,
-                ],
-                check=False,
-                env=_env_for(home),
-                capture_output=True,
-                text=True,
-            )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "progress failed")
-        decision = progress.get("decision")
-        key = decision.get("key") if isinstance(decision, dict) else None
-        if key and progress.get("discord_message_ids"):
-            revision = time.monotonic_ns()
-            request = str(progress.get("request_id") or "").split(":")
-            thread_id = progress.get("topic_thread_id") or (request[3] if len(request) > 3 else "")
-            _DECISION_THREAD_WRITES[home, str(thread_id)] = revision
-            if progress.get("buttons"):
-                _DECISION_BUTTON_WRITES[home, key] = revision
+    with _temp_json(progress) as progress_file:
+        result = subprocess.run(
+            [
+                str(outbox_cli()),
+                "progress",
+                "--slug",
+                payload["slug"],
+                "--kind",
+                payload["kind"],
+                "--generation",
+                str(payload["generation"]),
+                "--progress-file",
+                progress_file,
+            ],
+            check=False,
+            env=_env_for(home),
+            capture_output=True,
+            text=True,
+        )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "progress failed")
 
 
 
@@ -752,10 +742,7 @@ def request_progress_path(payload: dict, home: Path) -> Path:
 
 
 def load_request_thread(payload: dict, home: Path) -> str:
-    """This request's recorded topic-thread id, or "" when none exists.
-
-    Kept for callers that need only the id; load_request_topic carries the
-    recorded name and state rename comparisons use."""
+    """This request's recorded topic-thread id, or "" when none exists."""
     path = request_progress_path(payload, home)
     if path.is_symlink() or not path.is_file():
         return ""
@@ -786,12 +773,9 @@ def _read_thread_record(path: Path) -> dict:
         return {}
     request_id = data.get("request_id") or ""
     name = data.get("topic_name") or ""
-    state = data.get("thread_state") or ""
     creating = data.get("creating_title") or ""
-    retitle = data.get("retitle") or ""
     creator = data.get("creator") or ""
-    state_at = data.get("state_at")
-    rename = data.get("rename")
+    title = data.get("title")
     if not creator and data.get("adopted"):
         # Records written while adoption was a bare flag still say the thread
         # was not ours to begin with.
@@ -800,15 +784,9 @@ def _read_thread_record(path: Path) -> dict:
             "request_id": request_id if isinstance(request_id, str) else "",
             "topic_thread_id": thread_id,
             "topic_name": name if isinstance(name, str) else "",
-            "thread_state": state if isinstance(state, str) else "",
             "creator": creator if isinstance(creator, str) else "",
             "creating_title": creating if isinstance(creating, str) else "",
-            "retitle": retitle if isinstance(retitle, str) else "",
-            "state_at": _epoch(state_at),
-            "rename": rename if isinstance(rename, dict) else {},
-            "marked_open": data.get("marked_open") is True,
-            "deferred_state": (data.get("deferred_state")
-                               if isinstance(data.get("deferred_state"), str) else "")}
+            "title": title if isinstance(title, dict) else {}}
 
 
 def _epoch(value: object) -> float:
@@ -819,7 +797,7 @@ def _epoch(value: object) -> float:
 
 
 def load_request_topic(payload: dict, home: Path) -> dict:
-    """This request's recorded topic-thread id, name, and state, or {}."""
+    """This request's recorded topic-thread record, or {}."""
     record = _read_thread_record(request_progress_path(payload, home))
     if not record or record.get("request_id") != payload.get("request_id"):
         return {}
@@ -882,27 +860,22 @@ def load_thread_record_by_id(thread_id: str, home: Path) -> dict:
 
 
 def save_request_thread(payload: dict, thread_id: str, home: Path,
-                        topic_name: str = "", thread_state: str = "",
-                        creating_title: str = "", creator: str = "",
+                        topic_name: str = "", creating_title: str = "", creator: str = "",
                         opening_posted: bool | None = None) -> None:
     """Record this request's topic-thread id for every later generation.
 
-    The record is the request-wide one beside its outbox payload. A rename
-    made from inside the thread updates that same record through
+    The record is the request-wide one beside its outbox payload. Title
+    inputs for the thread update that same record through
     save_thread_record instead of writing a second one.
     """
     save_thread_record(request_progress_path(payload, home), payload.get("request_id"),
-                       thread_id, topic_name=topic_name, thread_state=thread_state,
-                       creating_title=creating_title, creator=creator, opening_posted=opening_posted)
+                       thread_id, topic_name=topic_name, creating_title=creating_title,
+                       creator=creator, opening_posted=opening_posted)
 
 
 def save_thread_record(path: Path, request_id: object, thread_id: str,
-                       topic_name: str = "", thread_state: str = "",
-                       creating_title: str = "", retitle: str | None = None,
-                       creator: str = "",
-                       state_at: float | None = None, rename: dict | None = None,
-                       marked_open: bool | None = None,
-                       deferred_state: str | None = None,
+                       topic_name: str = "", creating_title: str = "",
+                       creator: str = "", title: dict | None = None,
                        open_attempt: bool | None = None,
                        opening_posted: bool | None = None) -> None:
     """Write one thread record atomically, preserving any prior unset field.
@@ -912,19 +885,10 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     only reused for routing. It is kept once known, so a record never loses
     the evidence that a rename decision depends on.
 
-    ``topic_name`` is the name Discord was last seen showing, ``thread_state``
-    the effective marker target, even if the Discord rename failed. An
-    explicit marker request can update ``state_at`` even if the target stays
-    unchanged. ``rename`` records the last outcome so a failed or deferred
-    request can be retried. A failure keeps ``error``, ``retryable``, and
-    ``attempts`` (consecutive failed attempts).
-    ``creating_title`` is the title the creating reply supplied, kept so a
-    stored name can be re-derived from it. ``retitle`` stores an explicit base
-    title separately so it can be retried or used when the live title is absent.
-    ``marked_open`` records whether the marker was associated with an open
-    decision, preserving that association when a reminder postdates it.
-    ``deferred_state`` stores a pending ``none`` or ``done`` separately from
-    the marker target. An empty value clears it.
+    ``topic_name`` is the last title this home gave the thread, by creating
+    or renaming it. ``creating_title`` is the title the creating reply
+    supplied. ``title`` replaces the thread title reconciler's object whole:
+    its inputs and bookkeeping, owned by ``thread_title``.
 
     A private state artifact beside the outbox, written with the same guards
     the shell publication helper enforces: a regular single-link file at mode
@@ -933,21 +897,16 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     topics.
 
     Every writer holds ``_THREAD_RECORD_LOCK`` across its read-merge-write, so
-    a delivery rename and a sweep state update for the same record cannot lose
-    one another.
+    a delivery and a title update for the same record cannot lose one another.
     """
     with _THREAD_RECORD_LOCK:
-        _merge_thread_record(path, request_id, thread_id, topic_name, thread_state,
-                             creating_title, retitle, creator, state_at, rename,
-                             marked_open, deferred_state, open_attempt, opening_posted)
+        _merge_thread_record(path, request_id, thread_id, topic_name, creating_title,
+                             creator, title, open_attempt, opening_posted)
 
 
 def _merge_thread_record(path: Path, request_id: object, thread_id: str,
-                         topic_name: str, thread_state: str,
-                         creating_title: str, retitle: str | None,
-                         creator: str, state_at: float | None, rename: dict | None,
-                         marked_open: bool | None, deferred_state: str | None,
-                         open_attempt: bool | None,
+                         topic_name: str, creating_title: str, creator: str,
+                         title: dict | None, open_attempt: bool | None,
                          opening_posted: bool | None) -> None:
     if path.is_symlink():
         raise RuntimeError("thread record is a symlink")
@@ -959,31 +918,18 @@ def _merge_thread_record(path: Path, request_id: object, thread_id: str,
         prior = {}
     prior_request = prior.get("request_id") or ""
     prior_name = prior.get("topic_name") or ""
-    prior_state = prior.get("thread_state") or ""
     prior_creating = prior.get("creating_title") or ""
     prior_creator = prior.get("creator") or ("adopted" if prior.get("adopted") else "")
     record = {"request_id": request_id if request_id is not None else prior_request,
               "topic_thread_id": thread_id,
               "topic_name": topic_name or prior_name,
-              "thread_state": thread_state or prior_state,
               "creating_title": creating_title or prior_creating}
     kept_creator = creator or (prior_creator if isinstance(prior_creator, str) else "")
     if kept_creator:
         record["creator"] = kept_creator
-    kept_retitle = retitle if retitle is not None else prior.get("retitle")
-    if isinstance(kept_retitle, str) and kept_retitle:
-        record["retitle"] = kept_retitle
-    kept_state_at = _epoch(state_at if state_at is not None else prior.get("state_at"))
-    if kept_state_at:
-        record["state_at"] = kept_state_at
-    kept_rename = rename if rename is not None else prior.get("rename")
-    if isinstance(kept_rename, dict) and kept_rename:
-        record["rename"] = kept_rename
-    if (marked_open if marked_open is not None else prior.get("marked_open")) is True:
-        record["marked_open"] = True
-    kept_deferred = deferred_state if deferred_state is not None else prior.get("deferred_state")
-    if isinstance(kept_deferred, str) and kept_deferred:
-        record["deferred_state"] = kept_deferred
+    kept_title = title if title is not None else prior.get("title")
+    if isinstance(kept_title, dict) and kept_title:
+        record["title"] = kept_title
     if (open_attempt if open_attempt is not None else prior.get("open_attempt")) is True:
         record["open_attempt"] = True
     if (opening_posted if opening_posted is not None else prior.get("opening_posted")) is True:
@@ -1010,7 +956,21 @@ def _merge_thread_record(path: Path, request_id: object, thread_id: str,
     os.chmod(path, 0o600)
 
 
-_THREAD_STATES = {"needs-you": "❓ ", "done": "✅ ", "none": ""}
+def _thread_title():
+    # Imported on use: thread_title imports this module.
+    try:
+        from . import thread_title
+    except ImportError:
+        import thread_title
+    return thread_title
+
+
+def _thread_autoname():
+    try:
+        from . import thread_autoname
+    except ImportError:
+        import thread_autoname
+    return thread_autoname
 
 
 def public_topic_name(
@@ -1019,26 +979,24 @@ def public_topic_name(
     home: Path | None = None,
     request_text: str = "",
     title: str = "",
-    retitle: str = "",
 ) -> str:
     """Re-derive this request's thread name and check the stored one.
 
-    The request text (plus Firstmate's title and, when the thread's record
-    keeps one, its retitle) goes through bin/fm-ext-topic.sh, and the stored
-    name is accepted only when it equals that fresh derivation, a legacy
-    label-plus-time name for the same message when no valid title takes
-    precedence, or the retitle the thread now wears. Anything else falls back
-    to the fresh name.
+    The request text (plus Firstmate's title) goes through
+    bin/fm-ext-topic.sh, and the stored name is accepted only when it equals
+    that fresh derivation or a legacy label-plus-time name for the same
+    message when no valid title takes precedence. Anything else falls back to
+    the fresh name.
     """
     with _temp_text(request_text) as text_file, _temp_text(title) as title_file, \
-            _temp_text(retitle) as retitle_file, _temp_text(name) as stored_file:
+            _temp_text(name) as stored_file:
         result = subprocess.run(
             [str(firstmate_root() / "bin" / "fm-ext-topic.sh"),
              "--text-file", text_file, "--origin", str(payload.get("origin") or "slash"),
              "--thread-id", str(payload.get("thread_id") or ""),
              "--channel-id", str(payload.get("channel_id") or ""),
              "--message-id", str(payload.get("message_id") or ""),
-             "--title-file", title_file, "--retitle-file", retitle_file,
+             "--title-file", title_file,
              "--validate-name", "--stored-file", stored_file],
             capture_output=True, text=True, check=False,
             env=_env_for(home or firstmate_home()),
@@ -1051,11 +1009,12 @@ def thread_name_for(payload: dict, home: Path) -> str:
 
     Firstmate's title on the creating payload wins; otherwise the name is
     re-derived from the request text the intake recorded, never trusted from
-    the stored string alone, so later follow-ups reuse the exact name the
-    first reply used. Anything unusable - no context, no recorded name, an
-    already-threaded request - means no thread is created. A thread
+    the stored string alone. Anything unusable - no context, no recorded
+    name, an already-threaded request - means no thread is created. A thread
     bin/fm-ext-open.sh opened is named by its context's origin, so its title
     is its only name even when the caller stands in as a message request.
+    Once the thread exists, a later title never names it: the title
+    reconciler owns its name.
     """
     if payload.get("origin") not in ("message", "open"):
         return ""
@@ -1077,20 +1036,8 @@ def thread_name_for(payload: dict, home: Path) -> str:
     request_text = context.get("request_text") or ""
     if not isinstance(name, str) or not name or not isinstance(request_text, str):
         return ""
-    recorded = load_request_topic(payload, home)
-    recorded_name = recorded.get("topic_name") or ""
-    retitle = recorded.get("retitle") or ""
-    if recorded_name or retitle:
-        # A thread already exists: a retitle its record keeps is its current
-        # base name, so the thread follows its conversation; otherwise the name
-        # Discord was last seen showing, with its marker stripped, wins over
-        # any later title, so state renames build on the name Discord shows.
-        # Either re-validates against the creating title the record keeps, so a
-        # tampered record still falls back to a fresh derivation.
-        return public_topic_name(payload, retitle or state_thread_name(recorded_name, "none"), home,
-                                 request_text, recorded.get("creating_title") or "", retitle)
     return public_topic_name(payload, name, home, request_text,
-                             "" if recorded else _title_for(payload))
+                             "" if load_request_topic(payload, home) else _title_for(payload))
 
 
 def _context_for(payload: dict, home: Path | None) -> dict:
@@ -1117,9 +1064,9 @@ def screened_title(text: object, home: Path) -> str:
     """The shared title screen's verdict on one candidate name, or "".
 
     ``bin/fm-ext-topic.sh --check-title`` owns the bounds and safety rules a
-    creating title passes, and it judges a retitle too, so a retitle can never
-    put a name on a thread that a creation could not. An absent, unusable, or
-    unscreened candidate reads as "".
+    creating title passes, and it judges a retitle and a model-proposed base
+    too, so neither can put a name on a thread that a creation could not. An
+    absent, unusable, or unscreened candidate reads as "".
     """
     if not isinstance(text, str) or not text:
         return ""
@@ -1131,74 +1078,6 @@ def screened_title(text: object, home: Path) -> str:
             env=_env_for(home),
         )
     return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def state_prefix(state: object) -> str | None:
-    """Thread-name prefix for a thread_state value, or None when unknown."""
-    if not isinstance(state, str):
-        return None
-    return _THREAD_STATES.get(state)
-
-
-def state_thread_name(base: str, state: object) -> str | None:
-    """Base name with the thread_state prefix applied, or None when unknown.
-
-    The base is always the unprefixed thread name: any existing marker is
-    stripped before the new one is applied, so needs-you then done shows a
-    single ✅ and none always restores the bare name.
-    """
-    prefix = state_prefix(state)
-    if prefix is None or not base:
-        return None
-    bare = base
-    for known in ("❓ ", "✅ "):
-        if bare.startswith(known):
-            bare = bare[len(known):]
-            break
-    return prefix + bare if prefix else bare
-
-
-def discord_rename_thread(thread_id: str, name: str) -> dict:
-    """Rename a topic thread Firstmate created, best effort over REST."""
-    token = _bot_token()
-    if not token:
-        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
-    if not _SNOWFLAKE.fullmatch(thread_id):
-        raise DiscordSendError("permanent", "thread id is not a Discord id")
-    body = json.dumps({"name": name}).encode("utf-8")
-    request = urllib.request.Request(
-        f"{DISCORD_API_BASE}/channels/{thread_id}",
-        data=body,
-        method="PATCH",
-        headers={
-            "Authorization": f"Bot {token}",
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            raw = response.read().decode("utf-8") or "{}"
-    except urllib.error.HTTPError as err:
-        outcome = classify_http_code(err.code)
-        try:
-            details = json.loads(err.read().decode("utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            details = {}
-        if not isinstance(details, dict):
-            details = {}
-        raise DiscordSendError(outcome, f"discord HTTP {err.code}", err.code, details) from err
-    except urllib.error.URLError as err:
-        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
-    except (TimeoutError, OSError) as err:
-        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as err:
-        raise DiscordSendError("ambiguous", "discord HTTP 200 with invalid JSON") from err
-    if not isinstance(data, dict):
-        raise DiscordSendError("ambiguous", "discord thread rename returned no object")
-    return {"ok": True, "thread_id": thread_id}
 
 
 def _bot_user_id(token: str | None = None) -> str:
@@ -1262,253 +1141,51 @@ def discord_thread_name(thread_id: str) -> str:
     return name if isinstance(name, str) else ""
 
 
-def _decision_posts_changed(home: Path, thread_id: str, summary: dict | None, since: int) -> bool:
-    return (_DECISION_THREAD_WRITES.get((home, thread_id), 0) > since
-            or any(_DECISION_BUTTON_WRITES.get((home, key), 0) > since
-                   for key in (summary or {}).get("keys", ())))
+def title_thread_for(payload: dict, thread_id: str, home: Path) -> str:
+    """The topic thread whose title this delivered generation may move, or "".
 
-
-def apply_thread_state(
-    recorded: dict,
-    state: str | None,
-    home: Path,
-    state_at: float | None = None,
-    rename_thread=None,
-    thread_owner=None,
-    read_thread=None,
-    retitle: str = "",
-    require_current: bool = False,
-    decision_view: tuple[int, dict] | None = None,
-) -> str:
-    """Apply the requested marker or retitle under the Topic threads contract.
-
-    Returns the Discord rename outcome (applied, unchanged, or failed), or
-    skipped when no rename was attempted, including a request saved for replay.
-
-    ``recorded`` may be minutes old when the sweep reaches a thread, so the
-    record is re-read under ``_THREAD_RECORD_LOCK`` before the state is
-    applied: the name, retitle, and provenance this rename builds on are the
-    ones a delivery recorded meanwhile, not the ones the sweep read.
-    Sweep calls use ``require_current`` to reject stale state decisions;
-    decision publication revisions guard against concurrent posts.
-    Discord work runs outside the record lock. If eligibility changes during
-    that work, retry the current desired name without saving the stale outcome.
+    Only a thread in the dedicated channel qualifies: the one a top-level
+    message request or an opened thread created, or the thread an in-thread
+    request of any origin arrived in, which resolves through that thread's
+    own record. An adopted thread never takes inputs; the title reconciler
+    applies the remaining eligibility rules.
     """
-    repairing = False
-    periodic = decision_view is not None
-    while True:
-        thread_id = recorded.get("topic_thread_id") or ""
-        with _THREAD_RECORD_LOCK:
-            path = recorded.get("path")
-            fresh = _read_thread_record(path) if isinstance(path, Path) else {}
-            if require_current and fresh != recorded:
-                if not repairing or not fresh:
-                    return "skipped"
-                state = fresh.get("thread_state")
-                state_at = None
-                retitle = ""
-            since = decision_view[0] if decision_view is not None else time.monotonic_ns()
-            if fresh:
-                if fresh.get("topic_thread_id") != thread_id:
-                    return "skipped"
-                recorded = fresh
-        thread_id = recorded.get("topic_thread_id") or ""
-        provenance = recorded.get("creator") or ""
-        if provenance == "adopted":
-            return "skipped"
-        if provenance != "firstmate":
-            owner = thread_owner or discord_thread_owner
-            try:
-                owner_id = owner(thread_id)
-            except Exception as err:
-                print(f"fm-ext-poster: thread owner lookup skipped: {err}", file=sys.stderr)
-                return "skipped"
-            if not owner_id or owner_id != _bot_user_id():
-                print(f"fm-ext-poster: thread {thread_id} ownership unproved; leaving its name alone",
-                      file=sys.stderr)
-                return "skipped"
-            provenance = "firstmate"
-        prior = recorded.get("rename") or {}
-        saved_title = recorded.get("retitle")
-        retry_title = prior.get("outcome") in ("failed", "deferred") and prior.get(
-            "retitle", saved_title == state_thread_name(prior.get("name") or "", "none"))
-        requested_retitle = retitle or (saved_title if retry_title else "")
-        requested_state, requested_at = state, state_at
-        if prior.get("outcome") == "deferred" and state_at is None:
-            requested_state = prior.get("state")
-            requested_at = prior.get("state_at")
-        summaries = decision_view[1] if decision_view is not None else decision_threads(home, thread_id)
-        summary = summaries.get(thread_id, {}) if summaries is not None else None
-        if summary is None:
-            if state_at is not None or retitle:
-                pending = requested_state if requested_at is not None else None
-                if pending is None and prior.get("outcome") == "failed":
-                    pending = recorded.get("thread_state")
-                try:
-                    save_thread_record(recorded["path"], recorded.get("request_id"), thread_id,
-                                       creator=provenance, retitle=requested_retitle or None,
-                                       deferred_state=pending if pending in ("none", "done") else None,
-                                       rename={"outcome": "deferred", "at": time.time(),
-                                               "state": requested_state, "state_at": requested_at,
-                                               "retitle": bool(requested_retitle)})
-                except Exception as err:
-                    print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
-            return "skipped"
-        marked_open = deferred_state = None
-        effective_state = requested_state
-        if (prior.get("outcome") == "deferred" and state_at is None
-                and effective_state == "needs-you" and recorded.get("marked_open")):
-            requested_at = None
-        if summary.get("open", 0) > 0:
-            effective_state = "needs-you"
-            marked_open = True
-            if requested_at is not None and requested_state in ("none", "done"):
-                deferred_state = requested_state
-            elif prior.get("outcome") == "failed":
-                pending = recorded.get("thread_state")
-                if pending in ("none", "done"):
-                    deferred_state = pending
-        shown = ""
-        if (periodic and not requested_retitle) or effective_state is None:
-            try:
-                shown = (read_thread or discord_thread_name)(thread_id)
-            except Exception:
-                pass
-        if effective_state is None:
-            if shown:
-                effective_state = next((key for key, prefix in _THREAD_STATES.items()
-                                        if prefix and shown.startswith(prefix)), "none")
-            else:
-                effective_state = recorded.get("thread_state") or "none"
-        if not marked_open and (requested_at is not None or effective_state != "needs-you"):
-            marked_open = False
-            deferred_state = ""
-        try:
-            creator = _creating_request(recorded)
-            base = (requested_retitle or shown
-                    or (thread_name_for(creator, home) if creator else ""))
-        except Exception as err:
-            print(f"fm-ext-poster: thread name check skipped: {err}", file=sys.stderr)
-            return "skipped"
-        want = state_thread_name(base, effective_state)
-        if want is None:
-            return "skipped"
-        stored = recorded.get("topic_name") or base
-        rename = {"name": want, "at": time.time()}
-        if want == stored and not shown:
-            try:
-                shown = (read_thread or discord_thread_name)(thread_id)
-            except Exception:
-                pass
-        if shown == want:
-            rename["outcome"] = "unchanged"
-            if (periodic and marked_open and recorded.get("marked_open")
-                    and effective_state == recorded.get("thread_state")
-                    and prior.get("outcome") not in ("failed", "deferred")
-                    and deferred_state is None and not requested_retitle):
-                return "unchanged"
-        with _THREAD_RECORD_LOCK:
-            posts_changed = _decision_posts_changed(home, thread_id, summary, since)
-        if posts_changed:
-            if decision_view is not None:
-                return "skipped"
-            continue
-        if "outcome" not in rename:
-            try:
-                (rename_thread or discord_rename_thread)(thread_id, want)
-            except Exception as err:
-                attempts = prior.get("attempts") if prior.get("outcome") == "failed" else 0
-                rename.update(outcome="failed", error=str(err),
-                              retitle=bool(requested_retitle),
-                              retryable=classify_send_failure(err) != "permanent",
-                              attempts=(attempts if isinstance(attempts, int) else 0) + 1)
-                print(f"fm-ext-poster: thread {thread_id} rename failed: {err}", file=sys.stderr)
-            else:
-                rename["outcome"] = "applied"
-        changed = False
-        try:
-            with _THREAD_RECORD_LOCK:
-                current = _read_thread_record(recorded["path"])
-                changed = (require_current and current != recorded
-                           or _decision_posts_changed(home, thread_id, summary, since))
-                if not changed:
-                    save_thread_record(recorded["path"], recorded.get("request_id"), thread_id,
-                                       topic_name="" if rename["outcome"] == "failed" else want,
-                                       thread_state=effective_state, creator=provenance,
-                                       creating_title=recorded.get("creating_title") or "",
-                                       retitle=requested_retitle or None,
-                                       state_at=requested_at, rename=rename, marked_open=marked_open,
-                                       deferred_state=deferred_state)
-        except Exception as err:
-            print(f"fm-ext-poster: thread record update skipped: {err}", file=sys.stderr)
-        if changed:
-            if not current or current.get("topic_thread_id") != thread_id:
-                return "skipped"
-            if require_current:
-                state = current.get("thread_state")
-                state_at = None
-                retitle = ""
-            recorded = current
-            decision_view = None
-            repairing = True
-            require_current = True
-            continue
-        return rename["outcome"]
-
-
-def maybe_rename_topic_thread(
-    payload: dict,
-    thread_id: str,
-    home: Path,
-    rename_thread=None,
-    thread_owner=None,
-    read_thread=None,
-) -> str:
-    """Apply this generation's retitle and thread_state to its topic thread.
-
-    docs/configuration.md's topic-thread contract owns eligibility, state
-    semantics, and the retitle rule. A request of any origin that arrived
-    inside a topic thread resolves it through the thread's own record, so name
-    validation and later changes share the creating request's context. A
-    reply without a state retries its thread's last failed rename.
-    Ownership lookup, rename, and record-update failures must not escape into
-    delivery: this runs after the reply and its receipt are already durable.
-    """
-    state = payload.get("thread_state")
-    if state_prefix(state) is None:
-        state = None
-    retitle = payload.get("thread_retitle") or ""
-    if retitle:
-        retitle = screened_title(retitle, home)
     if str(payload.get("channel_id") or "") != dedicated_channel(home):
-        return thread_id
+        return ""
     thread_field = str(payload.get("thread_id") or "")
     if thread_field == str(payload.get("channel_id") or ""):
-        # Only a top-level message request or an opened thread ever creates
-        # a topic thread.
         if payload.get("origin") not in ("message", "open"):
-            return thread_id
+            return ""
         recorded = load_request_topic(payload, home)
         if not thread_id or recorded.get("topic_thread_id") != thread_id:
-            return thread_id
+            return ""
     else:
-        thread_id = thread_field
-        recorded = load_thread_record_by_id(thread_id, home)
-        if not recorded:
-            return thread_id
-    state_at = None
-    retry = state is None and not retitle
-    if retry:
-        outcome = (recorded.get("rename") or {}).get("outcome")
-        if outcome not in ("failed", "deferred"):
-            return thread_id
-        state = recorded.get("thread_state") or None
-    elif state is not None:
-        state_at = _epoch(payload.get("recorded_at")) or time.time()
-    apply_thread_state(recorded, state, home, state_at=state_at, rename_thread=rename_thread,
-                       thread_owner=thread_owner, read_thread=read_thread,
-                       retitle=retitle, require_current=retry)
-    return thread_id
+        recorded = load_thread_record_by_id(thread_field, home)
+    return "" if not recorded or recorded.get("creator") == "adopted" else recorded["topic_thread_id"]
+
+
+def queue_title_inputs(payload: dict, thread_id: str, ids: list, home: Path) -> None:
+    """Hand one delivered reply to the title worker and return at once.
+
+    Runs after the reply and its receipt are durable. It only queues: the
+    judging check, Jev, the naming model, and every rename happen elsewhere,
+    so nothing here can delay or fail a delivery.
+    """
+    try:
+        target = title_thread_for(payload, thread_id, home)
+        message_id = str(next((item for item in reversed(ids) if _SNOWFLAKE.fullmatch(str(item))), ""))
+        if not target or not message_id:
+            return
+        state = payload.get("thread_state")
+        retitle = payload.get("thread_retitle")
+        _thread_autoname().after_post(home, target, {
+            "message_id": message_id,
+            "state": state if isinstance(state, str) else "",
+            "retitle": retitle if isinstance(retitle, str) else "",
+            "decision": isinstance(payload.get("decision"), dict),
+        })
+    except Exception as err:
+        print(f"fm-ext-poster: title inputs skipped: {err}", file=sys.stderr)
 
 
 def decision_threads(home: Path, thread_id: str = "") -> dict[str, dict] | None:
@@ -1527,71 +1204,23 @@ def decision_threads(home: Path, thread_id: str = "") -> dict[str, dict] | None:
             item = json.loads(line)
             threads[str(item["thread_id"])] = {"open": int(item["open"]), "closed": int(item["closed"]),
                                                "last_posted_at": _epoch(item["last_posted_at"]),
+                                               "last_closed_at": _epoch(item["last_closed_at"]),
                                                "keys": tuple(item["keys"])}
         except (ValueError, KeyError, TypeError):
             return None
     return threads
 
 
-def reconcile_thread_states(
-    home: Path | None = None,
-    rename_thread=None,
-    read_thread=None,
-) -> list[str]:
-    """The periodic pass over this home's own topic threads.
+def sweep_thread_titles(home: Path | None = None) -> list[str]:
+    """The periodic pass: refresh every thread's decision input from the ledger.
 
-    docs/configuration.md's topic-thread contract owns auto-clear, re-assert,
-    and retry eligibility. Returns the threads it tried to rename. The watcher
-    catches failures so this pass cannot interrupt reply delivery.
+    It only updates inputs; ``thread_title.run_due`` writes any title change.
     """
     home = home or firstmate_home()
-    directory = state_dir(home) / "ext-outbox"
-    try:
-        paths = sorted(directory.glob(f"*{_THREAD_RECORD_SUFFIX}"))
-    except OSError:
-        return []
-    if not paths:
-        return []
-    channel = dedicated_channel(home)
-    with _THREAD_RECORD_LOCK:
-        since = time.monotonic_ns()
     summaries = decision_threads(home)
     if summaries is None:
         return []
-    decision_view = (since, summaries)
-    touched = []
-    for path in paths:
-        record = _read_thread_record(path)
-        if not record or record.get("creator") != "firstmate":
-            continue
-        if (_creating_request(record).get("channel_id") or "") != channel:
-            continue
-        failed = record.get("rename") or {}
-        retry = failed.get("outcome") == "failed"
-        if retry and not failed.get("retryable"):
-            continue
-        thread_id = record["topic_thread_id"]
-        state = record.get("thread_state")
-        summary = summaries.get(thread_id, {})
-        state_at = None
-        if failed.get("outcome") == "deferred":
-            state = None
-        elif summary.get("open", 0) > 0:
-            state = "needs-you"
-        elif (state == "needs-you" and summary.get("closed", 0) > 0
-              and (record.get("marked_open") or record.get("state_at", 0) <= summary["last_posted_at"])):
-            state = record.get("deferred_state")
-            if state_prefix(state) is None:
-                state = "none"
-            state_at = time.time()
-        elif not retry or state_prefix(state) is None:
-            continue
-        outcome = apply_thread_state(record, state, home, state_at=state_at,
-                                     rename_thread=rename_thread, read_thread=read_thread,
-                                     require_current=True, decision_view=decision_view)
-        if outcome in ("applied", "failed"):
-            touched.append(thread_id)
-    return touched
+    return _thread_title().sweep_decisions(home, summaries)
 
 
 def discord_create_thread(payload: dict, name: str) -> dict:
@@ -1729,8 +1358,7 @@ def ensure_topic_thread(
         return ""
     creator = create_thread or discord_create_thread
     creating_title = _title_for(payload)
-    thread_state = payload.get("thread_state") if isinstance(payload.get("thread_state"), str) else ""
-    # Provenance decides whether a later state change may rename this thread:
+    # Provenance decides whether the title reconciler may rename this thread:
     # this home created it, or it only adopted a thread that already existed.
     creator_provenance = "firstmate"
     try:
@@ -1753,13 +1381,12 @@ def ensure_topic_thread(
             name = existing.get("name")
             if not isinstance(name, str) or not name:
                 return thread_id
-            creating_title = state_thread_name(name, "none")
+            creating_title = _thread_title().split_marker(name)[1]
             if public_topic_name(payload, creating_title, home,
                                  _request_text_for(payload, home), creating_title) != creating_title:
                 return thread_id
         except Exception:
             return thread_id
-        thread_state = ""
         creator_provenance = "adopted"
         receipt = {"thread_id": thread_id}
     except Exception:
@@ -1769,8 +1396,7 @@ def ensure_topic_thread(
         return ""
     try:
         save_request_thread(payload, thread_id, home, topic_name=name,
-                            thread_state=thread_state, creating_title=creating_title,
-                            creator=creator_provenance)
+                            creating_title=creating_title, creator=creator_provenance)
     except Exception:
         return thread_id
     return thread_id
@@ -1831,8 +1457,7 @@ def ensure_open_thread(
     thread_id = str((receipt or {}).get("thread_id") or "")
     if not _SNOWFLAKE.fullmatch(thread_id):
         raise DiscordSendError("ambiguous", "discord thread open returned no thread id")
-    thread_state = payload.get("thread_state") if isinstance(payload.get("thread_state"), str) else ""
-    save_request_thread(payload, thread_id, home, topic_name=name, thread_state=thread_state,
+    save_request_thread(payload, thread_id, home, topic_name=name,
                         creating_title=_title_for(payload), creator="firstmate")
     return thread_id
 
@@ -2255,7 +1880,6 @@ def deliver_one(
     home: Path | None = None,
     react: ReactFn | None = None,
     create_thread: ThreadFn | None = None,
-    rename_thread=None,
 ) -> str:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -2508,10 +2132,10 @@ def deliver_one(
         save_request_thread(payload, thread_id, home, opening_posted=True)
     if payload.get("kind") in ("answer", "final"):
         react_to_request(payload, REACT_DONE, react)
-    # Renaming is not tied to this generation's destination: an in-thread
-    # request posts where it arrived and may still mark that thread's state,
-    # so the call always runs and decides inside what it may touch.
-    maybe_rename_topic_thread(payload, thread_id, home, rename_thread)
+    # The title is not tied to this generation's destination: an in-thread
+    # request posts where it arrived and its thread still gets the inputs, so
+    # the hand-off always runs and decides inside what it may touch.
+    queue_title_inputs(payload, thread_id, ids, home)
     return "sent"
 
 
@@ -2520,13 +2144,12 @@ def drain_outbox(
     home: Path | None = None,
     react: ReactFn | None = None,
     create_thread: ThreadFn | None = None,
-    rename_thread=None,
 ) -> list[str]:
     results = []
     for path in list_pending(home=home):
         try:
             results.append(deliver_one(path, send=send, home=home, react=react,
-                                       create_thread=create_thread, rename_thread=rename_thread))
+                                       create_thread=create_thread))
         except DiscordSendError:
             results.append("failed")
     return results
@@ -2562,12 +2185,12 @@ def outbox_delivery_loop(interval: float) -> None:
 
 
 def outbox_reconcile_loop(interval: float) -> None:
-    """Sweep decision posts and topic threads every ``interval`` seconds.
+    """Sweep decision posts every ``interval`` seconds.
 
     Clicks settle posts locally, so their edits follow within a cycle; posts
     closed on another channel need a ledger read and are swept on the slower
-    cadence, followed by the topic-thread pass that clears answered threads
-    and retries failed renames.
+    cadence, followed by the pass that refreshes each topic thread's decision
+    input for the title reconciler.
     """
     last_full = 0.0
     while True:
@@ -2576,7 +2199,17 @@ def outbox_reconcile_loop(interval: float) -> None:
             last_full = time.monotonic()
         _run_step("posts", lambda: _reconcile_posts_step(full))
         if full:
-            _run_step("threads", reconcile_thread_states)
+            _run_step("threads", sweep_thread_titles)
+        time.sleep(interval)
+
+
+def thread_title_loop(interval: float) -> None:
+    """Run the title reconciler for every due thread every ``interval`` seconds.
+
+    This is the only thread that writes topic-thread titles.
+    """
+    while True:
+        _run_step("titles", lambda: _thread_title().run_due())
         time.sleep(interval)
 
 
@@ -2600,3 +2233,6 @@ def start_outbox_watcher(interval: float | None = None) -> None:
                      name="fm-ext-outbox-delivery", daemon=True).start()
     threading.Thread(target=outbox_reconcile_loop, args=(wait,),
                      name="fm-ext-outbox-reconcile", daemon=True).start()
+    threading.Thread(target=thread_title_loop, args=(wait,),
+                     name="fm-ext-thread-title", daemon=True).start()
+    _thread_autoname().start_catch_up()

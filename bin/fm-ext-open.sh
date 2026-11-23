@@ -27,7 +27,7 @@
 # no request text to fall back to. The first message is the request's
 # answer generation 1, so later posts use bin/fm-ext-emit.sh with the printed
 # request id and --kind followup or final from generation 1, including
-# --thread-state renames; without --thread-state the first message carries
+# --thread-state markers; without --thread-state the first message carries
 # state none, because an emitted answer always names its state. A captain
 # reply inside the thread is an ordinary
 # in-thread request. --media attaches screened media to that first message

@@ -3563,7 +3563,7 @@ def blocking_sweep(full=False):
 real_drain = poster.drain_outbox
 poster.drain_outbox = lambda **kwargs: real_drain(send=send, home=home)
 poster.reconcile_decision_posts = blocking_sweep
-poster.reconcile_thread_states = lambda **kwargs: []
+poster.sweep_thread_titles = lambda home=None: []
 poster.decisions.ensure_click_route = lambda: False
 
 os.environ["FM_EXT_OUTBOX_POLL_SECS"] = "0.05"
@@ -3601,6 +3601,7 @@ import json, os, sys, tempfile, threading, time
 from pathlib import Path
 sys.path.insert(0, os.environ["PYTHONPATH"])
 import outbox_poster as poster
+import thread_title as title
 home = Path(sys.argv[1])
 outbox = home / "state" / "ext-outbox"
 outbox.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -3608,7 +3609,7 @@ path = outbox / f"{os.environ['SLUG']}.thread.json"
 
 # Hold every writer at the point just before it publishes its record. Two
 # writers that read the same prior therefore both write from it unless the
-# records are serialized, which is how the delivery and sweep paths raced.
+# records are serialized.
 real_mkstemp = tempfile.mkstemp
 def gated_mkstemp(*args, **kwargs):
     time.sleep(0.05)
@@ -3617,13 +3618,10 @@ poster.tempfile.mkstemp = gated_mkstemp
 
 updates = [
     {"topic_name": "Name One"},
-    {"thread_state": "needs-you"},
     {"creating_title": "Title Three"},
-    {"retitle": "Retitle Four"},
     {"creator": "firstmate"},
-    {"state_at": 1234.5},
-    {"rename": {"name": "Name Seven", "at": 1, "outcome": "applied"}},
-    {"marked_open": True},
+    {"title": {"base": "Base Four"}},
+    {"opening_posted": True},
 ]
 
 def writer(update):
@@ -3638,176 +3636,45 @@ for thread in threads:
 record = json.loads(path.read_text())
 missing = [key for key in dict.fromkeys(k for update in updates for k in update)
            if key not in record]
-poster.thread_name_for = lambda payload, home: poster._read_thread_record(path).get("retitle") or "Topic"
+poster.tempfile.mkstemp = real_mkstemp
+
+# The reconciler's Discord write runs outside the record lock: a reply's input
+# saved meanwhile is neither blocked nor lost, and the thread is due again.
 poster.dedicated_channel = lambda home: os.environ["RID"].split(":")[2]
-renamed = []
-remote = {}
-def rename(thread, name):
-    renamed.append(name)
-    remote[thread] = name
-
-def seed(state="needs-you", failed=None):
-    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
-        topic_name="Topic", thread_state=state, creator="firstmate",
-        state_at=1, marked_open=True, retitle="", rename=failed or {"outcome": "applied"})
-
-def summaries(home, thread_id=""):
-    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
-                              thread_state="done", state_at=3)
-    return {os.environ["THREAD"]: {"open": 0, "closed": 1, "last_posted_at": 2}}
-
-real_summaries = poster.decision_threads
-seed()
-poster.decision_threads = summaries
-poster.reconcile_thread_states(home, rename_thread=rename)
-assert poster._read_thread_record(path)["thread_state"] == "done"
-assert not renamed
-
-seed("done", {"outcome": "failed", "retryable": True})
-real_apply = poster.apply_thread_state
-def interleaved_apply(recorded, *args, **kwargs):
-    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"],
-                              thread_state="needs-you", state_at=4)
-    return real_apply(recorded, *args, **kwargs)
-poster.apply_thread_state = interleaved_apply
-poster.reconcile_thread_states(home, rename_thread=rename)
-assert poster._read_thread_record(path)["thread_state"] == "needs-you"
-assert not renamed
-poster.apply_thread_state = real_apply
-
-for operation in ("read", "rename"):
-    seed()
-    entered, release, saved = threading.Event(), threading.Event(), threading.Event()
-    def block(*args):
-        entered.set()
-        assert release.wait(5)
-        if len(args) == 2:
-            rename(*args)
-        return "Topic"
-    def deliver():
-        assert real_apply(poster._read_thread_record(path), "done", home,
-                          retitle="Delivered title", rename_thread=rename) == "applied"
-        saved.set()
-    sweep = threading.Thread(target=real_apply,
-        args=(poster._read_thread_record(path), "none", home),
-        kwargs={"read_thread": block if operation == "read" else lambda tid: "",
-                "rename_thread": block if operation == "rename" else rename,
-                "require_current": True})
-    sweep.start()
-    assert entered.wait(3)
-    delivery = threading.Thread(target=deliver)
-    delivery.start()
-    try:
-        assert saved.wait(1), "Discord work blocked a delivery record save"
-    finally:
-        release.set()
-        sweep.join(5)
-        delivery.join(5)
-    assert poster._read_thread_record(path)["thread_state"] == "done"
-    assert poster._read_thread_record(path)["retitle"] == "Delivered title"
-    assert remote[os.environ["THREAD"]] == "✅ Delivered title"
-    assert poster._read_thread_record(path)["topic_name"] == remote[os.environ["THREAD"]]
-
-seed()
-entered, release = threading.Event(), threading.Event()
-def delivery_rename(*args):
+poster.decision_threads = lambda home, thread_id="": {}
+poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"], topic_name="Topic",
+                          creator="firstmate", title={})
+title.record_explicit(home, os.environ["THREAD"], "done", "", "900000000000000001")
+remote = {os.environ["THREAD"]: "Topic"}
+entered, release, saved = threading.Event(), threading.Event(), threading.Event()
+def blocked_write(thread_id, name):
     entered.set()
     assert release.wait(5)
-    rename(*args)
-delivery = threading.Thread(target=real_apply,
-    args=(poster._read_thread_record(path), "done", home),
-    kwargs={"rename_thread": delivery_rename, "state_at": 10})
-delivery.start()
+    remote[thread_id] = name
+    return {}
+writing = threading.Thread(target=title.reconcile, args=(home, os.environ["THREAD"]),
+                           kwargs={"rename": blocked_write, "read_thread": remote.get})
+writing.start()
 assert entered.wait(3)
+def reply():
+    title.record_explicit(home, os.environ["THREAD"], "needs-you", "", "900000000000000002")
+    saved.set()
+delivery = threading.Thread(target=reply)
+delivery.start()
 try:
-    assert real_apply(poster._read_thread_record(path), "none", home,
-        rename_thread=rename, read_thread=lambda tid: "other",
-        require_current=True) == "applied"
+    assert saved.wait(1), "a Discord write blocked a reply's record save"
 finally:
     release.set()
+    writing.join(5)
     delivery.join(5)
-assert poster._read_thread_record(path)["thread_state"] == "done"
-assert poster._read_thread_record(path)["state_at"] == 10
+after = poster._read_thread_record(path)
 assert remote[os.environ["THREAD"]] == "✅ Topic"
-
-assert real_apply(poster._read_thread_record(path), "needs-you", home,
-                  rename_thread=rename) == "applied"
-assert poster._read_thread_record(path)["thread_state"] == "needs-you"
-
-(home / "state" / "route-fix.status").write_text("needs-decision [key=publication]: pick a route\n")
-publication = {"slug": os.environ["SLUG"], "kind": "followup", "generation": 2}
-progress = {"request_id": os.environ["RID"], "topic_thread_id": os.environ["THREAD"],
-            "decision": {"key": "key:route-fix:publication"},
-            "buttons": True, "discord_message_ids": ["900000000000000001"], "posted_at": 2}
-closed = dict(publication, generation=1)
-poster.write_progress(closed, dict(progress, posted_at=1), home)
-(outbox / f"{os.environ['SLUG']}.followup.1.settled.json").write_text('{"kind":"decided"}')
-published_path = outbox / f"{os.environ['SLUG']}.followup.2.progress.json"
-
-def publish():
-    poster.write_progress(publication, progress, home)
-
-for phase in ("summary", "apply", "rename"):
-    published_path.unlink(missing_ok=True)
-    seed()
-    renamed.clear()
-    remote[os.environ["THREAD"]] = "❓ Topic"
-    def snapshot(home, thread_id=""):
-        if thread_id:
-            return real_summaries(home, thread_id)
-        summary = real_summaries(home)
-        assert summary[os.environ["THREAD"]]["open"] == 0
-        if phase == "summary":
-            publish()
-        return summary
-    poster.decision_threads = snapshot
-    def publish_before_apply(*args, **kwargs):
-        publish()
-        return real_apply(*args, **kwargs)
-    poster.apply_thread_state = publish_before_apply if phase == "apply" else real_apply
-    entered, release = threading.Event(), threading.Event()
-    def clearing_rename(*args):
-        entered.set()
-        assert release.wait(5)
-        rename(*args)
-    if phase == "rename":
-        sweep = threading.Thread(target=poster.reconcile_thread_states, args=(home,),
-            kwargs={"rename_thread": clearing_rename, "read_thread": remote.get})
-        sweep.start()
-        assert entered.wait(3)
-        try:
-            publish()
-        finally:
-            release.set()
-            sweep.join(5)
-        assert not sweep.is_alive()
-    else:
-        poster.reconcile_thread_states(home, rename_thread=rename,
-                                       read_thread=remote.get)
-        assert not renamed
-    assert real_summaries(home)[os.environ["THREAD"]]["open"] == 1
-    assert poster._read_thread_record(path)["thread_state"] == "needs-you"
-    assert remote[os.environ["THREAD"]] == "❓ Topic"
-    assert poster._read_thread_record(path)["marked_open"]
-poster.apply_thread_state = real_apply
-poster.decision_threads = real_summaries
-
-published_path.unlink()
-seed()
-renamed.clear()
-remote[os.environ["THREAD"]] = "❓ Topic"
-def unrelated_publication(home, thread_id=""):
-    summary = real_summaries(home, thread_id)
-    if not thread_id:
-        poster.write_progress(dict(publication, generation=3),
-            dict(progress, topic_thread_id="888888888888888888",
-                 decision={"key": "key:route-fix:unrelated"}), home)
-    return summary
-poster.decision_threads = unrelated_publication
-poster.reconcile_thread_states(home, rename_thread=rename, read_thread=remote.get)
-assert renamed == ["Topic"], renamed
-assert poster._read_thread_record(path)["thread_state"] == "none"
-poster.decision_threads = real_summaries
+assert after["topic_name"] == "✅ Topic"
+assert after["title"]["verdict"]["status"] == "open-question", after
+assert after["title"]["due_at"] > 0, "the newer input must leave the thread due"
+assert title.reconcile(home, os.environ["THREAD"], rename=blocked_write, read_thread=remote.get,
+                       now=time.time() + title.PACE_SECS + 1) == "applied"
+assert remote[os.environ["THREAD"]] == "❓ Topic"
 
 print(json.dumps({"missing": missing, "record": record}))
 PY
@@ -3815,10 +3682,10 @@ PY
   printf '%s\n' "$out" | jq -e '.missing == []' >/dev/null \
     || fail "concurrent thread-record writers must lose no update: $out"
   printf '%s\n' "$out" | jq -e '
-    .record.topic_name == "Name One" and .record.thread_state == "needs-you"
-    and .record.creator == "firstmate" and .record.marked_open == true' >/dev/null \
+    .record.topic_name == "Name One" and .record.title.base == "Base Four"
+    and .record.creator == "firstmate" and .record.opening_posted == true' >/dev/null \
     || fail "concurrent thread-record writers must keep every value: $out"
-  pass "52 concurrent sweeps and deliveries keep every thread-record update"
+  pass "52 concurrent title writes and deliveries keep every thread-record update"
 }
 
 # --- 53. a delivery receipt carries its queue times ------------------------

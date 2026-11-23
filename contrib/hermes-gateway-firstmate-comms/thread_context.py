@@ -35,7 +35,6 @@ _SNOWFLAKE = re.compile(r"^[0-9]+$")
 _MESSAGE_DEFAULT = 0
 _MESSAGE_REPLY = 19
 _PROJECT_SEPARATOR = " · "
-_STATE_MARKERS = ("❓ ", "✅ ")
 PROJECT_UNKNOWN = "unknown"
 # Mirrors bin/fm-ext-intake.sh, which owns the trimming budget. The plugin only
 # needs it to know when it has fetched enough.
@@ -92,11 +91,7 @@ def thread_name(event: object, dest: dict) -> str:
 
 def project_from_name(name: str) -> str:
     """The project in a "<Project> · <topic>" thread name, or ""."""
-    text = (name or "").strip()
-    for marker in _STATE_MARKERS:
-        if text.startswith(marker):
-            text = text[len(marker):]
-            break
+    text = _poster()._thread_title().split_marker((name or "").strip())[1]
     head, separator, _topic = text.partition(_PROJECT_SEPARATOR)
     head = head.strip()
     if not separator or not head or len(head) > 60:

@@ -20,6 +20,10 @@ its own home while the process's ``HERMES_HOME`` still names the base Hermes
 home, so a subprocess reading ``HERMES_HOME`` alone would refuse the captain's
 own images. The home is recorded once at registration from the profile Hermes
 loaded the plugin for, never guessed from the environment here.
+
+It strips the typesafe.ai key (``TYPESAFE_API_KEY`` and its private alias)
+from every subprocess by default, so a gateway started with that key in its
+environment hands it only to the thread judge, the one caller that opts in.
 """
 
 from __future__ import annotations
@@ -45,6 +49,13 @@ PROBE_TIMEOUT_SECS = 5.0
 # gateway often enough to be worth asking twice.
 _shell_dirs: dict[str, tuple[str, ...]] = {}
 
+# The typesafe.ai key and the private copy bin/fm-jev-lib.sh callers keep.
+JEV_KEY_NAMES = ("TYPESAFE_API_KEY", "TYPESAFE_API_KEY_PRIVATE")
+
+
+def _without_jev_key() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key not in JEV_KEY_NAMES}
+
 
 def set_plugin_hermes_home(home) -> None:
     """Record the Hermes home this plugin was loaded for.
@@ -57,9 +68,15 @@ def set_plugin_hermes_home(home) -> None:
     _plugin_hermes_home = Path(home) if home else None
 
 
-def firstmate_env(home, root) -> dict[str, str]:
-    """The environment for every Firstmate subprocess."""
-    env = os.environ.copy()
+def firstmate_env(home, root, *, jev: bool = False) -> dict[str, str]:
+    """The environment for every Firstmate subprocess.
+
+    ``jev`` keeps an environment-provided ``TYPESAFE_API_KEY`` for the one
+    caller that asks Jev; every other subprocess runs without it.
+    """
+    env = _without_jev_key()
+    if jev and os.environ.get("TYPESAFE_API_KEY"):
+        env["TYPESAFE_API_KEY"] = os.environ["TYPESAFE_API_KEY"]
     env["FM_HOME"] = str(home)
     env["FM_ROOT_OVERRIDE"] = str(root)
     # Only a home recorded at registration may name attachment roots; an
@@ -125,6 +142,7 @@ def _probe(shell: str) -> tuple[str, ...]:
             capture_output=True,
             text=True,
             timeout=PROBE_TIMEOUT_SECS,
+            env=_without_jev_key(),
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:

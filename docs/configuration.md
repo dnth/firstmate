@@ -600,7 +600,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
-It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay contract, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay contract, and the shared Jev client in [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh) reads the line with the Relay accessor in `bin/fm-env-lib.sh`.
+The same key turns on [topic-thread judging](#thread-title-reconciler), which uses the same client and key check.
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
 Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFIG_OVERRIDE` selects the config directory for tests and specialized setup like the other scripts.
@@ -634,9 +635,9 @@ The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captai
 By accepted design, a `clear` result does not enforce general catalog/authentication, reasoning-class, or completion-runway gates; mapped OMP accounts must pass the catalog check owned by the script header.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
-The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
-The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific credential setting.
+The resolver, the thread judge, and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
+The key reaches `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
+[`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh) fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, and request timeout at 5 seconds for every caller; the resolver adds its default confidence floor of 0.6, and `TYPESAFE_API_KEY` is its only resolver-specific credential setting.
 Typed resolution validates and reads `quota-axi --json` according to the schema-version and account-lane contract in the [`fm-dispatch-resolve.sh` header](../bin/fm-dispatch-resolve.sh); an incompatible snapshot is an ordinary `error` outcome that returns the intake to firstmate, so the `FM_QUOTA_AXI_MIN` floor is unchanged.
 `config/quota-account-lanes.json` is an optional local, gitignored file that turns one profile on a multi-account provider into one candidate per account, so a dispatch can spend whichever of the captain's accounts has the most headroom instead of whichever account its single credential happens to be.
 It maps a quota-axi provider family to the concrete provider ids that spend each of that family's accounts, keyed by the `accountKey` the snapshot reports:
@@ -1131,32 +1132,13 @@ A top-level message request in the configured dedicated channel creates a Discor
 Replies to Firstmate posts outside the dedicated channel keep their existing routing without creating a thread.
 Names use Firstmate's title from the reply that successfully creates the thread; older queued payloads without a title retain the request-text fallback, then a label-plus-time fallback.
 [`bin/fm-ext-topic.sh`](../bin/fm-ext-topic.sh) owns the exact derivation, bounds, and shared title screen.
-The poster validates names against the stored request text, creating title, and any screened retitle before creating or renaming a thread.
+The poster validates names against the stored request text and creating title before creating a thread.
 Legacy label-plus-time names remain valid for the same source message when no valid creating title takes precedence, including contexts recorded before request text was retained.
 Anything else falls back to the fresh derivation.
-Once a thread exists, a plain later `--thread-title` does not replace its name; an explicit retitle sets its new base even when both title flags are present.
-A retitle passes the same screen and bounds as a creating title and becomes the stored base name for later markers, auto-clear, and reconciliation.
-With no open decision or explicit state on the same reply, a retitle preserves the marker Discord currently shows (`❓ `, `✅ `, or none), falling back to the recorded state when the live name cannot be read.
-The [emit header and help](../bin/fm-ext-emit.sh) own the title flags and rejection warnings, the [ask header](../bin/fm-ext-ask.sh) owns their passthrough, and the [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#name-the-thread-then-mark-its-state) owns when Firstmate retitles.
-A retitle shares a marker's eligibility and is equally best effort: it only ever reaches a thread this home created in the dedicated channel, and a refused, unusable, or ineligible one is ignored with the reply text still posted.
-A reply may carry a thread state (`needs-you`, `done`, `none` via `bin/fm-ext-emit.sh`).
+Once a thread exists, a plain later `--thread-title` never replaces its name; every later title change belongs to the [thread title reconciler](#thread-title-reconciler).
+A reply may carry a thread state (`needs-you`, `done`, `none`) and a retitle through `bin/fm-ext-emit.sh`; the [emit header and help](../bin/fm-ext-emit.sh) own the flags and rejection warnings, the [ask header](../bin/fm-ext-ask.sh) owns their passthrough, and the [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#name-the-thread-then-mark-its-state) owns when Firstmate sets them.
 Emit requires a title on any reply that may create the thread and an explicit state on every `answer` and `final`; the [emit header](../bin/fm-ext-emit.sh) owns both refusals.
 The [Decision buttons](#decision-buttons) section covers how to record choices and free-text questions, and when to use `--no-buttons`.
-The poster renames the existing topic thread to prefix `❓ `, `✅ `, or the bare name to match the requested state.
-Any open decision keeps the thread marked `❓ ` and defers a later reply's `none` or `done` until the last decision closes.
-If the decision ledger is unavailable, the poster leaves the live name intact and saves the requested marker or retitle for reconciliation once the ledger can be read.
-Before trusting a stored name that already matches, the poster reads the name Discord shows, so a manual rename never wedges a later marker; when that name cannot be read it renames anyway.
-Both the request that created the thread and a later request of any origin that arrived inside it - a typed message, a decision-button click, or a `/fm` command - may mark the state: the in-thread request resolves the thread and its base name from the thread's own record, so a marker never stacks on an earlier one.
-Only a thread this home created in the dedicated channel is renamed; a captain-made thread, a non-dedicated channel, or a DM is never renamed, and once a thread's record has aged out it can no longer be identified and is left alone.
-A decision-associated `needs-you` clears itself: once every decision post in the thread is closed in the ledgers - a click Firstmate recorded, a typed answer, or a captain call answered - the gateway's 30-second full decision sweep reconciles the posts, then applies the state a later reply asked for while that decision was open (`✅ ` for `done`, the bare name otherwise), so Firstmate never has to emit a separate `none`.
-The same sweep restores a missing `❓ ` on an eligible Firstmate-created thread with an open decision, under the same best-effort and archived-thread rules as a reply's rename.
-It uses the current Discord title for the marker repair when it can read it, with the stored title as a fallback and any pending explicit retitle taking precedence.
-A `needs-you` reminder while a decision is open belongs to that decision and preserves any deferred state.
-Only a `needs-you` marked when no decision post in the thread was open and after its newest one was asked is a newer question that stands until a reply clears it.
-[`bin/fm-ext-decision.sh`](../bin/fm-ext-decision.sh) `threads` owns which decision posts count as open.
-A rename failure, including a rate limit, is logged, recorded, and never blocks or loses the reply.
-The record keeps the wanted state and the failure; the next reply in that thread retries any failed rename, and the periodic sweep also retries one that did not fail permanently.
-Permanent failures, such as an archived thread refusing the rename, wait for the next reply; the periodic sweep never unarchives a thread just to change its marker.
 A request that arrives inside a thread stays in that thread: no new thread is created and the link is kept, so a follow-up conversation stays in one place.
 
 Firstmate can also open a topic thread no captain request started, for example one thread per tracked item, with [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh).
@@ -1174,15 +1156,63 @@ Slash commands are unchanged: `/fm` replies post to their originating thread (th
 For request-created threads, a thread-creation failure (such as missing permission) falls back to posting in place and never blocks or loses the reply; a later generation retries the create, and Discord error 160004 reuses the existing thread whose id equals the source message id.
 On that existing-thread path, the poster fetches and validates the winning name before recording the thread as adopted for reply routing.
 If that lookup or validation fails, replies still route to the existing thread but no new naming record is saved.
-A thread is renamed only with positive evidence that this home created it: a record that says so, or, for a record written before that provenance was kept, a Discord reply naming this bot as the thread's owner.
-An adopted thread, another user's thread, an unknown owner, and a failed ownership lookup are all left alone, so a captain-made thread never takes a marker.
+A thread's title changes only with positive evidence that this home created it: a record that says so, or, for a record written before that provenance was kept, a Discord reply naming this bot as the thread's owner.
+An adopted thread, another user's thread, an unknown owner, a failed ownership lookup, a non-dedicated channel, and a DM are all left alone, so a captain-made thread never takes a marker; once a thread's record has aged out it can no longer be identified and is left alone.
 Once any chunk has posted, retries keep that generation's original destination even if another generation subsequently creates the topic thread.
 Creating a topic thread never widens who the allowlist admits.
 The [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) owns the unchanged public-safety rules for reply text.
 The intake records the fallback name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record so every generation shares the same thread.
-[`save_thread_record` in the poster](../contrib/hermes-gateway-firstmate-comms/outbox_poster.py) owns the record fields.
-A marker applied from inside the thread, or by the periodic sweep, updates that same record rather than writing a second one, so the next change on any path builds on the same name.
-The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, retitle, marker, auto-clear, drift, rename-retry, opened-thread, and unchanged-allowlist coverage.
+[`save_thread_record` in the poster](../contrib/hermes-gateway-firstmate-comms/outbox_poster.py) owns the record fields, and its `title` object holds the reconciler's inputs and bookkeeping.
+The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, explicit-state, retitle, auto-clear, drift, retry, opened-thread, and unchanged-allowlist coverage.
+
+### Thread title reconciler
+
+One reconciler per topic thread is the only code that writes a thread's Discord title; creating the thread names it once, and every later change goes through the reconciler in [`thread_title.py`](../contrib/hermes-gateway-firstmate-comms/thread_title.py).
+It keeps these inputs in the thread's record:
+
+- the open decisions in the thread and the newest closure time, read from the decision ledger through `bin/fm-ext-decision.sh threads`, whose header owns which posts count as open and where a closure time comes from;
+- the latest status verdict, with the Firstmate message it was judged through;
+- a new base name from the naming model or an explicit retitle;
+- the captain's own words, once seen.
+
+The decision sweep, the after-post judge, and the one-time catch-up only update those inputs; none of them renames a thread.
+
+**Status source.**
+With judging on, after every Firstmate post in an eligible thread a background worker reads the thread's text through that post and asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
+When the topic drifted and the captain has not named the thread, [`bin/fm-ext-thread-name.sh`](../bin/fm-ext-thread-name.sh) proposes a screened `<Project> · <topic>` base.
+Model input is the thread's message text, which may include private interaction text.
+Only the newest queued post of a thread is judged, and a reply's explicit state and retitle do not touch the title while judging is on.
+With judging off, the reply's explicit state is the status (`needs-you` as `open-question`, `done`, or `none` for no marker) and a screened retitle is the new base.
+Judging, naming, and even the on-or-off check run on a background worker after the reply and its receipt are durable, so they never delay a reply.
+
+**Markers.**
+Precedence is `❓ ` > `⚠️ ` > `⏳ ` > `✅ ` > no marker.
+`❓ ` shows for any open decision and for an `open-question` status, including a plain question with no button; `⚠️ ` comes only from a Jev `blocked` status, never from worker status events; `⏳ ` is `running` and `✅ ` is `done`.
+A question that comes with a decision post, or while a decision is open, belongs to that decision: it never replaces a kept status, and once the ledger closes the last decision it shows no marker.
+So a `done` judged while a decision is open is kept and lands at the next permitted slot after the last decision closes.
+A Jev verdict is stale once a newer Firstmate message in that thread has been accepted by Discord, counted from chunk progress rather than only whole-delivery receipts; a stale verdict is refused when recorded and never applied.
+
+**The captain's words.**
+The reconciler reads the live title before every write and never writes when it cannot.
+When the live base differs from the last base this home wrote, the captain renamed the thread: his words stay the base on that thread for good and only the marker changes after that, even when the topic drifts, and the naming model is not asked.
+A marker the captain removes stays off until the marker the inputs ask for changes.
+
+**Pace and limits.**
+A title is written only when the desired title differs from the live one.
+Our pace is at most one title change per thread per 10 minutes, stamped when a write lands; when the slot opens, the newest desired title is written and any intermediate one is skipped.
+Only the `❓ ` an open decision button asks for skips that pace, and only the marker: a base change waits for the next slot.
+Discord's limits always hold the next write, including that `❓ `: an `X-RateLimit-Remaining` of 0 waits out `X-RateLimit-Reset-After`, and an HTTP 429 waits out its `retry_after`; no Discord number is hard-coded.
+A transient failure or an unreadable title is retried on the 30-second decision sweep, a permanent refusal such as an archived thread waits for the thread's next input, and a failure of Jev, the naming model, or Discord leaves the title as it is and never blocks or loses a reply.
+The reconciler runs on its own gateway thread, and a restart resumes recorded waits.
+
+**Catch-up.**
+Once per home with judging on, shortly after the gateway starts, the 10 eligible threads Firstmate posted in most recently are judged once each.
+`state/ext-autoname/catch-up.json` keeps that thread list and each thread's progress, written before the first model call and after each thread, so a restart resumes instead of repeating a finished thread's model calls or renames.
+
+**Judging on or off.**
+Judging is on when [typed dispatch resolution's key](#typed-dispatch-resolution-env-typesafe_api_key) is present; `bin/fm-ext-thread-judge.sh --check` is the one key-presence check, through the shared Jev client in [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh).
+The gateway strips that key from every other subprocess it runs, so only the judge receives it.
+The [thread auto-name regression test](../tests/fm-ext-thread-autoname.test.sh) owns the one-writer, precedence, pace, rate-limit, closure, freshness, captain's-words, catch-up, and off-the-delivery-path coverage.
 
 ### Thread context (name, project, history)
 
@@ -1191,7 +1221,7 @@ The plugin reads three things at intake and `bin/fm-ext-intake.sh` records them 
 
 - `thread_name` is the thread's current name, read from the event's own channel and otherwise from Discord over REST.
   It is omitted when neither answers.
-- `project` comes from the `<Project> · <topic>` prefix of that name, ignoring a `❓ ` or `✅ ` marker.
+- `project` comes from the `<Project> · <topic>` prefix of that name, ignoring any thread marker.
   Without a prefix it is the project of the task linked to the request that opened the thread (the thread's topic record, matched against `ext_request` or `ext_request_slug` in the task's meta), and otherwise `unknown`.
 - `history` is `{status, count, path}` in the inbox record, pointing at the sidecar `state/ext-context/<slug>.history.json` (mode 0600).
   The destination-context record keeps `thread_name`, `project`, and `history` `{status, count}`.
