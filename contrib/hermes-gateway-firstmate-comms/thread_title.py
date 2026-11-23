@@ -498,6 +498,7 @@ def reconcile(home: Path, thread_id: str, *, now: float | None = None, rename=No
     try:
         limits = (rename or discord_write_title)(thread_id, target) or {}
     except RateLimited as err:
+        _log(f"thread {thread_id} waits {err.retry_after:.1f}s for Discord before writing its title")
         return finish("rate-limited", now + err.retry_after, error=str(err),
                       discord_after=now + err.retry_after, pending=None)
     except Exception as err:
