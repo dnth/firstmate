@@ -107,10 +107,6 @@ const doorbellOwners: Map<string, object> =
 	(globalThis as unknown as Record<symbol, Map<string, object>>)[DOORBELL_OWNERS_KEY]
 	??= new Map<string, object>();
 
-// The turn-admission gate that fm-task-model-switch.ts owns (see its header).
-// The doorbell only defers its dispatch while the gate is held and reports a
-// wake it sent that has not opened a turn yet. The literal below must stay in
-// step with the owner's.
 type TurnAdmissionGate = {
 	held: boolean;
 	pending: Promise<void> | undefined;
@@ -120,7 +116,7 @@ type TurnAdmissionGate = {
 	busy: Set<() => boolean>;
 };
 const TURN_ADMISSION_KEY = Symbol.for("firstmate.turn-admission");
-function turnAdmissionGate(): TurnAdmissionGate {
+export function turnAdmissionGate(): TurnAdmissionGate {
 	const registry = globalThis as unknown as Record<symbol, TurnAdmissionGate | undefined>;
 	return (registry[TURN_ADMISSION_KEY] ??= {
 		held: false,

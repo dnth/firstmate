@@ -116,11 +116,10 @@
 #                                 not land. Both values are reported, nothing
 #                                 is claimed rolled back, and meta follows the
 #                                 live state.
-#                raced            the switch landed and read back as the target,
-#                                 but a provider request was prepared while it
-#                                 applied (a turn OMP started on its own), so
-#                                 that request may have used either model.
-#                                 Meta follows the live state.
+#                raced            a provider request was prepared during the
+#                                 switch attempt and may have used either model.
+#                                 The underlying outcome and live readback
+#                                 determine whether meta follows the live state.
 #                superseded       a newer request replaced it before it ran.
 #                cancelled        the wait expired and the request was withdrawn
 #                                 by an atomic rename before the worker claimed
@@ -134,7 +133,8 @@
 #                                 unfolded and `switch-model --status` retries.
 #              `switch-model --status` folds every acknowledgement not yet
 #              applied to meta - including a late one - into task meta, and
-#              lists unresolved requests (exit 1 while any remain). Every other
+#              lists unresolved requests (exit 1 while any remain or a race is
+#              found in a newly reconciled or latest result). Every other
 #              verb folds them first too, so meta never stays divergent from
 #              the live model without being reported.
 #              Only OMP ships and scouts have this channel. Any other harness,
@@ -719,23 +719,13 @@ ms_path() {  # <request-id> <suffix>
   printf '%s/model-switch.%s.%s' "$MS_DIR" "$1" "$2"
 }
 
-ms_effort_valid() {
-  case "${1-}" in
-    low|medium|high|xhigh|max) return 0 ;;
-  esac
-  return 1
-}
-
 ms_now_ms() {
   perl -MTime::HiRes=time -e 'printf "%d", time() * 1000' 2>/dev/null \
     || printf '%s000' "$(date +%s)"
 }
 
-# Milliseconds on the monotonic clock, so a wall-clock step never lengthens or
-# shortens a wait. It falls back to the wall clock only where perl is missing.
 ms_mono_ms() {
-  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%d", clock_gettime(CLOCK_MONOTONIC) * 1000' 2>/dev/null \
-    || printf '%s000' "$(date +%s)"
+  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%d", clock_gettime(CLOCK_MONOTONIC) * 1000' 2>/dev/null
 }
 
 # Bounded acquisition of this task's metadata lock: a reconcile that rides on an
@@ -837,7 +827,7 @@ ms_verify_ack() {
 }
 
 ms_fold_ack() {
-  local ack=$1 order=$2 high_water=$3 effort=
+  local ack=$1 order=$2 high_water=$3
   MS_FOLD_UPDATED=0
   ms_read_ack "$ack" || return 1
   [ "$MS_A_GEN" = "$MS_SPAWN_GEN" ] || return 2
@@ -846,10 +836,9 @@ ms_fold_ack() {
   case "$MS_A_OUTCOME" in
     applied|partial)
       if [ "$order" -gt "$high_water" ]; then
-        if ms_effort_valid "$MS_A_AFTER_THINKING"; then effort=$MS_A_AFTER_THINKING; fi
         if [ "$MS_A_AFTER_MODEL" != "$(fm_meta_get "$META" model)" ] \
-           || [ "$effort" != "$(fm_meta_get "$META" effort)" ]; then
-          ms_meta_apply "$MS_A_AFTER_MODEL" "$effort" || return 3
+           || [ "$MS_A_AFTER_THINKING" != "$(fm_meta_get "$META" effort)" ]; then
+          ms_meta_apply "$MS_A_AFTER_MODEL" "$MS_A_AFTER_THINKING" || return 3
           MS_FOLD_UPDATED=1
         fi
         # Always republished for the newest verified receipt: a fold that
@@ -871,9 +860,26 @@ ms_unfolded_acks() {
   done | LC_ALL=C sort -n
 }
 
+ms_ack_state() {
+  if [ "$MS_A_RACED" = true ]; then
+    printf 'raced'
+  else
+    printf '%s' "$MS_A_OUTCOME"
+  fi
+}
+
+ms_report_race() {
+  local detail=${MS_A_DETAIL//\"/\'}
+  printf 'raced %s request=%s outcome=%s target=%s model=%s->%s effort=%s->%s effort-requested=%s boundary=%s reason=%s detail="%s" meta=%s note="a provider request was prepared during the switch attempt; it may have used either model"\n' \
+    "$ID" "$MS_A_ID" "$MS_A_OUTCOME" "${MS_A_TARGET_MODEL:--}" "${MS_A_BEFORE_MODEL:--}" "${MS_A_AFTER_MODEL:--}" \
+    "${MS_A_BEFORE_THINKING:--}" "${MS_A_AFTER_THINKING:--}" "${MS_A_TARGET_EFFORT:--}" "${MS_A_BOUNDARY:--}" \
+    "${MS_A_REASON:--}" "$detail" "$1"
+}
+
 reconcile_model_switch() {
   local through=${1:-} at ack rc high_water=-1 folded=() f
   MS_RECONCILED=0
+  MS_RECONCILED_RACED=0
   [ -d "$MS_DIR" ] && [ ! -L "$MS_DIR" ] || return 0
   for f in "$MS_DIR"/model-switch.*.ack.json.folded; do
     [ ! -f "$f" ] || folded+=("$f")
@@ -892,6 +898,12 @@ reconcile_model_switch() {
     rc=0
     ms_fold_ack "$ack" "$at" "$high_water" || rc=$?
     [ "$ack" != "$through" ] || return "$rc"
+    if [ "$rc" -eq 0 ] && [ "$(ms_ack_state)" = raced ]; then
+      MS_RECONCILED_RACED=1
+      ms_report_race "reconciled(model=$(fm_meta_get "$META" model) effort=$(fm_meta_get "$META" effort))" >&2
+    elif [ "$rc" -eq 3 ] && [ "$(ms_ack_state)" = raced ]; then
+      ms_report_race stale >&2
+    fi
     case "$rc" in
       0)
         MS_RECONCILED=$((MS_RECONCILED + 1))
@@ -960,6 +972,8 @@ ms_report_ack() {
   reconcile_model_switch "$ack" || fold_rc=$?
   if [ "$fold_rc" -ne 0 ]; then
     ms_read_ack "$ack" || return 1
+    ms_verify_ack
+    if [ "$(ms_ack_state)" = raced ]; then ms_report_race stale >&2; fi
     printf 'meta-stale %s request=%s live-model=%s live-effort=%s reason=fold-failed(status-%s) next="fm-control.sh %s switch-model --status"\n' \
       "$ID" "$rid" "${MS_A_AFTER_MODEL:--}" "${MS_A_AFTER_THINKING:--}" "$fold_rc" "$ID"
     return 1
@@ -974,24 +988,22 @@ ms_report_ack() {
   else
     meta_state=unchanged
   fi
+  if [ "$(ms_ack_state)" = raced ]; then
+    ms_report_race "$meta_state"
+    return 1
+  fi
   detail=${detail//\"/\'}
   case "$verdict" in
     applied)
-      if [ "$MS_A_RACED" = true ]; then
-        printf 'raced %s request=%s model=%s->%s effort=%s->%s boundary=%s verified=extension-readback meta=%s backend=%s endpoint=%s note="a provider request was prepared while the switch applied; that request may have used either model"\n' \
-          "$ID" "$rid" "${MS_A_BEFORE_MODEL:--}" "$MS_A_AFTER_MODEL" "${MS_A_BEFORE_THINKING:--}" "${MS_A_AFTER_THINKING:--}" \
-          "$MS_A_BOUNDARY" "$meta_state" "$BACKEND" "$T"
-        return 1
-      fi
       printf 'switched %s request=%s model=%s->%s effort=%s->%s boundary=%s verified=extension-readback meta=%s backend=%s endpoint=%s\n' \
         "$ID" "$rid" "${MS_A_BEFORE_MODEL:--}" "$MS_A_AFTER_MODEL" "${MS_A_BEFORE_THINKING:--}" "${MS_A_AFTER_THINKING:--}" \
         "$MS_A_BOUNDARY" "$meta_state" "$BACKEND" "$T"
       return 0
       ;;
     partial)
-      printf 'partial %s request=%s target=%s model=%s->%s effort-requested=%s effort-live=%s reason=%s detail="%s" rolled-back=no raced=%s meta=%s\n' \
+      printf 'partial %s request=%s target=%s model=%s->%s effort-requested=%s effort-live=%s reason=%s detail="%s" rolled-back=no meta=%s\n' \
         "$ID" "$rid" "$MS_A_TARGET_MODEL" "${MS_A_BEFORE_MODEL:--}" "$MS_A_AFTER_MODEL" "${NEW_EFFORT:--}" "${MS_A_AFTER_THINKING:--}" \
-        "$reason" "$detail" "$([ "$MS_A_RACED" = true ] && echo yes || echo no)" "$meta_state"
+        "$reason" "$detail" "$meta_state"
       return 1
       ;;
     superseded)
@@ -1007,7 +1019,7 @@ ms_report_ack() {
 }
 
 do_switch_model() {
-  local rid req ack staged started now_ms remaining
+  local rid req ack staged started now_ms remaining reason=deadline-before-boundary
   ms_channel_ready || die "task $ID's worker cannot take a model switch: $MS_CHANNEL_WHY"
   reconcile_model_switch || true
   now_ms=$(ms_now_ms)
@@ -1020,18 +1032,29 @@ do_switch_model() {
            --arg model "$NEW_MODEL" --arg effort "$NEW_EFFORT" --argjson at "$now_ms" \
            '{schema: $schema, id: $id, spawnGen: $gen, model: $model,
              effort: (if $effort == "" then null else $effort end), requestedAtMs: $at}' > "$staged" ) \
-     || ! mv -f -- "$staged" "$req"; then
+  then
     rm -f -- "$staged"
     die "the model-switch request could not be written under $MS_DIR"
   fi
-  started=$(ms_mono_ms)
+  if ! started=$(ms_mono_ms) || [[ ! "$started" =~ ^[0-9]+$ ]]; then
+    rm -f -- "$staged"
+    die "the Perl Time::HiRes monotonic clock is unavailable; no model-switch request was published"
+  fi
+  if ! mv -f -- "$staged" "$req"; then
+    rm -f -- "$staged"
+    die "the model-switch request could not be published under $MS_DIR"
+  fi
   while :; do
+    if ! now_ms=$(ms_mono_ms) || [[ ! "$now_ms" =~ ^[0-9]+$ ]]; then
+      reason=monotonic-clock-unavailable
+      break
+    fi
+    remaining=$(( MODEL_WAIT * 1000 - (now_ms - started) ))
+    [ "$remaining" -gt 0 ] || break
     if [ -f "$ack" ]; then
       ms_report_ack "$ack" "$rid"
       return $?
     fi
-    remaining=$(( MODEL_WAIT * 1000 - ($(ms_mono_ms) - started) ))
-    [ "$remaining" -gt 0 ] || break
     sleep "$(awk -v poll="$POLL" -v left="$remaining" 'BEGIN { nap = left / 1000; if (poll < nap) nap = poll; printf "%.3f", nap }')"
   done
   # One non-waiting look before the outcome is called unknown: a receipt that
@@ -1041,12 +1064,12 @@ do_switch_model() {
     return $?
   fi
   if mv -- "$req" "$(ms_path "$rid" cancelled)" 2>/dev/null; then
-    printf 'cancelled %s request=%s target=%s reason=deadline-before-boundary waited=%ss proof=request-withdrawn-before-claim meta=unchanged\n' \
-      "$ID" "$rid" "$NEW_MODEL" "$MODEL_WAIT"
+    printf 'cancelled %s request=%s target=%s reason=%s waited=%ss proof=request-withdrawn-before-claim meta=unchanged\n' \
+      "$ID" "$rid" "$NEW_MODEL" "$reason" "$MODEL_WAIT"
     return 1
   fi
-  printf 'pending-unknown %s request=%s target=%s state=claimed-unacknowledged waited=%ss live-model=unknown meta=not-updated next="fm-control.sh %s switch-model --status"\n' \
-    "$ID" "$rid" "$NEW_MODEL" "$MODEL_WAIT" "$ID"
+  printf 'pending-unknown %s request=%s target=%s state=claimed-unacknowledged reason=%s waited=%ss live-model=unknown meta=not-updated next="fm-control.sh %s switch-model --status"\n' \
+    "$ID" "$rid" "$NEW_MODEL" "$reason" "$MODEL_WAIT" "$ID"
   return 1
 }
 
@@ -1076,7 +1099,7 @@ ms_request_state() {  # <request-id>
     # A validated folded receipt is the terminal result even when a crash left
     # the claim file behind.
     ms_verify_ack
-    echo "$MS_A_OUTCOME"
+    ms_ack_state
   elif [ -f "$(ms_path "$1" processing)" ]; then
     echo claimed-unacknowledged
   elif [ -f "$(ms_path "$1" request.json)" ]; then
@@ -1111,7 +1134,8 @@ EOF
   printf 'model-switch-status %s meta-model=%s meta-effort=%s channel=%s reconciled=%s unresolved=%s last-request=%s last-state=%s\n' \
     "$ID" "$(fm_meta_get "$META" model)" "$(fm_meta_get "$META" effort)" "$channel" \
     "$MS_RECONCILED" "$unresolved" "$last_id" "$last_state"
-  [ "$channel" = ready ] && [ "$unresolved" -eq 0 ]
+  [ "$channel" = ready ] && [ "$unresolved" -eq 0 ] \
+    && [ "$MS_RECONCILED_RACED" -eq 0 ] && [ "$last_state" != raced ]
 }
 
 # --- transactional relaunch -------------------------------------------------
@@ -1317,6 +1341,12 @@ resolve_relaunch_profile() {
     TARGET_EFFORT=${CONFIG_EFFORT:-default}
   elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
     TARGET_EFFORT=$PRIOR_EFFORT
+    if fm_control_model_switch_supported "$PRIOR_HARNESS" "$KIND"; then
+      case "$TARGET_EFFORT" in
+        low|medium|high|xhigh|max) ;;
+        *) TARGET_EFFORT=default ;;
+      esac
+    fi
   else
     TARGET_EFFORT=default
   fi

@@ -364,8 +364,8 @@ start_responder FM_HOST_THINKING=off
 run_control switch-model --model q/c --wait 08
 expect_code 0 "$CONTROL_RC" "a decimal wait with a leading zero must work: $CONTROL_OUT"
 assert_contains "$CONTROL_OUT" "effort=off->off" "the result must preserve native thinking readback"
-assert_meta q/c "" "native thinking outside the launch vocabulary must clear stale effort"
-pass "switch-model clears stale effort and reports the native thinking level"
+assert_meta q/c off "native thinking outside the launch vocabulary must be recorded"
+pass "switch-model records and reports the native thinking level"
 
 make_case reconciliation
 start_responder
@@ -416,6 +416,49 @@ assert_contains "$(cat "$CASE_DIR/raced.out")" "model=p/a->p/b" "the raced resul
 assert_contains "$(cat "$CASE_DIR/raced.out")" "may have used either model" "the raced result does not say what is uncertain"
 assert_meta p/b medium "raced: meta follows the verified live state"
 pass "switch-model raced: a provider request prepared mid-apply is a typed raced result, not a clean switch, and meta follows the live state"
+
+run_control switch-model --status
+expect_code 1 "$CONTROL_RC" "a folded race must remain visible in status: $CONTROL_OUT"
+assert_contains "$CONTROL_OUT" "last-state=raced" "status treated a folded race as clean"
+
+make_case laterace
+start_responder
+jq -n '{schema:"fm-model-switch.ack.v1", id:"ms-late-race", spawnGen:"gen1", ackSequence:1,
+  outcome:"partial", raced:true, reason:"thinking-mismatch", target:{model:"p/b",effort:"high"},
+  before:{model:"p/a",thinking:"low"}, after:{model:"p/b",thinking:"minimal"}}' \
+  > "$REQ_DIR/model-switch.ms-late-race.ack.json"
+run_control switch-model --status
+expect_code 1 "$CONTROL_RC" "a late raced partial must fail status: $CONTROL_OUT"
+assert_contains "$CONTROL_OUT" "raced $ID request=ms-late-race outcome=partial" "status omitted the race or the partial outcome"
+assert_contains "$CONTROL_OUT" "last-state=raced" "a late race was classified as clean"
+assert_meta p/b minimal "a raced partial still records verified native readback"
+jq -n '{schema:"fm-model-switch.ack.v1", id:"ms-late-refusal", spawnGen:"gen1", ackSequence:2,
+  outcome:"refused", raced:true, reason:"model-mismatch", target:{model:"p/a"},
+  before:{model:"p/b",thinking:"minimal"}, after:{model:"q/c",thinking:null}}' \
+  > "$REQ_DIR/model-switch.ms-late-refusal.ack.json"
+run_control relaunch
+expect_code 1 "$CONTROL_RC" "a relaunch without --note is refused"
+assert_contains "$CONTROL_OUT" "raced $ID request=ms-late-refusal outcome=refused" "lifecycle reconciliation omitted a raced refusal"
+assert_meta p/b minimal "a raced refusal cannot write unverified readback"
+pass "switch-model preserves raced outcomes in status and lifecycle reconciliation"
+
+make_case no_monotonic
+start_responder
+real_perl=$(command -v perl) || fail "Perl is required by the model-switch verb"
+cat > "$FAKEBIN/perl" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC) exit 1 ;; esac
+exec "$real_perl" "\$@"
+SH
+chmod +x "$FAKEBIN/perl"
+run_control switch-model --model p/b --wait 1
+expect_code 1 "$CONTROL_RC" "an unavailable monotonic clock must refuse publication: $CONTROL_OUT"
+assert_contains "$CONTROL_OUT" "monotonic clock is unavailable" "the missing clock was not reported"
+assert_meta p/a low "no monotonic clock"
+run_control switch-model --status
+expect_code 0 "$CONTROL_RC" "the refused publication must leave no unresolved request: $CONTROL_OUT"
+assert_contains "$CONTROL_OUT" "last-request=none" "the worker channel saw a request without a usable deadline"
+pass "switch-model refuses to publish when the monotonic clock is unavailable"
 
 # --- argument contract -------------------------------------------------------
 

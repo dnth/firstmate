@@ -35,15 +35,13 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the worktree and every uncommitted change, without explicitly closing the endpoint. | The backend's recovery-grade classifier reports the agent gone - stopped, or the endpoint positively absent after the command was delivered to an endpoint this plane had already validated and owned. Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same worktree, reusing the endpoint when the backend supports it or allocating a fresh endpoint for OMP secondmates, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint published by the replacement launch, and the durable record names the harness and endpoint that are actually running. |
-| `switch-model` | Change a live OMP worker's model, and optionally its thinking level, inside its current session through its generated extension, never by typing into the terminal. | The extension's readback of the live session equals the target before the recorded `model=` and `effort=` change; a refusal, a partial or raced result, a withdrawn request, or an unacknowledged one is typed and never reported as unchanged unless it provably is. |
+| `switch-model` | Change a live OMP worker's session model. | See the [verb header](../bin/fm-control.sh). |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 An endpoint already missing before exit delivery is refused; disappearance after interrupt alone is also insufficient to confirm exit.
 Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
-
-`switch-model` sends no keystrokes: its request is files that the worker's extension applies only at settled idle, so a busy worker finishes its whole run on the old model first, and [the verb's header](../bin/fm-control.sh) owns the result vocabulary, the wait, and what a timeout reports.
 
 An interrupt is not complete until the composer is empty.
 muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.

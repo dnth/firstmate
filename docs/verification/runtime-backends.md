@@ -1197,16 +1197,17 @@ This record therefore covers the loaded-closure binding, delivery into the live 
 
 ### OMP in-session model switch
 
-The model-switch guard last ran on 2026-11-23 against OMP 18.22.2 and Herdr 0.9.5 on Linux x86_64 in one guarded non-default lab session, from an explicit Git revision, with `opencode-go/deepseek-v4.1-flash` at low effort and `opencode-go/qwen3.8-flash` at medium effort.
+The model-switch guard last ran on 2026-11-23 against OMP 18.22.2 and Herdr 0.9.5 on Linux x86_64 in one guarded non-default lab session with an archived extension and checkout-side control scripts, using `opencode-go/deepseek-v4.1-flash` at low effort and `opencode-go/qwen3.8-flash` at medium effort.
 It launched a real OMP worker through the production `fm-spawn.sh`, drove `fm-control.sh <id> switch-model` and `fm-send.sh` against it, resumed its session with the documented OMP resume command, and compared the global OMP `config.yml` and `models.yml` before and after.
 
+To refresh the result, the current guard extracts one resolved Git commit and runs the Firstmate entry points and helpers from that archive.
+
 ```sh
-HERDR_LAB_HELPER=/home/dnth/Desktop/firstmate/bin/fm-herdr-lab.sh \
-  FM_OMP_MODEL_SWITCH_LIVE_E2E=1 FM_OMP_MODEL_SWITCH_LIVE_REV=HEAD \
+FM_OMP_MODEL_SWITCH_LIVE_E2E=1 FM_OMP_MODEL_SWITCH_LIVE_REV=HEAD \
   bash tests/fm-omp-model-switch-live-e2e.test.sh
 ```
 
-Observed bounded output, with the request ids and the lab session name shortened:
+Observed bounded output from the earlier run, with the request ids and the lab session name shortened:
 
 ```text
 ok - live OMP worker spawned on opencode-go/deepseek-v4.1-flash (low) with its model-switch channel active (omp/18.22.2)

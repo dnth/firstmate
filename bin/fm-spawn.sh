@@ -541,6 +541,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
     if [ "$EFFORT_SET" -eq 0 ]; then
       EFFORT=$RELAUNCH_PRIOR_EFFORT
       case "$EFFORT" in default|-) EFFORT= ;; esac
+      if [ "$RELAUNCH_PRIOR_HARNESS" = omp ]; then
+        case "$EFFORT" in
+          low|medium|high|xhigh|max) ;;
+          *) EFFORT= ;;
+        esac
+      fi
     fi
     if [ "$KIND" = ship ]; then
       if [ "$MODE_SET" -eq 0 ]; then

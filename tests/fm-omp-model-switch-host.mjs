@@ -36,6 +36,7 @@ export function createHost(options = {}) {
 		idle: options.idle ?? true,
 		pending: options.pending ?? false,
 		hold: undefined,
+		keyHold: undefined,
 	};
 	const calls = [];
 	const keyCalls = [];
@@ -61,6 +62,7 @@ export function createHost(options = {}) {
 			find,
 			getApiKey: async (target) => {
 				keyCalls.push(label(target));
+				await state.keyHold?.(label(target));
 				return options.apiKey === false ? undefined : "key";
 			},
 		},

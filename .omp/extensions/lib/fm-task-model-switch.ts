@@ -10,6 +10,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { turnAdmissionGate } from "./fm-task-inbox-doorbell.ts";
 
 // Firstmate's in-session model switch for a live OMP worker.
 //
@@ -124,7 +125,7 @@ type Request = {
 	effort: string | null;
 	requestedAtMs: number;
 };
-type Claim = { id: string; processing: string };
+type Pending = { id: string; parsed: Request | string };
 type AckTarget = Pick<Request, "id" | "model" | "effort">;
 
 const ACK_NAME = /^model-switch\.[A-Za-z0-9._-]+\.ack\.json(?:\.folded)?$/;
@@ -136,27 +137,6 @@ const OWNERS_KEY = Symbol.for("firstmate.task-model-switch.owners");
 const registryHost = globalThis as unknown as Record<symbol, Map<string, object> | undefined>;
 const owners: Map<string, object> = (registryHost[OWNERS_KEY] ??= new Map<string, object>());
 
-// The process-global turn-admission gate. fm-task-inbox-doorbell.ts reads and
-// extends the same object by key, so the literal below must stay in step with
-// the one there.
-type TurnGate = {
-	held: boolean;
-	pending: Promise<void> | undefined;
-	activity: number;
-	onRelease: Set<() => void>;
-	onQuiet: Set<() => void>;
-	busy: Set<() => boolean>;
-};
-const GATE_KEY = Symbol.for("firstmate.turn-admission");
-const gateRegistry = globalThis as unknown as Record<symbol, TurnGate | undefined>;
-const gate: TurnGate = (gateRegistry[GATE_KEY] ??= {
-	held: false,
-	pending: undefined,
-	activity: 0,
-	onRelease: new Set<() => void>(),
-	onQuiet: new Set<() => void>(),
-	busy: new Set<() => boolean>(),
-});
 const GATE_CAP_MS = 10_000;
 
 function labelOf(model: SwitchModel | undefined | null): string | null {
@@ -236,12 +216,13 @@ export function installTaskModelSwitch(
 	const readyFile = join(requestDir, "model-switch.ready");
 	const ownerKey = resolve(readyFile);
 	const ownerToken = {};
+	const gate = turnAdmissionGate();
 	let active = false;
+	let runOpen = false;
 	let ackSequence = Date.now() * 1000;
 	let mainCtx: SwitchContext | undefined;
 	let watcher: FSWatcher | undefined;
 	let chain: Promise<void> = Promise.resolve();
-	let applying: Promise<void> | undefined;
 	let sectionActivity: number | undefined;
 
 	const isMain = (ctx: SwitchContext | undefined): ctx is SwitchContext =>
@@ -302,7 +283,9 @@ export function installTaskModelSwitch(
 	// Resolve, switch the model, then the thinking level, reading everything back
 	// from the live session. Every refusal that can be known before a change is
 	// raised before the change.
-	const apply = async (request: Request, boundary: Boundary, ctx: SwitchContext): Promise<boolean> => {
+	const apply = async (
+		request: Request, resolved: SwitchModel | undefined, boundary: Boundary, ctx: SwitchContext,
+	): Promise<boolean> => {
 		const before = snapshot(ctx);
 		const refuse = (reason: string, detail: string | null): boolean =>
 			writeAck(request, "refused", boundary, before, snapshot(ctx), reason, detail);
@@ -310,7 +293,6 @@ export function installTaskModelSwitch(
 			return refuse("stale-incarnation", `the request was written for worker generation ${request.spawnGen}, not ${spawnGen}`);
 		}
 		const slash = request.model.indexOf("/");
-		const resolved = ctx.models.resolve(request.model);
 		if (!resolved) {
 			const known = ctx.modelRegistry.find(request.model.slice(0, slash), request.model.slice(slash + 1));
 			return labelOf(known) === request.model
@@ -367,27 +349,20 @@ export function installTaskModelSwitch(
 		return writeAck(request, "applied", boundary, before, afterModel);
 	};
 
-	const claimPending = (): Claim[] => {
-		const claims: Claim[] = [];
-		for (const name of readdirSync(requestDir).sort()) {
-			const match = REQUEST_NAME.exec(name);
-			if (!match) continue;
-			const processing = join(requestDir, `model-switch.${match[1]}.processing`);
-			try {
-				renameSync(join(requestDir, name), processing);
-			} catch {
-				// fm-control cancelled it first: it is never applied.
-				continue;
-			}
-			claims.push({ id: match[1], processing });
+	const claim = (id: string): string | undefined => {
+		const processing = join(requestDir, `model-switch.${id}.processing`);
+		try {
+			renameSync(join(requestDir, `model-switch.${id}.request.json`), processing);
+			return processing;
+		} catch {
+			return undefined;
 		}
-		return claims;
 	};
 
 	// Settled idle: nothing running, nothing queued, no doorbell wake in flight,
 	// and no switch already holding the gate.
 	const quiet = (ctx: SwitchContext): boolean => {
-		if (gate.held || !idleNow(ctx)) return false;
+		if (runOpen || gate.held || !idleNow(ctx)) return false;
 		try {
 			if (typeof ctx.hasPendingMessages === "function" && ctx.hasPendingMessages()) return false;
 			for (const probe of gate.busy) if (probe()) return false;
@@ -397,18 +372,9 @@ export function installTaskModelSwitch(
 		return true;
 	};
 
-	const hasPending = (): boolean => {
-		try {
-			return readdirSync(requestDir).some((name) => REQUEST_NAME.test(name));
-		} catch {
-			return false;
-		}
-	};
-
-	// The newest valid unclaimed request, read without claiming it, so its
-	// credentials can be resolved before the critical section.
-	const peekNewest = (): Request | undefined => {
+	const readPending = (): { newest: Request | undefined; pending: Pending[] } => {
 		let newest: Request | undefined;
+		const pending: Pending[] = [];
 		for (const name of readdirSync(requestDir).sort()) {
 			const match = REQUEST_NAME.exec(name);
 			if (!match) continue;
@@ -418,6 +384,7 @@ export function installTaskModelSwitch(
 			} catch {
 				continue;
 			}
+			pending.push({ id: match[1], parsed });
 			if (typeof parsed === "string") continue;
 			if (
 				!newest ||
@@ -427,43 +394,35 @@ export function installTaskModelSwitch(
 				newest = parsed;
 			}
 		}
-		return newest;
+		return { newest, pending };
 	};
 
-	const applyClaimed = async (boundary: Boundary, ctx: SwitchContext): Promise<void> => {
-		const claims = claimPending();
-		if (claims.length === 0) return;
-		const valid: Array<{ request: Request; claim: Claim }> = [];
-		for (const claim of claims) {
-			const parsed = parseRequest(claim.id, readFileSync(claim.processing, "utf8"));
-			if (typeof parsed === "string") {
-				const now = snapshot(ctx);
-				if (writeAck({ id: claim.id, model: "", effort: null }, "refused", boundary, now, now, "invalid-request", parsed)) {
-					bestEffortUnlink(claim.processing);
-				}
-			} else {
-				valid.push({ request: parsed, claim });
-			}
-		}
-		valid.sort((a, b) => a.request.requestedAtMs - b.request.requestedAtMs || (a.request.id < b.request.id ? -1 : 1));
-		const newest = valid.pop();
-		for (const older of valid) {
+	const applyClaimed = async (
+		{ newest, pending }: ReturnType<typeof readPending>, resolved: SwitchModel | undefined,
+		boundary: Boundary, ctx: SwitchContext,
+	): Promise<void> => {
+		const selected = newest && claim(newest.id);
+		if (newest && !selected) return;
+		for (const { id, parsed } of pending) {
+			if (id === newest?.id) continue;
+			const processing = claim(id);
+			if (!processing) continue;
 			const now = snapshot(ctx);
-			const detail = `request ${newest?.request.id} replaced it`;
-			if (writeAck(older.request, "superseded", boundary, now, now, "newer-request", detail)) {
-				bestEffortUnlink(older.claim.processing);
-			}
+			const landed = typeof parsed === "string"
+				? writeAck({ id, model: "", effort: null }, "refused", boundary, now, now, "invalid-request", parsed)
+				: writeAck(parsed, "superseded", boundary, now, now, "newer-request", `request ${newest?.id} replaced it`);
+			if (landed) bestEffortUnlink(processing);
 		}
-		if (!newest) return;
+		if (!newest || !selected) return;
 		let landed: boolean;
 		try {
-			landed = await apply(newest.request, boundary, ctx);
+			landed = await apply(newest, resolved, boundary, ctx);
 		} catch (error) {
 			const now = snapshot(ctx);
-			landed = writeAck(newest.request, "refused", boundary, now, now, "internal-error", String(error));
+			landed = writeAck(newest, "refused", boundary, now, now, "internal-error", String(error));
 			journalFailure(journal, "apply", error);
 		}
-		if (landed) bestEffortUnlink(newest.claim.processing);
+		if (landed) bestEffortUnlink(selected);
 	};
 
 	// The critical section. The gate is taken before the first await, so no
@@ -481,7 +440,6 @@ export function installTaskModelSwitch(
 		const done = work().finally(() => {
 			sectionActivity = undefined;
 		});
-		applying = done.catch(() => {});
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const cap = new Promise<void>((settle) => {
 			timer = setTimeout(settle, GATE_CAP_MS);
@@ -501,40 +459,42 @@ export function installTaskModelSwitch(
 				}
 			}
 		}
+		await done;
 	};
 
 	const drainOnce = async (boundary: Boundary, ctx: SwitchContext): Promise<void> => {
-		if (applying) await applying;
-		if (!active || !quiet(ctx) || !hasPending()) return;
-		const target = peekNewest();
-		if (target) {
-			const resolved = ctx.models.resolve(target.model);
-			if (resolved) {
-				try {
-					await ctx.modelRegistry.getApiKey?.(resolved);
-				} catch {
-					// setModel reports a credential failure as its typed refusal.
-				}
+		if (!active || !quiet(ctx)) return;
+		const initial = readPending();
+		if (initial.pending.length === 0) return;
+		const target = initial.newest;
+		const resolved = target?.spawnGen === spawnGen ? ctx.models.resolve(target.model) : undefined;
+		if (target && resolved && labelOf(resolved) === target.model) {
+			try {
+				await ctx.modelRegistry.getApiKey?.(resolved);
+			} catch {
+				// setModel reports a credential failure as its typed refusal.
 			}
-			if (!active || !quiet(ctx)) return;
 		}
-		await runSection(() => applyClaimed(boundary, ctx));
+		if (!active || !quiet(ctx)) return;
+		const batch = readPending();
+		if (batch.pending.length === 0 || JSON.stringify(batch.newest) !== JSON.stringify(target)) return;
+		await runSection(() => applyClaimed(batch, resolved, boundary, ctx));
 	};
 
 	// Drains run one at a time, in arrival order.
-	const drain = (boundary: Boundary, ctx: SwitchContext): Promise<void> => {
-		const run = chain.then(() => drainOnce(boundary, ctx));
-		chain = run.catch(() => {});
-		return run.catch((error: unknown) => journalFailure(journal, "drain", error));
+	const drain = (boundary: Boundary, ctx: SwitchContext): void => {
+		chain = chain.then(() => drainOnce(boundary, ctx))
+			.catch((error: unknown) => journalFailure(journal, "drain", error));
 	};
 
 	const wake = (): void => {
-		if (mainCtx) void drain("idle", mainCtx);
+		if (mainCtx) drain("idle", mainCtx);
 	};
 
 	const retire = (): void => {
 		if (!active) return;
 		active = false;
+		runOpen = false;
 		watcher?.close();
 		watcher = undefined;
 		gate.onQuiet.delete(wake);
@@ -592,11 +552,14 @@ export function installTaskModelSwitch(
 	subscribe("session_start", (_event: unknown, ctx: SwitchContext) => {
 		if (isMain(ctx)) activate(ctx);
 	});
-	subscribe("agent_end", async (event: { willContinue?: boolean }, ctx: SwitchContext) => {
+	subscribe("agent_start", (_event: unknown, ctx: SwitchContext) => {
+		if (isMain(ctx) && active) runOpen = true;
+	});
+	subscribe("agent_end", (event: { willContinue?: boolean }, ctx: SwitchContext) => {
 		if (!isMain(ctx) || !active) return;
 		mainCtx = ctx;
-		if (event?.willContinue === true) return;
-		await drain("agent_end", ctx);
+		runOpen = event?.willContinue === true;
+		if (!runOpen) drain("agent_end", ctx);
 	});
 	// Holds a prompt's first provider request while a switch is applying.
 	subscribe("before_agent_start", async () => {

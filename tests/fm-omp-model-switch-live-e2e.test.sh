@@ -15,7 +15,7 @@
 #
 #   FM_OMP_MODEL_SWITCH_LIVE_E2E=1 bash tests/fm-omp-model-switch-live-e2e.test.sh
 #
-# It drives the extension from an explicit Git revision (default HEAD,
+# It drives Firstmate from an explicit Git revision (default HEAD,
 # FM_OMP_MODEL_SWITCH_LIVE_REV), so commit the change under review first. It
 # spends five one-line model turns. FM_OMP_MODEL_SWITCH_LIVE_FROM and _TO name
 # two authenticated models (`omp models`); the defaults are inexpensive and the
@@ -29,11 +29,6 @@ fi
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-omp-process-lib.sh
-. "$ROOT/bin/fm-omp-process-lib.sh"
-# shellcheck source=bin/backends/herdr.sh
-. "$ROOT/bin/backends/herdr.sh"
-
 command -v omp >/dev/null 2>&1 || fail "omp not found"
 command -v herdr >/dev/null 2>&1 || fail "herdr not found"
 command -v jq >/dev/null 2>&1 || fail "jq not found"
@@ -43,19 +38,7 @@ FROM=${FM_OMP_MODEL_SWITCH_LIVE_FROM:-opencode-go/deepseek-v4.1-flash}
 TO=${FM_OMP_MODEL_SWITCH_LIVE_TO:-opencode-go/qwen3.8-flash}
 FROM_EFFORT=${FM_OMP_MODEL_SWITCH_LIVE_FROM_EFFORT:-low}
 TO_EFFORT=${FM_OMP_MODEL_SWITCH_LIVE_TO_EFFORT:-medium}
-TO_ID=${TO#*/}
 UNAUTHENTICATED=${FM_OMP_MODEL_SWITCH_LIVE_UNAUTHENTICATED:-abliteration/abliterated-model}
-
-OMP_BIN=$("$ROOT/bin/fm-omp-capabilities.sh" --print-binary) || fail "OMP capability check failed"
-OMP_BIN=$(fm_test_realpath "$OMP_BIN") || fail "OMP binary realpath could not be resolved"
-OMP_LAUNCH_IDENTITY=$(fm_omp_process_launch_identity "$OMP_BIN") \
-  || fail "OMP launch identity could not be resolved for $OMP_BIN"
-OMP_RUNTIME=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '1p')
-OMP_BIN=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '2p')
-OMP_VERSION=$(omp --version 2>&1 | head -1)
-REAL_HERDR=$(command -v herdr)
-HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
-[ -x "$HERDR_LAB_HELPER" ] || fail "Herdr lab helper is not executable: $HERDR_LAB_HELPER"
 
 # The global OMP configuration the switch must never rewrite.
 OMP_AGENT_DIR=${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}
@@ -71,13 +54,41 @@ CONFIG_BEFORE=$(config_fingerprint) || fail "could not fingerprint the global OM
 [ -n "$CONFIG_BEFORE" ] || echo "note: no global OMP config.yml or models.yml found under $OMP_AGENT_DIR; the unchanged-config check has nothing to compare"
 
 LAB=$(fm_test_tmproot fm-omp-model-switch-live)
+DRIVER_ROOT="$LAB/driver-root"
+REVISION=${FM_OMP_MODEL_SWITCH_LIVE_REV:-HEAD}
+REVISION_SHA=$(git -C "$ROOT" rev-parse --verify --quiet "$REVISION^{commit}") \
+  || fail "FM_OMP_MODEL_SWITCH_LIVE_REV '$REVISION' is not a commit"
+mkdir -p "$DRIVER_ROOT"
+( set -o pipefail; git -C "$ROOT" archive "$REVISION_SHA" | tar -x -C "$DRIVER_ROOT" ) \
+  || fail "could not extract the selected revision $REVISION_SHA"
+printf '# model-switch live guard drives revision %s\n' "$REVISION_SHA"
+git init -q -b main "$DRIVER_ROOT" || fail "could not initialize the archived driver root"
+fm_git_identity fmtest fmtest@example.invalid
+git -C "$DRIVER_ROOT" add . && git -C "$DRIVER_ROOT" commit -qm init \
+  || fail "could not register the archived driver root"
+
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "$DRIVER_ROOT/bin/fm-omp-process-lib.sh"
+# shellcheck source=bin/backends/herdr.sh
+FM_ROOT_OVERRIDE="$DRIVER_ROOT" . "$DRIVER_ROOT/bin/backends/herdr.sh"
+
+OMP_BIN=$(FM_ROOT_OVERRIDE="$DRIVER_ROOT" "$DRIVER_ROOT/bin/fm-omp-capabilities.sh" --print-binary) || fail "OMP capability check failed"
+OMP_BIN=$(fm_test_realpath "$OMP_BIN") || fail "OMP binary realpath could not be resolved"
+OMP_LAUNCH_IDENTITY=$(fm_omp_process_launch_identity "$OMP_BIN") \
+  || fail "OMP launch identity could not be resolved for $OMP_BIN"
+OMP_RUNTIME=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '1p')
+OMP_BIN=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '2p')
+OMP_VERSION=$(omp --version 2>&1 | head -1)
+REAL_HERDR=$(command -v herdr)
+HERDR_LAB_HELPER="$DRIVER_ROOT/bin/fm-herdr-lab.sh"
+[ -x "$HERDR_LAB_HELPER" ] || fail "Herdr lab helper is not executable: $HERDR_LAB_HELPER"
+
 SESSION=$("$HERDR_LAB_HELPER" name omp-model-switch) || fail "could not generate a guarded Herdr lab session name"
 WRAPPER_BIN="$LAB/bin"
 WRAPPER_LOG="$LAB/herdr-wrapper.log"
 BASE_PATH=$PATH
 HOME_DIR="$LAB/home"
 PROJECT="$LAB/project"
-DRIVER_ROOT="$LAB/driver-root"
 WORKER_ID="omp-model-switch-$$"
 WORKER_WT=
 TEARDOWN_DONE=0
@@ -116,17 +127,6 @@ trap cleanup EXIT
 mkdir -p "$WRAPPER_BIN" "$PROJECT" "$DRIVER_ROOT" "$HOME_DIR/data/$WORKER_ID" \
   "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/projects"
 : > "$WRAPPER_LOG"
-REVISION=${FM_OMP_MODEL_SWITCH_LIVE_REV:-HEAD}
-git rev-parse --verify --quiet "$REVISION^{commit}" >/dev/null \
-  || fail "FM_OMP_MODEL_SWITCH_LIVE_REV '$REVISION' is not a commit"
-# The driver is a clean clone of exactly that revision.
-git archive "$REVISION" | tar -x -C "$DRIVER_ROOT"
-printf '# model-switch live guard drives revision %s\n' "$(git rev-parse --short "$REVISION^{commit}")"
-git init -q -b main "$DRIVER_ROOT"
-fm_git_identity fmtest fmtest@example.invalid
-git -C "$DRIVER_ROOT" add .
-git -C "$DRIVER_ROOT" commit -qm init
-
 cat > "$WRAPPER_BIN/herdr" <<SH
 #!/usr/bin/env bash
 set -u
@@ -300,8 +300,8 @@ session_file_for() {
 # appended while the offset is taken can never start a tail mid-record.
 session_offset() { # <session-file>
   local offset
-  offset=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_omp_session_complete_offset "$1"' \
-    "$ROOT" "$1") || {
+  offset=$(FM_ROOT_OVERRIDE="$DRIVER_ROOT" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_omp_session_complete_offset "$1"' \
+    "$DRIVER_ROOT" "$1") || {
     printf 'not ok - production offset owner refused a complete JSONL record boundary in %s\n' "$1" >&2
     return 1
   }
@@ -312,8 +312,10 @@ entries_after() { # <session-file> <offset>
   tail -c "+$(($2 + 1))" "$1" 2>/dev/null
 }
 
-session_has_text_after() { # <file> <offset> <text>
-  entries_after "$1" "$2" | grep -F -- "$3" >/dev/null 2>&1
+session_has_assistant_reply_after() { # <file> <offset> <text>
+  entries_after "$1" "$2" | jq -se --arg reply "$3" '
+    any(.[]; .type == "message" and .message.role == "assistant"
+      and any(.message.content[]?; .type == "text" and (.text | contains($reply))))' >/dev/null 2>&1
 }
 
 session_has_model_change_after() { # <file> <offset> <provider/id>
@@ -344,11 +346,11 @@ meta_value() { # <key>
 }
 
 control() { # <fm-control args...>
-  fm_env FM_CONTROL_POLL=0.25 "$ROOT/bin/fm-control.sh" "$WORKER_ID" "$@"
+  fm_env FM_CONTROL_POLL=0.25 "$DRIVER_ROOT/bin/fm-control.sh" "$WORKER_ID" "$@"
 }
 
 send_task() {
-  fm_env FM_SEND_SLEEP=0.2 FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$WORKER_ID" "$@" >/dev/null
+  fm_env FM_SEND_SLEEP=0.2 FM_SEND_SETTLE=0 FM_SEND_REMOTE_TYPED=0 "$DRIVER_ROOT/bin/fm-send.sh" "$WORKER_ID" "$@" >/dev/null
 }
 
 # --- a real worker through production fm-spawn --------------------------------
@@ -367,7 +369,7 @@ git -C "$PROJECT" push -qu origin main
 git -C "$LAB/project-origin.git" symbolic-ref HEAD refs/heads/main
 
 fm_env FM_SPAWN_NO_GUARD=1 FM_OMP_LAUNCH_ACK_INTERVAL=0.25 \
-  "$ROOT/bin/fm-spawn.sh" "$WORKER_ID" "$PROJECT" --harness omp \
+  "$DRIVER_ROOT/bin/fm-spawn.sh" "$WORKER_ID" "$PROJECT" --harness omp \
     --model "$FROM" --effort "$FROM_EFFORT" --mode direct-PR --yolo off >/dev/null \
   || fail "production OMP Herdr worker spawn failed"
 WORKER_META="$HOME_DIR/state/$WORKER_ID.meta"
@@ -437,25 +439,28 @@ pass "live OMP: an idle worker switches $FROM -> $TO and $FROM_EFFORT -> $TO_EFF
 
 # --- AC2: a switch requested mid-run waits for the run to settle -------------
 busy_offset=$(session_offset "$WORKER_SESSION") || exit 1
-send_task 'Run this exact bash command: sleep 15. Then reply exactly: slept through the switch.' \
+busy_reply='slept through the switch.'
+send_task "Run this exact bash command: sleep 15. Then reply exactly: $busy_reply" \
   || fail "the busy turn was not submitted"
 wait_for "native working worker state" agent_is "$WORKER_TARGET" omp working
 sleep 3
 out=$(control switch-model --model "$FROM" --effort "$FROM_EFFORT" --wait 120 2>&1) || fail "mid-run switch-model failed: $out"
 printf '# %s\n' "$out"
 case "$out" in switched\ "$WORKER_ID"\ *"boundary=agent_end"*) ;; *) fail "a mid-run switch was not applied at settled idle: $out" ;; esac
-wait_for "the busy worker's final reply" session_has_text_after "$WORKER_SESSION" "$busy_offset" 'slept through the switch.'
+wait_for "the busy worker's final reply" session_has_assistant_reply_after "$WORKER_SESSION" "$busy_offset" "$busy_reply"
 wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
 # Every assistant message of the busy run - the tool turn and the final reply -
 # precedes the model-change entry and was served by the old model.
-entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg from "$FROM" --arg to_id "$TO_ID" '
+entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg from "$FROM" --arg to "$TO" --arg reply "$busy_reply" '
   [range(0; length)] as $i
   | . as $e
   | ($i | map(select($e[.].type == "model_change" and $e[.].model == $from)) | first) as $change
   | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"))) as $assistant
   | $change != null
     and ($assistant | length) >= 2
-    and ($assistant | all(. < $change and $e[.].message.model == $to_id))
+    and ($assistant | all(. < $change and ("\($e[.].message.provider)/\($e[.].message.model)" == $to)))
+    and ($assistant | last | $e[.].message.content
+         | any(.type == "text" and (.text | contains($reply))))
     and ($e | any(.type == "message" and .message.role == "assistant"
                   and ((.message.content // []) | any(.type == "toolCall"))))' >/dev/null 2>&1 \
   || fail "the session order does not show: the whole in-flight run on $TO, then the switch"
@@ -475,14 +480,13 @@ wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
   || fail "the turn after the mid-run switch ran on $(last_assistant_after "$WORKER_SESSION" "$post_offset"), not $FROM"
 # The user-message sequence is the oracle for the original failure: a typed
 # /model or /switch would appear as a message of its own.
+fallback_prompt=": Firstmate instruction waiting: list files named '*.msg' in '\$FM_TASK_INBOX', your '$WORKER_ID.inbox' steering inbox, read and act on each in numeric order, then mv each into its handled/."
 entries_after "$WORKER_SESSION" "$busy_offset" \
-  | jq -se --arg prompt "$post_prompt" '
+  | jq -se --arg prompt "$post_prompt" --arg fallback "$fallback_prompt" '
       [.[] | select(.type == "message" and .message.role == "user") | .message.content
         | if type == "array" then map(select(.type == "text") | .text) | join("") else . end]
-      == [$prompt]' >/dev/null \
-  || fail "the session recorded a user message other than the one post-switch prompt (a typed /model or /switch reached the chat)"
-! session_has_text_after "$WORKER_SESSION" "$busy_offset" '/switch ' \
-  || fail "a /switch reached the session as text"
+      | . == [$prompt] or . == [$fallback, $prompt]' >/dev/null \
+  || fail "the session recorded an unexpected user message during the busy or post-switch turn"
 pass "live OMP: a switch requested mid-run leaves the whole in-flight run on $TO and applies at settled idle; the next turn runs on $FROM; nothing is chat"
 
 # --- AC4: the documented OMP resume path keeps the switched model ------------
@@ -530,7 +534,7 @@ pass "live OMP: the global OMP config files are byte-identical before and after"
 
 out=$(control exit 2>&1) || fail "fm-control exit of the resumed worker failed: $out"
 wait_for "the resumed worker's OMP to exit" omp_agent_absent "$WORKER_TARGET"
-fm_env "$ROOT/bin/fm-teardown.sh" "$WORKER_ID" >/dev/null \
+fm_env "$DRIVER_ROOT/bin/fm-teardown.sh" "$WORKER_ID" >/dev/null \
   || fail "production cleanup refused the clean model-switch worker"
 WORKER_WT=
 FM_HERDR_LAB_INNER=1 PATH="$WRAPPER_BIN:$BASE_PATH" \

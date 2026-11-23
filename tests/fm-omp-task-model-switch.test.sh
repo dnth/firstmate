@@ -88,10 +88,39 @@ const settled = (promise) => {
 	assert.deepEqual(ack.before, { model: "p/a", thinking: "low" });
 	assert.deepEqual(ack.after, { model: "p/b", thinking: "medium" });
 	assert.equal(ack.modelChanged, true);
-	assert.deepEqual(c.keyCalls.slice(0, 1), ["p/b"], "credentials are resolved before the section");
+	assert.deepEqual(c.keyCalls, ["p/b"], "the target credentials are prepared");
 	assert.deepEqual(c.calls, [["setModel", "p/b"], ["setThinkingLevel", "medium"]]);
 	assert.equal(existsSync(`${c.dir}/model-switch.r1.processing`), false, "the claim is retired once acknowledged");
 	ok("idle: the request applies at once and the acknowledgement records id, before, after, thinking, and raced=false");
+	await finish();
+}
+
+{
+	const c = fresh({ idle: false });
+	await start(c);
+	let releaseFirst;
+	let releaseSecond;
+	const firstKey = new Promise((resolve) => { releaseFirst = resolve; });
+	const secondKey = new Promise((resolve) => { releaseSecond = resolve; });
+	c.state.keyHold = (target) => target === "p/b" ? firstKey : secondKey;
+	ask(c, "prewarm-first", "p/b");
+	c.state.idle = true;
+	const terminal = settled(c.fire("agent_end", { willContinue: false }));
+	await waitFor(() => c.keyCalls.includes("p/b"), "the first request to begin credential preparation");
+	await waitFor(() => terminal.done, "terminal lifecycle delivery while credentials are outstanding");
+	renameSync(requestFile(c.dir, "prewarm-first"), `${c.dir}/model-switch.prewarm-first.cancelled`);
+	ask(c, "prewarm-second", "q/c");
+	releaseFirst();
+	await waitFor(() => c.keyCalls.includes("q/c"), "credential preparation for the replacement request");
+	const prompt = settled(c.fire("before_agent_start", { prompt: "go" }));
+	await waitFor(() => prompt.done, "the prompt to pass before the replacement enters the gate");
+	assert.equal(existsSync(requestFile(c.dir, "prewarm-second")), true, "preparation does not claim the request");
+	assert.deepEqual(c.calls, [], "neither the withdrawn request nor the unprepared replacement may reach setModel");
+	releaseSecond();
+	await acked(c, "prewarm-second");
+	assert.deepEqual(c.calls, [["setModel", "q/c"]]);
+	assert.equal(existsSync(ackFile(c.dir, "prewarm-first")), false);
+	ok("credentials: a replacement gets its own preparation before the claim and the gate");
 	await finish();
 }
 
@@ -105,15 +134,24 @@ const settled = (promise) => {
 	assert.equal(existsSync(requestFile(c.dir, "r2")), true, "the request stays queued, unclaimed, while the run is open");
 	await c.fire("turn_end", { turnIndex: 0 });
 	await c.fire("turn_end", { turnIndex: 1 });
-	await c.fire("agent_end", { willContinue: true });
-	assert.deepEqual(c.calls, [], "neither turn_end nor a continuing agent_end is a boundary");
 	await c.fire("agent_end", { willContinue: false });
 	assert.deepEqual(c.calls, [], "a terminal agent_end that still reads busy applies nothing");
 	assert.equal(existsSync(requestFile(c.dir, "r2")), true, "and the request is not silently dropped");
+
+	await c.fire("agent_start");
 	c.state.idle = true;
+	ask(c, "paused", "p/b", "high", { requestedAtMs: Date.now() + 100 });
+	await sleep(150);
+	assert.deepEqual(c.calls, [], "an open run blocks the watcher even when the context looks idle");
+	await c.fire("agent_end", { willContinue: true });
+	writeFileSync(`${c.dir}/paused-watcher-trigger`, "");
+	await sleep(150);
+	assert.deepEqual(c.calls, [], "a continuing agent_end blocks the watcher while the run is paused");
+	assert.equal(existsSync(requestFile(c.dir, "paused")), true);
 	await c.fire("agent_end", { willContinue: false });
-	await acked(c, "r2");
-	const ack = readAck(c.dir, "r2");
+	await acked(c, "paused");
+	assert.equal(readAck(c.dir, "r2").outcome, "superseded");
+	const ack = readAck(c.dir, "paused");
 	assert.equal(ack.outcome, "applied");
 	assert.equal(ack.boundary, "agent_end");
 	assert.deepEqual(ack.after, { model: "p/b", thinking: "high" });
@@ -213,9 +251,16 @@ const settled = (promise) => {
 		const prompt = settled(c.fire("before_agent_start", { prompt: "go" }));
 		await waitFor(() => prompt.done, "the capped hold to release the prompt");
 		assert.equal(existsSync(ackFile(c.dir, "r6")), false, "the setter is still running, so there is no result yet");
+		await c.fire("agent_start");
 		await c.fire("context", { messages: [] });
+		ask(c, "r6-next", "q/c");
+		const terminal = settled(c.fire("agent_end", { willContinue: false }));
+		await waitFor(() => terminal.done, "the next run's terminal event to return while the setter is outstanding");
+		assert.deepEqual(c.calls, [["setModel", "p/b"]], "the next apply stays serialized after the gate cap");
 		release();
 		await acked(c, "r6");
+		await acked(c, "r6-next");
+		assert.deepEqual(c.calls, [["setModel", "p/b"], ["setModel", "q/c"]]);
 		const ack = readAck(c.dir, "r6");
 		assert.equal(ack.outcome, "applied", "the late setter still publishes its own acknowledgement");
 		assert.equal(ack.raced, true, "and raced covers the whole apply, not just the capped hold");
@@ -279,7 +324,14 @@ const doorbellFor = (dir) => {
 	await sleep(300);
 	assert.deepEqual(c.calls, [], "a switch must not apply between a doorbell wake and its turn");
 	assert.equal(existsSync(requestFile(c.dir, "r8")), true);
+	c.state.idle = false;
+	await c.fire("agent_start");
 	door.turnHandlers.get("turn_start")();
+	await sleep(150);
+	assert.equal(existsSync(requestFile(c.dir, "r8")), true, "opening the doorbell's turn must leave the switch queued");
+	assert.deepEqual(c.calls, [], "the doorbell run keeps the old model");
+	c.state.idle = true;
+	await c.fire("agent_end", { willContinue: false });
 	await acked(c, "r8");
 	assert.equal(readAck(c.dir, "r8").outcome, "applied");
 	door.bell.retire();
