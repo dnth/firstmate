@@ -1,8 +1,8 @@
 ---
 name: hillclimb
 description: >-
-  Agent-only workflow that turns one measurable metric into a repeatable experiment loop: a fixed stop rule, a frozen measurement harness, one hypothesis per attempt, a decision log, and an experiment branch for every attempt.
-  Load before scoping, briefing, or executing a task whose goal is sustained improvement of one measurable metric toward a target, such as search latency, retrieval quality on a frozen evaluation set, or a model sweep score; one-off bug fixes and leaking designs do not belong here.
+  Load before scoping, briefing, or executing sustained improvement of one measurable metric toward a target, such as search latency, retrieval quality on a frozen evaluation set, or a model sweep score.
+  Agent-only workflow for repeated experiments with a frozen harness, fixed stop rule, and decision log.
 user-invocable: false
 metadata:
   internal: true
@@ -31,24 +31,24 @@ A design that keeps leaking review findings is structural, so it needs a design 
 2. Name the metric, and state which direction is an improvement on it.
    Fix the campaign to that single number rather than a bundle, so a result can be attributed.
    Write both into the brief, so no later attempt redefines them.
-3. Write the stop rule as a checkable pair: a target value plus a minimum number of measured attempts.
-   The rule is checkable when a reader can answer yes or no from the harness output and the attempt log.
-   The pair prevents both a lucky early result from ending the campaign and an unlucky streak from running without bound.
-   One example shape is "at least 40 percent below baseline, across at least 10 measured attempts".
-   Use the captain's numbers when they exist; otherwise agree them with the captain before the first attempt.
+3. Fix the stop rule in the brief before the first attempt.
+   Set a target value and a minimum number of attempts with valid before and after measurements.
+   Use any values the captain supplied and set the remaining values during setup.
+   For example, require latency at least 40 percent below baseline and at least 10 measured attempts.
 
 ## Freeze the harness first
 
 Build the measurement before touching the product.
 Prove the harness separates a bad case from a good one: run it on the case that reproduces the complaint and on a known-good case, and confirm the numbers differ in the expected direction.
 When both read alike, revise the workload or the metric rather than trusting the harness.
-Freeze the result as one repeatable command that prints three things: the metric as the median of N runs, its error count, and its work count.
-The median clears run-to-run noise; the error count proves the measurement completed; the work count proves the case did the same amount of work before and after.
-Record the baseline, plus one passing run of the gate, before changing anything.
+Freeze the workload and one repeatable command that prints the metric as the median of N runs and the error and completed-work counts for each run.
+Define the expected completed-work count, allowed error count, and noise threshold before testing candidates.
+A measurement is valid only if every run completes the expected work and stays within the error limit.
+Record a valid baseline and a passing run of the regression gate before changing the product.
 
 For InfoConnect search work, the harness must cover the small corpus and the full corpus in the same frozen command.
 The issue 1026 typo spike is the standing warning: it looked clean on the full evaluation bank while rewriting 9 of 103 correct queries on a 15-document subset.
-A harness that watches only one corpus scale will pass a change that damages the other.
+Check measurement validity and the regression gate separately for each corpus, and reject a candidate if the metric worsens past the noise threshold on either corpus.
 
 ## The attempt loop
 
@@ -57,70 +57,73 @@ Each iteration tests a single hypothesis, and the hypothesis names a specific me
 
 For each attempt:
 
-1. Record the current metric from the frozen harness.
-2. Apply the single change on its own experiment branch.
-3. Re-run the frozen harness and the regression gate.
-4. Keep the change only when the metric clears noise and the gate passes; any other result is a reject.
-5. Commit one kept change per commit, containing only that change, and land kept commits on the delivery branch in order.
+1. Read the campaign log and measure the starting commit with the frozen harness.
+2. Apply and commit the single change on its own local experiment branch.
+3. Re-run the frozen harness and the regression gate on that candidate.
+4. At acceptance, use the current accepted tip of the delivery branch as the comparison point.
+   If the tip differs from the starting commit, replay only the candidate on a new local experiment branch based on the current tip, keep the original branch, and run the frozen harness and gate on both the current tip and the combined result.
+5. Keep the candidate only when both measurements are valid, the metric improves past noise, and the regression gate passes, including the corpus checks when applicable.
+   Reject every other candidate and record why.
+6. Return to the delivery branch and advance it only to an accepted, tested commit, with one commit per kept change.
 
-Keep one change in flight at a time, because two unmeasured changes in the same result cannot be attributed to either.
-An unmeasured change is unfinished, and a diff that reads well proves nothing.
-Only the harness and the gate can call a win.
+Isolated attempts can run in parallel.
+Serialize acceptance and branch advancement so each candidate is checked against the result of the preceding decision.
+Use measured results to decide every attempt.
 
 ### Preserve every attempt
 
-A reject is evidence, not garbage.
-Commit each attempt on its own experiment branch named `hc/<id>/<n>`, so it stays preserved and off the delivery branch; a later idea can then read it, combine it, or retry it.
-Keep the delivery branch for kept changes only.
-When a rejected change already landed on the delivery branch, undo it with a forward revert commit.
+Preserve each attempt on a distinct local experiment branch, for example `hc/<campaign-id>/<attempt-id>`.
+Leave rejected commits reachable there and off the delivery branch.
+When a change already on the delivery branch must be undone, use a forward revert commit.
 Firstmate's hard rules forbid discarding unlanded work, so never reset, never drop a stash, and never force-push attempted work away.
 
 ## Keep the decision log
 
-The campaign keeps a `decision.tsv` in the task's private `data/<id>/` directory in the Firstmate home, never in the project tree.
-Its header is: id, hypothesis, change, before, after, delta, gate, verdict, note.
-Use one tab-separated row per attempt, kept or rejected.
-Read the log before each attempt, so the next hypothesis starts from what the log already proved or killed.
-The log keeps numbers for rejects too, and a run of reject rows is the plateau signal.
+Before briefing workers, Firstmate initializes one `decision.tsv` in the campaign task's private `data/<task-id>/` directory in the Firstmate home.
+The tab-separated columns are `id`, `hypothesis`, `change`, `before`, `after`, `delta`, `gate`, `verdict`, and `note`.
+After each attempt, the worker reports those fields to Firstmate, including the experiment commit and any measurement failure.
+Firstmate records one row per attempt ID using the evidence from the acceptance decision, including the measurements for rejected attempts.
+Use `kept` for an accepted change, `rejected` for an attempt left off the delivery branch, and `reverted` when a forward revert undoes the change.
+On a forward revert, update that attempt's verdict and record the revert commit in its note.
 
 ## Plateau and stop
 
-A run of rejects means the current category is exhausted, not that the hill is climbed.
-Pivot to a different mechanism category, or combine near-misses whose effects may stack.
-Behavior and simplicity come first: a gain that breaks behavior goes back, while a simpler implementation that keeps the number stays.
-Stop at the stop rule, or when every remaining idea costs more than the next increment is worth.
-The stop rule is fixed at set-up; tighten it only with a new captain decision, and never loosen it to declare victory.
-When you are stuck, report it with evidence: the log, the categories already tried, and the ideas still open.
-Surface that through the normal status path rather than spinning.
+After a run of rejects, test a different mechanism or test a combination of near-misses as one new hypothesis under the same acceptance rule.
+Stop when the accepted metric reaches the fixed target and the log shows the fixed minimum number of measured attempts.
+If only marginal ideas remain before both conditions hold, report the plateau through the normal status path with the log, the mechanisms already tried, and the ideas still open.
 
 ## Running a hillclimb in Firstmate
 
-Firstmate loads this skill at intake to recognize the task shape, set up its brief, and choose the dispatch shape.
-Each parallel hypothesis goes to its own worker in its own isolated worktree, so two attempts never share a checkout.
-Dispatch uses the normal dispatch profiles and the model they select; this skill pins no model.
-Workers measure inside their own worktree with the frozen harness and preserve their attempts on `hc/<id>/<n>` branches.
-Kept work lands through the project's normal delivery mode and review pipeline, never through a side path around it.
+Firstmate loads this skill before scoping and assigns each attempt a unique campaign-wide ID before briefing the worker.
+Dispatch parallel hypotheses to separate workers in separate isolated worktrees using the normal dispatch profiles and their model selection.
+Firstmate designates a delivery worker to apply the ordered acceptance step and makes the preserved candidate commits available to that worker.
+Workers return to their normal delivery branch before handing back an attempt, including when every attempt was rejected.
+Send experiment results to Firstmate without claiming delivery of the experiment branch.
+The delivery worker ships accepted work through the project's normal delivery mode and review pipeline.
 
-The worker's final report carries:
+Include the following in the worker's final report.
 
-- the metric and its target;
-- the baseline and final values, with the percent delta;
-- the count of kept and rejected attempts;
-- one line per kept change;
-- the `decision.tsv` path;
-- the best idea for a further push.
+- Metric and target
+- Baseline, final value, and percent delta
+- Kept and reverted counts, using the campaign log verdicts
+- One line per kept change
+- Resolved campaign `decision.tsv` path
+- Next idea
 
 ## Brief section
 
-Firstmate pastes this block into the task brief and fills every placeholder; the worker then has everything needed to start measuring.
+Firstmate fills every placeholder and pastes this block into the task brief.
+Resolve the skill and campaign log paths from the worker's environment so both can be read from the isolated worktree.
 
 ```markdown
 ## Hillclimb
-- Load the `hillclimb` skill and follow it for every attempt.
-- Metric: `<name>`; better means `<lower|higher>`.
-- Stop rule: target `<value>` and at least `<N>` measured attempts.
-- Harness: `<frozen command>` (median of `<N>` runs; prints `errors=<n>` and `work=<n>`).
-- Gate: `<regression command>` (green before any attempt is kept).
-- Decision log: `data/<id>/decision.tsv`.
-- Experiment branches: `hc/<id>/<n>`; the delivery branch carries kept commits only.
+- Load the skill from `<absolute hillclimb SKILL.md path>`.
+- Improve `<metric>` in the `<lower|higher>` direction.
+- Stop at `<target>` after at least `<minimum attempts>` measured attempts.
+- Run `<frozen harness command>` for the median of `<run count>` runs, using `<expected completed-work count, allowed error count, and noise threshold for each workload>`.
+- Run the regression gate with `<gate command>`.
+- Read `<absolute campaign decision.tsv path>` before each attempt and report results to Firstmate, who writes the log.
+- Use assigned attempt ID `<attempt ID>` on a distinct local experiment branch.
+- This brief permits local experiment branches as an exception to any delivery-branch-only rule.
+- Return to `<normal delivery branch>` before handoff and use that branch for normal delivery.
 ```
