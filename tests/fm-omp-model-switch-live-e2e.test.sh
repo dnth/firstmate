@@ -454,6 +454,7 @@ busy_command='sleep 25'
 send_task "Run this exact bash command: $busy_command. Then reply exactly: $busy_reply" \
   || fail "the busy turn was not submitted"
 wait_for "native working worker state" agent_is "$WORKER_TARGET" omp working
+# shellcheck disable=SC2016 # jq resolves the variables in this filter.
 blocked_tool_filter='
   def blocked_tool($command):
     to_entries as $entries
