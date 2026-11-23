@@ -439,32 +439,31 @@ pass "live OMP: an idle worker switches $FROM -> $TO and $FROM_EFFORT -> $TO_EFF
 
 # --- AC2: a switch requested mid-task applies at once ------------------------
 busy_offset=$(session_offset "$WORKER_SESSION") || exit 1
-busy_reply='released after the switch.'
-release_file="$LAB/mid-task-release"
-rm -f "$release_file"
-# The fixture tool stays blocked until the test releases it, which it does only
-# after the switch receipt has arrived, so the switch provably lands while the
-# tool call is in flight.
-send_task "Run this exact bash command: while [ ! -f '$release_file' ]; do sleep 1; done. Then reply exactly: $busy_reply" \
+busy_reply='slept through the switch.'
+# A foreground sleep keeps the tool call in flight for 25 seconds; the guard
+# requires the switch receipt to arrive while that call is still unanswered.
+# (OMP turns a long polling loop into a background job, which would end the
+# turn instead of blocking it.)
+send_task "Run this exact bash command: sleep 25. Then reply exactly: $busy_reply" \
   || fail "the busy turn was not submitted"
 wait_for "native working worker state" agent_is "$WORKER_TARGET" omp working
 # The worker first reads its inbox message, so the blocked command is the tool
-# call whose arguments name the release file, not just any tool call.
+# call that runs the sleep, not just any tool call.
 blocked_tool_pending() {
   entries_after "$WORKER_SESSION" "$busy_offset" | jq -se '
     [range(0; length)] as $i | . as $e
     | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"
-        and (($e[.].message.content // []) | any(.type == "toolCall" and ((.arguments // {}) | tostring | contains("mid-task-release")))))) | first) as $call
+        and (($e[.].message.content // []) | any(.type == "toolCall" and ((.arguments // {}) | tostring | contains("sleep 25")))))) | first) as $call
     | $call != null
       and ($i | map(select(. > $call and $e[.].type == "message" and $e[.].message.role == "toolResult")) | length) == 0' >/dev/null 2>&1
 }
-wait_for "the blocked tool call to be recorded and still running" blocked_tool_pending
+wait_for "the sleep tool call to be recorded and still running" blocked_tool_pending
 out=$(control switch-model --model "$FROM" --effort "$FROM_EFFORT" 2>&1) || fail "mid-task switch-model failed: $out"
 printf '# %s\n' "$out"
 case "$out" in switched\ "$WORKER_ID"\ *"model=$TO->$FROM"*) ;; *) fail "a mid-task switch is not a typed switched result for $TO -> $FROM: $out" ;; esac
 [ "$(meta_value model)" = "$FROM" ] && [ "$(meta_value effort)" = "$FROM_EFFORT" ] \
   || fail "task meta does not record the mid-task switch: model=$(meta_value model) effort=$(meta_value effort)"
-: > "$release_file"
+blocked_tool_pending || fail "the tool returned before the switch receipt arrived, so the switch did not land mid-task"
 wait_for "the busy worker's final reply" session_has_assistant_reply_after "$WORKER_SESSION" "$busy_offset" "$busy_reply"
 wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
 # The tool-call request, in flight when the switch landed, was served by the old
@@ -476,7 +475,7 @@ entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg from "$FROM" --arg
   | . as $e
   | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"))) as $assistant
   | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"
-      and (($e[.].message.content // []) | any(.type == "toolCall" and ((.arguments // {}) | tostring | contains("mid-task-release")))))) | first) as $tool
+      and (($e[.].message.content // []) | any(.type == "toolCall" and ((.arguments // {}) | tostring | contains("sleep 25")))))) | first) as $tool
   | ($i | map(select($tool != null and . > $tool and $e[.].type == "message" and $e[.].message.role == "toolResult")) | first) as $result
   | ($i | map(select($e[.].type == "model_change" and $e[.].model == $from)) | first) as $change
   | ($assistant | map(select($change != null and . > $change)) | first) as $next
