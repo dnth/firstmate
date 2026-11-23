@@ -1197,7 +1197,7 @@ This record therefore covers the loaded-closure binding, delivery into the live 
 
 ### OMP in-session model switch
 
-The model-switch guard last ran on 2026-11-23 against OMP 18.22.2 and Herdr 0.9.5 on Linux x86_64 in one guarded non-default lab session with an archived extension and checkout-side control scripts, using `opencode-go/deepseek-v4.1-flash` at low effort and `opencode-go/qwen3.8-flash` at medium effort.
+The model-switch guard last ran on 2026-11-23 against OMP 18.22.2 and Herdr 0.9.5 on Linux x86_64 in one guarded non-default lab session, with the Firstmate entry points and the extension both taken from one archived Git commit, using `opencode-go/deepseek-v4.1-flash` at low effort and `opencode-go/qwen3.8-flash` at medium effort.
 It launched a real OMP worker through the production `fm-spawn.sh`, drove `fm-control.sh <id> switch-model` and `fm-send.sh` against it, resumed its session with the documented OMP resume command, and compared the global OMP `config.yml` and `models.yml` before and after.
 
 To refresh the result, the current guard extracts one resolved Git commit and runs the Firstmate entry points and helpers from that archive.
@@ -1207,16 +1207,15 @@ FM_OMP_MODEL_SWITCH_LIVE_E2E=1 FM_OMP_MODEL_SWITCH_LIVE_REV=HEAD \
   bash tests/fm-omp-model-switch-live-e2e.test.sh
 ```
 
-Observed bounded output from the earlier run, with the request ids and the lab session name shortened:
+Observed bounded output, with the request ids and the lab session name shortened:
 
 ```text
 ok - live OMP worker spawned on opencode-go/deepseek-v4.1-flash (low) with its model-switch channel active (omp/18.22.2)
 ok - live OMP: an unknown model and a model without credentials are refused with typed reasons, meta unchanged
-# switched ... model=opencode-go/deepseek-v4.1-flash->opencode-go/qwen3.8-flash effort=low->medium boundary=idle verified=extension-readback meta=updated(model=opencode-go/qwen3.8-flash effort=medium) backend=herdr
-# extension readback: {"outcome":"applied","boundary":"idle","before":{"model":"opencode-go/deepseek-v4.1-flash","thinking":"low"},"after":{"model":"opencode-go/qwen3.8-flash","thinking":"medium"},"modelChanged":true}
+# switched ... model=opencode-go/deepseek-v4.1-flash->opencode-go/qwen3.8-flash effort=low->medium verified=extension-readback meta=updated(model=opencode-go/qwen3.8-flash effort=medium) backend=herdr
 ok - live OMP: an idle worker switches opencode-go/deepseek-v4.1-flash -> opencode-go/qwen3.8-flash and low -> medium; the next turn runs on opencode-go/qwen3.8-flash; meta and the pane label follow; nothing is chat
-# switched ... model=opencode-go/qwen3.8-flash->opencode-go/deepseek-v4.1-flash effort=medium->low boundary=agent_end verified=extension-readback meta=updated(model=opencode-go/deepseek-v4.1-flash effort=low) backend=herdr
-ok - live OMP: a switch requested mid-run leaves the whole in-flight run on opencode-go/qwen3.8-flash and applies at settled idle; the next turn runs on opencode-go/deepseek-v4.1-flash; nothing is chat
+# switched ... model=opencode-go/qwen3.8-flash->opencode-go/deepseek-v4.1-flash effort=medium->low verified=extension-readback meta=updated(model=opencode-go/deepseek-v4.1-flash effort=low) backend=herdr
+ok - live OMP: a switch requested mid-task leaves the in-flight request on opencode-go/qwen3.8-flash and the next request runs on opencode-go/deepseek-v4.1-flash; nothing is chat
 ok - live OMP: the documented resume path (no --model) keeps the switched model opencode-go/qwen3.8-flash, and the resumed worker's channel is live again
 ok - live OMP: the global OMP config files are byte-identical before and after
 ok - live OMP model switch: guarded lab torn down with the default-session tripwire intact
@@ -1224,8 +1223,8 @@ ok - live OMP model switch: guarded lab torn down with the default-session tripw
 
 What the guard establishes about the installed OMP, and what the extension's design therefore relies on:
 
-- `setModel` called while the session is idle changes the model for the next provider request only, and a request made during a 15-second tool run was applied at `boundary=agent_end`, after the final reply: the whole in-flight run stayed on the old model, then the model-change entry, then the next turn on the new model.
-- `ctx.isIdle()` stays false from `agent_start` through tool execution, so the idle watcher never applied inside the run; it reads true at the terminal `agent_end` (OMP 18.22.2 emits that event only once the session is quiet, agent-session.ts `#checkRun`).
+- `setModel` and `setThinkingLevel` called from the extension apply at once and are session-only: a switch requested during a 15-second tool run left the tool-call request, already in flight, on the old model, then the session recorded the model-change entry, and the next request - the final reply - ran on the new model.
+- This is the behavior of OMP's own `/switch` picker, which calls `AgentSession#setModelTemporary`; the extension API does not expose that method, and `pi.setModel` followed by `pi.setThinkingLevel` is the equivalent it does expose.
 - A model that exists in the registry but has no credentials is told apart from an unknown one through `ctx.modelRegistry.find`, because `ctx.models.resolve` returns nothing for both.
 - The switch is session-only: no global config file changed, and a resume without `--model` restores the switched model from the session's own model-change entry.
 
@@ -1234,12 +1233,7 @@ Throwaway print-mode probes on the same date established three more facts that t
 `setThinkingLevel` clamps to the model's supported efforts without throwing (`medium` on a model supporting `low,high,max` read back `low`) and leaves the level unset for a string outside the vocabulary, so the extension validates the level and reads it back.
 An explicit `--model` on resume overrides the session's recorded model, which is why the recorded `model=` in task meta must follow a switch.
 
-Print-mode probes on 2026-11-23 (OMP 18.22.2) showed that `turn_end` is not a boundary the extension can use, which is why the extension applies only at settled idle.
-OMP does not await extension `turn_end` handlers: with a handler that slept 3 s, the next provider request was prepared in the same millisecond and finished before the handler returned.
-A `setModel` made in `turn_end` after a slow credential await (simulated with a 2.5 s delay) left the next two requests on the old model and changed the model while the third request was in flight, so a switch there can land inside a run.
-A `before_agent_start` handler is awaited before the first provider request: a handler that slept 1.5 s then called `setModel` ran the whole run on the new model.
-No lock keeps a turn from starting while an extension awaits, so the apply holds a process-global admission gate that `before_agent_start` and the inbox doorbell wait on, and the acknowledgement's `raced` field reports a provider request prepared during the apply.
-A turn that OMP starts by itself (a job result, a retry, an IRC wake) bypasses both holds; that residual risk is reported through `raced`, not prevented.
+Print-mode probes on 2026-11-23 (OMP 18.22.2) also showed that OMP does not await extension `turn_end` handlers, so the extension subscribes to no turn event and applies a request as soon as its watcher sees it.
 
 The guard drives Herdr only.
 The channel itself is files in the task's state directory, and worker liveness is the shared agent-state classifier, so the portable verb test covers tmux with a fake terminal backend and no live run does.
