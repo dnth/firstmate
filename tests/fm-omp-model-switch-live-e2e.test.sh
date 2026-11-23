@@ -57,13 +57,14 @@ HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 # The global OMP configuration the switch must never rewrite.
 OMP_AGENT_DIR=${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}
 config_fingerprint() {
-  local f
+  local f digest
   for f in "$OMP_AGENT_DIR/config.yml" "$OMP_AGENT_DIR/models.yml"; do
     [ -f "$f" ] || continue
-    printf '%s %s\n' "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$f" | cut -d' ' -f1)" "$f"
+    digest=$(sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") || return 1
+    printf '%s %s\n' "${digest%% *}" "$f"
   done
 }
-CONFIG_BEFORE=$(config_fingerprint)
+CONFIG_BEFORE=$(config_fingerprint) || fail "could not fingerprint the global OMP config"
 [ -n "$CONFIG_BEFORE" ] || echo "note: no global OMP config.yml or models.yml found under $OMP_AGENT_DIR; the unchanged-config check has nothing to compare"
 
 LAB=$(fm_test_tmproot fm-omp-model-switch-live)
@@ -415,14 +416,23 @@ session_has_model_change_after "$WORKER_SESSION" "$idle_offset" "$TO" \
   || fail "the session recorded no model-change entry for $TO"
 printf '# extension readback: %s\n' "$(jq -c '{id, outcome, boundary, before, after, modelChanged}' "$ack")"
 wait_for "pane label refreshed from meta" pane_label_is "omp · $TO $TO_EFFORT"
-send_task 'Reply exactly: idle switch applied.' || fail "the post-switch turn was not submitted"
-wait_for "the turn after the idle switch" session_has_text_after "$WORKER_SESSION" "$idle_offset" 'idle switch applied.'
+idle_prompt='Reply exactly: idle switch applied.'
+idle_submit=$(PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_ENV=1 HERDR_SESSION="$SESSION" \
+  fm_backend_herdr_send_text_submit "$WORKER_TARGET" "$idle_prompt" 3 0.2 0 "" \
+    omp "$OMP_RUNTIME" "$OMP_BIN") || true
+idle_assistant_recorded() {
+  [ -n "$(last_assistant_after "$WORKER_SESSION" "$idle_offset")" ]
+}
+wait_for "the turn after the idle switch (submit verdict: ${idle_submit:-none})" idle_assistant_recorded
 wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
 [ "$(last_assistant_after "$WORKER_SESSION" "$idle_offset")" = "$TO" ] \
   || fail "the turn after the switch ran on $(last_assistant_after "$WORKER_SESSION" "$idle_offset"), not $TO"
 entries_after "$WORKER_SESSION" "$idle_offset" \
-  | jq -se --arg id "$IDLE_RID" 'any(.[]; .type == "message" and .message.role == "user" and (tostring | contains($id)))' >/dev/null 2>&1 \
-  && fail "the switch request arrived as a chat message"
+  | jq -se --arg prompt "$idle_prompt" '
+      [.[] | select(.type == "message" and .message.role == "user") | .message.content
+        | if type == "array" then map(select(.type == "text") | .text) | join("") else . end]
+      == [$prompt]' >/dev/null \
+  || fail "the session did not record exactly the one post-switch user prompt"
 pass "live OMP: an idle worker switches $FROM -> $TO and $FROM_EFFORT -> $TO_EFFORT; the next turn runs on $TO; meta and the pane label follow; nothing is chat"
 
 # --- AC2: a switch requested mid-turn waits for the turn boundary ------------
@@ -486,7 +496,7 @@ case "$out" in *"channel=ready"*"unresolved=0"*) ;; *) fail "the resumed worker'
 pass "live OMP: the documented resume path (no --model) keeps the switched model $TO, and the resumed worker's channel is live again"
 
 # --- AC1: the global OMP configuration never changed -------------------------
-CONFIG_AFTER=$(config_fingerprint)
+CONFIG_AFTER=$(config_fingerprint) || fail "could not fingerprint the global OMP config"
 [ "$CONFIG_BEFORE" = "$CONFIG_AFTER" ] \
   || fail "the global OMP configuration changed during the run:"$'\n'"before: $CONFIG_BEFORE"$'\n'"after:  $CONFIG_AFTER"
 pass "live OMP: the global OMP config files are byte-identical before and after"

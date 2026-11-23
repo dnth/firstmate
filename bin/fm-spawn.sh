@@ -523,6 +523,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$RELAUNCH_ID" ] || { echo "error: --relaunch requires a task id" >&2; exit 1; }
   RELAUNCH_META="$STATE/$RELAUNCH_ID.meta"
   [ -f "$RELAUNCH_META" ] || { echo "error: --relaunch needs existing metadata at $RELAUNCH_META" >&2; exit 1; }
+  RELAUNCH_PRIOR_GEN=$(fm_meta_get "$RELAUNCH_META" spawn_gen)
+  RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+  RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   if [ "$KIND" != secondmate ]; then
@@ -531,11 +534,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
       [ -n "$HARNESS_ARG" ] || { echo "error: relaunch metadata has no recorded harness for $RELAUNCH_ID" >&2; exit 1; }
     fi
     if [ "$MODEL_SET" -eq 0 ]; then
-      MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+      MODEL=$RELAUNCH_PRIOR_MODEL
       case "$MODEL" in default|-) MODEL= ;; esac
     fi
     if [ "$EFFORT_SET" -eq 0 ]; then
-      EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+      EFFORT=$RELAUNCH_PRIOR_EFFORT
       case "$EFFORT" in default|-) EFFORT= ;; esac
     fi
     if [ "$KIND" = ship ]; then
@@ -1082,6 +1085,7 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_CONTROL_LOCK=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_META_LOCK=
@@ -1447,6 +1451,9 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  if [ -n "$SPAWN_CONTROL_LOCK" ]; then
+    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+  fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1601,6 +1608,22 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  control_lock="$STATE/.control-$ID.lock"
+  if [ -z "${FM_CONTROL_RELAUNCH_TX:-}" ] || [ "$(cat "$control_lock/pid" 2>/dev/null || true)" != "${FM_CONTROL_RELAUNCH_LOCK_OWNER:-$PPID}" ]; then
+    if ! fm_lock_try_acquire "$control_lock"; then
+      echo "error: another control action is already in progress for $ID" >&2
+      exit 1
+    fi
+    SPAWN_CONTROL_LOCK=$control_lock
+  fi
+  if [ "$RELAUNCH_PRIOR_GEN" != "$(fm_meta_get "$RELAUNCH_META" spawn_gen)" ] \
+     || [ "$RELAUNCH_PRIOR_MODEL" != "$(fm_meta_get "$RELAUNCH_META" model)" ] \
+     || [ "$RELAUNCH_PRIOR_EFFORT" != "$(fm_meta_get "$RELAUNCH_META" effort)" ]; then
+    echo "error: task $ID changed while acquiring relaunch ownership; retry the relaunch" >&2
+    exit 1
+  fi
+fi
 
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
@@ -4375,6 +4398,25 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     fi
   fi
 fi
+if [ "$RELAUNCH" -eq 1 ]; then
+  switch_dir="$STATE/$ID.omp-doorbell-ready.requests"
+  if [ -d "$switch_dir" ] && [ ! -L "$switch_dir" ]; then
+    for request_artifact in "$switch_dir"/model-switch.*.ack.json; do
+      [ -f "$request_artifact" ] || continue
+      receipt_gen=$(jq -r '.spawnGen // empty' "$request_artifact" 2>/dev/null) || receipt_gen=
+      if [ -n "$receipt_gen" ] && [ "$receipt_gen" != "$RELAUNCH_PRIOR_GEN" ]; then
+        printf 'meta-stale %s artifact=%s reason=worker-generation-changed\n' "$ID" "${request_artifact##*/}" >&2
+        continue
+      fi
+      echo "error: relaunch has an unfolded model-switch receipt ($request_artifact); run fm-control.sh $ID switch-model --status" >&2
+      exit 1
+    done
+    for request_artifact in "$switch_dir"/model-switch.*.processing "$switch_dir"/model-switch.*.request.json; do
+      [ -f "$request_artifact" ] || continue
+      printf 'pending-unknown %s artifact=%s reason=worker-replacement\n' "$ID" "${request_artifact##*/}" >&2
+    done
+  fi
+fi
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -5196,6 +5238,15 @@ else
   fi
 fi
 
+if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] && [ "$BACKEND" = herdr ]; then
+  control_lock="$STATE/.control-$ID.lock"
+  if ! fm_lock_try_acquire "$control_lock"; then
+    echo "error: another control action is already in progress for $ID" >&2
+    exit 1
+  fi
+  SPAWN_CONTROL_LOCK=$control_lock
+fi
+
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -5584,7 +5635,7 @@ sleep 0.3
 # exec already sits at each template's executable (launch_template), which is
 # the only point where the executable is syntactically first: prefixing exec
 # onto the assembled LAUNCH would yield "exec VAR=..." and fail.
-if [ "$HARNESS" = omp ] && [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ]; then
   # Generation reconciliation: every request.* receipt and model-switch.* file
   # under the doorbell requests dir was written for the PRIOR incarnation's
   # doorbell and extension. The doorbell only reconciles
@@ -5600,6 +5651,7 @@ if [ "$HARNESS" = omp ] && [ "$RELAUNCH" -eq 1 ]; then
   if [ -d "$OMP_REQUESTS_DIR" ] && [ ! -L "$OMP_REQUESTS_DIR" ]; then
     for request_artifact in "$OMP_REQUESTS_DIR"/request.* "$OMP_REQUESTS_DIR"/model-switch.*; do
       [ -e "$request_artifact" ] || [ -L "$request_artifact" ] || continue
+      case "${request_artifact##*/}" in request.*) [ "$HARNESS" = omp ] || continue ;; esac
       if [ -L "$request_artifact" ] || [ ! -f "$request_artifact" ]; then
         echo "error: refusing OMP relaunch through unsafe request entry: $request_artifact" >&2
         exit 1
@@ -5654,7 +5706,11 @@ else
   spawn_send_key "$T" Enter
 fi
 if [ "$BACKEND" = herdr ]; then
-  fm_backend_herdr_report_agent_label "$T" "$HARNESS" "$MODEL" "$EFFORT"
+  if [ "$RELAUNCH" -eq 1 ] || { [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; }; then
+    fm_backend_herdr_report_agent_label_ordered "$T" "$HARNESS" "$MODEL" "$EFFORT"
+  else
+    fm_backend_herdr_report_agent_label "$T" "$HARNESS" "$MODEL" "$EFFORT"
+  fi
 fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0

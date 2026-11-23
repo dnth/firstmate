@@ -2487,6 +2487,19 @@ fm_backend_herdr_report_agent_label() {  # <target> <harness> [<model>] [<effort
   return 0
 }
 
+fm_backend_herdr_report_agent_label_ordered() {  # <target> <harness> [<model>] [<effort>]
+  local target=$1 label log="$FM_HOME/state/herdr-agent-label.log"
+  shift
+  label=$(fm_backend_herdr_agent_display_label "$@") || return 0
+  fm_backend_herdr_parse_target "$target" || return 0
+  if ! mkdir -p "${log%/*}" || ! : >> "$log"; then
+    printf 'warning: herdr pane %s display label could not be published: cannot open %s\n' "$target" "$log" >&2
+    return 0
+  fi
+  fm_backend_herdr_publish_agent_label "$target" "$FM_BACKEND_HERDR_SESSION" \
+    "$FM_BACKEND_HERDR_PANE" "$label" 2>> "$log"
+}
+
 # Background worker: its caller owns descriptor detachment and warning log.
 fm_backend_herdr_publish_agent_label() {  # <target> <session> <pane> <label>
   local target=$1 session=$2 pane=$3 label=$4 err rc

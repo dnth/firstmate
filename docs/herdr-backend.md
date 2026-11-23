@@ -209,12 +209,14 @@ The label is published through `herdr pane report-metadata <pane> --source first
 Workspace and tab labels are never touched, because they stay the task identity and recovery key described above.
 
 Publishing is best effort by contract.
-Publication runs in the background with a two-second bound through `bin/fm-timeout-lib.sh`, so the spawn continues without awaiting the CLI.
+Publication has a two-second bound through `bin/fm-timeout-lib.sh`.
+Fresh OMP workers with a switch channel, relaunches, and switch reconciliation wait for publication under their lifecycle ownership so later labels follow earlier ones.
+Other launches publish in the background.
 Spawn success does not confirm publication; the label may appear after the spawn command returns.
 A failing or unsupported call appends one warning to the owning home's `state/herdr-agent-label.log`, naming the pane, the label, and the CLI's own reason.
 If that log cannot be opened, publication is skipped with one warning on the caller's stderr and spawning continues.
 Support is detected from the installed CLI's own refusal rather than a version comparison, so a build without `report-metadata` costs one warning and nothing else.
-There is no retry, polling, or read-back; the publisher's input and output are detached from the caller's captured descriptors.
+There is no retry, polling, or read-back; the background publisher's input and output are detached from the caller's captured descriptors.
 When the bound expires, the runner terminates the child process group and publication costs exactly one warning while leaving spawning successful.
 
 Verified presentation limits, live against Herdr 0.9.5 protocol 22 and recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr):

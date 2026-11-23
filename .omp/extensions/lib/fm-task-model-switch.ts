@@ -88,14 +88,12 @@ type ModelSwitchApi = {
 };
 
 export type TaskModelSwitchOptions = {
-	requestDir?: string;
+	requestDir: string;
 	// The generation fm-spawn minted for this incarnation. A request carrying
 	// another one was written for a different worker and is refused.
-	spawnGen?: string;
-	failureJournal?: string;
+	spawnGen: string;
 };
 
-export type TaskModelSwitch = { retire: () => void };
 export type TaskModelSwitchContext = SwitchContext;
 
 type Boundary = "session_start" | "idle" | "turn_end" | "agent_end";
@@ -111,6 +109,7 @@ type Request = {
 type Claim = { id: string; processing: string };
 type AckTarget = Pick<Request, "id" | "model" | "effort">;
 
+const ACK_NAME = /^model-switch\.[A-Za-z0-9._-]+\.ack\.json(?:\.folded)?$/;
 const REQUEST_NAME = /^model-switch\.([A-Za-z0-9][A-Za-z0-9._-]{0,63})\.request\.json$/;
 const OWNERS_KEY = Symbol.for("firstmate.task-model-switch.owners");
 // OMP binds this extension again inside a native subagent's child session in
@@ -184,16 +183,12 @@ function parseRequest(id: string, text: string): Request | string {
 
 export function installTaskModelSwitch(
 	omp: ModelSwitchApi,
-	options: TaskModelSwitchOptions = {},
-): TaskModelSwitch {
-	const requestDir = options.requestDir ?? (process.env.FM_OMP_TASK_DOORBELL_READY
-		? `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests`
-		: "");
-	const spawnGen = options.spawnGen ?? "";
-	const journal = options.failureJournal ?? (requestDir ? join(requestDir, "model-switch.failed") : "");
+	{ requestDir, spawnGen }: TaskModelSwitchOptions,
+): void {
+	const journal = join(requestDir, "model-switch.failed");
 	if (!requestDir.startsWith("/") || spawnGen === "" || typeof omp.on !== "function") {
 		journalFailure(journal, "install", new Error("model switch is unconfigured (requestDir/spawnGen unresolved or no event surface)"));
-		return { retire: () => {} };
+		return;
 	}
 	const subscribe: (event: string, handler: (event: never, ctx: never) => unknown) => void = omp.on.bind(omp);
 
@@ -201,6 +196,7 @@ export function installTaskModelSwitch(
 	const ownerKey = resolve(readyFile);
 	const ownerToken = {};
 	let active = false;
+	let ackSequence = Date.now() * 1000;
 	let mainCtx: SwitchContext | undefined;
 	let watcher: FSWatcher | undefined;
 	let chain: Promise<void> = Promise.resolve();
@@ -251,6 +247,7 @@ export function installTaskModelSwitch(
 				after,
 				modelChanged: before.model !== after.model,
 				ackedAtMs: Date.now(),
+				ackSequence: ++ackSequence,
 			});
 			return true;
 		} catch (error) {
@@ -309,6 +306,10 @@ export function installTaskModelSwitch(
 				failure = error instanceof Error ? error.message : String(error);
 			}
 			const afterThinking = snapshot(ctx);
+			if (afterThinking.model !== request.model) {
+				return writeAck(request, "refused", boundary, before, afterThinking, "model-mismatch",
+					`the live model reads ${afterThinking.model ?? "nothing"} after the thinking change`);
+			}
 			if (failure !== null) {
 				return writeAck(request, "partial", boundary, before, afterThinking, "thinking-error", failure);
 			}
@@ -318,8 +319,9 @@ export function installTaskModelSwitch(
 					`the live thinking level reads ${afterThinking.thinking ?? "nothing"}, not ${request.effort}`,
 				);
 			}
+			return writeAck(request, "applied", boundary, before, afterThinking);
 		}
-		return writeAck(request, "applied", boundary, before, snapshot(ctx));
+		return writeAck(request, "applied", boundary, before, afterModel);
 	};
 
 	const claimPending = (): Claim[] => {
@@ -406,6 +408,19 @@ export function installTaskModelSwitch(
 		if (owners.has(ownerKey)) return false;
 		try {
 			mkdirSync(requestDir, { recursive: true, mode: 0o700 });
+			for (const name of readdirSync(requestDir)) {
+				if (!ACK_NAME.test(name)) continue;
+				try {
+					const receipt: unknown = JSON.parse(readFileSync(join(requestDir, name), "utf8"));
+					if (receipt === null || typeof receipt !== "object") continue;
+					const sequence = jsonField(receipt, "ackSequence");
+					if (jsonField(receipt, "spawnGen") === spawnGen && typeof sequence === "number" && Number.isSafeInteger(sequence)) {
+						ackSequence = Math.max(ackSequence, sequence);
+					}
+				} catch {
+					continue;
+				}
+			}
 			mainCtx = ctx;
 			watcher = watch(requestDir, () => {
 				if (mainCtx) void drain("idle", mainCtx, true);
@@ -443,6 +458,4 @@ export function installTaskModelSwitch(
 		await drain("agent_end", ctx, false);
 	});
 	subscribe("session_shutdown", () => retire());
-
-	return { retire };
 }

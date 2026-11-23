@@ -117,7 +117,7 @@ control_env() {
   env PATH="$FAKEBIN:$PATH" TMUX=fake,1,0 FM_HOME="$HOME_DIR" \
     FM_FAKE_TMUX_LOG="$CASE_DIR/tmux.log" FM_FAKE_TASK="$ID" \
     FM_FAKE_AGENT_PID_FILE="$CASE_DIR/agent.pid" FM_FAKE_OMP_BIN="$FAKE_OMP_BIN" \
-    FM_CONTROL_POLL=0.1 FM_CONTROL_MODEL_WAIT="${WAIT:-3}" FM_CONTROL_MODEL_GRACE="${GRACE:-1}" \
+    FM_CONTROL_POLL=0.1 \
     FM_CONTROL_SETTLE_WAIT=1 "$@"
 }
 
@@ -205,7 +205,7 @@ done
 
 make_case midturn
 start_responder FM_HOST_BUSY=1
-( WAIT=20 run_control switch-model --model p/b --effort high; printf '%s\n%s\n' "$CONTROL_RC" "$CONTROL_OUT" > "$CASE_DIR/midturn.out" ) &
+( run_control switch-model --model p/b --effort high --wait 20; printf '%s\n%s\n' "$CONTROL_RC" "$CONTROL_OUT" > "$CASE_DIR/midturn.out" ) &
 BG_PID=$!
 printf '%s\n' "$BG_PID" >> "$PIDS"
 wait_for_queued_request
@@ -226,7 +226,7 @@ pass "switch-model mid-turn: the in-flight turn is untouched and the request app
 
 make_case cancel
 start_responder FM_HOST_BUSY=1
-WAIT=1 run_control switch-model --model p/b --effort medium
+run_control switch-model --model p/b --effort medium --wait 01
 expect_code 1 "$CONTROL_RC" "a timed-out switch must not succeed"
 case "$CONTROL_OUT" in cancelled\ "$ID"\ request=ms-*) ;; *) fail "timeout before the claim is not a typed cancelled result: $CONTROL_OUT" ;; esac
 assert_contains "$CONTROL_OUT" "proof=request-withdrawn-before-claim" "the cancellation carries no proof"
@@ -249,7 +249,7 @@ pass "switch-model timeout: the request is withdrawn atomically before the claim
 
 make_case late
 start_responder FM_HOST_SET_DELAY_MS=3500
-WAIT=1 GRACE=1 run_control switch-model --model p/b --effort medium
+run_control switch-model --model p/b --effort medium --wait 1
 expect_code 1 "$CONTROL_RC" "a switch whose acknowledgement is late must not report success"
 case "$CONTROL_OUT" in pending-unknown\ "$ID"\ request=ms-*) ;; *) fail "timeout after the claim is not a typed pending-unknown result: $CONTROL_OUT" ;; esac
 RID=$(request_id_of "$CONTROL_OUT")
@@ -272,7 +272,7 @@ pass "switch-model late acknowledgement: pending-unknown names the request, stat
 # The next verb call reconciles too, before it acts.
 make_case latenext
 start_responder FM_HOST_SET_DELAY_MS=3500
-WAIT=1 GRACE=1 run_control switch-model --model p/b --effort high
+run_control switch-model --model p/b --effort high --wait 1
 expect_code 1 "$CONTROL_RC" "latenext must time out first"
 RID=$(request_id_of "$CONTROL_OUT")
 wait_for_file "$REQ_DIR/model-switch.$RID.ack.json" "the late acknowledgement" 200
@@ -301,7 +301,7 @@ pass "switch-model partial: both thinking values are reported, nothing is claime
 
 make_case stalemeta
 start_responder FM_HOST_BUSY=1
-( WAIT=20 run_control switch-model --model p/b --effort medium; printf '%s\n%s\n' "$CONTROL_RC" "$CONTROL_OUT" > "$CASE_DIR/stalemeta.out" ) &
+( run_control switch-model --model p/b --effort medium --wait 20; printf '%s\n%s\n' "$CONTROL_RC" "$CONTROL_OUT" > "$CASE_DIR/stalemeta.out" ) &
 printf '%s\n' "$!" >> "$PIDS"
 BG_PID=$!
 wait_for_queued_request
@@ -336,6 +336,9 @@ run_control switch-model --model p/b
 expect_code 1 "$CONTROL_RC" "a worker with no channel must be refused"
 assert_contains "$CONTROL_OUT" "relaunch it to load the current extension" "a channel-less worker is not told to relaunch"
 assert_meta p/a low "no channel"
+run_control switch-model --status
+expect_code 1 "$CONTROL_RC" "status on a worker with no channel must be refused"
+assert_contains "$CONTROL_OUT" "no model-switch channel" "status did not explain the refusal"
 
 make_case deadext
 start_responder
@@ -356,29 +359,36 @@ expect_code 1 "$CONTROL_RC" "another generation's ready marker must be refused"
 assert_contains "$CONTROL_OUT" "belongs to worker generation gen0" "a stale generation is not named"
 pass "switch-model refuses a non-OMP worker, a secondmate, a worker without the channel, a dead extension, and another generation's marker"
 
-# --- a request a killed invocation left queued is withdrawn, not replayed ----
+make_case nativeeffort
+start_responder FM_HOST_THINKING=off
+run_control switch-model --model q/c --wait 08
+expect_code 0 "$CONTROL_RC" "a decimal wait with a leading zero must work: $CONTROL_OUT"
+assert_contains "$CONTROL_OUT" "effort=off->off" "the result must preserve native thinking readback"
+assert_meta q/c "" "native thinking outside the launch vocabulary must clear stale effort"
+pass "switch-model clears stale effort and reports the native thinking level"
 
-make_case stale
-start_responder FM_HOST_BUSY=1
-jq -n '{schema:"fm-model-switch.request.v1", id:"ms-1-dead", spawnGen:"gen1", model:"q/c", effort:null, requestedAtMs:1}' \
-  > "$REQ_DIR/model-switch.ms-1-dead.request.json"
-( WAIT=20 run_control switch-model --model p/b; printf '%s\n%s\n' "$CONTROL_RC" "$CONTROL_OUT" > "$CASE_DIR/stale.out" ) &
-printf '%s\n' "$!" >> "$PIDS"
-BG_PID=$!
-wait_for_file "$REQ_DIR/model-switch.ms-1-dead.cancelled" "the stale request's withdrawal" 100
-wait_for_queued_request
-: > "$CTL_DIR/turn_end"
-wait "$BG_PID" || true
-[ "$(sed -n '1p' "$CASE_DIR/stale.out")" = 0 ] || fail "the switch behind a stale request failed: $(cat "$CASE_DIR/stale.out")"
-[ "$(host_calls)" = "setModel p/b" ] || fail "the stale request was replayed: $(host_calls)"
-pass "switch-model: a request left queued by a killed invocation is withdrawn, never replayed"
+make_case reconciliation
+start_responder
+run_control switch-model --model p/b --effort high
+expect_code 0 "$CONTROL_RC" "could not establish the newer switch: $CONTROL_OUT"
+jq -n '{schema:"fm-model-switch.ack.v1", id:"ms-older", spawnGen:"gen1", ackSequence:1,
+  outcome:"applied", target:{model:"p/a",effort:"low"}, after:{model:"p/a",thinking:"low"}}' \
+  > "$REQ_DIR/model-switch.ms-older.ack.json"
+jq -n '{schema:"fm-model-switch.ack.v1", id:"ms-mismatch", spawnGen:"gen1", ackSequence:9007199254740991,
+  outcome:"applied", target:{model:"p/a",effort:"low"}, after:{model:"q/c",thinking:"low"}}' \
+  > "$REQ_DIR/model-switch.ms-mismatch.ack.json"
+run_control switch-model --status
+expect_code 0 "$CONTROL_RC" "status did not account for both acknowledgements: $CONTROL_OUT"
+assert_contains "$CONTROL_OUT" "outcome=refused reason=readback-mismatch" "a divergent readback must be visible"
+assert_meta p/b high "an older or unverified receipt must not replace the latest verified switch"
+pass "switch-model status preserves newer verified state and reports a divergent readback"
 
 # --- argument contract -------------------------------------------------------
 
 make_case args
 start_responder
 for bad in "--model nomodel" "--model p/b --effort default" "--model p/b --effort ultra" "--status --model p/b" \
-           "--model p/b --wait 0" "--model p/b --wait 9999" "--model p/ b" ""; do
+           "--model p/b --wait 00" "--model p/b --wait=3" "--model p/b --wait" "--model p/b --wait 9999" "--model p/ b" ""; do
   # shellcheck disable=SC2086 # the cases are deliberately word-split argument lists
   run_control switch-model $bad
   [ "$CONTROL_RC" -ne 0 ] || fail "switch-model accepted the invalid arguments: '$bad'"

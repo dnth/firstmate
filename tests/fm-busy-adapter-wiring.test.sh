@@ -542,22 +542,24 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 // OMP runs every handler an extension registered for an event, in registration
 // order, so this host does too: one extension may bind several to one event.
-const registered = {};
-const handlers = new Proxy(registered, {
-  get: (target, name) => (name in target
-    ? async (...args) => { for (const fn of target[name]) await fn(...args); }
-    : undefined),
-});
-mod.default({ on: (name, fn) => { (registered[name] ||= []).push(fn); } });
+const makeHost = (extension) => {
+  const registered = {};
+  extension.default({ on: (name, fn) => { (registered[name] ||= []).push(fn); } });
+  return new Proxy(registered, {
+    get: (target, name) => (name in target
+      ? async (...args) => { for (const fn of target[name]) await fn(...args); }
+      : undefined),
+  });
+};
+const handlers = makeHost(mod);
 // ctx.isIdle() reads false at a natural omp agent_end; state must not depend on it.
 const ctx = { isIdle: () => false };
 switch (process.env.MODE) {
   case "ownership": {
     const { execFileSync } = await import("node:child_process");
     const { readFileSync } = await import("node:fs");
-    const childHandlers = {};
     const childMod = await import(pathToFileURL(process.env.EXT_PATH).href + "?child");
-    childMod.default({ on: (name, fn) => { childHandlers[name] = fn; } });
+    const childHandlers = makeHost(childMod);
     const classify = () => execFileSync("bash", ["-c",
       '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux fake:w omp "$2" "$3"',
       "_", process.env.ROOT_PATH, process.env.TASK_ID, process.env.STATE_PATH,
