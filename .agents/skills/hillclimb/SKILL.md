@@ -49,7 +49,6 @@ Record the baseline tree, its valid campaign score, and a passing regression gat
 For InfoConnect search work, the harness must cover the small corpus and the full corpus in the same frozen command.
 The issue 1026 typo spike is the standing warning: it looked clean on the full evaluation bank while rewriting 9 of 103 correct queries on a 15-document subset.
 Print both corpus measurements and the campaign score.
-Check validity and the regression gate separately for each corpus, and reject a candidate if its per-corpus metric worsens past the noise threshold on either corpus.
 
 ## The attempt loop
 
@@ -63,17 +62,28 @@ Measure each attempt in this order.
 3. Re-run the frozen harness and the regression gate on that candidate.
 
 An attempt-only scout hands off the results through its report.
-The delivery worker applies the following steps to its own attempts and to scout candidates.
 
-1. At acceptance, use the current accepted tip of the delivery branch as the comparison point.
-   If the tip differs from the starting commit, replay only the candidate on a new local experiment branch based on the current tip, keep the original branch, and run the frozen harness and gate on both the current tip and the combined result.
-2. Keep the candidate only when both measurements are valid, the campaign score improves past noise, and the regression gate passes, including the corpus checks when applicable.
-   Reject every other candidate and record why.
-3. Return to the delivery branch and advance it only to an accepted, tested commit, with one commit per kept change.
+### Decide before advancing the delivery branch
+
+The delivery worker follows these steps for every candidate, including its own.
+Keep the delivery branch at its accepted tip while evaluating the candidate.
+
+1. Read the current delivery tip SHA and compare it with the candidate's starting SHA.
+   If they differ, replay only the candidate on a new experiment branch based on the current tip and preserve the original branch.
+   Run the frozen harness and regression gate on the current tip and the replayed commit.
+   When the SHAs match, existing results can be used if they cover the exact tip and candidate commits.
+2. Prepare the acceptance report with the two compared SHAs and the evidence for each check before deciding:
+   - Every run on both commits completed the expected amount of work and stayed within the allowed error count, for each workload.
+   - The campaign score improved past the noise threshold in the chosen direction.
+   - The regression gate passed, separately for the small and full corpora when applicable.
+   - For the two-corpus harness, each corpus's metric stayed within its noise threshold for worsening relative to the current tip.
+3. Return to the delivery branch.
+   If any check fails or lacks evidence, leave the branch at its accepted tip, preserve the experiment refs, and report the rejection and its reason.
+   If all checks pass and the delivery tip still matches the measured starting SHA, fast-forward to the exact tested candidate SHA, with one commit per kept change.
+   If the delivery tip changed, repeat acceptance against the new tip.
 
 Isolated attempts can run in parallel.
 Serialize acceptance and branch advancement so each candidate is checked against the result of the preceding decision.
-Use measured results to decide every attempt.
 Record the accepted tree with its score and gate result.
 
 ### Preserve every attempt
