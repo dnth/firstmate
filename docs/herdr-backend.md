@@ -209,14 +209,12 @@ The label is published through `herdr pane report-metadata <pane> --source first
 Workspace and tab labels are never touched, because they stay the task identity and recovery key described above.
 
 Publishing is best effort by contract.
-Publication has a two-second bound through `bin/fm-timeout-lib.sh`.
-Fresh OMP workers with a switch channel, relaunches, and switch reconciliation wait for publication under their lifecycle ownership so later labels follow earlier ones.
-Other launches publish in the background.
+Publication runs in the background with a two-second bound through `bin/fm-timeout-lib.sh`, so the spawn continues without awaiting the CLI.
 Spawn success does not confirm publication; the label may appear after the spawn command returns.
 A failing or unsupported call appends one warning to the owning home's `state/herdr-agent-label.log`, naming the pane, the label, and the CLI's own reason.
 If that log cannot be opened, publication is skipped with one warning on the caller's stderr and spawning continues.
 Support is detected from the installed CLI's own refusal rather than a version comparison, so a build without `report-metadata` costs one warning and nothing else.
-There is no retry, polling, or read-back; the background publisher's input and output are detached from the caller's captured descriptors.
+There is no retry, polling, or read-back; the publisher's input and output are detached from the caller's captured descriptors.
 When the bound expires, the runner terminates the child process group and publication costs exactly one warning while leaving spawning successful.
 
 Verified presentation limits, live against Herdr 0.9.5 protocol 22 and recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr):
@@ -227,7 +225,7 @@ Verified presentation limits, live against Herdr 0.9.5 protocol 22 and recorded 
 - An agent's own lifecycle reports do not rewrite it: `pane report-agent` and `pane release-agent` set or release the agent identity and leave `display_agent` alone.
 - The installed OMP integration reports only session identity and agent lifecycle, so it does not overwrite the firstmate label.
   A future integration that reports `display_agent` would win until the next launch re-reports.
-- The label mirrors recorded task metadata, not live state, so a model changed any way other than `bin/fm-control.sh switch-model`, such as a typed `/switch`, is not tracked; `switch-model` republishes the label whenever it changes the recorded model or effort.
+- The label mirrors recorded task metadata, not live state, so a model changed outside `bin/fm-control.sh switch-model` is not tracked.
 
 The publication hook runs only for Herdr; the other backend adapters do not use its pane metadata API:
 

@@ -13,7 +13,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 ## What the control plane owns
 
-`bin/fm-control-lib.sh` is the single executable owner of four capability tables, with no side effects, so it can be read as a contract:
+`bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:
 
 - The **verb allowlist**: `interrupt`, `exit`, `relaunch`, `switch-model`.
   There is no arbitrary-text and no generic raw-key entry point.
@@ -22,8 +22,6 @@ The failure repeated across harnesses and homes, and the workaround (remember to
   These were previously carried only in the [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) skill's tool references, which now point here.
   `bin/fm-send.sh`'s `--key` path reads the composer-clear table from this owner too, rather than keeping a second copy of it.
 - **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped.
-- **In-session model switching**: which harnesses and task kinds can change a running session's model through a verified channel instead of a relaunch.
-  Only an OMP ship or scout qualifies; the channel's wire contract lives with its extension, `.omp/extensions/lib/fm-task-model-switch.ts`.
 
 A recorded `harness=` is not always an exact adapter name: a task launched from a raw command records that command's basename instead.
 `fm_control_harness_family` is the one place that prefix rule is stated, and an unrecognized value resolves to no adapter rather than being guessed into one.
@@ -140,7 +138,4 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 - `tests/fm-update.test.sh` - fast-forward classification, live secondmate restart/nudge sets, and stopped or malformed endpoint handling.
 - `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` - host-local remote lifecycle control, including OMP endpoint binding and SSH unknown-state handling.
 - `tests/fm-remote-secondmate-update-restart.test.sh` - the remote OMP binding matrix for the restart persist request and an end-to-end update across an extension change followed by the persist-gated restart.
-- `tests/fm-control-switch-model.test.sh` - the `switch-model` verb against the real extension library driven by a fake OMP host: typed results, meta changes, a switch applied mid-task, withdrawal before the claim, late acknowledgements and their reconciliation, partial results, and every refusal.
-- `tests/fm-omp-task-model-switch.test.sh` - the extension side of the same channel: immediate application, typed refusals, partial and superseded results, and ownership.
-- `tests/fm-omp-model-switch-live-e2e.test.sh` - opt-in (`FM_OMP_MODEL_SWITCH_LIVE_E2E=1`) real OMP and Herdr proof in a guarded lab, run from an explicit Git revision: idle and mid-task switches, typed refusals, the documented resume path, and an unchanged global OMP config; [the runtime verification record](verification/runtime-backends.md#omp-in-session-model-switch) holds its latest result.
 - `tests/fm-remote-omp-update-restart-live-e2e.test.sh` - opt-in (`FM_OMP_REMOTE_UPDATE_LIVE_E2E=1`) real OMP and Herdr proof of the same update-then-restart path in a guarded lab; [the runtime verification record](verification/runtime-backends.md#remote-omp-update-and-restart) holds its latest result.

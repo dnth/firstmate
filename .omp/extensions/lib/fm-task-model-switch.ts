@@ -228,7 +228,6 @@ export function installTaskModelSwitch(
 				schema: FM_MODEL_SWITCH_ACK_SCHEMA,
 				id: request.id,
 				spawnGen,
-				pid: process.pid,
 				outcome,
 				reason,
 				detail,
@@ -268,8 +267,13 @@ export function installTaskModelSwitch(
 			return refuse("model-mismatch", `${request.model} resolves to ${labelOf(resolved)}; name the exact provider/id`);
 		}
 		const efforts = resolved.thinking?.efforts;
-		if (request.effort !== null && Array.isArray(efforts) && efforts.length > 0 && !efforts.includes(request.effort)) {
-			return refuse("effort-unsupported", `${request.model} supports ${efforts.join(", ")}, not ${request.effort}`);
+		if (request.effort !== null && !(Array.isArray(efforts) && efforts.includes(request.effort))) {
+			return refuse(
+				"effort-unsupported",
+				Array.isArray(efforts) && efforts.length > 0
+					? `${request.model} supports ${efforts.join(", ")}, not ${request.effort}`
+					: `${request.model} has no thinking levels, so ${request.effort} cannot be applied`,
+			);
 		}
 		if (before.model !== request.model) {
 			let switched: boolean;
@@ -419,7 +423,6 @@ export function installTaskModelSwitch(
 				schema: FM_MODEL_SWITCH_READY_SCHEMA,
 				pid: process.pid,
 				spawnGen,
-				at: new Date().toISOString(),
 			});
 			if (existsSync(journal)) bestEffortUnlink(journal);
 			return true;

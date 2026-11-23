@@ -346,7 +346,7 @@ meta_value() { # <key>
 }
 
 control() { # <fm-control args...>
-  fm_env FM_CONTROL_POLL=0.25 "$DRIVER_ROOT/bin/fm-control.sh" "$WORKER_ID" "$@"
+  fm_env "$DRIVER_ROOT/bin/fm-control.sh" "$WORKER_ID" "$@"
 }
 
 send_task() {
@@ -439,35 +439,51 @@ pass "live OMP: an idle worker switches $FROM -> $TO and $FROM_EFFORT -> $TO_EFF
 
 # --- AC2: a switch requested mid-task applies at once ------------------------
 busy_offset=$(session_offset "$WORKER_SESSION") || exit 1
-busy_reply='slept through the switch.'
-send_task "Run this exact bash command: sleep 15. Then reply exactly: $busy_reply" \
+busy_reply='released after the switch.'
+release_file="$LAB/mid-task-release"
+rm -f "$release_file"
+# The fixture tool stays blocked until the test releases it, which it does only
+# after the switch receipt has arrived, so the switch provably lands while the
+# tool call is in flight.
+send_task "Run this exact bash command: while [ ! -f '$release_file' ]; do sleep 1; done. Then reply exactly: $busy_reply" \
   || fail "the busy turn was not submitted"
 wait_for "native working worker state" agent_is "$WORKER_TARGET" omp working
-sleep 3
+session_has_entry_after() { # <jq predicate over one entry>
+  entries_after "$WORKER_SESSION" "$busy_offset" | jq -se "any(.[]; $1)" >/dev/null 2>&1
+}
+tool_call_recorded() {
+  session_has_entry_after '.type == "message" and .message.role == "assistant" and ((.message.content // []) | any(.type == "toolCall"))'
+}
+wait_for "the tool-call request to be recorded" tool_call_recorded
+! session_has_entry_after '.type == "message" and .message.role == "toolResult"' \
+  || fail "the tool returned before the switch was requested"
 out=$(control switch-model --model "$FROM" --effort "$FROM_EFFORT" 2>&1) || fail "mid-task switch-model failed: $out"
 printf '# %s\n' "$out"
 case "$out" in switched\ "$WORKER_ID"\ *"model=$TO->$FROM"*) ;; *) fail "a mid-task switch is not a typed switched result for $TO -> $FROM: $out" ;; esac
 [ "$(meta_value model)" = "$FROM" ] && [ "$(meta_value effort)" = "$FROM_EFFORT" ] \
   || fail "task meta does not record the mid-task switch: model=$(meta_value model) effort=$(meta_value effort)"
+: > "$release_file"
 wait_for "the busy worker's final reply" session_has_assistant_reply_after "$WORKER_SESSION" "$busy_offset" "$busy_reply"
 wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
-# The request in flight when the switch landed - the tool-call turn - was served
-# by the old model; the next request, the final reply, ran on the new one, with
-# the session's model-change entry between them.
+# The tool-call request, in flight when the switch landed, was served by the old
+# model; the session's model-change entry precedes the tool result; every
+# assistant request after the change - the first of which is the final reply -
+# ran on the new model, and none before it did.
 entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg from "$FROM" --arg to "$TO" --arg reply "$busy_reply" '
   [range(0; length)] as $i
   | . as $e
+  | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"))) as $assistant
   | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"
       and (($e[.].message.content // []) | any(.type == "toolCall")))) | first) as $tool
+  | ($i | map(select($e[.].type == "message" and $e[.].message.role == "toolResult")) | first) as $result
   | ($i | map(select($e[.].type == "model_change" and $e[.].model == $from)) | first) as $change
-  | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"
-      and $change != null and . > $change
-      and (($e[.].message.content // []) | any(.type == "text" and (.text | contains($reply)))))) | first) as $final
-  | $tool != null and $change != null and $final != null
-    and $tool < $change and $change < $final
-    and "\($e[$tool].message.provider)/\($e[$tool].message.model)" == $to
-    and "\($e[$final].message.provider)/\($e[$final].message.model)" == $from' >/dev/null 2>&1 \
-  || fail "the session order does not show: in-flight request on $TO, then the switch, then the next request on $FROM"
+  | ($assistant | map(select($change != null and . > $change)) | first) as $next
+  | $tool != null and $result != null and $change != null and $next != null
+    and $tool < $change and $change < $result and $result < $next
+    and ($e[$next].message.content // [] | any(.type == "text" and (.text | contains($reply))))
+    and ($assistant | map(select(. < $change)) | all("\($e[.].message.provider)/\($e[.].message.model)" == $to))
+    and ($assistant | map(select(. > $change)) | all("\($e[.].message.provider)/\($e[.].message.model)" == $from))' >/dev/null 2>&1 \
+  || fail "the session order does not show: tool-call request on $TO, then the switch before the tool result, then every later request on $FROM"
 # The user-message sequence is the oracle for the original failure: a typed
 # /model or /switch would appear as a message of its own. The only user message
 # the supported doorbell fallback can add is its own re-driven steer.

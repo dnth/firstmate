@@ -117,7 +117,6 @@ control_env() {
   env PATH="$FAKEBIN:$PATH" TMUX=fake,1,0 FM_HOME="$HOME_DIR" \
     FM_FAKE_TMUX_LOG="$CASE_DIR/tmux.log" FM_FAKE_TASK="$ID" \
     FM_FAKE_AGENT_PID_FILE="$CASE_DIR/agent.pid" FM_FAKE_OMP_BIN="$FAKE_OMP_BIN" \
-    FM_CONTROL_POLL=0.1 \
     FM_CONTROL_SETTLE_WAIT=1 "$@"
 }
 
@@ -266,6 +265,23 @@ assert_contains "$CONTROL_OUT" "model-switch-reconciled $ID request=$RID outcome
 assert_meta p/b high "reconcile on the next verb"
 pass "switch-model late acknowledgement: the next verb call folds it into meta before acting"
 
+# The next switch folds a late receipt first, even when the worker has since exited.
+make_case latedead
+start_responder FM_HOST_SET_DELAY_MS=3500
+run_control switch-model --model p/b --effort high --wait 1
+expect_code 1 "$CONTROL_RC" "latedead must time out first"
+RID=$(request_id_of "$CONTROL_OUT")
+wait_for_file "$REQ_DIR/model-switch.$RID.ack.json" "the late acknowledgement" 200
+: > "$CTL_DIR/quit"
+n=0
+while kill -0 "$RESPONDER_PID" 2>/dev/null; do n=$((n + 1)); [ "$n" -lt 100 ] || fail "the fake worker did not exit"; sleep 0.05; done
+run_control switch-model --model p/a
+expect_code 1 "$CONTROL_RC" "a switch to a worker that has exited must be refused"
+assert_contains "$CONTROL_OUT" "model-switch-reconciled $ID request=$RID outcome=applied" "a late receipt was left unfolded because the worker had exited"
+assert_contains "$CONTROL_OUT" "cannot take a model switch" "the exited worker was not refused"
+assert_meta p/b high "late receipt folded before the refusal"
+pass "switch-model: a late receipt is folded before a new switch is refused for a dead worker"
+
 # --- partial: the model switched, the thinking level did not -----------------
 
 make_case partial
@@ -382,6 +398,21 @@ expect_code 1 "$CONTROL_RC" "an acknowledgement with no sequence must stay unres
 assert_contains "$CONTROL_OUT" "unresolved $ID request=ms-legacy state=acknowledged-unfolded" "an unordered acknowledgement was treated as resolved"
 assert_meta p/a low "an acknowledgement without a sequence"
 pass "switch-model: an acknowledgement without the emitted sequence is left unresolved and never folded"
+
+# Status names the newest result by emitted sequence, not by the time inside a request id.
+make_case seqorder
+start_responder
+jq -n '{schema:"fm-model-switch.ack.v1", id:"ms-9-b", spawnGen:"gen1", ackSequence:1, outcome:"refused",
+  reason:"unknown-model", target:{model:"x/y"}, before:{model:"p/a",thinking:"low"}, after:{model:"p/a",thinking:"low"}}' \
+  > "$REQ_DIR/model-switch.ms-9-b.ack.json"
+jq -n '{schema:"fm-model-switch.ack.v1", id:"ms-1-a", spawnGen:"gen1", ackSequence:2, outcome:"applied",
+  target:{model:"p/b"}, before:{model:"p/a",thinking:"low"}, after:{model:"p/b",thinking:"low"}}' \
+  > "$REQ_DIR/model-switch.ms-1-a.ack.json"
+run_control switch-model --status
+expect_code 0 "$CONTROL_RC" "status after two receipts: $CONTROL_OUT"
+assert_contains "$CONTROL_OUT" "last-request=ms-1-a last-state=applied" "status named the older result because its request id sorts last"
+assert_meta p/b low "the higher sequence decides meta"
+pass "switch-model status: the newest result is the highest emitted sequence, whatever the request ids sort to"
 
 make_case no_monotonic
 start_responder

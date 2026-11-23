@@ -26,7 +26,7 @@ HOST="$ROOT/tests/fm-omp-model-switch-host.mjs"
 
 OUT=$(HOST="$HOST" TMP_ROOT="$TMP_ROOT" node --input-type=module <<'JS' 2>&1
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const host = await import(pathToFileURL(process.env.HOST).href);
@@ -70,7 +70,10 @@ const ok = (name) => console.log(`ok - ${name}`);
 	const ack = readAck(c.dir, "r1");
 	assert.equal(ack.outcome, "applied");
 	assert.equal(ack.id, "r1");
-	assert.equal("boundary" in ack || "raced" in ack || "ackedAtMs" in ack, false, "the acknowledgement carries no boundary, race, or second order field");
+	assert.equal("boundary" in ack || "raced" in ack || "ackedAtMs" in ack || "pid" in ack, false, "the acknowledgement carries only the sequence as order and no publisher pid");
+	const ready = JSON.parse(readFileSync(`${c.dir}/model-switch.ready`, "utf8"));
+	assert.equal(ready.pid, process.pid, "the ready marker names its publisher");
+	assert.equal("at" in ready, false, "the ready marker carries no wall-clock timestamp");
 	assert.deepEqual(ack.before, { model: "p/a", thinking: "low" });
 	assert.deepEqual(ack.after, { model: "p/b", thinking: "medium" });
 	assert.equal(ack.modelChanged, true);
@@ -103,6 +106,7 @@ const refusals = [
 	["set-model-failed", { setModelThrows: "provider exploded" }, "p/b", null, "a setModel that throws something else"],
 	["model-mismatch", { resolveOverride: { "p/b": "q/c" } }, "p/b", null, "a spec that resolves to a different model"],
 	["effort-unsupported", {}, "p/b", "max", "an effort the target model does not support"],
+	["effort-unsupported", {}, "q/c", "low", "a target model with no thinking levels"],
 ];
 for (const [reason, options, target, effort, what] of refusals) {
 	const c = fresh(options);

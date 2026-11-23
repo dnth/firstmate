@@ -100,7 +100,9 @@
 #              level equals --effort), and only then updates the recorded
 #              model= and effort= in task meta.
 #              The first word of the output is the typed result; every result
-#              but `switched` exits 1.
+#              but `switched` exits 1. The switch is immediate and session-only,
+#              exactly like the picker: on a Responses-WebSocket model a reply
+#              already streaming can be cut by the switch.
 #                switched         the live model (and effort) read back as the
 #                                 target; meta updated.
 #                refused          nothing was applied. reason= is one of
@@ -127,8 +129,7 @@
 #                                 unfolded and `switch-model --status` retries.
 #              `switch-model --status` folds every acknowledgement not yet
 #              applied to meta - including a late one - into task meta, and
-#              lists unresolved requests (exit 1 while any remain or a race is
-#              found in a newly reconciled or latest result). Every other
+#              lists unresolved requests (exit 1 while any remain). Every other
 #              verb folds them first too, so meta never stays divergent from
 #              the live model without being reported.
 #              Only OMP ships and scouts have this channel. Any other harness,
@@ -982,8 +983,8 @@ ms_report_ack() {
 
 do_switch_model() {
   local rid req ack staged started now_ms remaining reason=deadline-before-claim
-  ms_channel_ready || die "task $ID's worker cannot take a model switch: $MS_CHANNEL_WHY"
   reconcile_model_switch || true
+  ms_channel_ready || die "task $ID's worker cannot take a model switch: $MS_CHANNEL_WHY"
   now_ms=$(ms_now_ms)
   rid="ms-$now_ms-$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
   req=$(ms_path "$rid" request.json)
@@ -1017,7 +1018,7 @@ do_switch_model() {
       ms_report_ack "$ack" "$rid"
       return $?
     fi
-    sleep "$(awk -v poll="$POLL" -v left="$remaining" 'BEGIN { nap = left / 1000; if (poll < nap) nap = poll; printf "%.3f", nap }')"
+    sleep "$(awk -v left="$remaining" 'BEGIN { nap = left / 1000; if (nap > 0.25) nap = 0.25; printf "%.3f", nap }')"
   done
   # One non-waiting look before the outcome is called unknown: a receipt that
   # landed during the last nap is a result, not a pending request.
@@ -1051,6 +1052,18 @@ ms_request_ids() {
   done | LC_ALL=C sort -u
 }
 
+# The id of the newest acknowledgement by its emitted sequence, never by the
+# wall-clock time inside a request id.
+ms_latest_ack_id() {
+  local f order
+  for f in "$MS_DIR"/model-switch.*.ack.json "$MS_DIR"/model-switch.*.ack.json.folded; do
+    [ -f "$f" ] || continue
+    order=$(jq -r 'select((.ackSequence | type) == "number") | .ackSequence' "$f" 2>/dev/null) || order=
+    [ -n "$order" ] || continue
+    printf '%s\t%s\n' "$order" "$f"
+  done | LC_ALL=C sort -n | tail -1 | cut -f2 | sed 's|.*/model-switch\.||; s|\.ack\.json.*$||'
+}
+
 # The state of one request, with acknowledgement and reconciliation distinct.
 ms_request_state() {  # <request-id>
   local ack
@@ -1074,7 +1087,7 @@ ms_request_state() {  # <request-id>
 }
 
 do_switch_status() {
-  local channel=ready id state unresolved=0 last_id=none last_state=none
+  local channel=ready id state unresolved=0 last_id=none last_state=none latest
   ms_channel_ready || channel="not-ready($MS_CHANNEL_WHY)"
   reconcile_model_switch || true
   if [ -d "$MS_DIR" ] && [ ! -L "$MS_DIR" ]; then
@@ -1092,6 +1105,11 @@ do_switch_status() {
     done <<EOF
 $(ms_request_ids)
 EOF
+  fi
+  latest=$(ms_latest_ack_id)
+  if [ -n "$latest" ]; then
+    last_id=$latest
+    last_state=$(ms_request_state "$latest")
   fi
   printf 'model-switch-status %s meta-model=%s meta-effort=%s channel=%s reconciled=%s unresolved=%s last-request=%s last-state=%s\n' \
     "$ID" "$(fm_meta_get "$META" model)" "$(fm_meta_get "$META" effort)" "$channel" \

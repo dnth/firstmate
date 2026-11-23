@@ -108,7 +108,7 @@ export function writeRequest(dir, { id, spawnGen, model: target, effort = null, 
 //   FM_HOST_AVAILABLE    JSON ["provider/id",...] - models with credentials
 //   FM_HOST_CURRENT, FM_HOST_THINKING, FM_HOST_CLAMP (JSON), FM_HOST_SET_DELAY_MS
 //   FM_HOST_BUSY=1       start mid-task (isIdle() false, messages queued)
-//   FM_HOST_CONTROL_DIR  command files: busy, idle, quit
+//   FM_HOST_CONTROL_DIR  command file: quit
 //   FM_HOST_LOG          one JSON line per host call
 if (process.argv[2] === "responder") {
 	const env = process.env;
@@ -143,13 +143,7 @@ if (process.argv[2] === "responder") {
 			const path = join(controlDir, name);
 			rmSync(path, { force: true });
 			log({ event: "command", name });
-			if (name === "busy") {
-				host.state.idle = false;
-				host.state.pending = true;
-			} else if (name === "idle") {
-				host.state.idle = true;
-				host.state.pending = false;
-			} else if (name === "quit") {
+			if (name === "quit") {
 				await host.fire("session_shutdown");
 				process.exit(0);
 			}
