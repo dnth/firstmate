@@ -1017,6 +1017,9 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' secondmate
       printf '%s\n' live-harness-optin
+      if [ "$path" = .omp/extensions/lib/fm-task-inbox-doorbell.ts ]; then
+        printf '%s\n' "__script__:fm-omp-task-model-switch.test.sh"
+      fi
       ;;
     bin/fm-omp-process-lib.sh|bin/fm-session-lock-lib.sh)
       printf '%s\n' watcher-wake-lock
