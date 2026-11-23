@@ -160,21 +160,27 @@ def snowflake():
 clock_file = home / "fake-clock"
 now = max(time.time(), float(clock_file.read_text()) if clock_file.exists() else 0) + thread_title.PACE_SECS + 1
 clock_file.write_text(str(now))
-publish = [item["file"] for item in extra if item.get("kind") == "post-during-rename"]
+publish = [item["file"] for item in extra if item.get("kind") == "post-after-ledger-read"]
 def fake_rename(thread_id, name):
     if failing:
         raise outbox_poster.DiscordSendError(failing[0], "discord HTTP 500" if failing[0] == "transient"
                                              else "discord HTTP 403", 500 if failing[0] == "transient" else 403)
     renames.append({"rename": [thread_id, name]})
     actual[thread_id] = name
-    if publish:
-        # A decision post lands while this title write is under way.
+    return {}
+
+decision_threads = outbox_poster.decision_threads
+def read_decisions(home, thread_id=""):
+    summary = decision_threads(home, thread_id)
+    if thread_id and publish:
         file = home / "state" / "ext-outbox" / publish.pop()
         result = outbox_poster.deliver_one(file, home=home, react=lambda *args: None,
                                            send=lambda payload: {"discord_message_id": snowflake()})
-        if result != "sent":
-            raise RuntimeError("could not publish the decision during the write: %s" % result)
-    return {}
+        assert result == "sent", result
+    return summary
+
+outbox_poster.decision_threads = read_decisions
+
 def fake_read(thread_id):
     if thread_id in actual:
         return actual[thread_id]
@@ -1986,8 +1992,7 @@ test_31_retitle_follows_the_conversation() {
     "a retitle must rename the thread to the new base and keep its marker"
   [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
     || fail "a retitle must not create a second thread: $out"
-  jq -e '.title.base == "InfoConnect · v0.5.11 migration"
-    and .topic_name == "❓ InfoConnect · v0.5.11 migration"' \
+  jq -e '.topic_name == "❓ InfoConnect · v0.5.11 migration"' \
     "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "the record must store the new base name: $(cat "$home/state/ext-outbox/$slug.thread.json")"
 
@@ -2423,14 +2428,16 @@ test_36d_sweep_rechecks_after_concurrent_publication() {
   resolve_decision_key "$home" north North
   open_decision_key "$home" south
   emit_decision_post "$home" "$RID" 4 south
-  out=$(sweep "$home" '{"kind":"post-during-rename","file":"'"$slug"'.followup.4.json"}')
-  [ "$(sed -n 's/^thread-rename=//p' <<<"$out" | tail -n 1)" = "777777777777777777/❓ Aceh · long chats" ] \
-    || fail "a decision published during auto-clear must restore the live question marker: $out"
+  out=$(sweep "$home" '{"kind":"post-after-ledger-read","file":"'"$slug"'.followup.4.json"}')
+  [ -f "$home/state/ext-outbox/$slug.followup.4.receipt.json" ] \
+    || fail "the second decision must land before the PATCH check"
+  [ "$(renames_in "$out")" = 0 ] \
+    || fail "a decision published before PATCH must prevent the obsolete done write: $out"
   resolve_decision_key "$home" south South
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · long chats" \
     "auto-clear must retain the deferred done through a concurrent publication"
-  pass "36d a stale sweep restores the question marker"
+  pass "36d a decision published before PATCH prevents an obsolete title write"
 }
 
 test_36e_targeted_lookup_includes_cross_thread_replacements() {

@@ -1172,25 +1172,29 @@ It keeps these inputs in the thread's record:
 
 - the open decisions in the thread and the newest closure time, read from the decision ledger through `bin/fm-ext-decision.sh threads`, whose header owns which posts count as open and where a closure time comes from;
 - the latest status verdict, with the Firstmate message it was judged through;
-- a new base name from the naming model or an explicit retitle;
+- a proposed base name tied to its Jev verdict, or an independently requested explicit retitle;
 - the captain's own words, once seen.
 
 The decision sweep, the after-post judge, and the one-time catch-up only update those inputs; none of them renames a thread.
 
 **Status source.**
 With judging on, after every Firstmate post in an eligible thread a background worker reads the thread's text through that post and asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
-When the topic drifted and the captain has not named the thread, [`bin/fm-ext-thread-name.sh`](../bin/fm-ext-thread-name.sh) proposes a screened `<Project> · <topic>` base.
+When the topic drifted, the live title has a public project prefix, and the captain has not named the thread, [`bin/fm-ext-thread-name.sh`](../bin/fm-ext-thread-name.sh) proposes a screened `<Project> · <topic>` base.
 Model input is the thread's message text, which may include private interaction text.
-Only the newest queued post of a thread is judged, and a reply's explicit state and retitle do not touch the title while judging is on.
-With judging off, the reply's explicit state is the status (`needs-you` as `open-question`, `done`, or `none` for no marker) and a screened retitle is the new base.
-Judging, naming, and even the on-or-off check run on a background worker after the reply and its receipt are durable, so they never delay a reply.
+While judging is on, a reply's explicit state and retitle do not touch the title.
+When the key check confirms the Jev key is absent, the reply's explicit state is the status (`needs-you` as `open-question`, `done`, or `none` for no marker) and a screened retitle is the new base.
+After Discord accepts each chunk, the poster records its progress and queues it for judging, even when later chunks fail.
+Judging, naming, and the key check run on the background worker.
 
 **Markers.**
 Precedence is `❓ ` > `⚠️ ` > `⏳ ` > `✅ ` > no marker.
 `❓ ` shows for any open decision and for an `open-question` status, including a plain question with no button; `⚠️ ` comes only from a Jev `blocked` status, never from worker status events; `⏳ ` is `running` and `✅ ` is `done`.
-A question that comes with a decision post, or while a decision is open, belongs to that decision: it never replaces a kept status, and once the ledger closes the last decision it shows no marker.
+A question belongs to a decision when it carries that decision or the ledger shows a decision was open at the question's message cutoff.
+A kept Jev status carries forward only when the question is the next accepted message and repeats an open decision.
+After closure, the decision's own question contributes no marker.
 So a `done` judged while a decision is open is kept and lands at the next permitted slot after the last decision closes.
-A Jev verdict is stale once a newer Firstmate message in that thread has been accepted by Discord, counted from chunk progress rather than only whole-delivery receipts; a stale verdict is refused when recorded and never applied.
+A Jev verdict is stale once a newer Firstmate message in that thread has been accepted by Discord, counted from chunk progress rather than only whole-delivery receipts; a stale verdict and its proposed base are refused when recorded and never applied.
+Before PATCH, the reconciler checks the input revision, accepted-message cutoff, and decision snapshot again.
 
 **The captain's words.**
 The reconciler reads the live title before every write and never writes when it cannot.
@@ -1200,13 +1204,16 @@ A marker the captain removes stays off until the marker the inputs ask for chang
 **Pace and limits.**
 A title is written only when the desired title differs from the live one.
 Our pace is at most one title change per thread per 10 minutes, stamped when a write lands; when the slot opens, the newest desired title is written and any intermediate one is skipped.
-Only the `❓ ` an open decision button asks for skips that pace, and only the marker: a base change waits for the next slot.
-Discord's limits always hold the next write, including that `❓ `: an `X-RateLimit-Remaining` of 0 waits out `X-RateLimit-Reset-After`, and an HTTP 429 waits out its `retry_after`; no Discord number is hard-coded.
+Only the `❓ ` a published open decision button asks for skips that pace, and only the marker: a base change waits for the next slot.
+Discord's limits always hold the next write, including that `❓ `.
+An `X-RateLimit-Remaining` of 0 waits out `X-RateLimit-Reset-After` or the absolute `X-RateLimit-Reset`, and a title read or write that receives HTTP 429 waits out its retry deadline.
+A global limit holds every thread.
+If a PATCH response is lost, the next read checks whether it landed and restores the pace and decision marker bookkeeping.
 A transient failure or an unreadable title is retried on the 30-second decision sweep, a permanent refusal such as an archived thread waits for the thread's next input, and a failure of Jev, the naming model, or Discord leaves the title as it is and never blocks or loses a reply.
 The reconciler runs on its own gateway thread, and a restart resumes recorded waits.
 
 **Catch-up.**
-Once per home with judging on, shortly after the gateway starts, the 10 eligible threads Firstmate posted in most recently are judged once each.
+Once per home with judging on, in the background when the gateway starts, the 10 eligible threads Firstmate posted in most recently are judged once each.
 `state/ext-autoname/catch-up.json` keeps that thread list and each thread's progress, written before the first model call and after each thread, so a restart resumes instead of repeating a finished thread's model calls or renames.
 
 **Judging on or off.**

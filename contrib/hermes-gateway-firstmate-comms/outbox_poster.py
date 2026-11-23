@@ -775,7 +775,6 @@ def _read_thread_record(path: Path) -> dict:
     name = data.get("topic_name") or ""
     creating = data.get("creating_title") or ""
     creator = data.get("creator") or ""
-    title = data.get("title")
     if not creator and data.get("adopted"):
         # Records written while adoption was a bare flag still say the thread
         # was not ours to begin with.
@@ -786,7 +785,7 @@ def _read_thread_record(path: Path) -> dict:
             "topic_name": name if isinstance(name, str) else "",
             "creator": creator if isinstance(creator, str) else "",
             "creating_title": creating if isinstance(creating, str) else "",
-            "title": title if isinstance(title, dict) else {}}
+            "title": _thread_title().title_inputs(data)}
 
 
 def _epoch(value: object) -> float:
@@ -927,7 +926,7 @@ def _merge_thread_record(path: Path, request_id: object, thread_id: str,
     kept_creator = creator or (prior_creator if isinstance(prior_creator, str) else "")
     if kept_creator:
         record["creator"] = kept_creator
-    kept_title = title if title is not None else prior.get("title")
+    kept_title = title if title is not None else _thread_title().title_inputs(prior)
     if isinstance(kept_title, dict) and kept_title:
         record["title"] = kept_title
     if (open_attempt if open_attempt is not None else prior.get("open_attempt")) is True:
@@ -1119,6 +1118,12 @@ def _discord_thread(thread_id: str) -> dict:
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        if err.code == 429:
+            limit = _thread_title().read_rate_limit(err)
+            if limit is not None:
+                raise limit from err
+        return {}
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -1164,25 +1169,19 @@ def title_thread_for(payload: dict, thread_id: str, home: Path) -> str:
     return "" if not recorded or recorded.get("creator") == "adopted" else recorded["topic_thread_id"]
 
 
-def queue_title_inputs(payload: dict, thread_id: str, ids: list, home: Path) -> None:
-    """Hand one delivered reply to the title worker and return at once.
-
-    Runs after the reply and its receipt are durable. It only queues: the
-    judging check, Jev, the naming model, and every rename happen elsewhere,
-    so nothing here can delay or fail a delivery.
-    """
+def queue_title_inputs(payload: dict, thread_id: str, message_id: str, home: Path, last: bool) -> None:
+    """Queue a Discord-accepted chunk for the background title worker."""
     try:
         target = title_thread_for(payload, thread_id, home)
-        message_id = str(next((item for item in reversed(ids) if _SNOWFLAKE.fullmatch(str(item))), ""))
-        if not target or not message_id:
+        if not target:
             return
-        state = payload.get("thread_state")
-        retitle = payload.get("thread_retitle")
+        state = payload.get("thread_state") if last else None
+        retitle = payload.get("thread_retitle") if last else None
         _thread_autoname().after_post(home, target, {
             "message_id": message_id,
             "state": state if isinstance(state, str) else "",
             "retitle": retitle if isinstance(retitle, str) else "",
-            "decision": isinstance(payload.get("decision"), dict),
+            "decision": last and isinstance(payload.get("decision"), dict),
         })
     except Exception as err:
         print(f"fm-ext-poster: title inputs skipped: {err}", file=sys.stderr)
@@ -1203,6 +1202,8 @@ def decision_threads(home: Path, thread_id: str = "") -> dict[str, dict] | None:
         try:
             item = json.loads(line)
             threads[str(item["thread_id"])] = {"open": int(item["open"]), "closed": int(item["closed"]),
+                                               "open_buttons": int(item["open_buttons"]),
+                                               "posts": item["posts"],
                                                "last_posted_at": _epoch(item["last_posted_at"]),
                                                "last_closed_at": _epoch(item["last_closed_at"]),
                                                "keys": tuple(item["keys"])}
@@ -2095,7 +2096,9 @@ def deliver_one(
         if "decision" in progress and index + 1 == len(chunks):
             progress["buttons"] = bool(receipt.get("buttons"))
             progress["posted_at"] = time.time()
-        write_progress(payload, progress, home)
+        with _THREAD_RECORD_LOCK:
+            write_progress(payload, progress, home)
+        queue_title_inputs(payload, thread_id, ids[-1], home, last)
     posted_at = time.time()
     receipt_record = {
         "ok": True,
@@ -2132,10 +2135,6 @@ def deliver_one(
         save_request_thread(payload, thread_id, home, opening_posted=True)
     if payload.get("kind") in ("answer", "final"):
         react_to_request(payload, REACT_DONE, react)
-    # The title is not tied to this generation's destination: an in-thread
-    # request posts where it arrived and its thread still gets the inputs, so
-    # the hand-off always runs and decides inside what it may touch.
-    queue_title_inputs(payload, thread_id, ids, home)
     return "sent"
 
 

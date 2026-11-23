@@ -21,9 +21,9 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from collections import deque
 from pathlib import Path
+from weakref import WeakValueDictionary
 
 try:
     from . import outbox_poster as poster
@@ -41,8 +41,6 @@ except ImportError:  # loaded from sys.path in hermetic tests
 # Catch-up judges only this many of the threads Firstmate posted in most
 # recently.
 CATCH_UP_LIMIT = 10
-# Give the gateway time to connect before catch-up starts.
-CATCH_UP_DELAY_SECS = 60.0
 # Bound what one judgment sends: newest messages first, whole messages only.
 TEXT_BUDGET_CHARS = 8000
 MESSAGE_MAX_CHARS = 2000
@@ -50,6 +48,7 @@ MESSAGE_LIMIT = 40
 
 _LOCK = threading.Lock()
 _QUEUES: dict[tuple[Path, str], deque] = {}
+_JUDGE_LOCKS = WeakValueDictionary()
 
 
 def _log(message: str) -> None:
@@ -62,12 +61,11 @@ def _tool(name: str) -> str:
 
 def enabled(home: Path) -> bool:
     """The one key-presence check: ``bin/fm-ext-thread-judge.sh --check``."""
-    try:
-        result = subprocess.run([_tool("fm-ext-thread-judge.sh"), "--check"],
-                                capture_output=True, text=True, check=False, timeout=30,
-                                env=firstmate_env(home, poster.firstmate_root(), jev=True))
-    except (OSError, subprocess.SubprocessError):
-        return False
+    result = subprocess.run([_tool("fm-ext-thread-judge.sh"), "--check"],
+                            capture_output=True, text=True, check=False, timeout=30,
+                            env=firstmate_env(home, poster.firstmate_root(), jev=True))
+    if result.returncode not in (0, 2):
+        raise RuntimeError(result.stderr.strip() or f"judge check exited {result.returncode}")
     return result.returncode == 0
 
 
@@ -171,62 +169,58 @@ def propose_name(state: dict, home: Path) -> str:
 
 # --- judging one thread ----------------------------------------------------------------
 
-def _eligible(record: dict, home: Path) -> bool:
-    return (bool(record) and record.get("creator") == "firstmate"
-            and (poster._creating_request(record).get("channel_id") or "") == poster.dedicated_channel(home))
-
-
-def judge_thread(home: Path, thread_id: str, cutoff: str, read_thread=None, decision: bool = False) -> str:
-    """Judge one thread through message ``cutoff`` and record the verdict.
-
-    Returns recorded, stale, skipped, or failed. Nothing here renames.
-    """
-    record = poster.load_thread_record_by_id(thread_id, home)
-    if not _eligible(record, home):
-        return "skipped"
-    if not thread_title.fresh(home, thread_id, cutoff):
-        return "stale"
-    try:
-        live = (read_thread or poster.discord_thread_name)(thread_id)
-        if not live:
-            raise RuntimeError("live title unreadable")
-        base = thread_title.split_marker(live)[1]
-        state = {"thread": {"name": base,
-                            "project": thread_context.resolve_project(base, thread_id, home),
-                            "messages": thread_messages(record, home, cutoff)}}
-        if not state["thread"]["messages"]:
-            return "skipped"
-        verdict = judge(state, home)
-        new_base = ""
-        if not verdict["topic_fits"] and not thread_title.captain_named(record, live):
-            new_base = propose_name(state, home)
-    except Exception as err:
-        _log(f"thread {thread_id} keeps its title: {err}")
-        return "failed"
-    outcome = thread_title.record_verdict(home, thread_id, verdict["status"], verdict["topic_fits"],
-                                          cutoff, new_base, decision=decision)
-    return "recorded" if outcome == "recorded" else "stale"
+def judge_thread(home: Path, thread_id: str, cutoff: str, read_thread=None,
+                 decision: bool = False, catch_up: bool = False) -> str:
+    """Judge through a Discord-accepted message and publish any fresh result."""
+    with _LOCK:
+        lock = _JUDGE_LOCKS.setdefault((home, thread_id), threading.Lock())
+    with lock:
+        record = poster.load_thread_record_by_id(thread_id, home)
+        prior = (record.get("title") or {}).get("verdict") or {}
+        if prior.get("source") == "jev":
+            prior_cutoff = thread_title._id(prior.get("cutoff"))
+            cutoff_id = thread_title._id(cutoff)
+            if prior_cutoff == cutoff_id or (catch_up and prior_cutoff > cutoff_id):
+                return "completed"
+        try:
+            if not thread_title.eligible(record, home):
+                return "skipped"
+            live = (read_thread or poster.discord_thread_name)(thread_id)
+            if not live:
+                raise RuntimeError("live title unreadable")
+            base = thread_title.split_marker(live)[1]
+            project = thread_context.project_from_name(base)
+            state = {"thread": {"name": base, "project": project,
+                                "messages": thread_messages(record, home, cutoff)}}
+            if not state["thread"]["messages"]:
+                return "skipped"
+            summaries = None if decision else poster.decision_threads(home, thread_id)
+            verdict = judge(state, home)
+            if not thread_title.fresh(home, thread_id, cutoff):
+                return "stale"
+            new_base = ""
+            if project and not verdict["topic_fits"] and not thread_title.captain_named(record, live):
+                new_base = propose_name(state, home)
+            return thread_title.record_verdict(home, thread_id, verdict["status"], verdict["topic_fits"],
+                                               cutoff, new_base, decision=decision, summaries=summaries)
+        except Exception as err:
+            _log(f"thread {thread_id} keeps its title: {err}")
+            return "failed"
 
 
 # --- after every post ------------------------------------------------------------------
 
 def handle_post(home: Path, thread_id: str, post: dict, judging: bool | None = None,
-                read_thread=None, newest: bool = True) -> str:
+                read_thread=None) -> str:
     """Turn one delivered post into reconciler inputs.
 
-    ``post`` carries the final ``message_id``, the reply's explicit ``state``
-    and unscreened ``retitle``, and whether it carried a ``decision``. Every
-    post makes the thread due, so a decision post's question mark is written
-    as soon as Discord permits and a failed write is retried by the next
-    reply. With judging on, the newest queued post is judged; otherwise the
-    reply's own state and retitle are recorded.
+    Every accepted chunk makes the thread due and is judged when enabled.
+    Explicit state and retitle are carried by a reply's final chunk.
     """
     thread_title.mark_due(home, thread_id)
     if judging is None:
         judging = enabled(home)
     if judging:
-        if not newest:
-            return "superseded"
         return judge_thread(home, thread_id, post["message_id"], read_thread=read_thread,
                             decision=bool(post.get("decision")))
     retitle = poster.screened_title(post.get("retitle") or "", home) if post.get("retitle") else ""
@@ -246,11 +240,10 @@ def _run_queue(home: Path, thread_id: str) -> None:
                 del _QUEUES[key]
                 return
             post = queue.popleft()
-            newest = not queue
         try:
             if judging is None:
                 judging = enabled(home)
-            handle_post(home, thread_id, post, judging=judging, newest=newest)
+            handle_post(home, thread_id, post, judging=judging)
         except Exception as err:
             _log(f"thread {thread_id} keeps its title: {err}")
 
@@ -322,23 +315,23 @@ def catch_up(home: Path | None = None, read_thread=None) -> list[str]:
         for thread_id in sorted(newest, key=newest.__getitem__, reverse=True):
             if len(cohort) == CATCH_UP_LIMIT:
                 break
-            if _eligible(poster.load_thread_record_by_id(thread_id, home), home):
+            if thread_title.eligible(poster.load_thread_record_by_id(thread_id, home), home):
                 cohort.append({"thread_id": thread_id, "cutoff": str(newest[thread_id])})
-        data = {"started_at": time.time(), "threads": cohort, "done": [], "completed": False}
+        data = {"threads": cohort, "done": [], "completed": False}
         _save_catch_up(path, data)
     judged = []
     for item in data["threads"]:
         thread_id = str(item.get("thread_id") or "")
         if thread_id in data["done"]:
             continue
-        cutoff = str(thread_title.firstmate_messages(home).get(thread_id) or item.get("cutoff") or "")
+        cutoff = str(item.get("cutoff") or "")
         if poster._SNOWFLAKE.fullmatch(cutoff):
-            judge_thread(home, thread_id, cutoff, read_thread=read_thread)
-            judged.append(thread_id)
+            outcome = judge_thread(home, thread_id, cutoff, read_thread=read_thread, catch_up=True)
+            if outcome != "completed":
+                judged.append(thread_id)
         data["done"].append(thread_id)
         _save_catch_up(path, data)
     data["completed"] = True
-    data["completed_at"] = time.time()
     _save_catch_up(path, data)
     return judged
 
@@ -346,7 +339,6 @@ def catch_up(home: Path | None = None, read_thread=None) -> list[str]:
 def start_catch_up(home: Path | None = None) -> None:
     """Run the one-time catch-up in the background after the gateway connects."""
     def run() -> None:
-        time.sleep(CATCH_UP_DELAY_SECS)
         try:
             catch_up(home)
         except Exception as err:

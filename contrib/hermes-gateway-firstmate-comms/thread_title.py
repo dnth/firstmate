@@ -9,8 +9,8 @@ Every other part of the plugin only updates a thread's inputs, kept in the
 - ``verdict``: the latest status for the thread with the message id it was
   judged through (``cutoff``), its ``source`` (``jev`` for an after-post
   judgment, ``explicit`` for a reply's own thread state while judging is off),
-  and ``during_decision`` once known;
-- ``base``: a new screened base name from the naming model or a retitle;
+  its decision association, and any screened base from the naming model;
+- ``base``: an independently requested explicit retitle;
 - ``decisions``: the last open-count and closure time read from the decision
   ledger through ``bin/fm-ext-decision.sh threads``;
 - ``manual_base``: the captain's own words, once seen, kept for good.
@@ -28,6 +28,7 @@ in the plugin renames a thread.
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 import time
@@ -62,14 +63,20 @@ RETRY_SECS = poster.DECISION_SWEEP_SECS
 
 _DUE: dict[tuple[Path, str], float] = {}
 _DUE_LOCK = threading.Lock()
+_GLOBAL_AFTER: dict[Path, float] = {}
 
 
 class RateLimited(Exception):
-    """Discord refused a write with HTTP 429 and said how long to wait."""
+    """Discord refused a title request and said how long to wait."""
 
-    def __init__(self, retry_after: float):
-        super().__init__(f"discord rate limited; retry after {retry_after}s")
-        self.retry_after = retry_after
+    def __init__(self, deadline: float, global_limit: bool = False, *, absolute: bool = False):
+        super().__init__("discord rate limited")
+        self.deadline = deadline
+        self.global_limit = global_limit
+        self.absolute = absolute
+
+    def until(self, now: float) -> float:
+        return max(now, self.deadline) if self.absolute else now + self.deadline
 
 
 def _log(message: str) -> None:
@@ -91,17 +98,10 @@ def _id(value: object) -> int:
 
 # --- what Firstmate has posted -------------------------------------------------
 
-def firstmate_messages(home: Path) -> dict[str, int]:
-    """The newest Discord-accepted Firstmate message id per destination thread.
-
-    Chunk progress records each message id as soon as Discord accepts it,
-    before the whole reply's receipt, so a visible post counts even while its
-    receipt is pending or a later chunk failed.
-    """
-    newest: dict[str, int] = {}
+def _accepted_chunks(home: Path):
     outbox = poster.state_dir(home) / "ext-outbox"
     if outbox.is_symlink() or not outbox.is_dir():
-        return newest
+        return
     for path in outbox.glob("*.progress.json"):
         if path.is_symlink():
             continue
@@ -113,9 +113,15 @@ def firstmate_messages(home: Path) -> dict[str, int]:
             continue
         request = str(data.get("request_id") or "").split(":")
         thread_id = str(data.get("topic_thread_id") or (request[3] if len(request) > 3 else ""))
-        if not poster._SNOWFLAKE.fullmatch(thread_id):
-            continue
-        top = max((_id(item) for item in data["discord_message_ids"]), default=0)
+        if poster._SNOWFLAKE.fullmatch(thread_id):
+            yield thread_id, data["discord_message_ids"]
+
+
+def firstmate_messages(home: Path) -> dict[str, int]:
+    """The newest Discord-accepted Firstmate message id per destination thread."""
+    newest: dict[str, int] = {}
+    for thread_id, ids in _accepted_chunks(home):
+        top = max((_id(item) for item in ids), default=0)
         if top > newest.get(thread_id, 0):
             newest[thread_id] = top
     return newest
@@ -155,21 +161,60 @@ def _update(home: Path, thread_id: str, change) -> bool:
     return True
 
 
-def _set_verdict(title: dict, verdict: dict, decision: bool) -> None:
-    """Make ``verdict`` the latest one, unless it only repeats a decision's question.
+def title_inputs(record: dict) -> dict:
+    """Translate pending intent from a record written before the reconciler."""
+    title = record.get("title")
+    if isinstance(title, dict):
+        return title
+    title = {}
+    rename = record.get("rename")
+    rename = rename if isinstance(rename, dict) else {}
+    state = record.get("deferred_state")
+    if state not in ("none", "done"):
+        state = {"deferred": rename.get("state"), "failed": record.get("thread_state")}.get(rename.get("outcome"))
+    status = EXPLICIT_STATUS.get(state) if isinstance(state, str) else None
+    if status is not None:
+        title["verdict"] = {"source": "explicit", "status": status,
+                            "during_decision": status == "open-question" and record.get("marked_open") is True}
+    if record.get("marked_open") is True:
+        title["decision_marked"] = True
+    retitle = record.get("retitle")
+    if isinstance(retitle, str) and retitle and rename.get("outcome") in ("failed", "deferred"):
+        _, failed_base = split_marker(str(rename.get("name") or ""))
+        if rename.get("retitle", retitle == failed_base):
+            title["base"] = retitle
+    if title:
+        title["due_at"] = 1.0
+    return title
 
-    A question that comes with a decision post, or while a decision is open,
-    belongs to that decision: it never replaces a kept status, so a done
-    judged during the decision still lands when the last decision closes. The
-    kept status stays current through the newer post that only asked again.
-    """
+
+def _during_decision(home: Path, thread_id: str, cutoff: str, status: str, decision: bool,
+                     summaries: dict | None = None) -> bool | None:
+    if status != "open-question":
+        return False
+    if decision:
+        return True
+    if summaries is None:
+        summaries = poster.decision_threads(home, thread_id)
+        if summaries is None:
+            return None
+    cutoff_id = _id(cutoff)
+    cutoff_at = (cutoff_id >> 22) / 1000 + 1420070400
+    return any(0 < _id(post["message_id"]) <= cutoff_id
+               and (post["state"] == "open" or cutoff_at < post["closed_at"])
+               for post in summaries.get(thread_id, {}).get("posts", ()))
+
+
+def _set_verdict(home: Path, thread_id: str, title: dict, verdict: dict) -> None:
     prior = title.get("verdict") or {}
-    open_now = int((title.get("decisions") or {}).get("open", 0)) > 0
-    if verdict["status"] == "open-question" and (decision or open_now):
-        if prior and prior.get("status") != "open-question":
-            title["verdict"] = dict(prior, cutoff=verdict["cutoff"])
-            return
-        verdict["during_decision"] = True
+    if verdict["during_decision"] and prior and prior.get("status") != "open-question":
+        cutoff = _id(verdict["cutoff"])
+        previous = max((_id(item) for target, ids in _accepted_chunks(home) if target == thread_id
+                        for item in ids if 0 < _id(item) < cutoff), default=0)
+        both_explicit = prior.get("source") == verdict["source"] == "explicit"
+        if both_explicit or (previous and _id(prior.get("cutoff")) == previous):
+            verdict["status"] = prior["status"]
+            verdict["during_decision"] = False
     title["verdict"] = verdict
 
 
@@ -177,12 +222,16 @@ def record_explicit(home: Path, thread_id: str, state: str | None, retitle: str,
                     message_id: str, decision: bool = False) -> bool:
     """A reply's own thread state and retitle, used while judging is off."""
     status = EXPLICIT_STATUS.get(state or "")
+    if status is None and not retitle:
+        return False
+    during = _during_decision(home, thread_id, message_id, status or "", decision)
+    if during is None:
+        return False
 
     def change(title, _record):
-        if status is None and not retitle:
-            return False
         if status is not None:
-            _set_verdict(title, {"status": status, "source": "explicit", "cutoff": str(message_id)}, decision)
+            _set_verdict(home, thread_id, title, {"status": status, "source": "explicit",
+                         "cutoff": str(message_id), "during_decision": during})
         if retitle:
             title["base"] = retitle
         return True
@@ -191,30 +240,37 @@ def record_explicit(home: Path, thread_id: str, state: str | None, retitle: str,
 
 
 def record_verdict(home: Path, thread_id: str, status: str, topic_fits: bool,
-                   cutoff: str, base: str = "", decision: bool = False) -> str:
-    """Store a Jev verdict judged through ``cutoff``; drop it when stale.
-
-    ``decision`` says the judged post carried a decision. Returns recorded,
-    stale (a newer Firstmate post reached Discord, or a newer verdict is
-    already stored), or gone (no thread record).
-    """
+                   cutoff: str, base: str = "", decision: bool = False, summaries: dict | None = None) -> str:
+    """Store a fresh Jev verdict, with any new base bound to its cutoff."""
     if status not in STATUS_MARKER or status == "none":
         raise ValueError(f"unknown status {status!r}")
+    if not poster.load_thread_record_by_id(thread_id, home):
+        return "gone"
+    during = _during_decision(home, thread_id, cutoff, status, decision, summaries)
+    if during is None:
+        return "unreadable"
 
     def change(title, _record):
         prior = title.get("verdict") or {}
         if not fresh(home, thread_id, cutoff) or (
-                prior.get("source") == "jev" and _id(prior.get("cutoff")) > _id(cutoff)):
+                prior.get("source") == "jev" and _id(prior.get("cutoff")) >= _id(cutoff)):
             return False
-        _set_verdict(title, {"status": status, "source": "jev", "cutoff": str(cutoff),
-                             "topic_fits": bool(topic_fits)}, decision)
-        if base:
-            title["base"] = base
+        _set_verdict(home, thread_id, title, {"status": status, "source": "jev", "cutoff": str(cutoff),
+                     "topic_fits": bool(topic_fits), "base": base, "during_decision": during})
         return True
 
-    if not poster.load_thread_record_by_id(thread_id, home):
-        return "gone"
     return "recorded" if _update(home, thread_id, change) else "stale"
+
+
+def _decision_input(summary: dict) -> dict:
+    return {"open": int(summary.get("open", 0)), "open_buttons": int(summary.get("open_buttons", 0)),
+            "last_closed_at": float(summary.get("last_closed_at") or 0)}
+
+
+def _decision_snapshot(summary: dict) -> tuple:
+    return (summary.get("open", 0), summary.get("open_buttons", 0),
+            tuple((post["message_id"], post["state"], post["buttons"], post["closed_at"])
+                  for post in summary.get("posts", ())))
 
 
 def sweep_decisions(home: Path, summaries: dict[str, dict], now: float | None = None) -> list[str]:
@@ -234,10 +290,9 @@ def sweep_decisions(home: Path, summaries: dict[str, dict], now: float | None = 
             continue
         thread_id = record["topic_thread_id"]
         summary = summaries.get(thread_id, {})
-        seen = {"open": int(summary.get("open", 0)),
-                "last_closed_at": float(summary.get("last_closed_at", 0) or 0)}
+        seen = _decision_input(summary)
         title = record.get("title") or {}
-        if (title.get("decisions") or {"open": 0, "last_closed_at": 0.0}) != seen:
+        if (title.get("decisions") or _decision_input({})) != seen:
             _update(home, thread_id, lambda t, _r, seen=seen: t.__setitem__("decisions", seen))
             marked.append(thread_id)
         elif float(title.get("due_at") or 0) and float(title["due_at"]) <= now:
@@ -260,7 +315,26 @@ def _seconds(value: object) -> float | None:
         seconds = float(value)
     except (TypeError, ValueError):
         return None
-    return seconds if seconds >= 0 else None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
+def read_rate_limit(err: urllib.error.HTTPError) -> RateLimited | None:
+    try:
+        details = json.loads(err.read())
+    except (OSError, UnicodeError, ValueError):
+        details = {}
+    if not isinstance(details, dict):
+        details = {}
+    headers = err.headers or {}
+    global_limit = (details.get("global") is True or headers.get("X-RateLimit-Global") == "true"
+                    or headers.get("X-RateLimit-Scope") == "global")
+    waits = [_seconds(value) for value in (details.get("retry_after"), headers.get("Retry-After"),
+                                         headers.get("X-RateLimit-Reset-After"))]
+    wait = max((value for value in waits if value is not None), default=None)
+    if wait is not None:
+        return RateLimited(wait, global_limit)
+    reset = _seconds(headers.get("X-RateLimit-Reset"))
+    return RateLimited(reset, global_limit, absolute=True) if reset is not None else None
 
 
 def discord_write_title(thread_id: str, name: str) -> dict:
@@ -288,31 +362,23 @@ def discord_write_title(thread_id: str, name: str) -> dict:
             headers = response.headers
             response.read()
     except urllib.error.HTTPError as err:
-        try:
-            details = json.loads(err.read().decode("utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            details = {}
-        if not isinstance(details, dict):
-            details = {}
         if err.code == 429:
-            wait = _seconds(details.get("retry_after"))
-            for header in ("Retry-After", "X-RateLimit-Reset-After"):
-                if wait is None and err.headers is not None:
-                    wait = _seconds(err.headers.get(header))
-            if wait is not None:
-                raise RateLimited(wait) from err
+            limit = read_rate_limit(err)
+            if limit is not None:
+                raise limit from err
         raise poster.DiscordSendError(poster.classify_http_code(err.code), f"discord HTTP {err.code}",
-                                      err.code, details) from err
+                                      err.code) from err
     except (urllib.error.URLError, TimeoutError, OSError) as err:
         raise poster.DiscordSendError("ambiguous", f"discord transport: {err}") from err
     remaining = headers.get("X-RateLimit-Remaining")
     return {"remaining": int(remaining) if str(remaining or "").isdigit() else None,
-            "reset_after": _seconds(headers.get("X-RateLimit-Reset-After"))}
+            "reset_after": _seconds(headers.get("X-RateLimit-Reset-After")),
+            "reset": _seconds(headers.get("X-RateLimit-Reset"))}
 
 
 # --- the reconciler -----------------------------------------------------------------
 
-def _eligible(record: dict, home: Path, thread_owner) -> bool:
+def eligible(record: dict, home: Path, thread_owner=None) -> bool:
     """Only a thread this home created in the dedicated channel is renamed."""
     if not record or record.get("creator") == "adopted":
         return False
@@ -324,6 +390,8 @@ def _eligible(record: dict, home: Path, thread_owner) -> bool:
     # this bot owns the thread.
     try:
         owner_id = (thread_owner or poster.discord_thread_owner)(record["topic_thread_id"])
+    except RateLimited:
+        raise
     except Exception as err:
         _log(f"thread {record['topic_thread_id']} owner lookup skipped: {err}")
         return False
@@ -365,34 +433,43 @@ def captain_named(record: dict, live: str) -> bool:
     if title.get("manual_base"):
         return True
     written = record.get("topic_name") or ""
-    if not written or not live or title.get("pending") == live:
+    pending = title.get("pending") or {}
+    if not written or not live or pending.get("name") == live:
         return False
     return split_marker(live)[1] != split_marker(written)[1]
 
 
-def reconcile(home: Path, thread_id: str, *, now: float | None = None, rename=None,
-              read_thread=None, thread_owner=None, summaries: dict | None = None) -> str:
-    """Bring one thread's Discord title to the title its inputs ask for.
+def _global_after(home: Path) -> float:
+    if home not in _GLOBAL_AFTER:
+        _GLOBAL_AFTER[home] = max(
+            (float((poster._read_thread_record(path).get("title") or {}).get("discord_global_after") or 0)
+             for path in _record_paths(home)), default=0.0)
+    return _GLOBAL_AFTER[home]
 
-    Returns unchanged, applied, waiting (our pace or Discord's limit holds
-    the write; the thread is due again then), rate-limited, failed,
-    unreadable, or skipped. Every failure leaves the title as it is.
-    """
-    now = time.time() if now is None else now
+
+def _written_fields(attempt: dict, at: float) -> dict:
+    fields = {"pending": None, "decision_marked": attempt["decision"] or None,
+              "observed": attempt["name"]}
+    if not attempt["priority"]:
+        fields["paced_at"] = at
+    return fields
+
+
+def reconcile(home: Path, thread_id: str, *, now: float | None = None, rename=None,
+              read_thread=None, thread_owner=None) -> str:
+    """Bring one thread's Discord title to the title its inputs ask for."""
+    clock = time.time if now is None else lambda: now
     record = poster.load_thread_record_by_id(thread_id, home)
-    if not _eligible(record, home, thread_owner):
+    if not record:
         return "skipped"
     title = dict(record.get("title") or {})
     rev = int(title.get("rev") or 0)
-    # Input clean-ups (a stale verdict, an unusable base) are kept only if no
-    # newer input arrived meanwhile; what this pass saw on Discord always is.
     inputs: dict = {}
     seen: dict = {}
-    shown = ""
+    written = ""
 
-    def finish(outcome: str, due: float = 0.0, error: str = "", topic_name: str = "",
-               **fields) -> str:
-        last = {"outcome": outcome, "at": now}
+    def finish(outcome: str, due: float = 0.0, error: str = "", **fields) -> str:
+        last = {"outcome": outcome, "at": clock()}
         if error:
             last["error"] = error
         fields.update(due_at=due, last=last)
@@ -401,132 +478,146 @@ def reconcile(home: Path, thread_id: str, *, now: float | None = None, rename=No
             if not current:
                 return outcome
             merged = dict(current.get("title") or {})
+            merged.update(seen)
             if int(merged.get("rev") or 0) == rev:
                 merged.update(inputs)
             else:
-                # Inputs moved while Discord was busy: look again at once.
-                fields["due_at"] = now
-            merged.update(seen)
+                fields["due_at"] = last["at"]
             merged.update(fields)
             for key in [key for key, value in merged.items() if value is None]:
                 del merged[key]
             poster.save_thread_record(current["path"], current.get("request_id"), thread_id,
-                                      topic_name=topic_name or shown, title=merged)
+                                      topic_name=written, title=merged)
             due = float(merged.get("due_at") or 0)
         if due:
             mark_due(home, thread_id, due)
         return outcome
 
-    discord_after = float(title.get("discord_after") or 0)
-    if now < discord_after:
-        return finish("waiting", discord_after)
-    if summaries is None:
-        summaries = poster.decision_threads(home, thread_id)
-        if summaries is None:
-            return finish("unreadable", now + RETRY_SECS, error="decision ledger unreadable")
-    summary = summaries.get(thread_id, {})
-    seen["decisions"] = {"open": int(summary.get("open", 0)),
-                         "last_closed_at": float(summary.get("last_closed_at", 0) or 0)}
+    def rate_limited(err: RateLimited, **fields) -> str:
+        response_at = clock()
+        until = err.until(response_at)
+        _log(f"thread {thread_id} waits {until - response_at:.1f}s for Discord before writing its title")
+        if err.global_limit:
+            _GLOBAL_AFTER[home] = until
+            fields["discord_global_after"] = until
+        return finish("rate-limited", until, error=str(err), discord_after=until, **fields)
+
+    allowed = max(_global_after(home), float(title.get("discord_after") or 0))
+    if clock() < allowed:
+        return finish("waiting", allowed)
     try:
+        if not eligible(record, home, thread_owner):
+            return "skipped"
         live = (read_thread or poster.discord_thread_name)(thread_id)
+    except RateLimited as err:
+        return rate_limited(err)
     except Exception:
         live = ""
     if not live:
-        return finish("unreadable", now + RETRY_SECS, error="live title unreadable")
-    shown = live
-    live_marker, live_base = split_marker(live)
+        return finish("unreadable", clock() + RETRY_SECS, error="live title unreadable")
 
-    written = record.get("topic_name") or ""
-    if title.get("pending"):
-        if title["pending"] == live:
-            # Our last write landed even though Discord's answer was lost.
-            written = live
+    decision_view = poster.decision_threads(home, thread_id)
+    if decision_view is None:
+        return finish("unreadable", clock() + RETRY_SECS, error="decision ledger unreadable")
+    summary = decision_view.get(thread_id, {})
+    inputs["decisions"] = _decision_input(summary)
+    accepted = firstmate_messages(home).get(thread_id, 0)
+    live_marker, live_base = split_marker(live)
+    bot_name = record.get("topic_name") or ""
+    if pending := title.get("pending"):
+        if pending["name"] == live:
+            bot_name = written = live
+            recovered = _written_fields(pending, pending.get("at") or clock())
+            title.update(recovered)
+            seen.update(recovered)
         seen["pending"] = None
-    if written:
-        written_marker, written_base = split_marker(written)
-        if live_base != written_base:
-            # The captain renamed the thread: his words stay for good.
+
+    if bot_name:
+        bot_marker, bot_base = split_marker(bot_name)
+        observed_marker, observed_base = split_marker(title.get("observed") or bot_name)
+        if live_base != (observed_base if title.get("manual_base") else bot_base):
             title["manual_base"] = seen["manual_base"] = live_base
-        if written_marker and not live_marker:
-            # The captain took our marker off: respected until ours changes.
-            title["respect"] = seen["respect"] = written_marker
+        if bot_marker and observed_marker and not live_marker:
+            title["respect"] = seen["respect"] = bot_marker
+    seen["observed"] = live
 
     verdict = title.get("verdict") or None
-    if verdict and verdict.get("source") == "jev" and not fresh(home, thread_id, verdict.get("cutoff")):
-        # Stale: a newer Firstmate post reached Discord. It is never applied;
-        # it stays only so a newer judgment of that post can confirm it.
+    if verdict and verdict.get("source") == "jev" and accepted > _id(verdict.get("cutoff")):
         verdict = None
-    if verdict and "during_decision" not in verdict:
-        # First seen while a decision is open: it belongs to that decision.
-        verdict = inputs["verdict"] = dict(verdict, during_decision=int(summary.get("open", 0)) > 0)
     marker = _marker(title, summary, live_marker, verdict)
-    if "respect" in title:
-        if marker == title["respect"]:
+    decision_question = marker == QUESTION and inputs["decisions"]["open"] > 0
+    if respect := title.get("respect"):
+        if marker == respect:
             marker = live_marker
-        else:
-            seen["respect"] = None
-    decision_question = marker == QUESTION and int(summary.get("open", 0)) > 0
+        elif verdict or inputs["decisions"]["open"] or title.get("decision_marked"):
+            inputs["respect"] = None
 
-    base = title.get("manual_base") or ""
-    if not base:
-        wanted = title.get("base") or ""
-        base = live_base
-        if wanted and wanted != live_base:
-            if poster.screened_title(wanted, home) == wanted:
-                base = wanted
-            else:
-                inputs["base"] = None
+    proposed = (verdict or {}).get("base") or title.get("base") or ""
+    base = title.get("manual_base") or live_base
+    if not title.get("manual_base") and proposed and poster.screened_title(proposed, home) == proposed:
+        base = proposed
     desired = marker + base
     if desired == live:
+        if title.get("base") == base:
+            inputs["base"] = None
         return finish("unchanged", decision_marked=decision_question or None)
 
-    target = desired
-    priority = decision_question and live_marker != QUESTION
+    priority = (decision_question and marker == QUESTION and live_marker != QUESTION
+                and inputs["decisions"]["open_buttons"] > 0)
+    target = QUESTION + live_base if priority else desired
     paced_at = float(title.get("paced_at") or 0)
-    if priority:
-        # Only the question mark skips our pace; any base change waits.
-        target = QUESTION + live_base
-    elif paced_at and now < paced_at + PACE_SECS:
+    if not priority and paced_at and clock() < paced_at + PACE_SECS:
         return finish("waiting", paced_at + PACE_SECS)
 
+    decision_view = poster.decision_threads(home, thread_id)
+    if decision_view is None:
+        inputs.clear()
+        return finish("unreadable", clock() + RETRY_SECS, error="decision ledger unreadable")
     with poster._THREAD_RECORD_LOCK:
         current = poster.load_thread_record_by_id(thread_id, home)
         if not current:
             return "skipped"
+        current_title = current.get("title") or {}
+        if (int(current_title.get("rev") or 0) != rev
+                or _decision_snapshot(decision_view.get(thread_id, {})) != _decision_snapshot(summary)
+                or firstmate_messages(home).get(thread_id, 0) != accepted):
+            inputs.clear()
+            return finish("waiting", clock())
+        attempt = {"name": target, "decision": decision_question, "priority": priority}
         poster.save_thread_record(current["path"], current.get("request_id"), thread_id,
-                                  title=dict(current.get("title") or {}, pending=target))
+                                  title=dict(current_title, pending=attempt))
     try:
         limits = (rename or discord_write_title)(thread_id, target) or {}
     except RateLimited as err:
-        _log(f"thread {thread_id} waits {err.retry_after:.1f}s for Discord before writing its title")
-        return finish("rate-limited", now + err.retry_after, error=str(err),
-                      discord_after=now + err.retry_after, pending=None)
+        return rate_limited(err, pending=None)
     except Exception as err:
         outcome = poster.classify_send_failure(err)
         _log(f"thread {thread_id} keeps its title: {err}")
-        if outcome == "ambiguous":
-            # The write may have landed; the pending title lets the next pass
-            # tell our own write from the captain's.
-            return finish("failed", now + RETRY_SECS, error=str(err), pending=target)
-        return finish("failed", now + RETRY_SECS if outcome == "transient" else 0.0,
-                      error=str(err), pending=None)
-    fields = {"pending": None, "decision_marked": decision_question or None}
-    if not priority:
-        fields["paced_at"] = paced_at = now
-    if isinstance(limits, dict) and limits.get("remaining") == 0 and limits.get("reset_after") is not None:
-        fields["discord_after"] = now + float(limits["reset_after"])
-    due = 0.0
-    if target != desired:
-        due = max(now, paced_at + PACE_SECS if paced_at else now, fields.get("discord_after") or now)
-    return finish("applied", due, topic_name=target, **fields)
+        failed_at = clock()
+        pending = dict(attempt, at=failed_at) if outcome == "ambiguous" else None
+        due = failed_at + RETRY_SECS if outcome in ("ambiguous", "transient") else 0.0
+        return finish("failed", due, error=str(err), pending=pending)
+
+    landed_at = clock()
+    written = target
+    fields = _written_fields(attempt, landed_at)
+    if isinstance(limits, dict) and limits.get("remaining") == 0:
+        reset_after = limits.get("reset_after")
+        reset = landed_at + reset_after if reset_after is not None else limits.get("reset")
+        if reset is not None:
+            fields["discord_after"] = reset
+    if target == desired and title.get("base") == base:
+        inputs["base"] = None
+    due = max(landed_at, paced_at + PACE_SECS, fields.get("discord_after", 0)) if target != desired else 0.0
+    return finish("applied", due, **fields)
 
 
 def run_due(home: Path | None = None, now: float | None = None, **kwargs) -> list[str]:
     """Reconcile every thread whose due time has come; the loop's one step."""
     home = home or poster.firstmate_home()
-    now = time.time() if now is None else now
+    ready_at = time.time() if now is None else now
     with _DUE_LOCK:
-        ready = [thread for (where, thread), at in _DUE.items() if where == home and at <= now]
+        ready = [thread for (where, thread), at in _DUE.items() if where == home and at <= ready_at]
         for thread_id in ready:
             del _DUE[home, thread_id]
     touched = []
@@ -535,7 +626,7 @@ def run_due(home: Path | None = None, now: float | None = None, **kwargs) -> lis
             outcome = reconcile(home, thread_id, now=now, **kwargs)
         except Exception as err:
             _log(f"thread {thread_id} keeps its title: {err}")
-            mark_due(home, thread_id, now + RETRY_SECS)
+            mark_due(home, thread_id, (time.time() if now is None else now) + RETRY_SECS)
             continue
         if outcome == "applied":
             touched.append(thread_id)

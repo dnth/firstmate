@@ -93,8 +93,10 @@
 #
 # threads [--thread <id>]
 #   Prints one JSON line per Discord thread that holds a decision post, with
-#   or without buttons: {thread_id, open, closed, last_posted_at,
-#   last_closed_at, keys}.
+#   or without buttons: {thread_id, open, open_buttons, closed, last_posted_at,
+#   last_closed_at, keys, posts}. Each post lists its message_id, state,
+#   buttons and recorded closed_at (0 until settled) for ordering a verdict
+#   against its decision.
 #   --thread limits the summary to that thread and checks for replacements
 #   of its decision keys in other threads. Unpublished records are ignored.
 #   A post is closed once it is settled, replaced by
@@ -346,7 +348,12 @@ post_content() {
 # settle_post <stem> <kind> <text> [selected option id]: write the final
 # outcome once, including the option whose button should remain highlighted.
 settle_post() {
-  jq -cn --arg kind "$2" --arg text "$3" --arg selected "${4:-}" --argjson at "$NOW" \
+  local at
+  at=${FM_EXT_NOW_OVERRIDE:-$(date +%s.%3N)}
+  case "$at" in
+    ''|*[!0-9.]*) at=$NOW ;;
+  esac
+  jq -cn --arg kind "$2" --arg text "$3" --arg selected "${4:-}" --argjson at "$at" \
     '{kind:$kind, text:$text, at:$at}
      + if $selected == "" then {} else {selected_option_id:($selected | tonumber)} end' \
     | fm_ext_private_artifact_publish_stdin_once "$OUTBOX" "$1.settled.json" 600
@@ -852,7 +859,11 @@ command_posts() {
 
 command_threads() {
   local only='' stem haskey key occ posted buttons hasmessages message sections
-  local topic request newer newer_stem thread state progress closed_at
+  local topic request newer newer_stem thread state progress closed_at observed_at closure
+  observed_at=${FM_EXT_NOW_OVERRIDE:-$(date +%s.%3N)}
+  case "$observed_at" in
+    ''|*[!0-9.]*) observed_at=$NOW ;;
+  esac
   case "${1:-}" in
     '') ;;
     --thread)
@@ -868,6 +879,9 @@ command_threads() {
     sections topic request newer newer_stem progress; do
     [ -n "$stem" ] || continue
     [ "$haskey" = 1 ] && [ "$hasmessages" = 1 ] || continue
+    if [ "$posted" = 0 ] && [ "$(jq -r '(.posted_count // 0) < (.total // 0)' <<<"$progress")" = true ]; then
+      continue
+    fi
     thread=$(post_thread_of "$topic" "$request") || continue
     [ -z "$only" ] || [ "$thread" = "$only" ] || continue
     closed_at=0
@@ -882,25 +896,31 @@ command_threads() {
         *) state=open ;;
       esac
     fi
-    if [ "$state" = closed ]; then
-      case "$closed_at" in
-        ''|0|*[!0-9.]*) closed_at=$NOW ;;
-      esac
+    case "$closed_at" in
+      ''|*[!0-9.]*) closed_at=0 ;;
+    esac
+    closure=$closed_at
+    if [ "$state" = closed ] && [ "$closure" = 0 ]; then
+      closure=$observed_at
     fi
     case "$posted" in
       ''|*[!0-9.]*) posted=0 ;;
     esac
     jq -cn --arg thread "$thread" --arg state "$state" --argjson posted "$posted" --arg key "$key" \
-      --argjson closed_at "$closed_at" \
-      '{thread_id:$thread, state:$state, posted_at:$posted, closed_at:$closed_at, key:$key}'
+      --argjson closed_at "$closed_at" --argjson closure "$closure" \
+      --arg message "$message" --argjson buttons "$buttons" \
+      '{thread_id:$thread, state:$state, posted_at:$posted, closed_at:$closed_at, closure:$closure,
+        key:$key, message_id:$message, buttons:($buttons == 1)}'
   done <<<"$POST_TABLE" \
     | jq -sc 'group_by(.thread_id)[]
         | {thread_id: .[0].thread_id,
            open: (map(select(.state == "open")) | length),
+           open_buttons: (map(select(.state == "open" and .buttons)) | length),
            closed: (map(select(.state == "closed")) | length),
            last_posted_at: (map(.posted_at) | max),
-           last_closed_at: (map(.closed_at) | max),
-           keys: (map(.key) | unique)}'
+           last_closed_at: (map(.closure) | max),
+           keys: (map(.key) | unique),
+           posts: map({message_id, state, buttons, closed_at})}'
 }
 
 command_finalized() {

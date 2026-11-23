@@ -41,7 +41,6 @@ FM_JEV_BASE=https://api.typesafe.ai
 # shellcheck disable=SC2034  # read by sourcing callers
 FM_JEV_MODEL=jev-latest
 FM_JEV_TIMEOUT=5
-FM_JEV_LATENCY_MS=null
 
 fm_jev_load_key() {
   [ -n "${_FM_JEV_KEY:-}" ] || _FM_JEV_KEY=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
@@ -72,6 +71,5 @@ fm_jev_post() {
     -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$_FM_JEV_KEY") \
     --data-binary @- 2>/dev/null) || http=000
   t1=$(_fm_jev_now_ms)
-  FM_JEV_LATENCY_MS=$(( t1 - t0 ))
-  printf '%s %s\n' "$http" "$FM_JEV_LATENCY_MS"
+  printf '%s %s\n' "$http" "$(( t1 - t0 ))"
 }
