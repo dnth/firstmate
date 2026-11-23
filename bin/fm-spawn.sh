@@ -526,6 +526,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_PRIOR_GEN=$(fm_meta_get "$RELAUNCH_META" spawn_gen)
   RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
   RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   if [ "$KIND" != secondmate ]; then
@@ -1608,7 +1609,15 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
-if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+# A model-switch receipt exists only for an OMP worker, so relaunch coordination
+# with a switch (the control lock, the receipt scan, the label ordering) applies
+# only when the worker being replaced or its replacement is OMP.
+RELAUNCH_SWITCH_COORD=0
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ] \
+   && { [ "$RELAUNCH_PRIOR_HARNESS" = omp ] || [ "$HARNESS_ARG" = omp ]; }; then
+  RELAUNCH_SWITCH_COORD=1
+fi
+if [ "$RELAUNCH_SWITCH_COORD" -eq 1 ]; then
   control_lock="$STATE/.control-$ID.lock"
   if [ -z "${FM_CONTROL_RELAUNCH_TX:-}" ] || [ "$(cat "$control_lock/pid" 2>/dev/null || true)" != "${FM_CONTROL_RELAUNCH_LOCK_OWNER:-$PPID}" ]; then
     if ! fm_lock_try_acquire "$control_lock"; then
@@ -4398,7 +4407,7 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     fi
   fi
 fi
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH_SWITCH_COORD" -eq 1 ]; then
   switch_dir="$STATE/$ID.omp-doorbell-ready.requests"
   if [ -d "$switch_dir" ] && [ ! -L "$switch_dir" ]; then
     for request_artifact in "$switch_dir"/model-switch.*.ack.json; do
@@ -5010,8 +5019,8 @@ export default function (omp: any) {
     execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]);
   });
   omp.on("session_shutdown", taskInboxDoorbell.retire);
-  // Registered last so its awaited turn_end handler never delays the watcher
-  // turn-end signal above.
+  // Registered last so its agent_end drain never delays the busy-state edge
+  // above; it subscribes to no turn_end, which OMP does not await.
   installTaskModelSwitch(omp, {
     requestDir: "$OMP_DOORBELL_READY.requests",
     spawnGen: "$SPAWN_GEN",
@@ -5635,7 +5644,7 @@ sleep 0.3
 # exec already sits at each template's executable (launch_template), which is
 # the only point where the executable is syntactically first: prefixing exec
 # onto the assembled LAUNCH would yield "exec VAR=..." and fail.
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && { [ "$HARNESS" = omp ] || [ "$RELAUNCH_SWITCH_COORD" -eq 1 ]; }; then
   # Generation reconciliation: every request.* receipt and model-switch.* file
   # under the doorbell requests dir was written for the PRIOR incarnation's
   # doorbell and extension. The doorbell only reconciles
@@ -5706,7 +5715,7 @@ else
   spawn_send_key "$T" Enter
 fi
 if [ "$BACKEND" = herdr ]; then
-  if [ "$RELAUNCH" -eq 1 ] || { [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; }; then
+  if [ "$RELAUNCH_SWITCH_COORD" -eq 1 ] || { [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; }; then
     fm_backend_herdr_report_agent_label_ordered "$T" "$HARNESS" "$MODEL" "$EFFORT"
   else
     fm_backend_herdr_report_agent_label "$T" "$HARNESS" "$MODEL" "$EFFORT"

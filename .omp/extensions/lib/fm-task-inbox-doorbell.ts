@@ -107,6 +107,31 @@ const doorbellOwners: Map<string, object> =
 	(globalThis as unknown as Record<symbol, Map<string, object>>)[DOORBELL_OWNERS_KEY]
 	??= new Map<string, object>();
 
+// The turn-admission gate that fm-task-model-switch.ts owns (see its header).
+// The doorbell only defers its dispatch while the gate is held and reports a
+// wake it sent that has not opened a turn yet. The literal below must stay in
+// step with the owner's.
+type TurnAdmissionGate = {
+	held: boolean;
+	pending: Promise<void> | undefined;
+	activity: number;
+	onRelease: Set<() => void>;
+	onQuiet: Set<() => void>;
+	busy: Set<() => boolean>;
+};
+const TURN_ADMISSION_KEY = Symbol.for("firstmate.turn-admission");
+function turnAdmissionGate(): TurnAdmissionGate {
+	const registry = globalThis as unknown as Record<symbol, TurnAdmissionGate | undefined>;
+	return (registry[TURN_ADMISSION_KEY] ??= {
+		held: false,
+		pending: undefined,
+		activity: 0,
+		onRelease: new Set<() => void>(),
+		onQuiet: new Set<() => void>(),
+		busy: new Set<() => boolean>(),
+	});
+}
+
 function publishReadyMarker(marker: string): void {
 	mkdirSync(dirname(marker), { recursive: true });
 	const staged = `${marker}.staging.${process.pid}`;
@@ -247,6 +272,19 @@ export function installTaskInboxDoorbell(
 	let drainAgain = false;
 	const awaitingTurns = new Map<string, ReturnType<typeof setTimeout>>();
 	const activationSends = new Set<Promise<void>>();
+	const admission = turnAdmissionGate();
+	// A wake this doorbell sent, and no turn seen yet, still reads idle: the
+	// model switch must not apply inside that window.
+	const dispatchBusy = (): boolean => dispatchingTurn || awaitingTurns.size > 0;
+	const notifyQuiet = (): void => {
+		for (const wake of [...admission.onQuiet]) {
+			try {
+				wake();
+			} catch {
+				continue;
+			}
+		}
+	};
 	let watcher: FSWatcher | undefined;
 	const settleAwaiting = (awaitingPath: string, outcome: "delivered" | "failed" | "unproven"): void => {
 		const timer = awaitingTurns.get(awaitingPath);
@@ -255,6 +293,7 @@ export function installTaskInboxDoorbell(
 			awaitingTurns.delete(awaitingPath);
 		}
 		bestEffortRename(awaitingPath, awaitingPath.replace(/\.awaiting-turn$/, `.${outcome}`));
+		notifyQuiet();
 	};
 	// A delivered doorbell that produced no turn within the grace bound was
 	// downgraded by the runtime to append-only delivery. Re-drive the same
@@ -341,9 +380,13 @@ export function installTaskInboxDoorbell(
 		awaitingTurns.clear();
 		watcher?.close();
 		watcher = undefined;
+		admission.busy.delete(dispatchBusy);
+		admission.onRelease.delete(drain);
 	};
 	const drain = (): void => {
 		if (!active || (configured.deferUntilTurnStart && !firstTurnStarted)) return;
+		// A model switch is applying: its release rings drain again.
+		if (admission.held) return;
 		if (draining) {
 			drainAgain = true;
 			return;
@@ -440,6 +483,8 @@ export function installTaskInboxDoorbell(
 			installTurnListeners();
 			watcher = watch(requestDir, drain);
 			active = true;
+			admission.busy.add(dispatchBusy);
+			admission.onRelease.add(drain);
 			doorbellOwners.set(ownerKey, ownerToken);
 			if (!signalHandlerInstalled) {
 				process.on(FM_TASK_INBOX_DOORBELL_SIGNAL, drain);
