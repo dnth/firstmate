@@ -448,15 +448,17 @@ rm -f "$release_file"
 send_task "Run this exact bash command: while [ ! -f '$release_file' ]; do sleep 1; done. Then reply exactly: $busy_reply" \
   || fail "the busy turn was not submitted"
 wait_for "native working worker state" agent_is "$WORKER_TARGET" omp working
-session_has_entry_after() { # <jq predicate over one entry>
-  entries_after "$WORKER_SESSION" "$busy_offset" | jq -se "any(.[]; $1)" >/dev/null 2>&1
+# The worker first reads its inbox message, so the blocked command is the tool
+# call whose arguments name the release file, not just any tool call.
+blocked_tool_pending() {
+  entries_after "$WORKER_SESSION" "$busy_offset" | jq -se '
+    [range(0; length)] as $i | . as $e
+    | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"
+        and (($e[.].message.content // []) | any(.type == "toolCall" and ((.arguments // {}) | tostring | contains("mid-task-release")))))) | first) as $call
+    | $call != null
+      and ($i | map(select(. > $call and $e[.].type == "message" and $e[.].message.role == "toolResult")) | length) == 0' >/dev/null 2>&1
 }
-tool_call_recorded() {
-  session_has_entry_after '.type == "message" and .message.role == "assistant" and ((.message.content // []) | any(.type == "toolCall"))'
-}
-wait_for "the tool-call request to be recorded" tool_call_recorded
-! session_has_entry_after '.type == "message" and .message.role == "toolResult"' \
-  || fail "the tool returned before the switch was requested"
+wait_for "the blocked tool call to be recorded and still running" blocked_tool_pending
 out=$(control switch-model --model "$FROM" --effort "$FROM_EFFORT" 2>&1) || fail "mid-task switch-model failed: $out"
 printf '# %s\n' "$out"
 case "$out" in switched\ "$WORKER_ID"\ *"model=$TO->$FROM"*) ;; *) fail "a mid-task switch is not a typed switched result for $TO -> $FROM: $out" ;; esac
@@ -474,8 +476,8 @@ entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg from "$FROM" --arg
   | . as $e
   | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"))) as $assistant
   | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"
-      and (($e[.].message.content // []) | any(.type == "toolCall")))) | first) as $tool
-  | ($i | map(select($e[.].type == "message" and $e[.].message.role == "toolResult")) | first) as $result
+      and (($e[.].message.content // []) | any(.type == "toolCall" and ((.arguments // {}) | tostring | contains("mid-task-release")))))) | first) as $tool
+  | ($i | map(select($tool != null and . > $tool and $e[.].type == "message" and $e[.].message.role == "toolResult")) | first) as $result
   | ($i | map(select($e[.].type == "model_change" and $e[.].model == $from)) | first) as $change
   | ($assistant | map(select($change != null and . > $change)) | first) as $next
   | $tool != null and $result != null and $change != null and $next != null
@@ -483,7 +485,7 @@ entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg from "$FROM" --arg
     and ($e[$next].message.content // [] | any(.type == "text" and (.text | contains($reply))))
     and ($assistant | map(select(. < $change)) | all("\($e[.].message.provider)/\($e[.].message.model)" == $to))
     and ($assistant | map(select(. > $change)) | all("\($e[.].message.provider)/\($e[.].message.model)" == $from))' >/dev/null 2>&1 \
-  || fail "the session order does not show: tool-call request on $TO, then the switch before the tool result, then every later request on $FROM"
+  || fail "the session order does not show: the blocked tool call on $TO, then the switch before its result, then every later request on $FROM"
 # The user-message sequence is the oracle for the original failure: a typed
 # /model or /switch would appear as a message of its own. The only user message
 # the supported doorbell fallback can add is its own re-driven steer.
