@@ -510,7 +510,11 @@ wait_for "the resumed worker's model-switch channel" resumed_channel_active "$OL
 verdict=$(PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_ENV=1 HERDR_SESSION="$SESSION" \
   fm_backend_herdr_send_text_submit "$WORKER_TARGET" 'Reply exactly: resumed on the switched model.' 3 0.2 0 "" \
     omp "$OMP_RUNTIME" "$OMP_BIN") || true
-wait_for "the resumed worker's reply" session_has_text_after "$WORKER_SESSION" "$resume_offset" 'resumed on the switched model.'
+resume_assistant_recorded() {
+  [ -n "$(last_assistant_after "$WORKER_SESSION" "$resume_offset")" ]
+}
+# The assistant message, not the echoed prompt text, proves the resumed turn ran.
+wait_for "the resumed worker's reply (submit verdict: ${verdict:-none})" resume_assistant_recorded
 wait_for "resumed worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
 [ "$(last_assistant_after "$WORKER_SESSION" "$resume_offset")" = "$TO" ] \
   || fail "the resumed session ran on $(last_assistant_after "$WORKER_SESSION" "$resume_offset"), not the switched model $TO (submit verdict: ${verdict:-none})"
