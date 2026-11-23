@@ -207,6 +207,7 @@ Pilot before fan-out: when independent units share a materially unproven recipe 
 Recent equivalent evidence stands in for the pilot.
 Unrelated tasks run in parallel regardless.
 Write the task-specific brief under section 11 before spawning.
+A task that raises one existing measured number - search latency, retrieval quality on a frozen evaluation set, or a model sweep score - toward a target is a hillclimb: load `hillclimb` at intake and paste its brief section into the task brief.
 
 ### Dispatch and supervision handoff
 
