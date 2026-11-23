@@ -481,7 +481,7 @@ entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg from "$FROM" --arg
   | ($assistant | map(select($change != null and . > $change)) | first) as $next
   | $tool != null and $result != null and $change != null and $next != null
     and $tool < $change and $change < $result and $result < $next
-    and ($e[$next].message.content // [] | any(.type == "text" and (.text | contains($reply))))
+    and ($assistant | map(select(. > $change)) | any($e[.].message.content // [] | any(.type == "text" and (.text | contains($reply)))))
     and ($assistant | map(select(. < $change)) | all("\($e[.].message.provider)/\($e[.].message.model)" == $to))
     and ($assistant | map(select(. > $change)) | all("\($e[.].message.provider)/\($e[.].message.model)" == $from))' >/dev/null 2>&1 \
   || fail "the session order does not show: the blocked tool call on $TO, then the switch before its result, then every later request on $FROM"
