@@ -247,7 +247,8 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (OMP turn-start
-#                  acknowledgement, programmatic inbox doorbell, and turn-end
+#                  acknowledgement, programmatic inbox doorbell, in-session
+#                  model-switch channel, and turn-end
 #                  extension, also outside the worktree)
 #     __OMPSESSIONDIR__ task-local or secondmate-home OMP session directory for exact resume
 #     __OMPRESUMEFLAG__ empty for a fresh OMP launch or the exact retained secondmate session file
@@ -4903,8 +4904,9 @@ EOF
       rm -f "$OMP_READY" "$OMP_STARTED" "$OMP_DOORBELL_READY" "$OMP_DOORBELL_FAILED"
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate OMP launch acknowledgement, inbox doorbell, semantic busy state,
-// and turn-end signal; written by fm-spawn under the contract owned by
-// bin/fm-busy-lib.sh.
+// turn-end signal, and in-session model-switch channel; written by fm-spawn
+// under the contract owned by bin/fm-busy-lib.sh. The model-switch wire
+// contract is owned by .omp/extensions/lib/fm-task-model-switch.ts.
 // .omp-ready publishes only after the inbox doorbell activates; a failed
 // activation journals its reason to .omp-doorbell-failed instead, so a missing
 // marker is always attributable.
@@ -4919,6 +4921,7 @@ EOF
 // consulted because it still reads false at a natural agent_end.
 import { execFile } from "node:child_process";
 import { installTaskInboxDoorbell } from "$FM_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts";
+import { installTaskModelSwitch } from "$FM_ROOT/.omp/extensions/lib/fm-task-model-switch.ts";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -4965,6 +4968,12 @@ export default function (omp: any) {
     execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]);
   });
   omp.on("session_shutdown", taskInboxDoorbell.retire);
+  // Registered last so its awaited turn_end handler never delays the watcher
+  // turn-end signal above.
+  installTaskModelSwitch(omp, {
+    requestDir: "$OMP_DOORBELL_READY.requests",
+    spawnGen: "$SPAWN_GEN",
+  });
 }
 EOF
       ;;
@@ -5576,9 +5585,10 @@ sleep 0.3
 # the only point where the executable is syntactically first: prefixing exec
 # onto the assembled LAUNCH would yield "exec VAR=..." and fail.
 if [ "$HARNESS" = omp ] && [ "$RELAUNCH" -eq 1 ]; then
-  # Generation reconciliation: every request.* receipt under the doorbell
-  # requests dir was written for the PRIOR incarnation's doorbell. The
-  # extension only reconciles .ambiguous/.awaiting-turn on activate, so a
+  # Generation reconciliation: every request.* receipt and model-switch.* file
+  # under the doorbell requests dir was written for the PRIOR incarnation's
+  # doorbell and extension. The doorbell only reconciles
+  # .ambiguous/.awaiting-turn on activate, so a
   # surviving .acked/.delivered/.unproven tombstone would suppress the
   # replacement worker's doorbell for the same still-unhandled record - the
   # exact delivered-no-turn stall this relaunch recovers from. This runs only
@@ -5588,7 +5598,7 @@ if [ "$HARNESS" = omp ] && [ "$RELAUNCH" -eq 1 ]; then
   # state/<id>.inbox and are untouched.
   OMP_REQUESTS_DIR="$STATE/$ID.omp-doorbell-ready.requests"
   if [ -d "$OMP_REQUESTS_DIR" ] && [ ! -L "$OMP_REQUESTS_DIR" ]; then
-    for request_artifact in "$OMP_REQUESTS_DIR"/request.*; do
+    for request_artifact in "$OMP_REQUESTS_DIR"/request.* "$OMP_REQUESTS_DIR"/model-switch.*; do
       [ -e "$request_artifact" ] || [ -L "$request_artifact" ] || continue
       if [ -L "$request_artifact" ] || [ ! -f "$request_artifact" ]; then
         echo "error: refusing OMP relaunch through unsafe request entry: $request_artifact" >&2

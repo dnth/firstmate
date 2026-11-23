@@ -1195,6 +1195,48 @@ The remote control pins Herdr session `fm-remote`, so the disposable code root's
 Native OMP Herdr probes are quarantined, the SSH readiness doctor is answered by the deterministic boundary, and the parent's reply relay is modelled by copying the agent's own correlated reply into the parent status channel.
 This record therefore covers the loaded-closure binding, delivery into the live session, its persist answer, and the relaunch, but not macOS host readiness or the reply relay.
 
+### OMP in-session model switch
+
+The model-switch guard ran on 2026-11-23 against OMP 18.22.2 and Herdr 0.9.5 on Linux x86_64 in one guarded non-default lab session, with `opencode-go/deepseek-v4.1-flash` at low effort and `opencode-go/qwen3.8-flash` at medium effort.
+It launched a real OMP worker through the production `fm-spawn.sh`, drove `fm-control.sh <id> switch-model` and `fm-send.sh` against it, resumed its session with the documented OMP resume command, and compared the global OMP `config.yml` and `models.yml` before and after.
+
+```sh
+HERDR_LAB_HELPER=/home/dnth/Desktop/firstmate/bin/fm-herdr-lab.sh \
+  FM_OMP_MODEL_SWITCH_LIVE_E2E=1 \
+  bash tests/fm-omp-model-switch-live-e2e.test.sh
+```
+
+Observed bounded output, with the request ids and the lab session name shortened:
+
+```text
+ok - live OMP worker spawned on opencode-go/deepseek-v4.1-flash (low) with its model-switch channel active (omp/18.22.2)
+ok - live OMP: an unknown model and a model without credentials are refused with typed reasons, meta unchanged
+# switched ... model=opencode-go/deepseek-v4.1-flash->opencode-go/qwen3.8-flash effort=low->medium boundary=idle verified=extension-readback meta=updated(model=opencode-go/qwen3.8-flash effort=medium) backend=herdr
+# extension readback: {"outcome":"applied","boundary":"idle","before":{"model":"opencode-go/deepseek-v4.1-flash","thinking":"low"},"after":{"model":"opencode-go/qwen3.8-flash","thinking":"medium"},"modelChanged":true}
+ok - live OMP: an idle worker switches opencode-go/deepseek-v4.1-flash -> opencode-go/qwen3.8-flash and low -> medium; the next turn runs on opencode-go/qwen3.8-flash; meta and the pane label follow; nothing is chat
+# switched ... model=opencode-go/qwen3.8-flash->opencode-go/deepseek-v4.1-flash effort=medium->low boundary=turn_end verified=extension-readback meta=updated(model=opencode-go/deepseek-v4.1-flash effort=low) backend=herdr
+ok - live OMP: a switch requested mid-turn leaves the in-flight turn on opencode-go/qwen3.8-flash and applies at the turn boundary; the next turn runs on opencode-go/deepseek-v4.1-flash
+ok - live OMP: the documented resume path (no --model) keeps the switched model opencode-go/qwen3.8-flash, and the resumed worker's channel is live again
+ok - live OMP: the global OMP config files are byte-identical before and after
+ok - live OMP model switch: guarded lab torn down with the default-session tripwire intact
+```
+
+What the guard establishes about the installed OMP, and what the extension's design therefore relies on:
+
+- `setModel` called while the session is idle, and inside an awaited `turn_end` handler, changes the model for the next provider request only: the session records the in-flight turn on the old model, then the model-change entry, then the next turn on the new model.
+- `ctx.isIdle()` stays false from `agent_start` through tool execution to `agent_end`, because a request made during a 15-second tool run was applied at `boundary=turn_end` and not at `boundary=idle`.
+- A model that exists in the registry but has no credentials is told apart from an unknown one through `ctx.modelRegistry.find`, because `ctx.models.resolve` returns nothing for both.
+- The switch is session-only: no global config file changed, and a resume without `--model` restores the switched model from the session's own model-change entry.
+
+Throwaway print-mode probes on the same date established three more facts that the committed guard does not exercise, so the portable tests encode them with a fake host instead.
+`ctx.models.resolve` is fuzzy: a bare id resolves, and a trailing `:high` is dropped, so the extension accepts only an exact `provider/id` match.
+`setThinkingLevel` clamps to the model's supported efforts without throwing (`medium` on a model supporting `low,high,max` read back `low`) and leaves the level unset for a string outside the vocabulary, so the extension validates the level and reads it back.
+An explicit `--model` on resume overrides the session's recorded model, which is why the recorded `model=` in task meta must follow a switch.
+
+The guard drives Herdr only.
+The channel itself is files in the task's state directory, and worker liveness is the shared agent-state classifier, so the portable verb test covers tmux with a fake terminal backend and no live run does.
+zellij, orca, and cmux report `unverified` there, and the verb then relies on the extension's own ready marker and its live process.
+
 ### Workspace-removal focus safety
 
 The focus-flash regression ran on 2026-07-28 against Herdr 0.7.5 protocol 17 on macOS aarch64:

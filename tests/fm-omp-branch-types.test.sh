@@ -42,9 +42,24 @@ cp "$ROOT/.omp/extensions/fm-fleet-hooks.ts" "$TMP_ROOT/.omp/extensions/fm-fleet
 cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$TMP_ROOT/.omp/extensions/lib/fm-branch-dispatch.ts"
 cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$TMP_ROOT/.omp/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$TMP_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+cp "$ROOT/.omp/extensions/lib/fm-task-model-switch.ts" "$TMP_ROOT/.omp/extensions/lib/fm-task-model-switch.ts"
 cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$TMP_ROOT/.omp/extensions/lib/fm-branch-model-picker.ts"
 cp "$ROOT/bin/fm-primary-watch-core.ts" "$TMP_ROOT/bin/fm-primary-watch-core.ts"
 ln -s "$OMP_NODE_MODULES" "$TMP_ROOT/node_modules"
+# The model-switch library declares only the slice of the SDK it reads, so
+# assigning the real ExtensionAPI and ExtensionContext to that slice is what
+# fails when setModel, getThinkingLevel, setThinkingLevel, ctx.models,
+# ctx.modelRegistry, ctx.isIdle, or ctx.agent change shape.
+cat > "$TMP_ROOT/.omp/extensions/fm-model-switch-sdk-check.ts" <<'TS'
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { installTaskModelSwitch, type TaskModelSwitchContext } from "./lib/fm-task-model-switch.ts";
+
+export default function (pi: ExtensionAPI) {
+	installTaskModelSwitch(pi, { requestDir: "/state/task.omp-doorbell-ready.requests", spawnGen: "gen" });
+}
+
+export const sdkContextShape = (ctx: ExtensionContext): TaskModelSwitchContext => ctx;
+TS
 
 cat > "$TMP_ROOT/package.json" <<'JSON'
 {"type":"module"}

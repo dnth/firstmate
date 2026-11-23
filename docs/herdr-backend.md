@@ -225,7 +225,7 @@ Verified presentation limits, live against Herdr 0.9.5 protocol 22 and recorded 
 - An agent's own lifecycle reports do not rewrite it: `pane report-agent` and `pane release-agent` set or release the agent identity and leave `display_agent` alone.
 - The installed OMP integration reports only session identity and agent lifecycle, so it does not overwrite the firstmate label.
   A future integration that reports `display_agent` would win until the next launch re-reports.
-- The label mirrors recorded launch values, not live state, so an in-session model switch is not tracked.
+- The label mirrors recorded task metadata, not live state, so a model changed any way other than `bin/fm-control.sh switch-model`, such as a typed `/switch`, is not tracked; `switch-model` republishes the label whenever it changes the recorded model or effort.
 
 The publication hook runs only for Herdr; the other backend adapters do not use its pane metadata API:
 

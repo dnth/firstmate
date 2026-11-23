@@ -540,8 +540,15 @@ drive_omp_ext() {
     node --experimental-strip-types --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
-const handlers = {};
-mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+// OMP runs every handler an extension registered for an event, in registration
+// order, so this host does too: one extension may bind several to one event.
+const registered = {};
+const handlers = new Proxy(registered, {
+  get: (target, name) => (name in target
+    ? async (...args) => { for (const fn of target[name]) await fn(...args); }
+    : undefined),
+});
+mod.default({ on: (name, fn) => { (registered[name] ||= []).push(fn); } });
 // ctx.isIdle() reads false at a natural omp agent_end; state must not depend on it.
 const ctx = { isIdle: () => false };
 switch (process.env.MODE) {

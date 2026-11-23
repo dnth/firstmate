@@ -13,15 +13,17 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 ## What the control plane owns
 
-`bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:
+`bin/fm-control-lib.sh` is the single executable owner of four capability tables, with no side effects, so it can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `exit`, `relaunch`, `switch-model`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
   These were previously carried only in the [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) skill's tool references, which now point here.
   `bin/fm-send.sh`'s `--key` path reads the composer-clear table from this owner too, rather than keeping a second copy of it.
 - **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped.
+- **In-session model switching**: which harnesses and task kinds can change a running session's model through a verified channel instead of a relaunch.
+  Only an OMP ship or scout qualifies; the channel's wire contract lives with its extension, `.omp/extensions/lib/fm-task-model-switch.ts`.
 
 A recorded `harness=` is not always an exact adapter name: a task launched from a raw command records that command's basename instead.
 `fm_control_harness_family` is the one place that prefix rule is stated, and an unrecognized value resolves to no adapter rather than being guessed into one.
@@ -33,12 +35,15 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the worktree and every uncommitted change, without explicitly closing the endpoint. | The backend's recovery-grade classifier reports the agent gone - stopped, or the endpoint positively absent after the command was delivered to an endpoint this plane had already validated and owned. Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same worktree, reusing the endpoint when the backend supports it or allocating a fresh endpoint for OMP secondmates, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint published by the replacement launch, and the durable record names the harness and endpoint that are actually running. |
+| `switch-model` | Change a live OMP worker's model, and optionally its thinking level, inside its current session through its generated extension, never by typing into the terminal. | The extension's readback of the live session equals the target before the recorded `model=` and `effort=` change; a refusal, a partial result, a withdrawn request, or an unacknowledged one is typed and never reported as unchanged unless it provably is. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 An endpoint already missing before exit delivery is refused; disappearance after interrupt alone is also insufficient to confirm exit.
 Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
+
+`switch-model` sends no keystrokes: its request is files that the worker's extension applies at the next safe boundary, and [the verb's header](../bin/fm-control.sh) owns the result vocabulary, the wait knobs, and what a timeout reports.
 
 An interrupt is not complete until the composer is empty.
 muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
@@ -137,4 +142,7 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 - `tests/fm-update.test.sh` - fast-forward classification, live secondmate restart/nudge sets, and stopped or malformed endpoint handling.
 - `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` - host-local remote lifecycle control, including OMP endpoint binding and SSH unknown-state handling.
 - `tests/fm-remote-secondmate-update-restart.test.sh` - the remote OMP binding matrix for the restart persist request and an end-to-end update across an extension change followed by the persist-gated restart.
+- `tests/fm-control-switch-model.test.sh` - the `switch-model` verb against the real extension library driven by a fake OMP host: typed results, meta changes, mid-turn deferral, withdrawal before the claim, late acknowledgements and their reconciliation, partial results, and every refusal.
+- `tests/fm-omp-task-model-switch.test.sh` - the extension side of the same channel: idle and turn-boundary application, typed refusals, partial and superseded results, and ownership.
+- `tests/fm-omp-model-switch-live-e2e.test.sh` - opt-in (`FM_OMP_MODEL_SWITCH_LIVE_E2E=1`) real OMP and Herdr proof in a guarded lab: idle and mid-turn switches, typed refusals, the documented resume path, and an unchanged global OMP config; [the runtime verification record](verification/runtime-backends.md#omp-in-session-model-switch) holds its latest result.
 - `tests/fm-remote-omp-update-restart-live-e2e.test.sh` - opt-in (`FM_OMP_REMOTE_UPDATE_LIVE_E2E=1`) real OMP and Herdr proof of the same update-then-restart path in a guarded lab; [the runtime verification record](verification/runtime-backends.md#remote-omp-update-and-restart) holds its latest result.

@@ -8,6 +8,9 @@
 #                                         [--effort <level>] [--backend <name>]
 #                                         [--lock-preheld]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh <task-id> switch-model --model <provider/id>
+#                                             [--effort <level>] [--wait <seconds>]
+#        fm-control.sh <task-id> switch-model --status
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -77,6 +80,60 @@
 #              endpoint still refuses - an absent agent is a reconciliation
 #              finding, not a stopped one.
 #
+#   switch-model  Change a LIVE OMP worker's model, and optionally its thinking
+#              level, inside its current session. The request is files, never
+#              keystrokes: it does not touch the composer and never arrives as
+#              chat. The worker's own extension resolves the target, switches
+#              through OMP's documented session-only extension API (global
+#              modelRoles are untouched and the session records the change, so
+#              a resume keeps it), and reads the live model back. The wire
+#              contract and the boundary rule - a request applies while the
+#              session is idle or at the next turn boundary, never mid-stream -
+#              are owned by .omp/extensions/lib/fm-task-model-switch.ts.
+#              --model is provider/id exactly as `omp models` lists it. --effort
+#              is low|medium|high|xhigh|max, the OMP launch vocabulary, and is
+#              left alone when omitted. Every request carries a unique id. The
+#              verb waits up to --wait seconds for the acknowledgement, checks
+#              that the live model equals the target (and the live thinking
+#              level equals --effort), and only then updates the recorded
+#              model= and effort= in task meta.
+#              The first word of the output is the typed result; every result
+#              but `switched` exits 1:
+#                switched         the live model (and effort) read back as the
+#                                 target; meta updated.
+#                refused          nothing was applied. reason= is one of
+#                                 unknown-model, no-credentials, model-mismatch
+#                                 (the spec is not an exact provider/id),
+#                                 effort-unsupported, stale-incarnation,
+#                                 set-model-failed, invalid-request. Meta is
+#                                 unchanged unless it says meta=followed-live-
+#                                 model because the live model moved anyway.
+#                partial          the model switched but the thinking level did
+#                                 not land. Both values are reported, nothing
+#                                 is claimed rolled back, and meta follows the
+#                                 live state.
+#                superseded       a newer request replaced it before it ran.
+#                cancelled        the wait expired and the request was withdrawn
+#                                 by an atomic rename before the worker claimed
+#                                 it, so it can never apply. Nothing changed.
+#                pending-unknown  the wait expired after the worker claimed the
+#                                 request and before it acknowledged it, so it
+#                                 may still land. Nothing is claimed unchanged;
+#                                 the request id is named.
+#                meta-stale       the live state is as reported but task meta
+#                                 could not be written; the acknowledgement stays
+#                                 unfolded and `switch-model --status` retries.
+#              `switch-model --status` folds every acknowledgement not yet
+#              applied to meta - including a late one - into task meta, and
+#              lists unresolved requests (exit 1 while any remain). Every other
+#              verb folds them first too, so meta never stays divergent from
+#              the live model without being reported.
+#              Only OMP ships and scouts have this channel. Any other harness,
+#              a secondmate (its OMP runs the primary adapter, which has no
+#              request channel), and a worker launched before the verb existed
+#              are refused with that reason; relaunch with --model and
+#              --effort to change those instead.
+#
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
 # endpoint, or discarding work stays with bin/fm-teardown.sh, which owns the
@@ -108,6 +165,9 @@
 #     than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
+#   - `switch-model` sends no key, so it needs no recovery-grade classifier: it
+#     refuses a positively dead or missing endpoint, and requires the worker's
+#     extension to prove itself live through its ready marker.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -115,6 +175,9 @@
 #   FM_CONTROL_EXIT_WAIT         alive->stopped wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_MODEL_WAIT        switch-model acknowledgement wait (60)
+#   FM_CONTROL_MODEL_GRACE       acknowledgement wait after a withdrawal lost the
+#                                race to the worker's claim (3)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -229,6 +292,8 @@ NOTE=
 NOTE_SET=0
 LOCK_PREHELD=0
 STALL_RECORD=
+STATUS_SET=0
+WAIT_ARG=
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -242,6 +307,7 @@ for control_arg in "$@"; do
       backend) PIN_BACKEND=$control_arg; BACKEND_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       stall_record) STALL_RECORD=$control_arg ;;
+      wait) WAIT_ARG=$control_arg ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
@@ -271,6 +337,9 @@ for control_arg in "$@"; do
     --lock-preheld) LOCK_PREHELD=1 ;;
     --stall-record) control_want_value=stall_record ;;
     --stall-record=*) STALL_RECORD=${control_arg#--stall-record=} ;;
+    --wait) control_want_value='wait' ;;
+    --wait=*) WAIT_ARG=${control_arg#--wait=} ;;
+    --status) STATUS_SET=1 ;;
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
@@ -279,9 +348,20 @@ if [ -n "$control_want_value" ]; then
   die "--$control_want_value requires a value"
 fi
 
-if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$BACKEND_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$LOCK_PREHELD" = 0 ] && [ -z "$STALL_RECORD" ] \
-    || die "--harness, --model, --effort, --backend, --note, --lock-preheld, and --stall-record apply to 'relaunch' only"
+case "$VERB" in
+  relaunch) ;;
+  switch-model)
+    [ "$HARNESS_SET" = 0 ] && [ "$BACKEND_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$LOCK_PREHELD" = 0 ] && [ -z "$STALL_RECORD" ] \
+      || die "--harness, --backend, --note, --lock-preheld, and --stall-record apply to 'relaunch' only"
+    ;;
+  *)
+    [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$BACKEND_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$LOCK_PREHELD" = 0 ] && [ -z "$STALL_RECORD" ] \
+      || die "--harness, --model, --effort, --backend, --note, --lock-preheld, and --stall-record apply to 'relaunch' only (--model and --effort also apply to 'switch-model')"
+    ;;
+esac
+if [ "$VERB" != switch-model ]; then
+  [ "$STATUS_SET" = 0 ] && [ -z "$WAIT_ARG" ] \
+    || die "--status and --wait apply to 'switch-model' only"
 fi
 # The stall-record re-check is only meaningful inside the supervised-recovery
 # handshake: without --lock-preheld there is no proof the caller serialized
@@ -296,6 +376,31 @@ case "$NEW_EFFORT" in
   ''|default|low|medium|high|xhigh|max) ;;
   *) die "--effort must be one of default, low, medium, high, xhigh, max" ;;
 esac
+if [ "$VERB" = switch-model ]; then
+  if [ "$STATUS_SET" = 1 ]; then
+    [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ -z "$WAIT_ARG" ] \
+      || die "--status takes no other option"
+  else
+    [ "$MODEL_SET" = 1 ] || die "switch-model requires --model <provider/id>, or --status"
+    case "$NEW_MODEL" in
+      */*) ;;
+      *) die "--model must be written provider/id, exactly as 'omp models' lists it" ;;
+    esac
+    case "$NEW_MODEL" in
+      /*|*/|*[[:space:][:cntrl:]]*) die "--model must be one provider/id token with no whitespace and no leading or trailing slash" ;;
+    esac
+    case "$NEW_EFFORT" in
+      ''|low|medium|high|xhigh|max) ;;
+      *) die "--effort for switch-model must be one of low, medium, high, xhigh, max" ;;
+    esac
+  fi
+  MODEL_WAIT=${WAIT_ARG:-${FM_CONTROL_MODEL_WAIT:-60}}
+  MODEL_GRACE=${FM_CONTROL_MODEL_GRACE:-3}
+  case "$MODEL_WAIT" in
+    ''|*[!0-9]*|0) die "--wait must be a whole number of seconds from 1 to 3600" ;;
+  esac
+  [ "$MODEL_WAIT" -le 3600 ] || die "--wait must be a whole number of seconds from 1 to 3600"
+fi
 
 # --- exact task-id resolution ----------------------------------------------
 
@@ -369,6 +474,10 @@ HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
+if [ "$VERB" = switch-model ]; then
+  fm_control_model_switch_supported "$HARNESS" "$KIND" \
+    || die "task $ID (harness ${RECORDED_HARNESS:-none}, kind $KIND) has no in-session model-switch channel: only OMP ships and scouts load the per-task extension that applies it, and an OMP secondmate runs the primary adapter instead. Relaunch it with --model and --effort to change them"
+fi
 
 fm_backend_validate "$BACKEND" || exit 1
 
@@ -567,6 +676,447 @@ do_exit() {
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
   printf 'stopped'
+}
+
+# --- in-session model switch ------------------------------------------------
+#
+# The verb's contract is in this file's header; the wire contract (file names,
+# request and acknowledgement JSON, the boundary rule) is owned by
+# .omp/extensions/lib/fm-task-model-switch.ts. This section only speaks it.
+
+MS_REQUEST_SCHEMA=fm-model-switch.request.v1
+MS_ACK_SCHEMA=fm-model-switch.ack.v1
+MS_READY_SCHEMA=fm-model-switch.ready.v1
+MS_DIR="$STATE/$ID.omp-doorbell-ready.requests"
+MS_SPAWN_GEN=$(fm_meta_get "$META" spawn_gen)
+MS_META_LOCK=$(fm_meta_lock_path "$META" 2>/dev/null || true)
+MS_CHANNEL_WHY=
+MS_RECONCILED=0
+MS_FOLD_NEW_MODEL=
+MS_FOLD_NEW_EFFORT=
+MS_FOLD_NOTE=
+MS_A_ID=
+MS_A_GEN=
+MS_A_OUTCOME=
+MS_A_REASON=
+MS_A_DETAIL=
+MS_A_BOUNDARY=
+MS_A_TARGET_MODEL=
+MS_A_TARGET_EFFORT=
+MS_A_BEFORE_MODEL=
+MS_A_BEFORE_THINKING=
+MS_A_AFTER_MODEL=
+MS_A_AFTER_THINKING=
+MS_A_CHANGED=
+
+ms_path() {  # <request-id> <suffix>
+  printf '%s/model-switch.%s.%s' "$MS_DIR" "$1" "$2"
+}
+
+ms_effort_valid() {
+  case "${1-}" in
+    low|medium|high|xhigh|max) return 0 ;;
+  esac
+  return 1
+}
+
+ms_now_ms() {
+  perl -MTime::HiRes=time -e 'printf "%d", time() * 1000' 2>/dev/null \
+    || printf '%s000' "$(date +%s)"
+}
+
+# True while fewer than <seconds> have elapsed since <start-ms>. Millisecond
+# resolution keeps a one-second wait one second, not one to two.
+ms_within() {  # <start-ms> <seconds>
+  [ $(( $(ms_now_ms) - $1 )) -lt $(( $2 * 1000 )) ]
+}
+
+# Bounded acquisition of this task's metadata lock: a reconcile that rides on an
+# unrelated verb must never hang that verb behind a wedged lock holder.
+ms_lock_meta() {
+  local tries=0 status
+  [ -n "$MS_META_LOCK" ] || return 1
+  while :; do
+    status=0
+    fm_lock_try_acquire "$MS_META_LOCK" || status=$?
+    [ "$status" -ne 0 ] || return 0
+    [ "$status" -ne 2 ] || return 1
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || return 1
+    sleep 0.1
+  done
+}
+
+# ms_meta_apply <model|empty> <effort|empty>: replace the model= and effort=
+# records atomically under the metadata lock. A record whose worker generation
+# changed since this verb began is never rewritten.
+ms_meta_apply() {
+  local tmp rc=0
+  ms_lock_meta || { echo "error: task $ID's metadata lock could not be acquired" >&2; return 1; }
+  if [ -f "$META" ] && [ ! -L "$META" ] \
+     && [ "$(fm_meta_get "$META" spawn_gen)" = "$MS_SPAWN_GEN" ] \
+     && tmp=$(mktemp "$STATE/.model-switch-$ID.XXXXXX"); then
+    if awk -v m="$1" -v e="$2" '
+         m != "" && /^model=/ { next }
+         e != "" && /^effort=/ { next }
+         { print }
+         END { if (m != "") print "model=" m; if (e != "") print "effort=" e }
+       ' "$META" > "$tmp" && mv -f -- "$tmp" "$META"; then
+      rc=0
+    else
+      rm -f -- "$tmp"
+      rc=1
+    fi
+  else
+    rc=1
+  fi
+  fm_lock_release "$MS_META_LOCK" || true
+  return "$rc"
+}
+
+# ms_read_ack <ack-file>: parse one acknowledgement into the MS_A_* variables.
+# Non-zero when the file is not a model-switch acknowledgement.
+ms_read_ack() {
+  local rec
+  MS_A_ID=
+  MS_A_GEN=
+  MS_A_OUTCOME=
+  MS_A_REASON=
+  MS_A_DETAIL=
+  MS_A_BOUNDARY=
+  MS_A_TARGET_MODEL=
+  MS_A_TARGET_EFFORT=
+  MS_A_BEFORE_MODEL=
+  MS_A_BEFORE_THINKING=
+  MS_A_AFTER_MODEL=
+  MS_A_AFTER_THINKING=
+  MS_A_CHANGED=
+  rec=$(jq -j --arg schema "$MS_ACK_SCHEMA" '
+      select(type == "object" and .schema == $schema)
+      | [.id, .spawnGen, .outcome, .reason, .detail, .boundary,
+         .target.model, .target.effort, .before.model, .before.thinking,
+         .after.model, .after.thinking, .modelChanged]
+      | map(if . == null then "" else (tostring | gsub("[\u001f\n\r]"; " ")) end)
+      | join("\u001f")' "$1" 2>/dev/null) || return 1
+  [ -n "$rec" ] || return 1
+  IFS=$'\037' read -r MS_A_ID MS_A_GEN MS_A_OUTCOME MS_A_REASON MS_A_DETAIL MS_A_BOUNDARY \
+    MS_A_TARGET_MODEL MS_A_TARGET_EFFORT MS_A_BEFORE_MODEL MS_A_BEFORE_THINKING \
+    MS_A_AFTER_MODEL MS_A_AFTER_THINKING MS_A_CHANGED <<< "$rec" || true
+  [ -n "$MS_A_ID" ] && [ -n "$MS_A_OUTCOME" ]
+}
+
+# The Herdr pane label mirrors the model and effort recorded in meta
+# (docs/herdr-backend.md "Pane display-agent label"), so a change to meta
+# republishes it. Best effort by that contract: a failed publication costs one
+# warning in the home's log and never fails the verb.
+ms_refresh_pane_label() {
+  [ "$BACKEND" = herdr ] || return 0
+  fm_backend_source herdr >/dev/null 2>&1 || return 0
+  fm_backend_herdr_report_agent_label "$T" "$RECORDED_HARNESS" \
+    "$(fm_meta_get "$META" model)" "$(fm_meta_get "$META" effort)" || true
+}
+
+# ms_fold_ack <ack-file>: bring meta in line with the live state the
+# acknowledgement read back, then retire it (renamed .folded, never deleted) so
+# it is folded once. Returns 1 for an unreadable acknowledgement, 2 for another
+# worker generation's, and 3 when meta could not be written - in which case the
+# acknowledgement stays unfolded for the next call. The model follows the live
+# readback for an applied or partial result and for any result that moved it;
+# the effort follows it only when this request changed it or asked for it, and
+# only inside the launch vocabulary.
+ms_fold_ack() {
+  local ack=$1 meta_model meta_effort take=0
+  ms_read_ack "$ack" || return 1
+  [ "$MS_A_GEN" = "$MS_SPAWN_GEN" ] || return 2
+  meta_model=$(fm_meta_get "$META" model)
+  meta_effort=$(fm_meta_get "$META" effort)
+  MS_FOLD_NEW_MODEL=
+  MS_FOLD_NEW_EFFORT=
+  MS_FOLD_NOTE=
+  if [ -n "$MS_A_AFTER_MODEL" ] && [ "$MS_A_AFTER_MODEL" != "$meta_model" ]; then
+    case "$MS_A_OUTCOME" in
+      applied|partial) MS_FOLD_NEW_MODEL=$MS_A_AFTER_MODEL ;;
+      *) [ "$MS_A_CHANGED" != true ] || MS_FOLD_NEW_MODEL=$MS_A_AFTER_MODEL ;;
+    esac
+  fi
+  if [ -n "$MS_A_AFTER_THINKING" ] && [ "$MS_A_AFTER_THINKING" != "$meta_effort" ]; then
+    [ "$MS_A_AFTER_THINKING" = "$MS_A_BEFORE_THINKING" ] || take=1
+    case "$MS_A_OUTCOME" in
+      applied|partial) [ -z "$MS_A_TARGET_EFFORT" ] || take=1 ;;
+    esac
+    if [ "$take" = 1 ]; then
+      if ms_effort_valid "$MS_A_AFTER_THINKING"; then
+        MS_FOLD_NEW_EFFORT=$MS_A_AFTER_THINKING
+      else
+        MS_FOLD_NOTE="effort-unrecorded=$MS_A_AFTER_THINKING"
+      fi
+    fi
+  fi
+  if [ -n "$MS_FOLD_NEW_MODEL" ] || [ -n "$MS_FOLD_NEW_EFFORT" ]; then
+    ms_meta_apply "$MS_FOLD_NEW_MODEL" "$MS_FOLD_NEW_EFFORT" || return 3
+    ms_refresh_pane_label
+  fi
+  mv -f -- "$ack" "$ack.folded" 2>/dev/null || true
+  return 0
+}
+
+# Oldest first, so the newest acknowledgement defines the live state.
+ms_unfolded_acks() {
+  local f at
+  for f in "$MS_DIR"/model-switch.*.ack.json; do
+    [ -f "$f" ] || continue
+    at=$(jq -r '.ackedAtMs // 0' "$f" 2>/dev/null) || at=0
+    printf '%s\t%s\n' "$at" "$f"
+  done | LC_ALL=C sort -n
+}
+
+# reconcile_model_switch: fold every acknowledgement not yet applied to meta -
+# including one that arrived after its own verb timed out - and say so on
+# stderr. Never fatal: a verb that only rides on it must not fail because of it.
+reconcile_model_switch() {
+  local at ack rc
+  MS_RECONCILED=0
+  [ -d "$MS_DIR" ] && [ ! -L "$MS_DIR" ] || return 0
+  while IFS=$'\t' read -r at ack; do
+    [ -n "$ack" ] || continue
+    rc=0
+    ms_fold_ack "$ack" || rc=$?
+    case "$rc" in
+      0)
+        MS_RECONCILED=$((MS_RECONCILED + 1))
+        printf 'model-switch-reconciled %s request=%s outcome=%s live-model=%s live-effort=%s meta-model=%s meta-effort=%s%s\n' \
+          "$ID" "$MS_A_ID" "$MS_A_OUTCOME" "${MS_A_AFTER_MODEL:--}" "${MS_A_AFTER_THINKING:--}" \
+          "$(fm_meta_get "$META" model)" "$(fm_meta_get "$META" effort)" "${MS_FOLD_NOTE:+ $MS_FOLD_NOTE}" >&2
+        ;;
+      2) ;;
+      *) echo "warning: model-switch acknowledgement $ack could not be folded into task $ID's meta (status $rc); it stays unfolded" >&2 ;;
+    esac
+  done <<EOF
+$(ms_unfolded_acks)
+EOF
+  return 0
+}
+
+# ms_channel_ready: the worker's extension must have activated this very
+# incarnation and still be running. Sets MS_CHANNEL_WHY when it is not.
+ms_channel_ready() {
+  local state ready pid gen
+  MS_CHANNEL_WHY=
+  state=$(agent_state)
+  case "$state" in
+    alive|unverified) ;;
+    dead|missing) MS_CHANNEL_WHY="no agent is running at its recorded endpoint (state: $state)"; return 1 ;;
+    *) MS_CHANNEL_WHY="its endpoint reads '$state' rather than a positively attributed worker"; return 1 ;;
+  esac
+  ready="$MS_DIR/model-switch.ready"
+  if [ ! -d "$MS_DIR" ] || [ -L "$MS_DIR" ] || [ ! -f "$ready" ] || [ -L "$ready" ]; then
+    if [ -f "$MS_DIR/model-switch.failed" ]; then
+      MS_CHANNEL_WHY="its extension could not activate the channel: $(head -c 300 "$MS_DIR/model-switch.failed" 2>/dev/null | tr '\n' ' ')"
+    else
+      MS_CHANNEL_WHY="it has no model-switch channel (it was launched before the verb existed, or its extension has not activated); relaunch it to load the current extension"
+    fi
+    return 1
+  fi
+  pid=$(jq -r --arg schema "$MS_READY_SCHEMA" 'select(.schema == $schema) | .pid // empty' "$ready" 2>/dev/null || true)
+  gen=$(jq -r --arg schema "$MS_READY_SCHEMA" 'select(.schema == $schema) | .spawnGen // empty' "$ready" 2>/dev/null || true)
+  if [ -z "$pid" ] || [ -z "$gen" ]; then
+    MS_CHANNEL_WHY="its model-switch ready marker is unreadable"
+    return 1
+  fi
+  if [ "$gen" != "$MS_SPAWN_GEN" ]; then
+    MS_CHANNEL_WHY="its ready marker belongs to worker generation $gen, not the recorded $MS_SPAWN_GEN"
+    return 1
+  fi
+  if ! fm_pid_alive "$pid"; then
+    MS_CHANNEL_WHY="the extension process $pid that published its ready marker is not running"
+    return 1
+  fi
+  return 0
+}
+
+# A queued request left by an earlier invocation that was killed before it could
+# withdraw it: withdraw it now, with the same atomic rename, so it cannot apply
+# out of order behind the new one.
+ms_withdraw_queued() {
+  local f id
+  for f in "$MS_DIR"/model-switch.*.request.json; do
+    [ -f "$f" ] || continue
+    id=${f##*/model-switch.}
+    id=${id%.request.json}
+    if mv -- "$f" "$(ms_path "$id" cancelled)" 2>/dev/null; then
+      echo "note: withdrew queued request $id left by an earlier switch-model" >&2
+    fi
+  done
+}
+
+# ms_report_ack <ack-file> <request-id>: verify, fold into meta, print the typed
+# result, and return the verb's exit status.
+ms_report_ack() {
+  local ack=$1 rid=$2 fold_rc=0 verdict reason detail meta_state
+  ms_read_ack "$ack" \
+    || die "the acknowledgement for request $rid is unreadable ($ack); the live model is unknown, so task meta was not changed"
+  [ "$MS_A_ID" = "$rid" ] || die "the acknowledgement at $ack names request $MS_A_ID, not $rid"
+  [ "$MS_A_GEN" = "$MS_SPAWN_GEN" ] \
+    || die "the acknowledgement for request $rid came from worker generation $MS_A_GEN, not the recorded $MS_SPAWN_GEN"
+  verdict=$MS_A_OUTCOME
+  reason=$MS_A_REASON
+  detail=$MS_A_DETAIL
+  if [ "$verdict" = applied ]; then
+    if [ "$MS_A_AFTER_MODEL" != "$NEW_MODEL" ] \
+       || { [ -n "$NEW_EFFORT" ] && [ "$MS_A_AFTER_THINKING" != "$NEW_EFFORT" ]; }; then
+      verdict=refused
+      reason=readback-mismatch
+      detail="the live model reads ${MS_A_AFTER_MODEL:-nothing} and the live thinking level ${MS_A_AFTER_THINKING:-nothing}, not the requested ${NEW_MODEL}${NEW_EFFORT:+ at $NEW_EFFORT}"
+    fi
+  fi
+  ms_fold_ack "$ack" || fold_rc=$?
+  if [ "$fold_rc" -ne 0 ]; then
+    meta_state="not-updated(status-$fold_rc)"
+  elif [ -n "$MS_FOLD_NEW_MODEL$MS_FOLD_NEW_EFFORT" ]; then
+    meta_state="updated(model=$(fm_meta_get "$META" model) effort=$(fm_meta_get "$META" effort))"
+  elif [ "$verdict" = applied ]; then
+    meta_state=already-current
+  else
+    meta_state=unchanged
+  fi
+  [ -z "$MS_FOLD_NOTE" ] || meta_state="$meta_state $MS_FOLD_NOTE"
+  if [ "$fold_rc" -ne 0 ] && { [ "$verdict" = applied ] || [ "$verdict" = partial ] || [ "$MS_A_CHANGED" = true ]; }; then
+    printf 'meta-stale %s request=%s live-model=%s live-effort=%s reason=meta-write-failed(status-%s) next="fm-control.sh %s switch-model --status"\n' \
+      "$ID" "$rid" "${MS_A_AFTER_MODEL:--}" "${MS_A_AFTER_THINKING:--}" "$fold_rc" "$ID"
+    return 1
+  fi
+  detail=${detail//\"/\'}
+  case "$verdict" in
+    applied)
+      printf 'switched %s request=%s model=%s->%s effort=%s->%s boundary=%s verified=extension-readback meta=%s backend=%s endpoint=%s\n' \
+        "$ID" "$rid" "${MS_A_BEFORE_MODEL:--}" "$MS_A_AFTER_MODEL" "${MS_A_BEFORE_THINKING:--}" "${MS_A_AFTER_THINKING:--}" \
+        "$MS_A_BOUNDARY" "$meta_state" "$BACKEND" "$T"
+      return 0
+      ;;
+    partial)
+      printf 'partial %s request=%s target=%s model=%s->%s effort-requested=%s effort-live=%s reason=%s detail="%s" rolled-back=no meta=%s\n' \
+        "$ID" "$rid" "$MS_A_TARGET_MODEL" "${MS_A_BEFORE_MODEL:--}" "$MS_A_AFTER_MODEL" "${NEW_EFFORT:--}" "${MS_A_AFTER_THINKING:--}" \
+        "$reason" "$detail" "$meta_state"
+      return 1
+      ;;
+    superseded)
+      printf 'superseded %s request=%s reason=%s detail="%s" meta=%s\n' "$ID" "$rid" "$reason" "$detail" "$meta_state"
+      return 1
+      ;;
+    *)
+      if [ -n "$MS_FOLD_NEW_MODEL" ]; then
+        meta_state="followed-live-model($MS_FOLD_NEW_MODEL)"
+      fi
+      printf 'refused %s request=%s target=%s reason=%s detail="%s" live-model=%s meta=%s\n' \
+        "$ID" "$rid" "${MS_A_TARGET_MODEL:-$NEW_MODEL}" "${reason:-unspecified}" "$detail" "${MS_A_AFTER_MODEL:--}" "$meta_state"
+      return 1
+      ;;
+  esac
+}
+
+do_switch_model() {
+  local rid req ack staged started now_ms
+  ms_channel_ready || die "task $ID's worker cannot take a model switch: $MS_CHANNEL_WHY"
+  reconcile_model_switch
+  ms_withdraw_queued
+  now_ms=$(ms_now_ms)
+  rid="ms-$now_ms-$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
+  req=$(ms_path "$rid" request.json)
+  ack=$(ms_path "$rid" ack.json)
+  staged="$MS_DIR/.model-switch.$rid.staging.${BASHPID:-$$}"
+  if ! ( umask 077
+         jq -n --arg schema "$MS_REQUEST_SCHEMA" --arg id "$rid" --arg gen "$MS_SPAWN_GEN" \
+           --arg model "$NEW_MODEL" --arg effort "$NEW_EFFORT" --argjson at "$now_ms" \
+           '{schema: $schema, id: $id, spawnGen: $gen, model: $model,
+             effort: (if $effort == "" then null else $effort end), requestedAtMs: $at}' > "$staged" ) \
+     || ! mv -f -- "$staged" "$req"; then
+    rm -f -- "$staged"
+    die "the model-switch request could not be written under $MS_DIR"
+  fi
+  started=$(ms_now_ms)
+  while [ ! -f "$ack" ] && ms_within "$started" "$MODEL_WAIT"; do
+    sleep "$POLL"
+  done
+  if [ ! -f "$ack" ]; then
+    # The wait expired. Renaming the pending request away is atomic against the
+    # worker's own claim-by-rename, so exactly one of the two wins: if this one
+    # does, the request can never be applied, and that is the proof.
+    if mv -- "$req" "$(ms_path "$rid" cancelled)" 2>/dev/null; then
+      printf 'cancelled %s request=%s target=%s reason=deadline-before-boundary waited=%ss proof=request-withdrawn-before-claim meta=unchanged\n' \
+        "$ID" "$rid" "$NEW_MODEL" "$MODEL_WAIT"
+      return 1
+    fi
+    started=$(ms_now_ms)
+    while [ ! -f "$ack" ] && ms_within "$started" "$MODEL_GRACE"; do
+      sleep "$POLL"
+    done
+    if [ ! -f "$ack" ]; then
+      printf 'pending-unknown %s request=%s target=%s state=claimed-unacknowledged waited=%ss live-model=unknown meta=not-updated next="fm-control.sh %s switch-model --status"\n' \
+        "$ID" "$rid" "$NEW_MODEL" "$((MODEL_WAIT + MODEL_GRACE))" "$ID"
+      return 1
+    fi
+  fi
+  ms_report_ack "$ack" "$rid"
+}
+
+# Every request id the directory holds a file for, oldest first.
+ms_request_ids() {
+  local f base
+  for f in "$MS_DIR"/model-switch.*; do
+    [ -f "$f" ] || continue
+    base=${f##*/model-switch.}
+    case "$base" in
+      *.request.json) printf '%s\n' "${base%.request.json}" ;;
+      *.processing) printf '%s\n' "${base%.processing}" ;;
+      *.cancelled) printf '%s\n' "${base%.cancelled}" ;;
+      *.ack.json) printf '%s\n' "${base%.ack.json}" ;;
+      *.ack.json.folded) printf '%s\n' "${base%.ack.json.folded}" ;;
+    esac
+  done | LC_ALL=C sort -u
+}
+
+# The state of one request: the extension's outcome once it acknowledged, else
+# claimed-unacknowledged, queued, or cancelled.
+ms_request_state() {  # <request-id>
+  local ack
+  for ack in "$(ms_path "$1" ack.json)" "$(ms_path "$1" ack.json.folded)"; do
+    [ -f "$ack" ] || continue
+    jq -r '.outcome // "unreadable"' "$ack" 2>/dev/null || echo unreadable
+    return 0
+  done
+  if [ -f "$(ms_path "$1" processing)" ]; then
+    echo claimed-unacknowledged
+  elif [ -f "$(ms_path "$1" request.json)" ]; then
+    echo queued
+  else
+    echo cancelled
+  fi
+}
+
+do_switch_status() {
+  local channel=ready id state unresolved=0 last_id=none last_state=none
+  ms_channel_ready || channel="not-ready($MS_CHANNEL_WHY)"
+  reconcile_model_switch
+  if [ -d "$MS_DIR" ] && [ ! -L "$MS_DIR" ]; then
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      state=$(ms_request_state "$id")
+      case "$state" in
+        queued|claimed-unacknowledged)
+          unresolved=$((unresolved + 1))
+          echo "unresolved $ID request=$id state=$state"
+          ;;
+      esac
+      last_id=$id
+      last_state=$state
+    done <<EOF
+$(ms_request_ids)
+EOF
+  fi
+  printf 'model-switch-status %s meta-model=%s meta-effort=%s channel=%s reconciled=%s unresolved=%s last-request=%s last-state=%s\n' \
+    "$ID" "$(fm_meta_get "$META" model)" "$(fm_meta_get "$META" effort)" "$channel" \
+    "$MS_RECONCILED" "$unresolved" "$last_id" "$last_state"
+  [ "$unresolved" -eq 0 ]
 }
 
 # --- transactional relaunch -------------------------------------------------
@@ -1022,6 +1572,14 @@ do_relaunch() {
 
 # --- verbs ------------------------------------------------------------------
 
+# Fold any model-switch acknowledgement not yet applied to meta - including one
+# that arrived after its own verb stopped waiting - before any other verb acts,
+# so every verb, relaunch most of all, sees the live model. switch-model does
+# its own reconcile so it can report the count.
+if [ "$VERB" != switch-model ] && fm_control_model_switch_supported "$HARNESS" "$KIND"; then
+  reconcile_model_switch
+fi
+
 case "$VERB" in
   interrupt)
     state=$(agent_state)
@@ -1045,5 +1603,14 @@ case "$VERB" in
     ;;
   relaunch)
     do_relaunch
+    ;;
+  switch-model)
+    switch_rc=0
+    if [ "$STATUS_SET" = 1 ]; then
+      do_switch_status || switch_rc=$?
+    else
+      do_switch_model || switch_rc=$?
+    fi
+    exit "$switch_rc"
     ;;
 esac

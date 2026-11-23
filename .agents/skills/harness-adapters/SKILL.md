@@ -321,6 +321,7 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 | Skill invocation | `/skill:<name>`, for example `/skill:no-mistakes`. |
 | Autonomy | `--auto-approve` |
 | Resume | Use the exact selected OMP binary with `--session-dir /tmp/fm-<id>/omp-sessions --resume <session-file> --auto-approve -e state/<id>.omp-ext.ts`. |
+| Model switch | `bin/fm-control.sh <id> switch-model --model <provider/id> [--effort <level>]` changes a live worker's model and thinking level inside its session through the generated extension; the verb's header owns the contract, and [runtime verification](../../../docs/verification/runtime-backends.md#omp-in-session-model-switch) records the live guard. Typed `/model` and `/switch` cannot do it: in the TUI both only open a picker and ignore an argument. |
 
 OMP is an exact harness identity and is never normalized to Pi.
 `bin/fm-omp-capabilities.sh` owns exact executable resolution and the selected OMP executable's launch and recovery capability checks that run before `fm-spawn` creates an endpoint.
@@ -329,6 +330,14 @@ Workers and scouts receive one typed `launch-brief` positional argument and an e
 The extension reports `session_start` readiness, acknowledges the initial instruction through `turn_start`, and publishes turn-end through the per-generation signal contract on every `turn_end`.
 Firstmate waits for the first `turn_start` acknowledgement before reporting a successful spawn.
 OMP workers keep their sessions under the task temp root so recovery can resume the exact conversation and ordinary cleanup can remove the session files with the rest of the task temp.
+The built-in TUI slash commands worth knowing were read from the installed OMP 18.22.2 `src/slash-commands`, and an operator types them because `fm-control` has no raw-text entry.
+`/retry` retries the last failed turn.
+`/fresh` resets provider stream state without touching the transcript and is unavailable while streaming.
+`/compact [mode] [focus]` compacts the session context.
+`/context` shows the estimated context breakdown.
+`/usage` shows provider usage and limits.
+`/queue <message>` holds a message until the agent yields.
+`/pause` freezes every agent until resumed.
 
 **Native orchestration opt-in.** OMP activates its built-in multi-agent orchestration mode when the exact lowercase keyword `orchestrate` appears in the initial user message; `magicKeywords.enabled` and `magicKeywords.orchestrate` (both default true) then append a hidden `orchestrate-notice` system instruction that directs the worker to decompose, dispatch `task` subagents, integrate, and verify.
 The matcher is a Unicode word-boundary scan of the message that starts the turn, case-sensitive, with fenced code, inline code spans, comments, and balanced tags masked out: `orchestrate`, `orchestrate,` and `path:orchestrate` fire; `Orchestrate`, `orchestration`, `orchestrate.ts`, `path/orchestrate`, `foo::orchestrate`, `orchestrate()`, and backtick-quoted forms do not.
