@@ -2,10 +2,10 @@
 # Opt-in live guard for fm-control.sh switch-model against a REAL OMP worker in
 # a guarded, non-default Herdr lab. It is the proof that the OMP behaviours the
 # portable tests assume are true of the installed OMP:
-#   - setModel while idle takes effect for the NEXT turn, and a switch requested
-#     mid-run waits for the run to settle: the in-flight run stays on the old
-#     model and the next turn runs on the new one (the session's own message
-#     order shows it);
+#   - a switch applies at once, like OMP's own /switch picker: a request made
+#     mid-task leaves the model request already in flight on the old model and
+#     the next request runs on the new one, and an idle switch governs the next
+#     turn (the session's own message order shows it);
 #   - the switch is session-only: the global ~/.omp config files do not change;
 #   - a model the session has no credentials for is told apart from an unknown
 #     one, through the registry the real OMP exposes;
@@ -17,7 +17,7 @@
 #
 # It drives Firstmate from an explicit Git revision (default HEAD,
 # FM_OMP_MODEL_SWITCH_LIVE_REV), so commit the change under review first. It
-# spends five one-line model turns. FM_OMP_MODEL_SWITCH_LIVE_FROM and _TO name
+# spends four one-line model turns. FM_OMP_MODEL_SWITCH_LIVE_FROM and _TO name
 # two authenticated models (`omp models`); the defaults are inexpensive and the
 # TO model must support the thinking level in FM_OMP_MODEL_SWITCH_LIVE_TO_EFFORT.
 set -u
@@ -64,8 +64,8 @@ mkdir -p "$DRIVER_ROOT"
 printf '# model-switch live guard drives revision %s\n' "$REVISION_SHA"
 git init -q -b main "$DRIVER_ROOT" || fail "could not initialize the archived driver root"
 fm_git_identity fmtest fmtest@example.invalid
-git -C "$DRIVER_ROOT" add . && git -C "$DRIVER_ROOT" commit -qm init \
-  || fail "could not register the archived driver root"
+git -C "$DRIVER_ROOT" add . || fail "could not register the archived driver root"
+git -C "$DRIVER_ROOT" commit -qm init || fail "could not register the archived driver root"
 
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "$DRIVER_ROOT/bin/fm-omp-process-lib.sh"
@@ -407,7 +407,7 @@ idle_offset=$(session_offset "$WORKER_SESSION") || exit 1
 out=$(control switch-model --model "$TO" --effort "$TO_EFFORT" 2>&1) || fail "idle switch-model failed: $out"
 printf '# %s\n' "$out"
 case "$out" in switched\ "$WORKER_ID"\ request=ms-*) ;; *) fail "idle switch-model is not a typed switched result: $out" ;; esac
-case "$out" in *"model=$FROM->$TO"*"boundary=idle"*) ;; *) fail "idle switch-model did not report the model change at the idle boundary: $out" ;; esac
+case "$out" in *"model=$FROM->$TO"*) ;; *) fail "idle switch-model did not report the model change: $out" ;; esac
 IDLE_RID=$(printf '%s' "$out" | sed -n 's/.*request=\([^ ]*\).*/\1/p')
 [ "$(meta_value model)" = "$TO" ] && [ "$(meta_value effort)" = "$TO_EFFORT" ] \
   || fail "task meta does not record the switch: model=$(meta_value model) effort=$(meta_value effort)"
@@ -416,7 +416,7 @@ ack="$REQ_DIR/model-switch.$IDLE_RID.ack.json.folded"
   || fail "the extension's ctx.models.current() readback is not the target: $(jq -c . "$ack")"
 session_has_model_change_after "$WORKER_SESSION" "$idle_offset" "$TO" \
   || fail "the session recorded no model-change entry for $TO"
-printf '# extension readback: %s\n' "$(jq -c '{id, outcome, boundary, before, after, modelChanged}' "$ack")"
+printf '# extension readback: %s\n' "$(jq -c '{id, outcome, before, after, modelChanged}' "$ack")"
 wait_for "pane label refreshed from meta" pane_label_is "omp · $TO $TO_EFFORT"
 idle_prompt='Reply exactly: idle switch applied.'
 idle_submit=$(PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_ENV=1 HERDR_SESSION="$SESSION" \
@@ -437,57 +437,48 @@ entries_after "$WORKER_SESSION" "$idle_offset" \
   || fail "the session did not record exactly the one post-switch user prompt"
 pass "live OMP: an idle worker switches $FROM -> $TO and $FROM_EFFORT -> $TO_EFFORT; the next turn runs on $TO; meta and the pane label follow; nothing is chat"
 
-# --- AC2: a switch requested mid-run waits for the run to settle -------------
+# --- AC2: a switch requested mid-task applies at once ------------------------
 busy_offset=$(session_offset "$WORKER_SESSION") || exit 1
 busy_reply='slept through the switch.'
 send_task "Run this exact bash command: sleep 15. Then reply exactly: $busy_reply" \
   || fail "the busy turn was not submitted"
 wait_for "native working worker state" agent_is "$WORKER_TARGET" omp working
 sleep 3
-out=$(control switch-model --model "$FROM" --effort "$FROM_EFFORT" --wait 120 2>&1) || fail "mid-run switch-model failed: $out"
+out=$(control switch-model --model "$FROM" --effort "$FROM_EFFORT" 2>&1) || fail "mid-task switch-model failed: $out"
 printf '# %s\n' "$out"
-case "$out" in switched\ "$WORKER_ID"\ *"boundary=agent_end"*) ;; *) fail "a mid-run switch was not applied at settled idle: $out" ;; esac
+case "$out" in switched\ "$WORKER_ID"\ *"model=$TO->$FROM"*) ;; *) fail "a mid-task switch is not a typed switched result for $TO -> $FROM: $out" ;; esac
+[ "$(meta_value model)" = "$FROM" ] && [ "$(meta_value effort)" = "$FROM_EFFORT" ] \
+  || fail "task meta does not record the mid-task switch: model=$(meta_value model) effort=$(meta_value effort)"
 wait_for "the busy worker's final reply" session_has_assistant_reply_after "$WORKER_SESSION" "$busy_offset" "$busy_reply"
 wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
-# Every assistant message of the busy run - the tool turn and the final reply -
-# precedes the model-change entry and was served by the old model.
+# The request in flight when the switch landed - the tool-call turn - was served
+# by the old model; the next request, the final reply, ran on the new one, with
+# the session's model-change entry between them.
 entries_after "$WORKER_SESSION" "$busy_offset" | jq -se --arg from "$FROM" --arg to "$TO" --arg reply "$busy_reply" '
   [range(0; length)] as $i
   | . as $e
+  | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"
+      and (($e[.].message.content // []) | any(.type == "toolCall")))) | first) as $tool
   | ($i | map(select($e[.].type == "model_change" and $e[.].model == $from)) | first) as $change
-  | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"))) as $assistant
-  | $change != null
-    and ($assistant | length) >= 2
-    and ($assistant | all(. < $change and ("\($e[.].message.provider)/\($e[.].message.model)" == $to)))
-    and ($assistant | last | $e[.].message.content
-         | any(.type == "text" and (.text | contains($reply))))
-    and ($e | any(.type == "message" and .message.role == "assistant"
-                  and ((.message.content // []) | any(.type == "toolCall"))))' >/dev/null 2>&1 \
-  || fail "the session order does not show: the whole in-flight run on $TO, then the switch"
-[ "$(meta_value model)" = "$FROM" ] && [ "$(meta_value effort)" = "$FROM_EFFORT" ] \
-  || fail "task meta does not record the mid-run switch: model=$(meta_value model) effort=$(meta_value effort)"
-post_offset=$(session_offset "$WORKER_SESSION") || exit 1
-post_prompt='Reply exactly: busy switch applied.'
-post_submit=$(PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_ENV=1 HERDR_SESSION="$SESSION" \
-  fm_backend_herdr_send_text_submit "$WORKER_TARGET" "$post_prompt" 3 0.2 0 "" \
-    omp "$OMP_RUNTIME" "$OMP_BIN") || true
-post_assistant_recorded() {
-  [ -n "$(last_assistant_after "$WORKER_SESSION" "$post_offset")" ]
-}
-wait_for "the turn after the mid-run switch (submit verdict: ${post_submit:-none})" post_assistant_recorded
-wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
-[ "$(last_assistant_after "$WORKER_SESSION" "$post_offset")" = "$FROM" ] \
-  || fail "the turn after the mid-run switch ran on $(last_assistant_after "$WORKER_SESSION" "$post_offset"), not $FROM"
+  | ($i | map(select($e[.].type == "message" and $e[.].message.role == "assistant"
+      and $change != null and . > $change
+      and (($e[.].message.content // []) | any(.type == "text" and (.text | contains($reply)))))) | first) as $final
+  | $tool != null and $change != null and $final != null
+    and $tool < $change and $change < $final
+    and "\($e[$tool].message.provider)/\($e[$tool].message.model)" == $to
+    and "\($e[$final].message.provider)/\($e[$final].message.model)" == $from' >/dev/null 2>&1 \
+  || fail "the session order does not show: in-flight request on $TO, then the switch, then the next request on $FROM"
 # The user-message sequence is the oracle for the original failure: a typed
-# /model or /switch would appear as a message of its own.
+# /model or /switch would appear as a message of its own. The only user message
+# the supported doorbell fallback can add is its own re-driven steer.
 fallback_prompt=": Firstmate instruction waiting: list files named '*.msg' in '\$FM_TASK_INBOX', your '$WORKER_ID.inbox' steering inbox, read and act on each in numeric order, then mv each into its handled/."
 entries_after "$WORKER_SESSION" "$busy_offset" \
-  | jq -se --arg prompt "$post_prompt" --arg fallback "$fallback_prompt" '
+  | jq -se --arg fallback "$fallback_prompt" '
       [.[] | select(.type == "message" and .message.role == "user") | .message.content
         | if type == "array" then map(select(.type == "text") | .text) | join("") else . end]
-      | . == [$prompt] or . == [$fallback, $prompt]' >/dev/null \
-  || fail "the session recorded an unexpected user message during the busy or post-switch turn"
-pass "live OMP: a switch requested mid-run leaves the whole in-flight run on $TO and applies at settled idle; the next turn runs on $FROM; nothing is chat"
+      | . == [] or . == [$fallback]' >/dev/null \
+  || fail "the session recorded an unexpected user message during the mid-task switch"
+pass "live OMP: a switch requested mid-task leaves the in-flight request on $TO and the next request runs on $FROM; nothing is chat"
 
 # --- AC4: the documented OMP resume path keeps the switched model ------------
 out=$(control switch-model --model "$TO" --effort "$TO_EFFORT" 2>&1) || fail "the pre-resume switch-model failed: $out"

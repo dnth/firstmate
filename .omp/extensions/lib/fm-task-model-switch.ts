@@ -10,7 +10,6 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { turnAdmissionGate } from "./fm-task-inbox-doorbell.ts";
 
 // Firstmate's in-session model switch for a live OMP worker.
 //
@@ -20,7 +19,9 @@ import { turnAdmissionGate } from "./fm-task-inbox-doorbell.ts";
 // is applied through OMP's documented extension API (ctx.models.resolve,
 // pi.setModel, pi.setThinkingLevel), which is session-only - it does not
 // rewrite global modelRoles and it appends a model-change entry to the session
-// so a resume keeps the model.
+// so a resume keeps the model. OMP's own /switch picker uses the same
+// session-only path through AgentSession#setModelTemporary, which the
+// extension API does not expose; pi.setModel is the equivalent it does.
 //
 // Files in <requestDir> (the doorbell's `<task>.omp-doorbell-ready.requests`;
 // every name carries the model-switch. prefix, so the doorbell never sees them):
@@ -37,34 +38,19 @@ import { turnAdmissionGate } from "./fm-task-inbox-doorbell.ts";
 // request that was claimed can no longer be cancelled - its only remaining
 // outcome is its acknowledgement, which a waiter that timed out reads later.
 //
-// Boundary. A request applies only at settled idle: from the watcher while
-// ctx.isIdle() reads true, or from the terminal agent_end, which OMP emits
-// once the session is quiet. A busy worker finishes its whole run on the old
-// model and the request applies afterwards. turn_end is not a boundary: OMP
-// does not await extension turn_end handlers, so the loop issues the next
-// provider request while a switch is still running. A request that arrives
-// mid-run waits for settled idle and is never delivered as a message.
-//
-// Admission gate. OMP gives an extension no lock against a turn starting while
-// setModel awaits credentials and model metadata, so the apply is one critical
-// section holding a process-global gate (Symbol.for("firstmate.turn-admission")).
-// The gate holds every turn start the extension API can reach: this module's
-// before_agent_start handler waits on it, and fm-task-inbox-doorbell.ts defers
-// its dispatch while it is held and reports through gate.busy a wake it sent
-// that has not opened a turn yet. Entry also needs an empty message queue.
-// Credentials are resolved before entering, and the hold is capped well inside
-// OMP's 30 s handler limit. A turn OMP starts on its own (a job result, a
-// retry, an IRC wake) bypasses both holds, so the context handler counts every
-// provider request prepared by the main session and the acknowledgement
-// carries raced=true when one was prepared while the switch applied.
+// Timing. A request applies as soon as it is seen, whatever the worker is
+// doing, exactly like the picker: the model request already in flight
+// finishes on the old model and the next one uses the new model, even
+// mid-task. Nothing waits for idle and nothing holds a turn off; a request is
+// never delivered as a message.
 //
 // Acknowledgement. outcome is applied, partial (the model switched but the
 // thinking level did not land as requested), refused (typed reason), or
 // superseded (a newer request replaced it before it ran). It records the
 // request id, the model and thinking level before and after (read back from the
-// live session), whether the model changed, and raced. Nothing is rolled back,
-// so a partial or post-apply refusal reports the live state rather than
-// claiming the prior one.
+// live session), and whether the model changed. Nothing is rolled back, so a
+// partial or post-apply refusal reports the live state rather than claiming
+// the prior one.
 
 export const FM_MODEL_SWITCH_ACK_SCHEMA = "fm-model-switch.ack.v1";
 export const FM_MODEL_SWITCH_READY_SCHEMA = "fm-model-switch.ready.v1";
@@ -83,16 +69,11 @@ type SwitchModel = {
 // the authenticated set.
 type SwitchContext = {
 	agent?: { kind?: string };
-	isIdle: () => boolean;
-	hasPendingMessages?: () => boolean;
 	models: {
 		current: () => SwitchModel | undefined;
 		resolve: (spec: string) => SwitchModel | undefined;
 	};
-	modelRegistry: {
-		find: (provider: string, id: string) => SwitchModel | undefined;
-		getApiKey?: (model: SwitchModel) => Promise<unknown>;
-	};
+	modelRegistry: { find: (provider: string, id: string) => SwitchModel | undefined };
 };
 
 // Method syntax keeps setModel and setThinkingLevel bivariant, so the real
@@ -115,7 +96,6 @@ export type TaskModelSwitchOptions = {
 
 export type TaskModelSwitchContext = SwitchContext;
 
-type Boundary = "idle" | "agent_end";
 type Outcome = "applied" | "partial" | "refused" | "superseded";
 type Snapshot = { model: string | null; thinking: string | null };
 type Request = {
@@ -125,7 +105,7 @@ type Request = {
 	effort: string | null;
 	requestedAtMs: number;
 };
-type Pending = { id: string; parsed: Request | string };
+type Claim = { id: string; processing: string };
 type AckTarget = Pick<Request, "id" | "model" | "effort">;
 
 const ACK_NAME = /^model-switch\.[A-Za-z0-9._-]+\.ack\.json(?:\.folded)?$/;
@@ -136,8 +116,6 @@ const OWNERS_KEY = Symbol.for("firstmate.task-model-switch.owners");
 // the owner registry rides the shared symbol registry rather than module scope.
 const registryHost = globalThis as unknown as Record<symbol, Map<string, object> | undefined>;
 const owners: Map<string, object> = (registryHost[OWNERS_KEY] ??= new Map<string, object>());
-
-const GATE_CAP_MS = 10_000;
 
 function labelOf(model: SwitchModel | undefined | null): string | null {
 	return model ? `${model.provider}/${model.id}` : null;
@@ -216,24 +194,14 @@ export function installTaskModelSwitch(
 	const readyFile = join(requestDir, "model-switch.ready");
 	const ownerKey = resolve(readyFile);
 	const ownerToken = {};
-	const gate = turnAdmissionGate();
 	let active = false;
-	let runOpen = false;
 	let ackSequence = Date.now() * 1000;
 	let mainCtx: SwitchContext | undefined;
 	let watcher: FSWatcher | undefined;
 	let chain: Promise<void> = Promise.resolve();
-	let sectionActivity: number | undefined;
 
 	const isMain = (ctx: SwitchContext | undefined): ctx is SwitchContext =>
 		ctx !== undefined && ctx !== null && (ctx.agent?.kind === undefined || ctx.agent.kind === "main");
-	const idleNow = (ctx: SwitchContext): boolean => {
-		try {
-			return ctx.isIdle();
-		} catch {
-			return false;
-		}
-	};
 	const snapshot = (ctx: SwitchContext): Snapshot => {
 		let thinking: string | undefined;
 		try {
@@ -250,7 +218,6 @@ export function installTaskModelSwitch(
 	const writeAck = (
 		request: AckTarget,
 		outcome: Outcome,
-		boundary: Boundary,
 		before: Snapshot,
 		after: Snapshot,
 		reason: string | null = null,
@@ -265,12 +232,10 @@ export function installTaskModelSwitch(
 				outcome,
 				reason,
 				detail,
-				boundary,
 				target: { model: request.model, effort: request.effort },
 				before,
 				after,
 				modelChanged: before.model !== after.model,
-				raced: sectionActivity !== undefined && gate.activity !== sectionActivity,
 				ackSequence: ++ackSequence,
 			});
 			return true;
@@ -282,17 +247,17 @@ export function installTaskModelSwitch(
 
 	// Resolve, switch the model, then the thinking level, reading everything back
 	// from the live session. Every refusal that can be known before a change is
-	// raised before the change.
-	const apply = async (
-		request: Request, resolved: SwitchModel | undefined, boundary: Boundary, ctx: SwitchContext,
-	): Promise<boolean> => {
+	// raised before the change: ctx.models.resolve searches only the models this
+	// session has credentials for, and setModel checks the key again.
+	const apply = async (request: Request, ctx: SwitchContext): Promise<boolean> => {
 		const before = snapshot(ctx);
 		const refuse = (reason: string, detail: string | null): boolean =>
-			writeAck(request, "refused", boundary, before, snapshot(ctx), reason, detail);
+			writeAck(request, "refused", before, snapshot(ctx), reason, detail);
 		if (request.spawnGen !== spawnGen) {
 			return refuse("stale-incarnation", `the request was written for worker generation ${request.spawnGen}, not ${spawnGen}`);
 		}
 		const slash = request.model.indexOf("/");
+		const resolved = ctx.models.resolve(request.model);
 		if (!resolved) {
 			const known = ctx.modelRegistry.find(request.model.slice(0, slash), request.model.slice(slash + 1));
 			return labelOf(known) === request.model
@@ -319,7 +284,7 @@ export function installTaskModelSwitch(
 		const afterModel = snapshot(ctx);
 		if (afterModel.model !== request.model) {
 			return writeAck(
-				request, "refused", boundary, before, afterModel, "model-mismatch",
+				request, "refused", before, afterModel, "model-mismatch",
 				`the live model reads ${afterModel.model ?? "nothing"} after the switch, not ${request.model}`,
 			);
 		}
@@ -332,172 +297,89 @@ export function installTaskModelSwitch(
 			}
 			const afterThinking = snapshot(ctx);
 			if (afterThinking.model !== request.model) {
-				return writeAck(request, "refused", boundary, before, afterThinking, "model-mismatch",
+				return writeAck(request, "refused", before, afterThinking, "model-mismatch",
 					`the live model reads ${afterThinking.model ?? "nothing"} after the thinking change`);
 			}
 			if (failure !== null) {
-				return writeAck(request, "partial", boundary, before, afterThinking, "thinking-error", failure);
+				return writeAck(request, "partial", before, afterThinking, "thinking-error", failure);
 			}
 			if (afterThinking.thinking !== request.effort) {
 				return writeAck(
-					request, "partial", boundary, before, afterThinking, "thinking-mismatch",
+					request, "partial", before, afterThinking, "thinking-mismatch",
 					`the live thinking level reads ${afterThinking.thinking ?? "nothing"}, not ${request.effort}`,
 				);
 			}
-			return writeAck(request, "applied", boundary, before, afterThinking);
+			return writeAck(request, "applied", before, afterThinking);
 		}
-		return writeAck(request, "applied", boundary, before, afterModel);
+		return writeAck(request, "applied", before, afterModel);
 	};
 
-	const claim = (id: string): string | undefined => {
-		const processing = join(requestDir, `model-switch.${id}.processing`);
-		try {
-			renameSync(join(requestDir, `model-switch.${id}.request.json`), processing);
-			return processing;
-		} catch {
-			return undefined;
-		}
-	};
-
-	// Settled idle: nothing running, nothing queued, no doorbell wake in flight,
-	// and no switch already holding the gate.
-	const quiet = (ctx: SwitchContext): boolean => {
-		if (runOpen || gate.held || !idleNow(ctx)) return false;
-		try {
-			if (typeof ctx.hasPendingMessages === "function" && ctx.hasPendingMessages()) return false;
-			for (const probe of gate.busy) if (probe()) return false;
-		} catch {
-			return false;
-		}
-		return true;
-	};
-
-	const readPending = (): { newest: Request | undefined; pending: Pending[] } => {
-		let newest: Request | undefined;
-		const pending: Pending[] = [];
+	const claimPending = (): Claim[] => {
+		const claims: Claim[] = [];
 		for (const name of readdirSync(requestDir).sort()) {
 			const match = REQUEST_NAME.exec(name);
 			if (!match) continue;
-			let parsed: Request | string;
+			const processing = join(requestDir, `model-switch.${match[1]}.processing`);
 			try {
-				parsed = parseRequest(match[1], readFileSync(join(requestDir, name), "utf8"));
+				renameSync(join(requestDir, name), processing);
 			} catch {
+				// fm-control cancelled it first: it is never applied.
 				continue;
 			}
-			pending.push({ id: match[1], parsed });
-			if (typeof parsed === "string") continue;
-			if (
-				!newest ||
-				parsed.requestedAtMs > newest.requestedAtMs ||
-				(parsed.requestedAtMs === newest.requestedAtMs && parsed.id > newest.id)
-			) {
-				newest = parsed;
-			}
+			claims.push({ id: match[1], processing });
 		}
-		return { newest, pending };
+		return claims;
 	};
 
-	const applyClaimed = async (
-		{ newest, pending }: ReturnType<typeof readPending>, resolved: SwitchModel | undefined,
-		boundary: Boundary, ctx: SwitchContext,
-	): Promise<void> => {
-		const selected = newest && claim(newest.id);
-		if (newest && !selected) return;
-		for (const { id, parsed } of pending) {
-			if (id === newest?.id) continue;
-			const processing = claim(id);
-			if (!processing) continue;
-			const now = snapshot(ctx);
-			const landed = typeof parsed === "string"
-				? writeAck({ id, model: "", effort: null }, "refused", boundary, now, now, "invalid-request", parsed)
-				: writeAck(parsed, "superseded", boundary, now, now, "newer-request", `request ${newest?.id} replaced it`);
-			if (landed) bestEffortUnlink(processing);
+	const drainOnce = async (ctx: SwitchContext): Promise<void> => {
+		if (!active) return;
+		const claims = claimPending();
+		if (claims.length === 0) return;
+		const valid: Array<{ request: Request; claim: Claim }> = [];
+		for (const claim of claims) {
+			const parsed = parseRequest(claim.id, readFileSync(claim.processing, "utf8"));
+			if (typeof parsed === "string") {
+				const now = snapshot(ctx);
+				if (writeAck({ id: claim.id, model: "", effort: null }, "refused", now, now, "invalid-request", parsed)) {
+					bestEffortUnlink(claim.processing);
+				}
+			} else {
+				valid.push({ request: parsed, claim });
+			}
 		}
-		if (!newest || !selected) return;
+		valid.sort((a, b) => a.request.requestedAtMs - b.request.requestedAtMs || (a.request.id < b.request.id ? -1 : 1));
+		const newest = valid.pop();
+		for (const older of valid) {
+			const now = snapshot(ctx);
+			const detail = `request ${newest?.request.id} replaced it`;
+			if (writeAck(older.request, "superseded", now, now, "newer-request", detail)) {
+				bestEffortUnlink(older.claim.processing);
+			}
+		}
+		if (!newest) return;
 		let landed: boolean;
 		try {
-			landed = await apply(newest, resolved, boundary, ctx);
+			landed = await apply(newest.request, ctx);
 		} catch (error) {
 			const now = snapshot(ctx);
-			landed = writeAck(newest, "refused", boundary, now, now, "internal-error", String(error));
+			landed = writeAck(newest.request, "refused", now, now, "internal-error", String(error));
 			journalFailure(journal, "apply", error);
 		}
-		if (landed) bestEffortUnlink(selected);
-	};
-
-	// The critical section. The gate is taken before the first await, so no
-	// turn start the extension API reaches can slip in between the quiet check
-	// that admitted the caller and the first write. The hold is capped; a setter
-	// that outlives the cap keeps running and still publishes its own
-	// acknowledgement, with raced reflecting the whole apply.
-	const runSection = async (work: () => Promise<void>): Promise<void> => {
-		let release: () => void = () => {};
-		gate.pending = new Promise<void>((settle) => {
-			release = settle;
-		});
-		gate.held = true;
-		sectionActivity = gate.activity;
-		const done = work().finally(() => {
-			sectionActivity = undefined;
-		});
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const cap = new Promise<void>((settle) => {
-			timer = setTimeout(settle, GATE_CAP_MS);
-		});
-		try {
-			await Promise.race([done, cap]);
-		} finally {
-			clearTimeout(timer);
-			gate.held = false;
-			gate.pending = undefined;
-			release();
-			for (const wakeDoorbell of [...gate.onRelease]) {
-				try {
-					wakeDoorbell();
-				} catch {
-					continue;
-				}
-			}
-		}
-		await done;
-	};
-
-	const drainOnce = async (boundary: Boundary, ctx: SwitchContext): Promise<void> => {
-		if (!active || !quiet(ctx)) return;
-		const initial = readPending();
-		if (initial.pending.length === 0) return;
-		const target = initial.newest;
-		const resolved = target?.spawnGen === spawnGen ? ctx.models.resolve(target.model) : undefined;
-		if (target && resolved && labelOf(resolved) === target.model) {
-			try {
-				await ctx.modelRegistry.getApiKey?.(resolved);
-			} catch {
-				// setModel reports a credential failure as its typed refusal.
-			}
-		}
-		if (!active || !quiet(ctx)) return;
-		const batch = readPending();
-		if (batch.pending.length === 0 || JSON.stringify(batch.newest) !== JSON.stringify(target)) return;
-		await runSection(() => applyClaimed(batch, resolved, boundary, ctx));
+		if (landed) bestEffortUnlink(newest.claim.processing);
 	};
 
 	// Drains run one at a time, in arrival order.
-	const drain = (boundary: Boundary, ctx: SwitchContext): void => {
-		chain = chain.then(() => drainOnce(boundary, ctx))
-			.catch((error: unknown) => journalFailure(journal, "drain", error));
-	};
-
-	const wake = (): void => {
-		if (mainCtx) drain("idle", mainCtx);
+	const drain = (ctx: SwitchContext): Promise<void> => {
+		const run = chain.then(() => drainOnce(ctx));
+		chain = run.catch(() => {});
+		return run.catch((error: unknown) => journalFailure(journal, "drain", error));
 	};
 
 	const retire = (): void => {
 		if (!active) return;
 		active = false;
-		runOpen = false;
 		watcher?.close();
 		watcher = undefined;
-		gate.onQuiet.delete(wake);
 		try {
 			const recorded: unknown = JSON.parse(readFileSync(readyFile, "utf8"));
 			if (recorded !== null && typeof recorded === "object" && jsonField(recorded, "pid") === process.pid) {
@@ -528,9 +410,10 @@ export function installTaskModelSwitch(
 				}
 			}
 			mainCtx = ctx;
-			watcher = watch(requestDir, wake);
+			watcher = watch(requestDir, () => {
+				if (mainCtx) void drain(mainCtx);
+			});
 			active = true;
-			gate.onQuiet.add(wake);
 			owners.set(ownerKey, ownerToken);
 			publishJson(readyFile, {
 				schema: FM_MODEL_SWITCH_READY_SCHEMA,
@@ -547,27 +430,9 @@ export function installTaskModelSwitch(
 		}
 	};
 
-	// Activation publishes the ready marker; requests are only written after it,
-	// so nothing needs draining here.
-	subscribe("session_start", (_event: unknown, ctx: SwitchContext) => {
-		if (isMain(ctx)) activate(ctx);
-	});
-	subscribe("agent_start", (_event: unknown, ctx: SwitchContext) => {
-		if (isMain(ctx) && active) runOpen = true;
-	});
-	subscribe("agent_end", (event: { willContinue?: boolean }, ctx: SwitchContext) => {
-		if (!isMain(ctx) || !active) return;
-		mainCtx = ctx;
-		runOpen = event?.willContinue === true;
-		if (!runOpen) drain("agent_end", ctx);
-	});
-	// Holds a prompt's first provider request while a switch is applying.
-	subscribe("before_agent_start", async () => {
-		while (gate.pending) await gate.pending;
-	});
-	// The witness: one count per provider request the main session prepares.
-	subscribe("context", (_event: unknown, ctx: SwitchContext) => {
-		if (isMain(ctx)) gate.activity += 1;
+	subscribe("session_start", async (_event: unknown, ctx: SwitchContext) => {
+		if (!isMain(ctx)) return;
+		if (activate(ctx)) await drain(ctx);
 	});
 	subscribe("session_shutdown", () => retire());
 }

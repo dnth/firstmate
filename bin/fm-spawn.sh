@@ -5025,8 +5025,8 @@ export default function (omp: any) {
     execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]);
   });
   omp.on("session_shutdown", taskInboxDoorbell.retire);
-  // Registered last so its agent_end drain never delays the busy-state edge
-  // above; it subscribes to no turn_end, which OMP does not await.
+  // Registered last: it only watches its request directory and applies a
+  // request at once, and subscribes to no turn event.
   installTaskModelSwitch(omp, {
     requestDir: "$OMP_DOORBELL_READY.requests",
     spawnGen: "$SPAWN_GEN",

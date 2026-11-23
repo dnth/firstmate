@@ -155,16 +155,6 @@ wait_for_file() {  # <path> <label> [tries]
   done
 }
 
-# The request id is minted by fm-control, so wait for any queued request file.
-wait_for_queued_request() {
-  local n=0
-  while ! ls "$REQ_DIR"/model-switch.ms-*.request.json >/dev/null 2>&1; do
-    n=$((n + 1))
-    [ "$n" -lt 200 ] || fail "timed out waiting for fm-control to queue its request ($(ls "$REQ_DIR" 2>&1))"
-    sleep 0.05
-  done
-}
-
 # --- success: model and thinking level change, meta follows ------------------
 
 make_case success
@@ -174,7 +164,6 @@ expect_code 0 "$CONTROL_RC" "switch-model success: $CONTROL_OUT"
 case "$CONTROL_OUT" in switched\ "$ID"\ request=ms-*) ;; *) fail "success output is not a typed switched result: $CONTROL_OUT" ;; esac
 assert_contains "$CONTROL_OUT" "model=p/a->p/b" "success output omits the model change"
 assert_contains "$CONTROL_OUT" "effort=low->medium" "success output omits the thinking-level change"
-assert_contains "$CONTROL_OUT" "boundary=idle" "an idle worker did not report the idle boundary"
 assert_contains "$CONTROL_OUT" "verified=extension-readback" "success is not tied to the extension's readback"
 assert_meta p/b medium "success"
 [ "$(host_calls)" = $'setModel p/b\nsetThinkingLevel medium' ] \
@@ -201,31 +190,26 @@ for spec in "nowhere/none:unknown-model" "locked/d:no-credentials"; do
   pass "switch-model refused $reason: typed reason, meta unchanged, the worker keeps its model"
 done
 
-# --- a request made mid-turn waits for the boundary --------------------------
+# --- a request made mid-task applies at once ----------------------------------
 
 make_case midturn
 start_responder FM_HOST_BUSY=1
-( run_control switch-model --model p/b --effort high --wait 20; printf '%s\n%s\n' "$CONTROL_RC" "$CONTROL_OUT" > "$CASE_DIR/midturn.out" ) &
-BG_PID=$!
-printf '%s\n' "$BG_PID" >> "$PIDS"
-wait_for_queued_request
-sleep 0.5
-[ -z "$(host_calls)" ] || fail "a busy worker's session was touched before it settled: $(host_calls)"
-assert_meta p/a low "mid-turn request, before the boundary"
-: > "$CTL_DIR/agent_end"
-wait "$BG_PID" || true
-[ "$(sed -n '1p' "$CASE_DIR/midturn.out")" = 0 ] || fail "the mid-turn switch failed: $(cat "$CASE_DIR/midturn.out")"
-assert_contains "$(cat "$CASE_DIR/midturn.out")" "boundary=agent_end" "the mid-turn request was not applied at settled idle"
-assert_meta p/b high "mid-turn request, after the boundary"
-[ "$(host_calls | head -1)" = "setModel p/b" ] || fail "settling did not apply the model first: $(host_calls)"
-[ "$(jq -r 'select(.call == "setModel") | .idle' "$CASE_DIR/host.log")" = true ] \
-  || fail "the switch was applied while the session still read busy"
-pass "switch-model mid-turn: the in-flight run stays on the old model and the request applies at settled idle"
+run_control switch-model --model p/b --effort high
+expect_code 0 "$CONTROL_RC" "a mid-task switch must apply at once: $CONTROL_OUT"
+case "$CONTROL_OUT" in switched\ "$ID"\ request=ms-*) ;; *) fail "the mid-task switch is not a typed switched result: $CONTROL_OUT" ;; esac
+assert_meta p/b high "mid-task request"
+[ "$(host_calls | head -1)" = "setModel p/b" ] || fail "the worker was not switched: $(host_calls)"
+[ "$(jq -r 'select(.call == "setModel") | .idle' "$CASE_DIR/host.log")" = false ] \
+  || fail "the switch waited for the worker to go idle instead of applying mid-task"
+pass "switch-model mid-task: the request applies at once while the worker reads busy with messages queued"
 
 # --- a timeout before the claim withdraws the request, provably --------------
 
 make_case cancel
-start_responder FM_HOST_BUSY=1
+start_responder
+# A stopped extension process is alive but claims nothing, so the wait expires
+# with the request still queued.
+kill -STOP "$RESPONDER_PID"
 run_control switch-model --model p/b --effort medium --wait 01
 expect_code 1 "$CONTROL_RC" "a timed-out switch must not succeed"
 case "$CONTROL_OUT" in cancelled\ "$ID"\ request=ms-*) ;; *) fail "timeout before the claim is not a typed cancelled result: $CONTROL_OUT" ;; esac
@@ -235,15 +219,15 @@ RID=$(request_id_of "$CONTROL_OUT")
 [ -f "$REQ_DIR/model-switch.$RID.cancelled" ] && [ ! -e "$REQ_DIR/model-switch.$RID.request.json" ] \
   || fail "the cancelled request is still queued: $(ls "$REQ_DIR")"
 assert_meta p/a low "cancelled request"
-: > "$CTL_DIR/agent_end"
+kill -CONT "$RESPONDER_PID"
 sleep 0.6
 [ -z "$(host_calls)" ] && [ ! -e "$REQ_DIR/model-switch.$RID.ack.json" ] \
-  || fail "a later boundary applied a request that was cancelled: $(host_calls)"
+  || fail "the extension applied a request that was cancelled: $(host_calls)"
 run_control switch-model --status
 expect_code 0 "$CONTROL_RC" "status after a proven cancellation: $CONTROL_OUT"
 assert_contains "$CONTROL_OUT" "unresolved=0" "a withdrawn request is still reported unresolved"
 assert_contains "$CONTROL_OUT" "last-state=cancelled" "status does not report the cancellation"
-pass "switch-model timeout: the request is withdrawn atomically before the claim, a later boundary applies nothing, and status says so"
+pass "switch-model timeout: the request is withdrawn atomically before the claim, the extension applies nothing later, and status says so"
 
 # --- a late acknowledgement is reported, then reconciled ---------------------
 
@@ -300,14 +284,18 @@ pass "switch-model partial: both thinking values are reported, nothing is claime
 # --- a record that changed under the verb is never rewritten -----------------
 
 make_case stalemeta
-start_responder FM_HOST_BUSY=1
+start_responder FM_HOST_SET_DELAY_MS=1500
 ( run_control switch-model --model p/b --effort medium --wait 20; printf '%s\n%s\n' "$CONTROL_RC" "$CONTROL_OUT" > "$CASE_DIR/stalemeta.out" ) &
-printf '%s\n' "$!" >> "$PIDS"
 BG_PID=$!
-wait_for_queued_request
+printf '%s\n' "$BG_PID" >> "$PIDS"
+n=0
+while [ -z "$(host_calls)" ]; do
+  n=$((n + 1))
+  [ "$n" -lt 200 ] || fail "the worker never started applying the switch: $(cat "$CASE_DIR/host.out")"
+  sleep 0.05
+done
 # A relaunch publishes a new worker generation while the verb is still waiting.
 awk '/^spawn_gen=/ { print "spawn_gen=gen2"; next } { print }' "$META" > "$META.new" && mv -f "$META.new" "$META"
-: > "$CTL_DIR/agent_end"
 wait "$BG_PID" || true
 [ "$(sed -n '1p' "$CASE_DIR/stalemeta.out")" = 1 ] || fail "a switch whose record changed underneath it exited 0: $(cat "$CASE_DIR/stalemeta.out")"
 assert_contains "$(cat "$CASE_DIR/stalemeta.out")" "meta-stale $ID request=ms-" "a record that could not be updated is not a typed meta-stale result"
@@ -394,53 +382,6 @@ expect_code 1 "$CONTROL_RC" "an acknowledgement with no sequence must stay unres
 assert_contains "$CONTROL_OUT" "unresolved $ID request=ms-legacy state=acknowledged-unfolded" "an unordered acknowledgement was treated as resolved"
 assert_meta p/a low "an acknowledgement without a sequence"
 pass "switch-model: an acknowledgement without the emitted sequence is left unresolved and never folded"
-
-# --- raced: a provider request prepared while the switch applied ------------
-
-make_case raced
-start_responder FM_HOST_SET_DELAY_MS=1500
-( run_control switch-model --model p/b --effort medium --wait 20; printf '%s\n%s\n' "$CONTROL_RC" "$CONTROL_OUT" > "$CASE_DIR/raced.out" ) &
-BG_PID=$!
-printf '%s\n' "$BG_PID" >> "$PIDS"
-n=0
-while [ -z "$(host_calls)" ]; do
-  n=$((n + 1))
-  [ "$n" -lt 200 ] || fail "the worker never started applying the switch: $(cat "$CASE_DIR/host.out")"
-  sleep 0.05
-done
-: > "$CTL_DIR/context"
-wait "$BG_PID" || true
-[ "$(sed -n '1p' "$CASE_DIR/raced.out")" = 1 ] || fail "a raced switch exited 0: $(cat "$CASE_DIR/raced.out")"
-case "$(sed -n '2p' "$CASE_DIR/raced.out")" in raced\ "$ID"\ request=ms-*) ;; *) fail "a race is not a typed raced result: $(cat "$CASE_DIR/raced.out")" ;; esac
-assert_contains "$(cat "$CASE_DIR/raced.out")" "model=p/a->p/b" "the raced result omits the live model change"
-assert_contains "$(cat "$CASE_DIR/raced.out")" "may have used either model" "the raced result does not say what is uncertain"
-assert_meta p/b medium "raced: meta follows the verified live state"
-pass "switch-model raced: a provider request prepared mid-apply is a typed raced result, not a clean switch, and meta follows the live state"
-
-run_control switch-model --status
-expect_code 1 "$CONTROL_RC" "a folded race must remain visible in status: $CONTROL_OUT"
-assert_contains "$CONTROL_OUT" "last-state=raced" "status treated a folded race as clean"
-
-make_case laterace
-start_responder
-jq -n '{schema:"fm-model-switch.ack.v1", id:"ms-late-race", spawnGen:"gen1", ackSequence:1,
-  outcome:"partial", raced:true, reason:"thinking-mismatch", target:{model:"p/b",effort:"high"},
-  before:{model:"p/a",thinking:"low"}, after:{model:"p/b",thinking:"minimal"}}' \
-  > "$REQ_DIR/model-switch.ms-late-race.ack.json"
-run_control switch-model --status
-expect_code 1 "$CONTROL_RC" "a late raced partial must fail status: $CONTROL_OUT"
-assert_contains "$CONTROL_OUT" "raced $ID request=ms-late-race outcome=partial" "status omitted the race or the partial outcome"
-assert_contains "$CONTROL_OUT" "last-state=raced" "a late race was classified as clean"
-assert_meta p/b minimal "a raced partial still records verified native readback"
-jq -n '{schema:"fm-model-switch.ack.v1", id:"ms-late-refusal", spawnGen:"gen1", ackSequence:2,
-  outcome:"refused", raced:true, reason:"model-mismatch", target:{model:"p/a"},
-  before:{model:"p/b",thinking:"minimal"}, after:{model:"q/c",thinking:null}}' \
-  > "$REQ_DIR/model-switch.ms-late-refusal.ack.json"
-run_control relaunch
-expect_code 1 "$CONTROL_RC" "a relaunch without --note is refused"
-assert_contains "$CONTROL_OUT" "raced $ID request=ms-late-refusal outcome=refused" "lifecycle reconciliation omitted a raced refusal"
-assert_meta p/b minimal "a raced refusal cannot write unverified readback"
-pass "switch-model preserves raced outcomes in status and lifecycle reconciliation"
 
 make_case no_monotonic
 start_responder

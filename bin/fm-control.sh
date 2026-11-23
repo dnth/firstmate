@@ -87,22 +87,20 @@
 #              through OMP's documented session-only extension API (global
 #              modelRoles are untouched and the session records the change, so
 #              a resume keeps it), and reads the live model back. The wire
-#              contract and the boundary rule - a request applies only at
-#              settled idle, so a busy worker finishes its whole run on the old
-#              model first and a switch never lands inside a turn - are owned
-#              by .omp/extensions/lib/fm-task-model-switch.ts.
+#              contract is owned by .omp/extensions/lib/fm-task-model-switch.ts.
+#              The switch applies at once, like OMP's own /switch picker: the
+#              request already in flight finishes on the old model and the next
+#              model request uses the new one, even mid-task.
 #              --model is provider/id exactly as `omp models` lists it. --effort
 #              is low|medium|high|xhigh|max, the OMP launch vocabulary, and is
 #              left to the session when omitted. Both are written as separate
 #              arguments (--model <provider/id>). Every request carries a unique id. The
-#              verb waits up to --wait seconds (default 60) for the acknowledgement, checks
+#              verb waits up to --wait seconds (default 15) for the acknowledgement, checks
 #              that the live model equals the target (and the live thinking
 #              level equals --effort), and only then updates the recorded
 #              model= and effort= in task meta.
 #              The first word of the output is the typed result; every result
-#              but `switched` exits 1. A busy worker can take longer than --wait
-#              to settle; the request is then withdrawn as `cancelled`, so ask
-#              again later.
+#              but `switched` exits 1.
 #                switched         the live model (and effort) read back as the
 #                                 target; meta updated.
 #                refused          nothing was applied. reason= is one of
@@ -116,10 +114,6 @@
 #                                 not land. Both values are reported, nothing
 #                                 is claimed rolled back, and meta follows the
 #                                 live state.
-#                raced            a provider request was prepared during the
-#                                 switch attempt and may have used either model.
-#                                 The underlying outcome and live readback
-#                                 determine whether meta follows the live state.
 #                superseded       a newer request replaced it before it ran.
 #                cancelled        the wait expired and the request was withdrawn
 #                                 by an atomic rename before the worker claimed
@@ -299,7 +293,7 @@ NOTE_SET=0
 LOCK_PREHELD=0
 STALL_RECORD=
 STATUS_SET=0
-WAIT_ARG=60
+WAIT_ARG=15
 WAIT_SET=0
 control_want_value=
 for control_arg in "$@"; do
@@ -689,7 +683,7 @@ do_exit() {
 # --- in-session model switch ------------------------------------------------
 #
 # The verb's contract is in this file's header; the wire contract (file names,
-# request and acknowledgement JSON, the boundary rule) is owned by
+# request and acknowledgement JSON) is owned by
 # .omp/extensions/lib/fm-task-model-switch.ts. This section only speaks it.
 
 MS_REQUEST_SCHEMA=fm-model-switch.request.v1
@@ -706,14 +700,12 @@ MS_A_GEN=
 MS_A_OUTCOME=
 MS_A_REASON=
 MS_A_DETAIL=
-MS_A_BOUNDARY=
 MS_A_TARGET_MODEL=
 MS_A_TARGET_EFFORT=
 MS_A_BEFORE_MODEL=
 MS_A_BEFORE_THINKING=
 MS_A_AFTER_MODEL=
 MS_A_AFTER_THINKING=
-MS_A_RACED=
 
 ms_path() {  # <request-id> <suffix>
   printf '%s/model-switch.%s.%s' "$MS_DIR" "$1" "$2"
@@ -779,25 +771,23 @@ ms_read_ack() {
   MS_A_OUTCOME=
   MS_A_REASON=
   MS_A_DETAIL=
-  MS_A_BOUNDARY=
   MS_A_TARGET_MODEL=
   MS_A_TARGET_EFFORT=
   MS_A_BEFORE_MODEL=
   MS_A_BEFORE_THINKING=
   MS_A_AFTER_MODEL=
   MS_A_AFTER_THINKING=
-  MS_A_RACED=
     rec=$(jq -j --arg schema "$MS_ACK_SCHEMA" '
       select(type == "object" and .schema == $schema and (.ackSequence | type) == "number")
-      | [.id, .spawnGen, .outcome, .reason, .detail, .boundary,
+      | [.id, .spawnGen, .outcome, .reason, .detail,
          .target.model, .target.effort, .before.model, .before.thinking,
-         .after.model, .after.thinking, .raced]
+         .after.model, .after.thinking]
       | map(if . == null then "" else (tostring | gsub("[\u001f\n\r]"; " ")) end)
       | join("\u001f")' "$1" 2>/dev/null) || return 1
   [ -n "$rec" ] || return 1
-  IFS=$'\037' read -r MS_A_ID MS_A_GEN MS_A_OUTCOME MS_A_REASON MS_A_DETAIL MS_A_BOUNDARY \
+  IFS=$'\037' read -r MS_A_ID MS_A_GEN MS_A_OUTCOME MS_A_REASON MS_A_DETAIL \
     MS_A_TARGET_MODEL MS_A_TARGET_EFFORT MS_A_BEFORE_MODEL MS_A_BEFORE_THINKING \
-    MS_A_AFTER_MODEL MS_A_AFTER_THINKING MS_A_RACED <<< "$rec" || true
+    MS_A_AFTER_MODEL MS_A_AFTER_THINKING <<< "$rec" || true
   [ -n "$MS_A_ID" ] && [ -n "$MS_A_OUTCOME" ]
 }
 
@@ -860,26 +850,9 @@ ms_unfolded_acks() {
   done | LC_ALL=C sort -n
 }
 
-ms_ack_state() {
-  if [ "$MS_A_RACED" = true ]; then
-    printf 'raced'
-  else
-    printf '%s' "$MS_A_OUTCOME"
-  fi
-}
-
-ms_report_race() {
-  local detail=${MS_A_DETAIL//\"/\'}
-  printf 'raced %s request=%s outcome=%s target=%s model=%s->%s effort=%s->%s effort-requested=%s boundary=%s reason=%s detail="%s" meta=%s note="a provider request was prepared during the switch attempt; it may have used either model"\n' \
-    "$ID" "$MS_A_ID" "$MS_A_OUTCOME" "${MS_A_TARGET_MODEL:--}" "${MS_A_BEFORE_MODEL:--}" "${MS_A_AFTER_MODEL:--}" \
-    "${MS_A_BEFORE_THINKING:--}" "${MS_A_AFTER_THINKING:--}" "${MS_A_TARGET_EFFORT:--}" "${MS_A_BOUNDARY:--}" \
-    "${MS_A_REASON:--}" "$detail" "$1"
-}
-
 reconcile_model_switch() {
   local through=${1:-} at ack rc high_water=-1 folded=() f
   MS_RECONCILED=0
-  MS_RECONCILED_RACED=0
   [ -d "$MS_DIR" ] && [ ! -L "$MS_DIR" ] || return 0
   for f in "$MS_DIR"/model-switch.*.ack.json.folded; do
     [ ! -f "$f" ] || folded+=("$f")
@@ -898,12 +871,6 @@ reconcile_model_switch() {
     rc=0
     ms_fold_ack "$ack" "$at" "$high_water" || rc=$?
     [ "$ack" != "$through" ] || return "$rc"
-    if [ "$rc" -eq 0 ] && [ "$(ms_ack_state)" = raced ]; then
-      MS_RECONCILED_RACED=1
-      ms_report_race "reconciled(model=$(fm_meta_get "$META" model) effort=$(fm_meta_get "$META" effort))" >&2
-    elif [ "$rc" -eq 3 ] && [ "$(ms_ack_state)" = raced ]; then
-      ms_report_race stale >&2
-    fi
     case "$rc" in
       0)
         MS_RECONCILED=$((MS_RECONCILED + 1))
@@ -973,7 +940,6 @@ ms_report_ack() {
   if [ "$fold_rc" -ne 0 ]; then
     ms_read_ack "$ack" || return 1
     ms_verify_ack
-    if [ "$(ms_ack_state)" = raced ]; then ms_report_race stale >&2; fi
     printf 'meta-stale %s request=%s live-model=%s live-effort=%s reason=fold-failed(status-%s) next="fm-control.sh %s switch-model --status"\n' \
       "$ID" "$rid" "${MS_A_AFTER_MODEL:--}" "${MS_A_AFTER_THINKING:--}" "$fold_rc" "$ID"
     return 1
@@ -988,16 +954,12 @@ ms_report_ack() {
   else
     meta_state=unchanged
   fi
-  if [ "$(ms_ack_state)" = raced ]; then
-    ms_report_race "$meta_state"
-    return 1
-  fi
   detail=${detail//\"/\'}
   case "$verdict" in
     applied)
-      printf 'switched %s request=%s model=%s->%s effort=%s->%s boundary=%s verified=extension-readback meta=%s backend=%s endpoint=%s\n' \
+      printf 'switched %s request=%s model=%s->%s effort=%s->%s verified=extension-readback meta=%s backend=%s endpoint=%s\n' \
         "$ID" "$rid" "${MS_A_BEFORE_MODEL:--}" "$MS_A_AFTER_MODEL" "${MS_A_BEFORE_THINKING:--}" "${MS_A_AFTER_THINKING:--}" \
-        "$MS_A_BOUNDARY" "$meta_state" "$BACKEND" "$T"
+        "$meta_state" "$BACKEND" "$T"
       return 0
       ;;
     partial)
@@ -1019,7 +981,7 @@ ms_report_ack() {
 }
 
 do_switch_model() {
-  local rid req ack staged started now_ms remaining reason=deadline-before-boundary
+  local rid req ack staged started now_ms remaining reason=deadline-before-claim
   ms_channel_ready || die "task $ID's worker cannot take a model switch: $MS_CHANNEL_WHY"
   reconcile_model_switch || true
   now_ms=$(ms_now_ms)
@@ -1099,7 +1061,7 @@ ms_request_state() {  # <request-id>
     # A validated folded receipt is the terminal result even when a crash left
     # the claim file behind.
     ms_verify_ack
-    ms_ack_state
+    echo "$MS_A_OUTCOME"
   elif [ -f "$(ms_path "$1" processing)" ]; then
     echo claimed-unacknowledged
   elif [ -f "$(ms_path "$1" request.json)" ]; then
@@ -1134,8 +1096,7 @@ EOF
   printf 'model-switch-status %s meta-model=%s meta-effort=%s channel=%s reconciled=%s unresolved=%s last-request=%s last-state=%s\n' \
     "$ID" "$(fm_meta_get "$META" model)" "$(fm_meta_get "$META" effort)" "$channel" \
     "$MS_RECONCILED" "$unresolved" "$last_id" "$last_state"
-  [ "$channel" = ready ] && [ "$unresolved" -eq 0 ] \
-    && [ "$MS_RECONCILED_RACED" -eq 0 ] && [ "$last_state" != raced ]
+  [ "$channel" = ready ] && [ "$unresolved" -eq 0 ]
 }
 
 # --- transactional relaunch -------------------------------------------------
