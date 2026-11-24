@@ -176,6 +176,8 @@ class Discord(BaseHTTPRequestHandler):
         parts = url.path.strip("/").split("/")
         with LOCK:
             data = load()
+            data.setdefault("gets", []).append(url.path)
+            save(data)
             if parts == ["users", "@me"]:
                 return self.reply(200, {"id": BOT})
             thread = data["threads"].get(parts[1]) if len(parts) > 1 else None
@@ -188,7 +190,12 @@ class Discord(BaseHTTPRequestHandler):
                     data["read_limits"] = delays
                     save(data)
                     return self.reply(429, {"retry_after": retry_after}, [("X-RateLimit-Scope", "global")])
-                return self.reply(200, {"id": parts[1], "name": thread["name"], "owner_id": BOT})
+                reset = data.pop("title_reset", None)
+                headers = []
+                if reset is not None:
+                    save(data)
+                    headers = [("X-RateLimit-Remaining", "0"), ("X-RateLimit-Reset", str(reset))]
+                return self.reply(200, {"id": parts[1], "name": thread["name"], "owner_id": BOT}, headers)
             before = int(parse_qs(url.query).get("before", ["9" * 20])[0])
             messages = [m for m in thread["messages"] if int(m["id"]) < before]
             return self.reply(200, list(reversed(messages))[:100])
@@ -262,7 +269,7 @@ def create(payload, name):
 
 def settle():
     for worker in threading.enumerate():
-        if worker.name == "fm-ext-autoname":
+        if worker.name in ("fm-ext-autoname", "fm-ext-autoname-scan"):
             worker.join(timeout=60)
 
 
@@ -574,12 +581,8 @@ assert name(thread) == "⏳ Aceh · nightly reindex" and len(patches()) == 1, pa
 deliver("blocked")
 tick(300)
 assert len(patches()) == 1, "a write landed inside the ten-minute pace"
-script({"status": 200, "remaining": "0", "reset": T0 + 604.25})
-tick(601)
-assert [p["name"] for p in patches()][1:] == ["⚠️ Aceh · nightly reindex"], patches()
-print("ok")
 PY
-  ) || fail "judged changes were not paced to the newest title: $out"
+  ) || fail "judged changes did not wait for the pace: $out"
   decision_post "$home" "$M1" 5 route-free '[]'
   out=$(py "$home" <<'PY'
 (thread,) = threads()
@@ -587,24 +590,32 @@ deliver("open-question")
 summary = poster.decision_threads(HOME, thread)[thread]
 assert summary["open"] == 1 and summary["open_buttons"] == 0, summary
 assert not load()["threads"][thread]["messages"][-1]["components"]
-tick(605)
-assert len(patches()) == 2, "a free-text question bypassed the pace"
+tick(301)
+assert len(patches()) == 1, "a free-text question bypassed the pace"
 PY
   ) || fail "the free-text decision was not paced: $out"
+  resolve_key "$home" route-free
+  out=$(py "$home" <<'PY'
+script({"status": 200, "remaining": "0", "reset": T0 + 604.25})
+tick(601)
+assert [p["name"] for p in patches()][1:] == ["⚠️ Aceh · nightly reindex"], patches()
+PY
+  ) || fail "the newest kept verdict did not land at the paced slot: $out"
   decision_post "$home" "$M1" 6 route-a
   out=$(py "$home" <<'PY'
 (thread,) = threads()
 deliver("open-question")
 summary = poster.decision_threads(HOME, thread)[thread]
-assert summary["open"] == 2 and summary["open_buttons"] == 1, summary
+assert summary["open"] == 1 and summary["open_buttons"] == 1, summary
 assert load()["threads"][thread]["messages"][-1]["components"]
-assert title.blocked_until(HOME, thread) == T0 + 604.25
+tick(604.24)
+assert len(patches()) == 2, "a button write went out before Discord's reset"
 script({"status": 429, "retry_after": 7.5})
-tick(606)
+tick(604.25)
 assert patches()[-1]["status"] == 429 and name(thread) == "⚠️ Aceh · nightly reindex"
-tick(613)
+tick(611.74)
 assert len(patches()) == 3, "a write went out before the 429 retry_after"
-tick(614)
+tick(611.75)
 assert patches()[-1]["status"] == 200 and name(thread) == "❓ Aceh · nightly reindex", patches()
 print("ok")
 PY
@@ -648,7 +659,15 @@ tick(20)
 assert name(thread) == "❓ Aceh · nightly reindex" and verdicts(thread)[-1]["status"] == "done"
 PY
   ) || fail "done replaced the open decision's ❓: $out"
-  post "$home" "$M1" followup 5 "Reminder: the route call above still needs you."
+  local generation
+  for generation in {5..13}; do
+    post "$home" "$M1" followup "$generation" "Reminder: the route call above still needs you."
+    py "$home" <<'PY' >/dev/null || fail "decision reminder was not judged"
+set_clock(CLOCK[0] + 1)
+deliver("open-question")
+PY
+  done
+  post "$home" "$M1" followup 14 "Reminder: the route call above still needs you."
   out=$(py "$home" <<'PY'
 (thread,) = threads()
 judge = autoname.judge
@@ -676,17 +695,32 @@ PY
   new_thread "$home" "$M1" "Aceh · nightly reindex" "Looking at the reindex schedule now."
   decision_post "$home" "$M1" 2 route-c
   py "$home" <<'PY' >/dev/null || fail "decision setup failed"
-deliver("open-question")
+(thread,) = threads()
+deliver()
+assert not verdicts(thread)
+script({"disconnect": True})
 tick(0)
+assert name(thread) == "❓ Aceh · nightly reindex"
 PY
   resolve_key "$home" route-c
   out=$(py "$home" <<'PY'
 (thread,) = threads()
 tick(601)
 assert name(thread) == "Aceh · nightly reindex", name(thread)
+path = poster.load_thread_record_by_id(thread, HOME)["path"]
+old = 1_600_000_000_000_000_000
+os.utime(path, ns=(old, old))
+tick(1202)
+assert path.stat().st_mtime_ns == old, "unchanged safety pass renewed thread retention"
+data = load()
+data["threads"][thread]["unreadable"] = True
+save(data)
+tick(1803)
+tick(1833)
+assert path.stat().st_mtime_ns == old, "failed safety passes renewed thread retention"
 print("ok")
 PY
-  ) || fail "a question asked during the decision kept ❓ after closure: $out"
+  ) || fail "a lost decision write kept its marker after closure or renewed retention: $out"
   pass "a done judged during a decision lands at the next slot after closure; the decision's own question clears"
 }
 
@@ -725,6 +759,28 @@ assert patches() == [], "a stale verdict was applied"
 assert title.record_verdict(HOME, thread, newer, "done", True) == "recorded"
 tick(2)
 assert name(thread) == "✅ Aceh · nightly reindex", "a newer fit verdict inherited the stale base"
+assert title.record_verdict(HOME, thread, newer, "running", True) == "recorded"
+reads = []
+def publish_between_reads(thread_id):
+    reads.append(thread_id)
+    if len(reads) == 2:
+        assert title.record_verdict(HOME, thread_id, newer, "blocked", True) == "recorded"
+    return title.discord_read_title(HOME, thread_id)
+
+tick(603, read_thread=publish_between_reads)
+assert [p["name"] for p in patches()] == ["✅ Aceh · nightly reindex", "⚠️ Aceh · nightly reindex"], patches()
+
+assert title.record_verdict(HOME, thread, newer, "running", True) == "recorded"
+def publish_during_write(thread_id, name):
+    set_clock(CLOCK[0] + 1)
+    assert title.record_verdict(HOME, thread_id, newer, "done", True) == "recorded"
+    script({"elapsed": 1})
+    title.discord_write_title(HOME, thread_id, name)
+
+tick(1204, rename=publish_during_write)
+assert name(thread) == "⏳ Aceh · nightly reindex"
+tick(1207)
+assert name(thread) == "✅ Aceh · nightly reindex", "a same-cutoff verdict racing PATCH waited for the pace"
 print("ok")
 PY
   ) || fail "a verdict older than a visible post was used: $out"
@@ -812,7 +868,7 @@ def rename_between_reads(thread_id):
     reads.append(thread_id)
     if len(reads) == 2:
         captain_renames(thread_id, "GPU box move")
-    return title.discord_read_title(thread_id)
+    return title.discord_read_title(HOME, thread_id)
 
 tick(0, read_thread=rename_between_reads)
 assert not any("OCR GPU migration" in p["name"] for p in patches()), patches()
@@ -1080,7 +1136,8 @@ topic = poster.load_thread_record_by_id(thread, HOME)
 question_name = "❓ Aceh · legacy thread"
 with topic["path"].open("w") as state:
     json.dump({"request_id": topic["request_id"], "topic_thread_id": thread, "creator": "firstmate",
-               "topic_name": question_name, "marked_open": True, "deferred_state": "done"}, state)
+               "topic_name": question_name, "marked_open": True,
+               "thread_state": "needs-you", "rename": {"outcome": "failed"}}, state)
 captain_renames(thread, question_name)
 # Replies delivered before the reconciler kept no title input in their progress.
 for path in (HOME / "state" / "ext-outbox").glob("*.progress.json"):
@@ -1088,6 +1145,12 @@ for path in (HOME / "state" / "ext-outbox").glob("*.progress.json"):
     data.pop("title_input", None)
     path.write_text(json.dumps(data))
 tick(0)
+assert name(thread) == "Aceh · legacy thread", name(thread)
+with topic["path"].open("w") as state:
+    json.dump({"request_id": topic["request_id"], "topic_thread_id": thread, "creator": "firstmate",
+               "topic_name": question_name, "marked_open": True, "deferred_state": "done"}, state)
+captain_renames(thread, question_name)
+tick(1)
 assert name(thread) == "✅ Aceh · legacy thread", name(thread)
 
 check = autoname.subprocess.run
@@ -1102,7 +1165,7 @@ with patch.object(autoname.subprocess, "run", failed_check):
 assert name(thread) == "✅ Aceh · legacy thread", "a failed key check enabled the explicit fallback"
 (HOME / "config" / "ext-bridge").unlink()
 tick(1300)
-assert name(thread) == "✅ Aceh · legacy thread" and len(patches()) == 1, "title work ran with the bridge off"
+assert name(thread) == "✅ Aceh · legacy thread" and len(patches()) == 2, "title work ran with the bridge off"
 print("ok")
 PY
   ) || fail "legacy intent or check handling failed: $out"
@@ -1131,7 +1194,7 @@ def accept_reply_mid_write(thread_id, name):
     with only("followup.3"):
         deliver()
     script({"elapsed": 5})
-    return title.discord_write_title(thread_id, name)
+    return title.discord_write_title(HOME, thread_id, name)
 
 tick(0, rename=accept_reply_mid_write)
 assert name(thread) == "✅ Aceh · nightly reindex", patches()
@@ -1149,6 +1212,53 @@ PY
   pass "a write that raced an accepted reply is corrected at once; later changes keep the pace"
 }
 
+test_get_cooldowns_gate_compare_and_history() {
+  local home="$TMP_ROOT/gets" out
+  setup_home "$home"
+  new_thread "$home" "$M1" "Aceh · nightly reindex" "Looking at the reindex schedule now."
+  post "$home" "$M1" followup 2 "Reindex moved to 02:00; first run is under way."
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+deliver("running")
+channel = "/channels/" + thread
+data = load()
+data["gets"] = []
+data["title_reset"] = T0 + 12.5
+save(data)
+tick(0)
+assert load()["gets"] == [channel], load()["gets"]
+assert patches() == []
+tick(12.49)
+assert load()["gets"] == [channel] and patches() == []
+tick(12.5)
+assert name(thread) == "⏳ Aceh · nightly reindex", patches()
+PY
+  ) || fail "a successful title GET did not hold the compare read and PATCH: $out"
+  post "$home" "$M1" followup 3 "The reindex finished."
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+channel = "/channels/" + thread
+data = load()
+data["gets"] = []
+data["title_reset"] = T0 + 25
+save(data)
+before = len(jev_calls())
+deliver("done")
+assert load()["gets"] == [channel] and len(jev_calls()) == before
+set_clock(T0 + 24.99)
+autoname.start_due(HOME)
+settle()
+assert load()["gets"] == [channel] and len(jev_calls()) == before
+set_clock(T0 + 25)
+autoname.start_due(HOME)
+settle()
+assert load()["gets"] == [channel, channel, channel + "/messages"], load()["gets"]
+assert len(jev_calls()) == before + 1 and verdicts(thread)[-1]["status"] == "done"
+PY
+  ) || fail "a judge did not wait for Discord and resume at expiry: $out"
+  pass "a successful title GET holds compare and history reads, and the judge resumes at expiry"
+}
+
 test_1_only_the_reconciler_writes_titles
 test_2_marker_precedence_follows_recorded_verdicts
 test_3_explicit_states_drive_markers_when_judging_is_off
@@ -1162,3 +1272,4 @@ test_10_title_request_limits_survive_a_slow_response_and_lost_ack
 test_11_partial_posts_are_judged_and_private_labels_stay_private
 test_12_legacy_intent_and_unclear_checks_keep_the_title
 test_13_a_raced_write_is_corrected_without_waiting
+test_get_cooldowns_gate_compare_and_history

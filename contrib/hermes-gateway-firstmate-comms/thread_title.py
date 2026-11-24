@@ -64,8 +64,6 @@ RETRY_SECS = 30.0
 # The safety sweep: every eligible thread is reconciled at least this often,
 # which catches what raises no event, such as the captain's own renames.
 SAFETY_SECS = 600.0
-# How many judged messages a thread's verdict log keeps.
-VERDICT_KEEP = 8
 # Discord snowflakes count milliseconds from this epoch in their top bits.
 _DISCORD_EPOCH = 1420070400.0
 # Compare-and-write retries inside one pass before leaving it to the next.
@@ -73,20 +71,19 @@ _ATTEMPTS = 3
 
 _DUE: dict[tuple[Path, str], float] = {}
 _DUE_LOCK = threading.Lock()
-_COOLDOWN_LOCK = threading.Lock()
+_REQUEST_LOCK = threading.Lock()
 
 
 class RateLimited(Exception):
-    """Discord refused a title-path request and said how long to wait."""
+    """The next time Discord permits this title-path request."""
 
-    def __init__(self, deadline: float, global_limit: bool = False, *, absolute: bool = False):
+    def __init__(self, until: float):
         super().__init__("discord rate limited")
-        self.deadline = deadline
-        self.global_limit = global_limit
-        self.absolute = absolute
+        self.until = until
 
-    def until(self, now: float) -> float:
-        return max(now, self.deadline) if self.absolute else now + self.deadline
+
+class _InputsMoved(Exception):
+    pass
 
 
 def _log(message: str) -> None:
@@ -133,8 +130,8 @@ def accepted_posts(home: Path) -> dict[str, list[dict]]:
     """Every Discord-accepted Firstmate reply per destination thread, oldest first.
 
     Each entry is one outbox generation: ``message_id`` is its newest accepted
-    chunk, ``complete`` says every chunk landed, and ``state``, ``retitle``,
-    and ``decision`` are the reply's own title inputs.
+    chunk, ``complete`` says every chunk landed, and ``state`` and ``retitle``
+    are the reply's own title inputs.
     """
     posts: dict[str, list[dict]] = {}
     outbox = poster.state_dir(home) / "ext-outbox"
@@ -161,7 +158,6 @@ def accepted_posts(home: Path) -> dict[str, list[dict]]:
             "complete": int(data.get("posted_count") or 0) >= int(data.get("total") or 0),
             "state": state if isinstance(state, str) else "",
             "retitle": retitle if isinstance(retitle, str) else "",
-            "decision": given.get("decision") is True,
         })
     for entries in posts.values():
         entries.sort(key=lambda entry: entry["message_id"])
@@ -197,26 +193,16 @@ def blocked_until(home: Path, thread_id: str) -> float:
     return max(held["global"], float(held["threads"].get(thread_id) or 0))
 
 
-def hold(home: Path, thread_id: str, until: float, global_limit: bool = False) -> None:
+def _hold(home: Path, thread_id: str, until: float, global_limit: bool) -> None:
     """Record a Discord deadline durably, for this thread or for the bot."""
-    with _COOLDOWN_LOCK:
-        held = cooldowns(home)
-        now = time.time()
-        held["threads"] = {key: value for key, value in held["threads"].items() if float(value) > now}
-        if global_limit:
-            held["global"] = max(held["global"], until)
-        else:
-            held["threads"][thread_id] = max(float(held["threads"].get(thread_id) or 0), until)
-        _atomic_json(_cooldown_path(home), held)
-
-
-def note_rate_limit(home: Path, thread_id: str, limit: RateLimited) -> float:
-    """Record a 429 against the time its response arrived; return the deadline."""
-    until = limit.until(time.time())
-    hold(home, thread_id, until, limit.global_limit)
-    _log(f"thread {thread_id} waits {until - time.time():.1f}s for Discord"
-         + (" (bot-wide)" if limit.global_limit else ""))
-    return until
+    held = cooldowns(home)
+    now = time.time()
+    held["threads"] = {key: value for key, value in held["threads"].items() if float(value) > now}
+    if global_limit:
+        held["global"] = max(held["global"], until)
+    else:
+        held["threads"][thread_id] = max(float(held["threads"].get(thread_id) or 0), until)
+    _atomic_json(_cooldown_path(home), held)
 
 
 def _seconds(value: object) -> float | None:
@@ -227,26 +213,30 @@ def _seconds(value: object) -> float | None:
     return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
-def read_rate_limit(err: urllib.error.HTTPError) -> RateLimited | None:
-    try:
-        details = json.loads(err.read())
-    except (OSError, UnicodeError, ValueError):
-        details = {}
-    if not isinstance(details, dict):
-        details = {}
-    headers = err.headers or {}
-    global_limit = (details.get("global") is True or headers.get("X-RateLimit-Global") == "true"
-                    or headers.get("X-RateLimit-Scope") == "global")
+def _response_wait(home: Path, thread_id: str, headers, at: float,
+                   details: dict | None = None) -> float | None:
+    limited = details is not None
+    if not limited and headers.get("X-RateLimit-Remaining") != "0":
+        return None
+    details = details or {}
     waits = [_seconds(value) for value in (details.get("retry_after"), headers.get("Retry-After"),
-                                         headers.get("X-RateLimit-Reset-After"))]
+                                           headers.get("X-RateLimit-Reset-After"))]
     wait = max((value for value in waits if value is not None), default=None)
-    if wait is not None:
-        return RateLimited(wait, global_limit)
     reset = _seconds(headers.get("X-RateLimit-Reset"))
-    return RateLimited(reset, global_limit, absolute=True) if reset is not None else None
+    until = at + wait if wait is not None else (max(at, reset) if reset is not None else None)
+    if until is not None:
+        global_limit = limited and (details.get("global") is True
+                                    or headers.get("X-RateLimit-Global") == "true"
+                                    or headers.get("X-RateLimit-Scope") == "global")
+        _hold(home, thread_id, until, global_limit)
+        if limited:
+            _log(f"thread {thread_id} waits {until - at:.1f}s for Discord"
+                 + (" (bot-wide)" if global_limit else ""))
+    return until
 
 
-def _request(method: str, path: str, body: dict | None = None):
+def _request(home: Path, thread_id: str, method: str, path: str, body: dict | None = None,
+             prepare=None) -> bytes:
     token = poster._bot_token()
     if not token:
         raise poster.DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
@@ -257,56 +247,66 @@ def _request(method: str, path: str, body: dict | None = None):
         headers={"Authorization": f"Bot {token}", "Content-Type": "application/json",
                  "User-Agent": poster.USER_AGENT},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            return response.headers, response.read()
-    except urllib.error.HTTPError as err:
-        if err.code == 429:
-            limit = read_rate_limit(err)
-            if limit is not None:
-                raise limit from err
-        raise poster.DiscordSendError(poster.classify_http_code(err.code), f"discord HTTP {err.code}",
-                                      err.code) from err
-    except (urllib.error.URLError, TimeoutError, OSError) as err:
-        raise poster.DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    with _REQUEST_LOCK:
+        allowed = blocked_until(home, thread_id)
+        if time.time() < allowed:
+            raise RateLimited(allowed)
+        if prepare is not None:
+            prepare()
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                _response_wait(home, thread_id, response.headers, time.time())
+                return response.read()
+        except urllib.error.HTTPError as err:
+            at = time.time()
+            details = None
+            if err.code == 429:
+                try:
+                    details = json.loads(err.read())
+                except (OSError, UnicodeError, ValueError):
+                    details = {}
+                if not isinstance(details, dict):
+                    details = {}
+            until = _response_wait(home, thread_id, err.headers or {}, at, details)
+            if err.code == 429 and until is not None:
+                raise RateLimited(until) from err
+            raise poster.DiscordSendError(poster.classify_http_code(err.code), f"discord HTTP {err.code}",
+                                          err.code) from err
+        except (urllib.error.URLError, TimeoutError, OSError) as err:
+            raise poster.DiscordSendError("ambiguous", f"discord transport: {err}") from err
 
 
-def discord_read_title(thread_id: str) -> str:
-    """The name Discord shows now; raises RateLimited or DiscordSendError."""
+def _discord_thread(home: Path, thread_id: str) -> dict:
     if not poster._SNOWFLAKE.fullmatch(thread_id):
         raise poster.DiscordSendError("permanent", "thread id is not a Discord id")
-    _headers, raw = _request("GET", f"/channels/{thread_id}")
+    raw = _request(home, thread_id, "GET", f"/channels/{thread_id}")
     data = json.loads(raw.decode("utf-8") or "{}")
-    name = data.get("name") if isinstance(data, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
+def discord_read_title(home: Path, thread_id: str) -> str:
+    """The name Discord shows now; raises RateLimited or DiscordSendError."""
+    name = _discord_thread(home, thread_id).get("name")
     if not isinstance(name, str) or not name:
         raise poster.DiscordSendError("ambiguous", "discord thread read returned no name")
     return name
 
 
-def discord_read_messages(thread_id: str, through: int, limit: int) -> list:
+def discord_read_messages(home: Path, thread_id: str, through: int, limit: int) -> list:
     """Up to ``limit`` messages at or before ``through``, newest first."""
     query = urllib.parse.urlencode({"limit": limit, "before": str(through + 1)})
-    _headers, raw = _request("GET", f"/channels/{thread_id}/messages?{query}")
+    raw = _request(home, thread_id, "GET", f"/channels/{thread_id}/messages?{query}")
     data = json.loads(raw.decode("utf-8") or "[]")
     if not isinstance(data, list):
         raise poster.DiscordSendError("ambiguous", "discord returned no message list")
     return data
 
 
-def discord_write_title(thread_id: str, name: str) -> dict:
-    """PATCH one thread's name and return Discord's rate-limit view.
-
-    Returns ``{"remaining", "reset_after", "reset"}`` from the
-    ``X-RateLimit-*`` headers; raises RateLimited on an HTTP 429 that names a
-    wait, and DiscordSendError for anything else.
-    """
+def discord_write_title(home: Path, thread_id: str, name: str, prepare=None) -> None:
+    """PATCH one thread's name, honoring and recording Discord's cooldowns."""
     if not poster._SNOWFLAKE.fullmatch(thread_id):
         raise poster.DiscordSendError("permanent", "thread id is not a Discord id")
-    headers, _raw = _request("PATCH", f"/channels/{thread_id}", {"name": name})
-    remaining = headers.get("X-RateLimit-Remaining")
-    return {"remaining": int(remaining) if str(remaining or "").isdigit() else None,
-            "reset_after": _seconds(headers.get("X-RateLimit-Reset-After")),
-            "reset": _seconds(headers.get("X-RateLimit-Reset"))}
+    _request(home, thread_id, "PATCH", f"/channels/{thread_id}", {"name": name}, prepare=prepare)
 
 
 # --- inputs other parts of the plugin record --------------------------------------
@@ -318,7 +318,7 @@ def mark_due(home: Path, thread_id: str, at: float = 0.0) -> None:
         _DUE[key] = min(at, _DUE.get(key, at))
 
 
-def _change_title(home: Path, thread_id: str, change) -> bool:
+def _change_title(home: Path, thread_id: str, change, topic_name: str = "") -> bool:
     """Apply ``change(title)`` to a thread's ``title`` object under the record lock."""
     with poster._THREAD_RECORD_LOCK:
         record = poster.load_thread_record_by_id(thread_id, home)
@@ -329,7 +329,8 @@ def _change_title(home: Path, thread_id: str, change) -> bool:
             return False
         for key in [key for key, value in title.items() if value is None]:
             del title[key]
-        poster.save_thread_record(record["path"], record.get("request_id"), thread_id, title=title)
+        poster.save_thread_record(record["path"], record.get("request_id"), thread_id,
+                                  topic_name=topic_name, title=title, preserve_mtime=True)
     return True
 
 
@@ -343,20 +344,24 @@ def record_verdict(home: Path, thread_id: str, message_id: object, status: str, 
     if status not in STATUS_MARKER or status == "none":
         raise ValueError(f"unknown status {status!r}")
     cutoff = _id(message_id)
-    if newest_accepted(home).get(thread_id, 0) > cutoff:
-        return "stale"
 
     def change(title):
-        log = [entry for entry in title.get("verdicts") or [] if _id(entry.get("message_id")) != cutoff]
-        log.append({"message_id": str(cutoff), "status": status, "topic_fits": bool(topic_fits),
-                    "base": base or ""})
-        log.sort(key=lambda entry: _id(entry["message_id"]))
-        title["verdicts"] = log[-VERDICT_KEEP:]
+        verdict = {"message_id": str(cutoff), "status": status, "topic_fits": bool(topic_fits),
+                   "base": base or ""}
+        previous = _verdict_at(title, cutoff)
+        if any(previous.get(key) != value for key, value in verdict.items()):
+            log = [entry for entry in title.get("verdicts") or [] if _id(entry.get("message_id")) != cutoff]
+            log.append(dict(verdict, at=time.time()))
+            log.sort(key=lambda entry: _id(entry["message_id"]))
+            title["verdicts"] = log
         if (title.get("judge_failed") or {}).get("message_id") == str(cutoff):
             title["judge_failed"] = None
 
-    if not _change_title(home, thread_id, change):
-        return "gone"
+    with poster._THREAD_RECORD_LOCK:
+        if newest_accepted(home).get(thread_id, 0) > cutoff:
+            return "stale"
+        if not _change_title(home, thread_id, change):
+            return "gone"
     mark_due(home, thread_id)
     return "recorded"
 
@@ -364,7 +369,7 @@ def record_verdict(home: Path, thread_id: str, message_id: object, status: str, 
 def record_judge_failure(home: Path, thread_id: str, message_id: object) -> None:
     """Remember that judging this message failed, so only the safety sweep retries it."""
     _change_title(home, thread_id, lambda title: title.__setitem__(
-        "judge_failed", {"message_id": str(_id(message_id)), "at": time.time()}))
+        "judge_failed", {"message_id": str(_id(message_id))}))
 
 
 def title_inputs(record: dict) -> dict:
@@ -382,12 +387,17 @@ def title_inputs(record: dict) -> dict:
     state = record.get("deferred_state")
     if state not in ("none", "done"):
         state = {"deferred": rename.get("state"), "failed": record.get("thread_state")}.get(rename.get("outcome"))
-    if state in EXPLICIT_STATUS:
+    marked_open = record.get("marked_open") is True
+    if state in EXPLICIT_STATUS and not (marked_open and state == "needs-you"):
         seed["state"] = state
     retitle = record.get("retitle")
     if isinstance(retitle, str) and retitle and rename.get("outcome") in ("failed", "deferred"):
         seed["retitle"] = retitle
-    return {"seed": seed} if seed else {}
+    title = {"seed": seed} if seed else {}
+    name = record.get("topic_name")
+    if marked_open and isinstance(name, str) and split_marker(name)[0] == QUESTION:
+        title["held"] = ""
+    return title
 
 
 # --- the desired title ---------------------------------------------------------------
@@ -398,6 +408,11 @@ def _during_decision(posts: list[dict], message_id: int) -> bool:
     return any(0 < _id(post.get("message_id")) <= message_id
                and (post.get("state") == "open" or float(post.get("closed_at") or 0) > at)
                for post in posts)
+
+
+def _verdict_at(title: dict, cutoff: int) -> dict:
+    return next((entry for entry in reversed(title.get("verdicts") or [])
+                 if _id(entry.get("message_id")) == cutoff and entry.get("status") in STATUS_MARKER), {})
 
 
 def _entries(view: dict, title: dict, judging: bool) -> list[dict]:
@@ -418,8 +433,7 @@ def _entries(view: dict, title: dict, judging: bool) -> list[dict]:
 def plan(title: dict, view: dict, judging: bool) -> dict:
     """The title the durable inputs ask for: a pure function of its arguments.
 
-    Returns ``{"desired", "computed", "decision_question"}``; ``computed`` is
-    the marker before a removed marker is respected.
+    ``computed`` is the marker before a removed marker is respected.
     """
     live_marker, live_base = split_marker(view["live"])
     summary = view["summary"]
@@ -427,16 +441,17 @@ def plan(title: dict, view: dict, judging: bool) -> dict:
     open_decisions = int(summary.get("open") or 0)
     entries = _entries(view, title, judging)
     newest = view["newest"]
+    verdict = _verdict_at(title, newest) if judging else {}
 
     chosen = None
     if judging:
-        chosen = next((entry for entry in entries if entry["message_id"] == newest), None)
+        chosen = dict(verdict, message_id=newest) if verdict else None
     elif entries:
         chosen = entries[-1]
     if chosen is None:
         # Nothing judged on the newest post yet: hold the marker of our last
         # paced write until a verdict arrives.
-        status_marker = split_marker(title.get("held") or view["written"])[0]
+        status_marker = split_marker(title.get("held", view["written"]))[0]
     else:
         pick = chosen
         if (pick["status"] == "open-question" and open_decisions == 0
@@ -463,17 +478,20 @@ def plan(title: dict, view: dict, judging: bool) -> dict:
         elif not judging:
             retitles = [post["retitle"] for post in view["posts"] if post["complete"] and post["retitle"]]
             base = (retitles[-1] if retitles else (title.get("seed") or {}).get("retitle")) or live_base
-    return {"desired": marker + base, "computed": computed,
+    return {"desired": marker + base, "computed": computed, "verdict": verdict,
             "decision_question": marker == QUESTION and int(summary.get("open_buttons") or 0) > 0}
 
 
-def _correction(title: dict, view: dict) -> bool:
+def _correction(title: dict, view: dict, verdict: dict) -> bool:
     """True when our last write raced newer durable state that existed before it landed."""
     written = title.get("written") or {}
     if not written or view["live"] != written.get("name"):
         return False
     landed = float(written.get("at") or 0)
     basis = written.get("basis") or {}
+    if ("verdict" in basis and verdict != basis["verdict"]
+            and 0 < float(verdict.get("at") or 0) < landed):
+        return True
     if any(entry["message_id"] > int(basis.get("newest") or 0) and message_time(entry["message_id"]) < landed
            for entry in view["posts"]):
         return True
@@ -506,17 +524,23 @@ def eligible(record: dict, home: Path, thread_owner=None) -> bool:
         return True
     # A record written before provenance was kept needs Discord's word that
     # this bot owns the thread.
+    thread_id = record["topic_thread_id"]
     try:
-        owner_id = (thread_owner or poster.discord_thread_owner)(record["topic_thread_id"])
+        if thread_owner is not None:
+            owner_id = thread_owner(thread_id)
+        else:
+            owner_id = str(_discord_thread(home, thread_id).get("owner_id") or "")
+        if not poster._SNOWFLAKE.fullmatch(owner_id or ""):
+            return False
+        if owner_id != poster._bot_user_id(read=lambda: _request(home, thread_id, "GET", "/users/@me")):
+            return False
     except RateLimited:
         raise
     except Exception as err:
         _log(f"thread {record['topic_thread_id']} owner lookup skipped: {err}")
         return False
-    if not owner_id or owner_id != poster._bot_user_id():
-        return False
     poster.save_thread_record(record["path"], record.get("request_id"), record["topic_thread_id"],
-                              creator="firstmate")
+                              creator="firstmate", preserve_mtime=True)
     return True
 
 
@@ -532,23 +556,18 @@ def captain_named(record: dict, live: str) -> bool:
     return split_marker(live)[1] != split_marker(written)[1]
 
 
-def _view(home: Path, record: dict, thread_id: str, read_thread) -> dict | str:
-    """The durable state one pass works from, or a reason it cannot be read."""
+def _read_view(home: Path, thread_id: str, read_thread) -> dict | str:
+    """Read the live title and decision ledger, or return a reason to stop."""
+    live = read_thread(thread_id) if read_thread is not None else discord_read_title(home, thread_id)
+    if not live:
+        return "live title unreadable"
     summaries = poster.decision_threads(home, thread_id)
     if summaries is None:
         return "decision ledger unreadable"
     summary = summaries.get(thread_id, {})
     if int(summary.get("unknown") or 0):
         return "a decision's state is unknown"
-    live = (read_thread or discord_read_title)(thread_id)
-    if not live:
-        return "live title unreadable"
-    posts = accepted_posts(home).get(thread_id, [])
-    title = record.get("title") or {}
-    return {"summary": summary, "posts": posts, "live": live,
-            "newest": posts[-1]["message_id"] if posts else 0,
-            "ledger": _fingerprint(summary),
-            "written": (title.get("written") or {}).get("name") or record.get("topic_name") or ""}
+    return {"summary": summary, "live": live, "ledger": _fingerprint(summary)}
 
 
 def _observe(title: dict, view: dict) -> dict:
@@ -559,7 +578,7 @@ def _observe(title: dict, view: dict) -> dict:
     if attempt:
         if attempt.get("name") == live:
             # Our last write landed even though Discord's answer was lost.
-            changes.update(_written(attempt))
+            changes.update(_written(attempt, title.get("held", view["written"])))
             title.update(changes)
             view["written"] = live
         changes["attempt"] = None
@@ -577,8 +596,8 @@ def _observe(title: dict, view: dict) -> dict:
     return changes
 
 
-def _written(attempt: dict) -> dict:
-    fields = {"written": {key: attempt.get(key) for key in ("name", "at", "kind", "basis")}}
+def _written(attempt: dict, held: str) -> dict:
+    fields = {"written": {key: attempt.get(key) for key in ("name", "at", "basis")}, "held": held}
     if attempt.get("kind") != "decision":
         fields["paced_at"] = attempt.get("at")
         fields["held"] = attempt.get("name")
@@ -601,18 +620,14 @@ def reconcile(home: Path, thread_id: str, *, judging: str | None = None, rename=
     record = poster.load_thread_record_by_id(thread_id, home)
     if not record:
         return "skipped"
-    saved: dict = {}
 
     def save(outcome: str, due: float = 0.0, error: str = "", **fields) -> str:
         last = {"outcome": outcome, "at": time.time()}
         if error:
             last["error"] = error
-        saved.update(fields)
-        saved["last"] = last
-        _change_title(home, thread_id, lambda title: title.update(saved))
-        if "written" in fields:
-            poster.save_thread_record(record["path"], record.get("request_id"), thread_id,
-                                      topic_name=fields["written"]["name"])
+        fields["last"] = last
+        name = (fields.get("written") or {}).get("name") or ""
+        _change_title(home, thread_id, lambda title: title.update(fields), topic_name=name)
         if due:
             mark_due(home, thread_id, due)
         return outcome
@@ -625,17 +640,21 @@ def reconcile(home: Path, thread_id: str, *, judging: str | None = None, rename=
         try:
             if not eligible(record, home, thread_owner):
                 return "skipped"
-            view = _view(home, record, thread_id, read_thread)
+            view = _read_view(home, thread_id, read_thread)
         except RateLimited as err:
-            return save("rate-limited", note_rate_limit(home, thread_id, err), str(err))
+            return save("rate-limited", err.until, str(err))
         except Exception as err:
             view = f"live title unreadable: {err}"
         if isinstance(view, str):
             return save("unreadable", time.time() + RETRY_SECS, view)
         title = dict(record.get("title") or {})
+        posts = accepted_posts(home).get(thread_id, [])
+        view.update(posts=posts, newest=posts[-1]["message_id"] if posts else 0,
+                    written=(title.get("written") or {}).get("name") or record.get("topic_name") or "")
         changes = _observe(title, view)
         changes["ledger"] = view["ledger"]
         wanted = plan(title, view, judging == "on")
+        verdict = wanted["verdict"]
         if title.get("removed_marker") and wanted["computed"] != title["removed_marker"]:
             changes["removed_marker"] = None
         if wanted["desired"] == view["live"]:
@@ -652,7 +671,7 @@ def reconcile(home: Path, thread_id: str, *, judging: str | None = None, rename=
 
         if wanted["decision_question"] and live_marker != QUESTION:
             kind, target = "decision", QUESTION + live_base
-        elif _correction(title, view):
+        elif _correction(title, view, verdict):
             kind, target = "correction", wanted["desired"]
         else:
             kind, target = "paced", wanted["desired"]
@@ -669,25 +688,50 @@ def reconcile(home: Path, thread_id: str, *, judging: str | None = None, rename=
         # Compare and write: the state this title was computed from must
         # still hold right before the request leaves.
         try:
-            check = _view(home, record, thread_id, read_thread)
+            check = _read_view(home, thread_id, read_thread)
         except RateLimited as err:
-            return save("rate-limited", note_rate_limit(home, thread_id, err), str(err), **changes)
+            return save("rate-limited", err.until, str(err), **changes)
         except Exception as err:
             check = f"live title unreadable: {err}"
         if isinstance(check, str):
             return save("unreadable", time.time() + RETRY_SECS, check, **changes)
-        if any(check[key] != view[key] for key in ("live", "newest", "ledger")):
+        if any(check[key] != view[key] for key in ("live", "ledger")):
             save("moved", **changes)
             record = poster.load_thread_record_by_id(thread_id, home) or record
             continue
 
-        attempt = {"name": target, "at": time.time(), "kind": kind,
-                   "basis": {"newest": view["newest"], "ledger": view["ledger"]}}
-        _change_title(home, thread_id, lambda title: title.update(changes, attempt=attempt))
+        attempt = {"name": target, "kind": kind,
+                   "basis": {"newest": view["newest"], "ledger": view["ledger"], "verdict": verdict}}
+
+        def prepare():
+            with poster._THREAD_RECORD_LOCK:
+                if newest_accepted(home).get(thread_id, 0) != view["newest"]:
+                    raise _InputsMoved
+
+                def save_attempt(current):
+                    if judging == "on" and _verdict_at(current, view["newest"]) != verdict:
+                        return False
+                    attempt["at"] = time.time()
+                    current.update(changes, attempt=attempt)
+
+                if not _change_title(home, thread_id, save_attempt):
+                    raise _InputsMoved
+
         try:
-            limits = (rename or discord_write_title)(thread_id, target) or {}
+            if rename is None:
+                discord_write_title(home, thread_id, target, prepare=prepare)
+            else:
+                allowed = blocked_until(home, thread_id)
+                if time.time() < allowed:
+                    raise RateLimited(allowed)
+                prepare()
+                rename(thread_id, target)
+        except _InputsMoved:
+            save("moved", **changes)
+            record = poster.load_thread_record_by_id(thread_id, home) or record
+            continue
         except RateLimited as err:
-            return save("rate-limited", note_rate_limit(home, thread_id, err), str(err), attempt=None)
+            return save("rate-limited", err.until, str(err), **dict(changes, attempt=None))
         except Exception as err:
             outcome = poster.classify_send_failure(err)
             _log(f"thread {thread_id} keeps its title: {err}")
@@ -701,12 +745,7 @@ def reconcile(home: Path, thread_id: str, *, judging: str | None = None, rename=
             return save("failed", 0.0, str(err), attempt=None,
                         refused={"name": target, "newest": view["newest"]})
         landed = dict(attempt, at=time.time())
-        fields = dict(_written(landed), attempt=None, refused=None)
-        if isinstance(limits, dict) and limits.get("remaining") == 0:
-            reset_after = limits.get("reset_after")
-            reset = landed["at"] + reset_after if reset_after is not None else limits.get("reset")
-            if reset is not None:
-                hold(home, thread_id, reset)
+        fields = dict(_written(landed, title.get("held", view["written"])), attempt=None, refused=None)
         due = 0.0
         if target != wanted["desired"]:
             due = max(landed["at"], float(title.get("paced_at") or 0) + PACE_SECS)

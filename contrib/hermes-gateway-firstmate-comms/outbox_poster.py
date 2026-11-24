@@ -877,7 +877,8 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
                        topic_name: str = "", creating_title: str = "",
                        creator: str = "", title: dict | None = None,
                        open_attempt: bool | None = None,
-                       opening_posted: bool | None = None) -> None:
+                       opening_posted: bool | None = None,
+                       preserve_mtime: bool = False) -> None:
     """Write one thread record atomically, preserving any prior unset field.
 
     ``creator`` is the provenance that authorises a later rename: ``firstmate``
@@ -901,13 +902,13 @@ def save_thread_record(path: Path, request_id: object, thread_id: str,
     """
     with _THREAD_RECORD_LOCK:
         _merge_thread_record(path, request_id, thread_id, topic_name, creating_title,
-                             creator, title, open_attempt, opening_posted)
+                             creator, title, open_attempt, opening_posted, preserve_mtime)
 
 
 def _merge_thread_record(path: Path, request_id: object, thread_id: str,
                          topic_name: str, creating_title: str, creator: str,
                          title: dict | None, open_attempt: bool | None,
-                         opening_posted: bool | None) -> None:
+                         opening_posted: bool | None, preserve_mtime: bool) -> None:
     if path.is_symlink():
         raise RuntimeError("thread record is a symlink")
     try:
@@ -935,12 +936,15 @@ def _merge_thread_record(path: Path, request_id: object, thread_id: str,
     if (opening_posted if opening_posted is not None else prior.get("opening_posted")) is True:
         record["opening_posted"] = True
     body = json.dumps(record)
+    prior_stat = path.stat() if preserve_mtime else None
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="fm-ext-thread.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(body)
         os.chmod(tmp, 0o600)
+        if prior_stat is not None:
+            os.utime(tmp, ns=(prior_stat.st_atime_ns, prior_stat.st_mtime_ns))
         os.replace(tmp, path)
     finally:
         try:
@@ -1080,21 +1084,24 @@ def screened_title(text: object, home: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def _bot_user_id(token: str | None = None) -> str:
+def _bot_user_id(token: str | None = None, *, read=None) -> str:
     """This bot's own Discord user id, or "" when it cannot be read."""
-    if token is None:
-        token = _bot_token()
-    if not token:
-        return ""
-    request = urllib.request.Request(
-        f"{DISCORD_API_BASE}/users/@me",
-        headers={"Authorization": f"Bot {token}", "User-Agent": USER_AGENT},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        return ""
+    if read is not None:
+        data = json.loads(read().decode("utf-8"))
+    else:
+        if token is None:
+            token = _bot_token()
+        if not token:
+            return ""
+        request = urllib.request.Request(
+            f"{DISCORD_API_BASE}/users/@me",
+            headers={"Authorization": f"Bot {token}", "User-Agent": USER_AGENT},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return ""
     if not isinstance(data, dict):
         return ""
     user_id = str(data.get("id") or "")
@@ -1119,26 +1126,9 @@ def _discord_thread(thread_id: str) -> dict:
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as err:
-        if err.code == 429:
-            limit = _thread_title().read_rate_limit(err)
-            if limit is not None:
-                raise limit from err
-        return {}
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
-
-
-def discord_thread_owner(thread_id: str) -> str:
-    """The Discord user id that created a thread, or "" when unproved.
-
-    An unreadable thread or a reply without an owner leaves ownership
-    unproved, which a rename check reads as "not ours" and refuses to rename
-    on.
-    """
-    owner = str(_discord_thread(thread_id).get("owner_id") or "")
-    return owner if _SNOWFLAKE.fullmatch(owner) else ""
 
 
 def discord_thread_name(thread_id: str) -> str:
@@ -1955,8 +1945,7 @@ def deliver_one(
         # restart.
         state, retitle = payload.get("thread_state"), payload.get("thread_retitle")
         progress["title_input"] = {"state": state if isinstance(state, str) else "",
-                                   "retitle": retitle if isinstance(retitle, str) else "",
-                                   "decision": isinstance(payload.get("decision"), dict)}
+                                   "retitle": retitle if isinstance(retitle, str) else ""}
     if isinstance(payload.get("decision"), dict):
         # The post record a click and a later edit find this decision by.
         post_decision = dict(payload["decision"])
@@ -2222,6 +2211,7 @@ def thread_title_loop(interval: float) -> None:
             last_safety = time.monotonic()
             _run_step("title-safety", lambda: (_thread_title().safety_sweep(firstmate_home()),
                                                _thread_autoname().start_scan(retry_failed=True)))
+        _run_step("title-judge-due", lambda: _thread_autoname().start_due(firstmate_home()))
         _run_step("titles", lambda: _thread_title().run_due())
         time.sleep(interval)
 

@@ -3651,7 +3651,7 @@ def accepted(name, state):
     (outbox / f"{name}.progress.json").write_text(json.dumps({
         "request_id": os.environ["RID"], "topic_thread_id": os.environ["THREAD"], "total": 1,
         "posted_count": 1, "discord_message_ids": [message_id],
-        "title_input": {"state": state, "retitle": "", "decision": False}}))
+        "title_input": {"state": state, "retitle": ""}}))
 accepted("reply-1", "done")
 remote = {os.environ["THREAD"]: "Topic"}
 entered, release, saved = threading.Event(), threading.Event(), threading.Event()

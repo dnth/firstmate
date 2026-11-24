@@ -238,8 +238,7 @@ def apply_reply(payload, thread_id, home, rename_thread=None, read_thread=None, 
         "request_id": payload.get("request_id") or "", "total": 1, "posted_count": 1, "inflight": None,
         "discord_message_ids": [message_id], "topic_thread_id": target,
         "title_input": {"state": payload.get("thread_state") or "",
-                        "retitle": payload.get("thread_retitle") or "",
-                        "decision": isinstance(payload.get("decision"), dict)}}))
+                        "retitle": payload.get("thread_retitle") or ""}}))
     clock_file = home / "fake-clock"
     now = max(time.time(), float(clock_file.read_text()) if clock_file.exists() else 0) + title.PACE_SECS + 1
     clock_file.write_text(str(now))
@@ -1336,7 +1335,7 @@ os.environ["DISCORD_BOT_TOKEN"] = "fixture"
 context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
 payload = dict(context, origin="message", slug=slug)
 thread_id = payload["message_id"]
-poster._bot_user_id = lambda: "111111111111111111"
+poster._bot_user_id = lambda **kwargs: "111111111111111111"
 poster.save_request_thread(payload, thread_id, home, topic_name="ship the login fix")
 
 def legacy(state, owner):

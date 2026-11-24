@@ -53,6 +53,7 @@ MESSAGE_LIMIT = 40
 
 _LOCK = threading.Lock()
 _PENDING: set[tuple[Path, str]] = set()
+_WAITING: set[tuple[Path, str]] = set()
 _RUNNING: set[Path] = set()
 _SCAN_LOCK = threading.Lock()
 
@@ -105,7 +106,7 @@ def _captains(record: dict, home: Path) -> set[str]:
 
 def thread_messages(record: dict, home: Path, through: int) -> list[dict]:
     """The thread's text through message ``through``, oldest first."""
-    raw = thread_title.discord_read_messages(record["topic_thread_id"], through, MESSAGE_LIMIT)
+    raw = thread_title.discord_read_messages(home, record["topic_thread_id"], through, MESSAGE_LIMIT)
     posts = poster.firstmate_posts(home)
     captains = _captains(record, home)
     kept, seen, budget = [], set(), TEXT_BUDGET_CHARS
@@ -176,10 +177,8 @@ def judge_thread(home: Path, record: dict, through: int) -> str:
     Returns recorded, stale, waiting (Discord asked us to wait), or failed.
     """
     thread_id = record["topic_thread_id"]
-    if thread_title.blocked_until(home, thread_id) > thread_title.time.time():
-        return "waiting"
     try:
-        live = thread_title.discord_read_title(thread_id)
+        live = thread_title.discord_read_title(home, thread_id)
         base = thread_title.split_marker(live)[1]
         # The project comes only from the thread's own public name.
         project = thread_context.project_from_name(base)
@@ -191,8 +190,7 @@ def judge_thread(home: Path, record: dict, through: int) -> str:
         new_base = ""
         if not verdict["topic_fits"] and project and not thread_title.captain_named(record, live):
             new_base = propose_name(state, home)
-    except thread_title.RateLimited as err:
-        thread_title.note_rate_limit(home, thread_id, err)
+    except thread_title.RateLimited:
         return "waiting"
     except Exception as err:
         _log(f"thread {thread_id} keeps its title: {err}")
@@ -254,7 +252,12 @@ def judge_scan(home: Path | None = None, threads=None, retry_failed: bool = Fals
             failed = title.get("judge_failed") or {}
             if not retry_failed and thread_title._id(failed.get("message_id")) == through:
                 continue
-            if judge_thread(home, record, through) == "recorded":
+            outcome = judge_thread(home, record, through)
+            with _LOCK:
+                _WAITING.discard((home, thread_id))
+                if outcome == "waiting":
+                    _WAITING.add((home, thread_id))
+            if outcome == "recorded":
                 judged.append(thread_id)
         return judged
 
@@ -288,11 +291,22 @@ def after_post(home: Path, thread_id: str) -> None:
     threading.Thread(target=_run, args=(home,), name="fm-ext-autoname", daemon=True).start()
 
 
-def start_scan(home: Path | None = None, retry_failed: bool = False) -> None:
-    """Run one full judge scan in the background (the safety sweep's half)."""
+def start_due(home: Path) -> None:
+    """Resume judgments whose Discord wait has ended."""
+    now = thread_title.time.time()
+    with _LOCK:
+        due = {thread for where, thread in _WAITING if where == home
+               and thread_title.blocked_until(home, thread) <= now}
+        _WAITING.difference_update((home, thread) for thread in due)
+    if due:
+        start_scan(home, retry_failed=True, threads=due)
+
+
+def start_scan(home: Path | None = None, retry_failed: bool = False, *, threads=None) -> None:
+    """Run the requested judge scan in the background."""
     def run() -> None:
         try:
-            judge_scan(home, retry_failed=retry_failed)
+            judge_scan(home, threads=threads, retry_failed=retry_failed)
         except Exception as err:
             _log(f"judging skipped: {err}")
 
