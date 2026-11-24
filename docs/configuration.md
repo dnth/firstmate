@@ -1144,7 +1144,8 @@ A request that arrives inside a thread stays in that thread: no new thread is cr
 Firstmate can also open a topic thread no captain request started, for example one thread per tracked item, with [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh).
 It opens a titled public thread directly in the dedicated channel and posts its first message there through the same outbox, poster, receipts, chunking, and posting markers as any reply; its header owns the flags, key format, and lookup output.
 A private key names the tracked item and maps to one stable request id, printed on success and recorded in the destination context, so re-running the same open never opens a second thread and later `followup`/`final` emits and thread states land in that thread exactly as for a request-created one.
-The title is required and passes the shared title screen; an opened thread has no request text, so its title supplies the initial base name until an explicit retitle replaces it.
+The title is required and passes the shared title screen.
+An opened thread has no request text, so its title supplies the initial base name and later changes follow the [thread title reconciler](#thread-title-reconciler).
 The open has no channel argument, and the poster re-checks the dedicated channel before creating the thread: a payload whose channel is no longer dedicated fails terminally rather than opening a thread anywhere else.
 The guild is the one valid allowlist rules name for the dedicated channel, and an open refuses when those rules name none or more than one; malformed rules admit nothing.
 Unlike a request thread, an opened thread never falls back to posting in place: a create refused for a missing permission fails the first message with a reason naming the permissions the bot needs, and a create with an unknown outcome is never retried into a second thread.
@@ -1178,15 +1179,19 @@ It reads:
 - Discord's waits in `state/ext-autoname/cooldowns.json`.
 
 The decision sweep, the after-post judge, and the catch-up only add inputs or mark a thread due; none of them renames a thread.
-A pass runs when a reply is accepted, a verdict arrives, a decision opens or closes, or a pace or Discord wait ends, and a safety sweep marks every thread due at gateway start and every 10 minutes.
+A pass runs when a reply chunk is accepted, a verdict arrives, a decision opens or closes, or a pace or Discord wait ends.
+A safety sweep marks eligible threads due at gateway start and every 10 minutes.
 
 **Status source.**
-With judging on, after every Firstmate post in an eligible thread a background worker looks at the thread's newest accepted Firstmate message and, when it has no verdict yet, reads the thread's text through it and asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
-Only that newest message is judged; a message superseded before its turn is never judged, and a failed judgment is retried by the safety sweep.
+With judging on, an accepted chunk in an eligible thread queues a background scan.
+The scan selects each thread's newest accepted Firstmate message at scan start and, when that message has no verdict, reads the thread's text through it and asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
+The safety sweep retries failed judgments for the newest accepted message.
 When the topic drifted, the live title has a public `<Project> · ` prefix, and the captain has not named the thread, [`bin/fm-ext-thread-name.sh`](../bin/fm-ext-thread-name.sh) proposes a screened `<Project> · <topic>` base; with no public prefix no name is proposed.
-Model input is the thread's message text, which may include private interaction text.
+The models receive the current base title, its project prefix when present, and thread message text, which may include private interaction text.
 The status comes from the verdict on the newest accepted message; until that verdict arrives, the marker of the last paced write holds.
-When the key check confirms the Jev key is absent, the newest complete reply's explicit state is the status (`needs-you` as `open-question`, `done`, or `none` for no marker) and its screened retitle is the base; while judging is on, explicit state and retitle do not touch the title.
+When the key check confirms the Jev key is absent, the reconciler uses the latest explicit state and latest screened retitle from complete replies, which can come from different replies.
+An explicit state of `needs-you` means `open-question`, `done` means complete, and `none` requests no status marker.
+While judging is on, the reconciler ignores explicit state and retitle inputs.
 An accepted chunk counts even when later chunks of its reply fail.
 Judging, naming, and the key check run on the background worker and never delay a reply.
 
@@ -1206,6 +1211,7 @@ A marker the captain removes stays off until the marker the inputs ask for chang
 Right before a write, the reconciler reads the live title, the newest accepted message, and the decision ledger again; if any changed, it recomputes, and after three tries it leaves the thread for the next pass.
 It writes nothing while any decision's state is unknown, the ledger or the live title cannot be read, or the key check gives no clear answer.
 A write records its attempt first, so a write whose answer was lost is recognized as ours when the live title matches it.
+If the recovered write counts toward the pace, its timer starts when the request failed.
 When a reply was accepted or a decision changed before a write landed and after its inputs were read, the next pass corrects that write without waiting for our pace.
 
 **Pace and limits.**
@@ -1282,7 +1288,7 @@ The [emit header's choice guard](../bin/fm-ext-emit.sh) owns the matching rules,
 Emit requires `--decision-file` or `--no-buttons "<reason>"` on an `answer`, `followup`, or `final` marked `needs-you`.
 An `ack` is exempt, and [`bin/fm-ext-open.sh`](../bin/fm-ext-open.sh) passes both flags through for a thread it opens.
 Use [`bin/fm-ext-ask.sh`](../bin/fm-ext-ask.sh) `--free-text` or a `--decision-file` with an empty option list to record a question the captain answers in words, with no buttons.
-The [Topic threads contract](#topic-threads-one-thread-per-request) owns the markers for all recorded decisions.
+The [thread title reconciler](#thread-title-reconciler) owns the markers for recorded decisions.
 A decision with no options refuses choice-shaped text: a choice always carries its options.
 Each option button's `custom_id` carries the key and the option id, `fmd:<key>:<n>`, and every post with option buttons also carries a Discuss button, `fmd:<key>:d`.
 Channel members can read a `custom_id` through the Discord API, so the key is never written into a label or the post text, and emit refuses a post that names the key or its task id.

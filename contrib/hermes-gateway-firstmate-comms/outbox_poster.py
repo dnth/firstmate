@@ -47,7 +47,7 @@ for a later outcome header.
 rules in docs/configuration.md, "Decision buttons".
 
 Topic-thread titles are written only by ``thread_title``. A delivery keeps
-its thread state, retitle, and decision flag in its chunk progress and wakes
+its thread state and retitle in its chunk progress and wakes
 ``thread_autoname`` through ``queue_title_work``; ``sweep_thread_titles``
 marks threads whose decision posts changed. docs/configuration.md, "Thread
 title reconciler", owns the contract.
