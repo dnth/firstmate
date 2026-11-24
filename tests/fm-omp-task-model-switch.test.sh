@@ -24,7 +24,7 @@ command -v node >/dev/null 2>&1 || { echo "skip: node not found (required to run
 TMP_ROOT=$(fm_test_tmproot fm-omp-task-model-switch)
 HOST="$ROOT/tests/fm-omp-model-switch-host.mjs"
 
-OUT=$(HOST="$HOST" TMP_ROOT="$TMP_ROOT" node --input-type=module <<'JS' 2>&1
+HOST="$HOST" TMP_ROOT="$TMP_ROOT" node --input-type=module <<'JS' 2>&1
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -230,7 +230,5 @@ for (const [reason, options, target, effort, what] of refusals) {
 
 process.exit(0);
 JS
-)
 RC=$?
-printf '%s\n' "$OUT"
 [ "$RC" -eq 0 ] || fail "model-switch extension cases failed (exit $RC)"
