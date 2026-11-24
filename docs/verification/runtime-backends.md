@@ -1197,7 +1197,8 @@ This record therefore covers the loaded-closure binding, delivery into the live 
 
 ### OMP in-session model switch
 
-The model-switch guard last ran on 2026-11-23 against OMP 18.22.2 and Herdr 0.9.5 on Linux x86_64 in one guarded non-default lab session, with the Firstmate entry points and the extension both taken from one archived Git commit, using `opencode-go/deepseek-v4.1-flash` at low effort and `opencode-go/qwen3.8-flash` at medium effort.
+The recorded model-switch run used commit `c5f87a00` on 2026-11-23 against OMP 18.22.2 and Herdr 0.9.5 on Linux x86_64, with the Firstmate entry points and extension taken from that commit's archive in one guarded non-default lab session.
+It used `opencode-go/deepseek-v4.1-flash` at low effort and `opencode-go/qwen3.8-flash` at medium effort.
 It launched a real OMP worker through the production `fm-spawn.sh`, drove `fm-control.sh <id> switch-model` and `fm-send.sh` against it, resumed its session with the documented OMP resume command, and compared the global OMP `config.yml` and `models.yml` before and after.
 
 To refresh the result, the current guard extracts one resolved Git commit and runs the Firstmate entry points and helpers from that archive.
@@ -1220,17 +1221,19 @@ ok - live OMP: the global OMP config files are byte-identical before and after
 ok - live OMP model switch: guarded lab torn down with the default-session tripwire intact
 ```
 
-The current mid-task guard checks that the old model issued the foreground `sleep 25` Bash call and that the switch receipt arrived while that call was still running.
+The current guard uses a foreground `sleep 25` Bash call for its mid-task check.
+It requires the old model to issue that call and the switch receipt to arrive while the call is still running.
 It correlates the result by tool-call ID and checks the provider-qualified model for every later assistant request.
 The timing evidence is bounded to a running tool call.
 
-Throwaway print-mode probes on the same date established three more facts that the committed guard does not exercise, so the portable tests encode them with a fake host instead.
+Print-mode probes on the same date established the following OMP behavior beyond the live guard's coverage.
 `ctx.models.resolve` is fuzzy: a bare id resolves, and a trailing `:high` is dropped, so the extension accepts only an exact `provider/id` match.
 `setThinkingLevel` clamps to the model's supported efforts without throwing (`medium` on a model supporting `low,high,max` read back `low`) and leaves the level unset for a string outside the vocabulary, so the extension validates the level and reads it back.
 An explicit `--model` on resume overrides the session's recorded model, which is why the recorded `model=` in task meta must follow a switch.
 
 The guard drives Herdr only.
-The portable verb test covers tmux with a fake terminal backend.
+The [portable extension test](../../tests/fm-omp-task-model-switch.test.sh) covers fuzzy resolution and clamped effort with a fake OMP host.
+The [portable verb test](../../tests/fm-control-switch-model.test.sh) covers tmux with a fake terminal backend.
 See the [verb header](../../bin/fm-control.sh) for the backend liveness requirements.
 
 ### Workspace-removal focus safety

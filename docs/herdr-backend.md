@@ -225,7 +225,6 @@ Verified presentation limits, live against Herdr 0.9.5 protocol 22 and recorded 
 - The most recent `display-agent` report wins across sources, while `--clear-display-agent` clears only the reporting source.
 - An agent's own lifecycle reports do not rewrite it: `pane report-agent` and `pane release-agent` set or release the agent identity and leave `display_agent` alone.
 - The installed OMP integration reports only session identity and agent lifecycle, so it does not overwrite the firstmate label.
-  A future integration that reports `display_agent` would win until the next launch re-reports.
 - A model change made directly in an agent session leaves the label at the value in task metadata.
 
 The publication hook runs only for Herdr; the other backend adapters do not use its pane metadata API:
