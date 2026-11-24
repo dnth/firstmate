@@ -187,6 +187,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/hillclimb/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/implicit-state-audit/SKILL.md",
       "audience": "agent-runtime"
     },
