@@ -26,9 +26,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import outbox_poster as poster
+import thread_title
 
 base = Path(sys.argv[1])
 mode = sys.argv[2]
+thread_id = "700000000000000010"
 hermes = base / "hermes"
 fmcomms = hermes / "profiles" / "fmcomms"
 hermes.mkdir(parents=True, exist_ok=True)
@@ -49,9 +51,17 @@ else:
     raise SystemExit(f"unknown mode {mode}")
 
 auth = []
+titles = []
 
 def fake_urlopen(request, timeout):
     auth.append(request.get_header("Authorization"))
+    if request.get_method() == "PATCH":
+        assert request.full_url == f"{poster.DISCORD_API_BASE}/channels/{thread_id}", request.full_url
+        titles.append(json.loads(request.data))
+        response = io.BytesIO(b"{}")
+        response.headers = {}
+        return response
+    assert request.get_method() == "GET" and request.full_url.endswith("/users/@me"), request.full_url
     user_id = {
         "Bot fmcomms-token": "700000000000000009",
         "Bot replacement-token": "700000000000000011",
@@ -67,11 +77,11 @@ with patch.object(poster.urllib.request, "urlopen", side_effect=fake_urlopen), \
     if mode == "owning-profile-token":
         (fmcomms / ".env").write_text("DISCORD_BOT_TOKEN=replacement-token\n", encoding="utf-8")
         assert poster._bot_user_id() == "700000000000000011"
-        poster.discord_rename_thread("700000000000000010", "renamed")
+        thread_title.discord_write_title(base, thread_id, "renamed")
         (fmcomms / ".env").unlink()
         assert poster._bot_user_id() == ""
         try:
-            poster.discord_rename_thread("700000000000000010", "missing")
+            thread_title.discord_write_title(base, thread_id, "missing")
         except poster.DiscordSendError as exc:
             assert poster.classify_send_failure(exc) == "transient", exc
             assert "missing DISCORD_BOT_TOKEN" in str(exc), exc
@@ -79,7 +89,8 @@ with patch.object(poster.urllib.request, "urlopen", side_effect=fake_urlopen), \
             raise AssertionError("removed profile token still authorized a request")
         (fmcomms / ".env").write_text("HERMES_DISCORD_TOKEN=restored-token\n", encoding="utf-8")
         assert poster._bot_user_id() == "700000000000000012"
-        poster.discord_rename_thread("700000000000000010", "restored")
+        thread_title.discord_write_title(base, thread_id, "restored")
+        assert titles == [{"name": "renamed"}, {"name": "restored"}], titles
 
 print(json.dumps({"user_id": user_id, "auth": auth, "stderr": stderr.getvalue()}))
 PY

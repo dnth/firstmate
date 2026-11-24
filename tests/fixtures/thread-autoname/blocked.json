@@ -1,0 +1,29 @@
+{
+  "title": "Aceh · OCR deploy",
+  "request": "Deploy the Aceh OCR update to production.",
+  "posts": [
+    "Starting the deploy.",
+    "The deploy failed: the production server refused our deploy key, so nothing changed. Work is stopped until server access is restored."
+  ],
+  "jev": {
+    "model": "jev-1.14.0",
+    "answers": {
+      "status": {
+        "type": "choice",
+        "choice": "blocked",
+        "confidence": 1.0,
+        "probabilities": {
+          "open-question": 0.0,
+          "running": 0.0,
+          "done": 0.0,
+          "blocked": 1.0
+        }
+      },
+      "topic_fits": {
+        "type": "noul",
+        "noul": 0.98
+      }
+    }
+  },
+  "recorded": "jev-latest answered as jev-1.14.0 on 2026-11-23 for this request and posts"
+}

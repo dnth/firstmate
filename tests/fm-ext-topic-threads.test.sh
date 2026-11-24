@@ -53,7 +53,8 @@ setup_home() {
 home_env() {
   local home=$1
   shift
-  PATH="$BASE_PATH" \
+  env -u TYPESAFE_API_KEY -u TYPESAFE_API_KEY_PRIVATE \
+    PATH="$BASE_PATH" \
     FM_HOME="$home" \
     FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" \
@@ -133,25 +134,132 @@ emit_as() {
   emit_reply "$home" "${args[@]}"
 }
 
-# The stand-in Discord edge for renames. An extra {"kind":"actual",
+# The stand-in Discord edge for titles. An extra {"kind":"actual",
 # "thread_id":...,"name":...} argument is the name Discord really shows for
 # that thread (a manual rename); without one Discord shows the recorded name.
 # {"kind":"rename-fail","outcome":"transient"|"permanent"} makes every rename
-# fail with that classified outcome.
-deliver() {
-  local home=$1
-  shift
-  home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$@" <<'PY'
-import io, json, os, sys
+# fail with that classified outcome. After delivery the title worker runs and
+# the reconciler takes one pass; every call advances a per-home fake clock past
+# the reconciler's ten-minute pace, so each step may change the title once.
+TITLE_EDGE=$(cat <<'PY'
+import io, json, os, sys, threading, time
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0, os.environ["PYTHONPATH"])
 import outbox_poster
+import thread_title
 home = Path(sys.argv[1])
 os.environ["FM_HOME"] = str(home)
 extra = [json.loads(a) for a in sys.argv[2:]]
-threads = {item["request"]: item for item in extra if item.get("kind") == "thread"}
 actual = {item["thread_id"]: item["name"] for item in extra if item.get("kind") == "actual"}
 failing = [item["outcome"] for item in extra if item.get("kind") == "rename-fail"]
+renames = []
+def snowflake():
+    # A real-looking Discord id, so its embedded time is this moment.
+    snowflake.seq = getattr(snowflake, "seq", 0) + 1
+    return str(((int(time.time() * 1000) - 1420070400000) << 22) + snowflake.seq)
+clock_file = home / "fake-clock"
+now = max(time.time(), float(clock_file.read_text()) if clock_file.exists() else 0) + thread_title.PACE_SECS + 1
+clock_file.write_text(str(now))
+publish = [item["file"] for item in extra if item.get("kind") == "post-after-ledger-read"]
+def fake_rename(thread_id, name):
+    if failing:
+        raise outbox_poster.DiscordSendError(failing[0], "discord HTTP 500" if failing[0] == "transient"
+                                             else "discord HTTP 403", 500 if failing[0] == "transient" else 403)
+    renames.append({"rename": [thread_id, name]})
+    actual[thread_id] = name
+    return {}
+
+decision_threads = outbox_poster.decision_threads
+def read_decisions(home, thread_id=""):
+    summary = decision_threads(home, thread_id)
+    if thread_id and publish:
+        file = home / "state" / "ext-outbox" / publish.pop()
+        result = outbox_poster.deliver_one(file, home=home, react=lambda *args: None,
+                                           send=lambda payload: {"discord_message_id": snowflake()})
+        assert result == "sent", result
+    return summary
+
+outbox_poster.decision_threads = read_decisions
+
+def fake_read(thread_id):
+    if thread_id in actual:
+        return actual[thread_id]
+    return outbox_poster.load_thread_record_by_id(thread_id, home).get("topic_name", "")
+outbox_poster.discord_thread_name = fake_read
+if any(item["kind"] == "decision-ledger-offline" for item in extra):
+    outbox_poster._decision_cli = lambda: home / "missing-decision-cli"
+def settle_titles():
+    # The title worker finishes, the decision-post sweep settles closed posts
+    # and marks threads whose decisions changed, the safety sweep marks every
+    # thread, and the reconciler takes its loop passes at the fake time until
+    # nothing it can write now is left due.
+    with patch.object(thread_title, "time", SimpleNamespace(time=lambda: now)):
+        for sweep in (True, False):
+            for worker in threading.enumerate():
+                if worker.name == "fm-ext-autoname":
+                    worker.join(timeout=60)
+            if sweep:
+                try:  # the gateway's step runner logs and carries on
+                    outbox_poster.reconcile_decision_posts(home, full=True, edit=lambda *args: None)
+                except Exception as err:
+                    print(f"decision sweep skipped: {err}", file=sys.stderr)
+            outbox_poster.sweep_thread_titles(home)
+            if sweep:
+                thread_title.safety_sweep(home)
+            thread_title.run_due(home, rename=fake_rename, read_thread=fake_read)
+PY
+)
+
+# A reply Discord accepted, recorded as the poster records it (chunk progress
+# with the reply's own thread state and retitle), plus one reconciler pass as
+# the gateway runs it while judging is off, on the same per-home fake clock as
+# deliver. Discord shows the last title Firstmate wrote unless read_thread
+# says otherwise.
+cat > "$TMP_ROOT/title_helper.py" <<'PY'
+import json, time
+from types import SimpleNamespace
+from unittest.mock import patch
+import outbox_poster as poster
+import thread_title as title
+
+_seq = [0]
+
+
+def apply_reply(payload, thread_id, home, rename_thread=None, read_thread=None, thread_owner=None):
+    target = poster.title_thread_for(payload, thread_id, home)
+    if not target:
+        return "skipped"
+    _seq[0] += 1
+    message_id = str(((int(time.time() * 1000) - 1420070400000) << 22) + _seq[0])
+    path = home / "state" / "ext-outbox" / f"applied-{message_id}.progress.json"
+    path.write_text(json.dumps({
+        "request_id": payload.get("request_id") or "", "total": 1, "posted_count": 1, "inflight": None,
+        "discord_message_ids": [message_id], "topic_thread_id": target,
+        "title_input": {"state": payload.get("thread_state") or "",
+                        "retitle": payload.get("thread_retitle") or ""}}))
+    clock_file = home / "fake-clock"
+    now = max(time.time(), float(clock_file.read_text()) if clock_file.exists() else 0) + title.PACE_SECS + 1
+    clock_file.write_text(str(now))
+
+    def rename(tid, name):
+        result = (rename_thread or (lambda *args: None))(tid, name)
+        return result if isinstance(result, dict) else {}
+
+    def recorded(tid):
+        return poster.load_thread_record_by_id(tid, home).get("topic_name", "")
+
+    with patch.object(title, "time", SimpleNamespace(time=lambda: now)):
+        return title.reconcile(home, target, judging="off", rename=rename,
+                               read_thread=read_thread or recorded, thread_owner=thread_owner)
+PY
+
+deliver() {
+  local home=$1
+  shift
+  home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" -c "$TITLE_EDGE"'
+threads = {item["request"]: item for item in extra if item.get("kind") == "thread"}
 sends = []
 def fake_create(payload, name):
     item = threads.get(payload["request_id"], {})
@@ -163,21 +271,7 @@ def fake_create(payload, name):
 posted = []
 def send(payload):
     posted.append({"thread": payload["thread_id"], "text": payload["text"]})
-    return {"ok": True, "discord_message_id": "9%09d" % len(posted)}
-renames = []
-def fake_rename(thread_id, name):
-    if failing:
-        raise outbox_poster.DiscordSendError(failing[0], "discord HTTP 429" if failing[0] == "transient"
-                                             else "discord HTTP 403", 429 if failing[0] == "transient" else 403)
-    renames.append({"rename": [thread_id, name]})
-    return {"ok": True, "thread_id": thread_id}
-def fake_read(thread_id):
-    if thread_id in actual:
-        return actual[thread_id]
-    return outbox_poster.load_thread_record_by_id(thread_id, home).get("topic_name", "")
-outbox_poster.discord_thread_name = fake_read
-if any(item["kind"] == "decision-ledger-offline" for item in extra):
-    outbox_poster._decision_cli = lambda: home / "missing-decision-cli"
+    return {"ok": True, "discord_message_id": snowflake()}
 if any(item["kind"] == "discord-http" for item in extra):
     os.environ["DISCORD_BOT_TOKEN"] = "fixture-token"
     bot_id = "888888888888888888"
@@ -191,12 +285,13 @@ if any(item["kind"] == "discord-http" for item in extra):
         thread_id = request.full_url.split("/")[-2]
         posted.append({"thread": thread_id, "text": body["content"]})
         print("discord-post=%s" % json.dumps(body, ensure_ascii=False))
-        return io.BytesIO(json.dumps({"id": "9%09d" % len(posted), "channel_id": thread_id}).encode())
+        return io.BytesIO(json.dumps({"id": snowflake(), "channel_id": thread_id}).encode())
 
     outbox_poster.urllib.request.urlopen = respond
     send = None
 results = outbox_poster.drain_outbox(send=send, home=home, react=lambda *args: None,
-                                   create_thread=fake_create, rename_thread=fake_rename)
+                                     create_thread=fake_create)
+settle_titles()
 print("results=" + ",".join(sorted(results)))
 for entry in sends:
     print("thread-create=%s" % "/".join(entry["create"]))
@@ -204,47 +299,20 @@ for entry in renames:
     print("thread-rename=%s" % "/".join(entry["rename"]))
 for entry in posted:
     print("posted-to=%s %s" % (entry["thread"], entry["text"]))
-PY
+' "$home" "$@"
 }
 
-# One periodic thread-state pass against the same stand-in Discord edge as
-# deliver; takes the same extra arguments and prints each rename it made.
+# One periodic pass - the decision sweep, then the reconciler - against the
+# same stand-in Discord edge as deliver; prints each rename it made.
 sweep() {
   local home=$1
   shift
-  home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$@" <<'PY'
-import json, os, sys
-from pathlib import Path
-sys.path.insert(0, os.environ["PYTHONPATH"])
-import outbox_poster
-home = Path(sys.argv[1])
-os.environ["FM_HOME"] = str(home)
-extra = [json.loads(a) for a in sys.argv[2:]]
-actual = {item["thread_id"]: item["name"] for item in extra if item.get("kind") == "actual"}
-failing = [item["outcome"] for item in extra if item.get("kind") == "rename-fail"]
-publish = [item["file"] for item in extra if item.get("kind") == "post-during-rename"]
-renames = []
-def fake_rename(thread_id, name):
-    if failing:
-        raise outbox_poster.DiscordSendError(failing[0], "discord HTTP 429", 429)
-    renames.append([thread_id, name])
-    actual[thread_id] = name
-    if publish:
-        file = home / "state" / "ext-outbox" / publish.pop()
-        result = outbox_poster.deliver_one(file, home=home, react=lambda *args: None,
-                                          send=lambda payload: {"discord_message_id": "900000000001"},
-                                          rename_thread=fake_rename)
-        if result != "sent":
-            raise RuntimeError("could not publish the decision during rename: %s" % result)
-def fake_read(thread_id):
-    if thread_id in actual:
-        return actual[thread_id]
-    return outbox_poster.load_thread_record_by_id(thread_id, home).get("topic_name", "")
-outbox_poster.reconcile_thread_states(home=home, rename_thread=fake_rename, read_thread=fake_read)
-for thread_id, name in renames:
-    print("thread-rename=%s/%s" % (thread_id, name))
+  home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" -c "$TITLE_EDGE"'
+settle_titles()
+for entry in renames:
+    print("thread-rename=%s" % "/".join(entry["rename"]))
 print("swept")
-PY
+' "$home" "$@"
 }
 
 # Count the rename lines in captured deliver or sweep output.
@@ -844,10 +912,11 @@ test_13_rename_never_blocks_and_never_leaves_home() {
   assert_contains "$out" "posted-to=$CHANNEL On it." "the fallback must post in place"
   [ "$(printf '%s\n' "$out" | grep -c '^thread-rename=')" = 0 ] \
     || fail "no thread means no rename: $out"
-  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN:$TMP_ROOT" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
 import json, sys
 from pathlib import Path
 import outbox_poster as poster
+from title_helper import apply_reply
 home, slug = Path(sys.argv[1]), sys.argv[2]
 context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
 base = {"request_id": context["request_id"], "slug": slug, "origin": "message",
@@ -859,17 +928,17 @@ def boom(thread_id, name):
     raise RuntimeError("discord 429 rate limited")
 poster.save_request_thread(base, "777777777777777777", home, topic_name="ship the login fix",
     creator="firstmate")
-assert poster.maybe_rename_topic_thread(base, "777777777777777777", home, rename_thread=boom) == "777777777777777777"
+assert apply_reply(base, "777777777777777777", home, rename_thread=boom) == "failed"
 assert calls == ["✅ ship the login fix"]
 slash = dict(base, origin="slash")
 calls.clear()
-assert poster.maybe_rename_topic_thread(slash, "777777777777777777", home, rename_thread=boom) == "777777777777777777"
+assert apply_reply(slash, "777777777777777777", home, rename_thread=boom) == "skipped"
 assert calls == []
 foreign = dict(base, thread_id="999999999999999999")
-assert poster.maybe_rename_topic_thread(foreign, "999999999999999999", home, rename_thread=boom) == "999999999999999999"
+assert apply_reply(foreign, "999999999999999999", home, rename_thread=boom) == "skipped"
 assert calls == []
 inthread = dict(base, thread_id="333333333333333333")
-assert poster.maybe_rename_topic_thread(inthread, "333333333333333333", home, rename_thread=boom) == "333333333333333333"
+assert apply_reply(inthread, "333333333333333333", home, rename_thread=boom) == "skipped"
 assert calls == []
 PY
 then fail "rename failures must be swallowed and foreign threads never renamed"
@@ -884,11 +953,12 @@ test_14_legacy_titles_markers_and_long_tokens() {
   setup_home "$home"
   slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
   legacy=$(expected_topic "$MESSAGE")
-  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$legacy" <<'PY'
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN:$TMP_ROOT" "$PYTHON_BIN" - "$home" "$slug" "$legacy" <<'PY'
 import io, json, os, subprocess, sys
 from pathlib import Path
 from unittest.mock import patch
 import outbox_poster as poster
+from title_helper import apply_reply
 home, slug, legacy = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 context_path = home / "state/ext-context" / (slug + ".json")
 context = json.loads(context_path.read_text())
@@ -929,8 +999,8 @@ for text in (None, "ship the login fix"):
     renames = []
     for state, prefix in (("needs-you", "❓ "), ("done", "✅ "), ("none", "")):
         marked = dict(payload, thread_state=state)
-        assert poster.maybe_rename_topic_thread(marked, "777777777777777777", home,
-            rename_thread=lambda tid, name: renames.append(name)) == "777777777777777777"
+        assert apply_reply(marked, "777777777777777777", home,
+            rename_thread=lambda tid, name: renames.append(name)) == "applied"
         assert renames[-1] == prefix + legacy
         assert poster.thread_name_for(marked, home) == legacy
     poster.request_progress_path(payload, home).unlink()
@@ -957,11 +1027,12 @@ test_15_existing_threads_keep_the_winning_name() {
   setup_home "$home"
   slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
   legacy=$(expected_topic "$MESSAGE")
-  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" "$legacy" <<'PY'
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN:$TMP_ROOT" "$PYTHON_BIN" - "$home" "$slug" "$legacy" <<'PY'
 import io, json, os, sys
 from pathlib import Path
 from unittest.mock import patch
 import outbox_poster as poster
+from title_helper import apply_reply
 home, slug, legacy = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 context_path = home / "state/ext-context" / (slug + ".json")
 context = json.loads(context_path.read_text())
@@ -973,8 +1044,8 @@ thread_id = payload["message_id"]
 poster.save_request_thread(payload, thread_id, home, creator="firstmate")
 renames = []
 assert poster.thread_name_for(payload, home) == legacy
-poster.maybe_rename_topic_thread(payload, thread_id, home,
-    rename_thread=lambda tid, name: renames.append(name))
+apply_reply(payload, thread_id, home, rename_thread=lambda tid, name: renames.append(name),
+            read_thread=lambda tid: legacy)
 assert renames == ["✅ " + legacy]
 poster.request_progress_path(payload, home).unlink()
 context["request_text"] = "ship the login fix"
@@ -988,8 +1059,8 @@ with patch.object(poster.urllib.request, "urlopen", side_effect=OSError("offline
     assert poster.ensure_topic_thread(payload, {}, home, lost_create) == thread_id
 assert not poster.load_request_topic(payload, home)
 renames.clear()
-poster.maybe_rename_topic_thread(payload, thread_id, home,
-    rename_thread=lambda tid, name: renames.append(name))
+apply_reply(payload, thread_id, home, rename_thread=lambda tid, name: renames.append(name),
+            read_thread=lambda tid: legacy)
 assert renames == []
 for winner in ("InfoConnect · winning title", "❓ InfoConnect · winning title", "ship the login fix"):
     def read_thread(request, **kwargs):
@@ -1005,8 +1076,7 @@ for winner in ("InfoConnect · winning title", "❓ InfoConnect · winning title
     renames.clear()
     for state in ("done", "needs-you", "none"):
         marked = dict(payload, thread_state=state)
-        poster.maybe_rename_topic_thread(marked, thread_id, home,
-            rename_thread=lambda tid, name: renames.append(name))
+        apply_reply(marked, thread_id, home, rename_thread=lambda tid, name: renames.append(name))
         assert renames == []
         assert poster.load_request_topic(payload, home)["topic_name"] == winner
     poster.request_progress_path(payload, home).unlink()
@@ -1021,11 +1091,12 @@ test_16_shared_title_screen_and_nickname_mentions() {
   home="$TMP_ROOT/c16"
   setup_home "$home"
   slug=$(intake_as "$home" "<@!80351110224678912> release status" "$MESSAGE" "$CHANNEL" message)
-  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN:$TMP_ROOT" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
 import io, json, os, subprocess, sys
 from pathlib import Path
 from unittest.mock import patch
 import outbox_poster as poster
+from title_helper import apply_reply
 home, slug = Path(sys.argv[1]), sys.argv[2]
 context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
 assert context["topic"] == "release status"
@@ -1057,9 +1128,10 @@ for generation, title in enumerate(bad_titles, 1):
         assert poster.discord_create_thread(payload, title)["thread_id"] == "777777777777777777"
     poster.save_request_thread(payload, "777777777777777777", home,
         topic_name=title, creating_title=title, creator="firstmate")
+    # Discord shows the screened name the create used, never the stored bytes.
     renames = []
-    poster.maybe_rename_topic_thread(dict(payload, thread_state="done"), "777777777777777777", home,
-        rename_thread=lambda tid, name: renames.append(name))
+    apply_reply(dict(payload, thread_state="done"), "777777777777777777", home,
+        rename_thread=lambda tid, name: renames.append(name), read_thread=lambda tid: "release status")
     assert renames == ["✅ release status"], title
     poster.request_progress_path(payload, home).unlink()
 title = "  Firstmate · release status  "
@@ -1127,42 +1199,23 @@ test_17_in_thread_requests_mark_their_thread() {
   assert_contains "$out" "thread-rename=777777777777777777/✅ InfoConnect · v0.5.11 status" \
     "the creating request must build on the name the in-thread change left"
 
-  # A rate-limited rename must leave the reply delivered and receipted.
+  # A refused title write must leave the reply delivered and receipted.
   emit_as "$home" "$rid2" followup 3 "Still blocked." "" "needs-you" >/dev/null
-  out=$(
-    home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
-import os, sys
-from pathlib import Path
-sys.path.insert(0, os.environ["PYTHONPATH"])
-import outbox_poster as poster
-home = Path(sys.argv[1])
-os.environ["FM_HOME"] = str(home)
-posted = []
-def send(payload):
-    posted.append((payload["thread_id"], payload["text"]))
-    return {"ok": True, "discord_message_id": "999999999999999999"}
-def boom(thread_id, name):
-    raise RuntimeError("discord 429 rate limited")
-results = poster.drain_outbox(send=send, home=home, rename_thread=boom)
-print("results=" + ",".join(sorted(results)))
-for thread, text in posted:
-    print("posted-to=%s %s" % (thread, text))
-PY
-  )
-  assert_contains "$out" "results=sent" "a rate-limited rename must not fail the reply"
+  out=$(deliver "$home" '{"kind":"rename-fail","outcome":"transient"}')
+  assert_contains "$out" "results=sent" "a refused title write must not fail the reply"
   assert_contains "$out" "posted-to=777777777777777777 Still blocked." \
-    "a rate-limited in-thread rename must still deliver the reply"
+    "a refused in-thread title write must still deliver the reply"
   [ -f "$home/state/ext-outbox/$slug2.followup.3.receipt.json" ] \
-    || fail "a rate-limited rename must still record the reply receipt"
+    || fail "a refused title write must still record the reply receipt"
 
   # Only a thread this home created is ever renamed: a captain-made thread in
   # the dedicated channel has no record, and any other channel or a DM is not
   # the dedicated channel at all.
-  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug2" <<'PY'
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN:$TMP_ROOT" "$PYTHON_BIN" - "$home" "$slug2" <<'PY'
 import json, os, sys
 from pathlib import Path
-sys.path.insert(0, os.environ["PYTHONPATH"])
 import outbox_poster as poster
+from title_helper import apply_reply
 home, slug2 = Path(sys.argv[1]), sys.argv[2]
 os.environ["FM_HOME"] = str(home)
 context = json.loads((home / "state/ext-context" / (slug2 + ".json")).read_text())
@@ -1173,24 +1226,23 @@ calls = []
 def boom(thread_id, name):
     calls.append(name)
     raise RuntimeError("discord 429 rate limited")
-assert poster.maybe_rename_topic_thread(base, "", home, rename_thread=boom) == base["thread_id"]
+apply_reply(base, "", home, rename_thread=boom)
 assert calls == ["❓ InfoConnect · v0.5.11 status"], calls
 for guarded in (dict(base, thread_id="444444444444444444"),
                 dict(base, channel_id="555555555555555555"),
                 dict(base, channel_id="666666666666666666", thread_id="666666666666666666")):
     calls.clear()
-    poster.maybe_rename_topic_thread(guarded, "", home, rename_thread=boom)
+    apply_reply(guarded, "", home, rename_thread=boom)
     assert calls == [], guarded
-# A tampered stored name never reaches Discord: the base is re-validated
-# through the creating request exactly as a create is, so the rename carries
-# the name the rules can produce, not the bytes in the record.
+# A tampered stored name never reaches Discord: the title is built on the
+# base Discord itself shows, never on the bytes in the record.
 record_path = sorted((home / "state/ext-outbox").glob("*.thread.json"))[0]
 record = json.loads(record_path.read_text())
 record["topic_name"] = "tampered thread name"
 record_path.write_text(json.dumps(record))
 calls.clear()
-poster.maybe_rename_topic_thread(base, "", home,
-    rename_thread=lambda tid, name: calls.append(name))
+apply_reply(base, "", home, rename_thread=lambda tid, name: calls.append(name),
+            read_thread=lambda tid: "✅ InfoConnect · v0.5.11 status")
 assert calls == ["❓ InfoConnect · v0.5.11 status"], calls
 PY
   then fail "in-thread renames must stay inside Firstmate threads"
@@ -1216,7 +1268,7 @@ path = home / "state/ext-outbox" / (slug + ".answer.1.json")
 payload = json.loads(path.read_text())
 thread_id = payload["message_id"]
 name = "InfoConnect · v0.5.11 status"
-posted, renames = [], []
+posted = []
 def create(request, title):
     raise poster.DiscordSendError("permanent", "already exists", 400, {"code": 160004})
 def fetch(request, **kwargs):
@@ -1227,14 +1279,12 @@ def send(request):
     posted.append((request["thread_id"], request["text"]))
     return {"ok": True, "discord_message_id": "900000000000000001"}
 with patch.object(poster.urllib.request, "urlopen", fetch):
-    assert poster.deliver_one(path, send=send, home=home, create_thread=create,
-        rename_thread=lambda tid, title: renames.append(title)) == "sent"
+    assert poster.deliver_one(path, send=send, home=home, create_thread=create) == "sent"
 assert posted == [(thread_id, "Using your thread.")]
-assert renames == []
 record = poster.load_request_topic(payload, home)
 assert record["creator"] == "adopted"
 assert record["topic_name"] == name
-assert record["thread_state"] == ""
+assert record["title"] == {}
 assert (path.parent / (slug + ".answer.1.receipt.json")).is_file()
 PY
   then fail "recovering a captain-made thread must route without renaming"
@@ -1254,7 +1304,7 @@ PY
       || fail "an in-thread reply must retain its receipt"
     [ -f "$home/state/ext-outbox/$slug.followup.$generation.receipt.json" ] \
       || fail "a top-level reply must retain its receipt"
-    jq -e '.creator == "adopted" and .topic_name == "InfoConnect · v0.5.11 status" and .thread_state == ""' \
+    jq -e '.creator == "adopted" and .topic_name == "InfoConnect · v0.5.11 status" and (has("title") | not)' \
       "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
       || fail "state changes must leave the adopted thread record untouched"
     generation=$((generation + 1))
@@ -1274,17 +1324,18 @@ test_19_legacy_records_need_proved_ownership() {
   home="$TMP_ROOT/c19"
   setup_home "$home"
   slug=$(intake_as "$home" "ship the login fix" "$MESSAGE" "$CHANNEL" message)
-  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN:$TMP_ROOT" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
 import json, os, sys
 from pathlib import Path
 import outbox_poster as poster
+from title_helper import apply_reply
 home, slug = Path(sys.argv[1]), sys.argv[2]
 os.environ["FM_HOME"] = str(home)
 os.environ["DISCORD_BOT_TOKEN"] = "fixture"
 context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
 payload = dict(context, origin="message", slug=slug)
 thread_id = payload["message_id"]
-poster._bot_user_id = lambda: "111111111111111111"
+poster._bot_user_id = lambda **kwargs: "111111111111111111"
 poster.save_request_thread(payload, thread_id, home, topic_name="ship the login fix")
 
 def legacy(state, owner):
@@ -1295,8 +1346,8 @@ def legacy(state, owner):
     data["topic_name"] = "ship the login fix"
     path.write_text(json.dumps(data))
     renames = []
-    poster.maybe_rename_topic_thread(dict(payload, thread_state=state), thread_id, home,
-        rename_thread=lambda tid, name: renames.append(name), thread_owner=owner)
+    apply_reply(dict(payload, thread_state=state), thread_id, home,
+                rename_thread=lambda tid, name: renames.append(name), thread_owner=owner)
     return renames
 
 # The bot owns the thread, so the marker lands and the record gains provenance.
@@ -1323,8 +1374,7 @@ def counted(tid):
     return "111111111111111111"
 def refuse(tid, name):
     raise AssertionError("an adopted thread must never be renamed")
-assert poster.maybe_rename_topic_thread(dict(payload, thread_state="done"), thread_id, home,
-    rename_thread=refuse, thread_owner=counted) == thread_id
+apply_reply(dict(payload, thread_state="done"), thread_id, home, rename_thread=refuse, thread_owner=counted)
 assert asked == []
 PY
   then fail "a record without provenance must need proved thread ownership"
@@ -1364,7 +1414,7 @@ test_20_button_requests_mark_their_thread() {
     "a button request's answer must post in the thread it was clicked in"
   assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
     "a none from an in-thread button request must clear the question mark"
-  jq -e '.thread_state == "none" and .topic_name == "Aceh · long chats" and .rename.outcome == "applied"' \
+  jq -e '.topic_name == "Aceh · long chats" and .title.last.outcome == "applied"' \
     "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "the thread record must follow the button request's state: $(cat "$home/state/ext-outbox/$slug.thread.json")"
   pass "20 a decision-button request marks the thread it was clicked in"
@@ -1401,13 +1451,13 @@ test_21_resolving_the_last_decision_clears_the_marker() {
   resolve_decision_key "$home" north North
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "an open second decision must keep the marker: $out"
-  jq -e '.thread_state == "needs-you"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
-    || fail "the record must stay needs-you while a decision is open"
+  jq -e '.topic_name == "❓ Aceh · long chats"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "the thread must stay marked while a decision is open"
   resolve_decision_key "$home" south South
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
     "resolving the last open decision must clear the marker"
-  jq -e '.thread_state == "none" and .topic_name == "Aceh · long chats" and .rename.outcome == "applied"' \
+  jq -e '.topic_name == "Aceh · long chats" and .title.last.outcome == "applied"' \
     "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "the auto-clear must be recorded: $(cat "$home/state/ext-outbox/$slug.thread.json")"
   out=$(sweep "$home")
@@ -1424,10 +1474,9 @@ test_21_resolving_the_last_decision_clears_the_marker() {
 
 # --- 22. the real thread name wins over a drifted record ---------------------
 #
-# A manual rename on Discord leaves the stored name stale. Before trusting a
-# stored name that already matches the wanted one, the poster reads the name
-# Discord shows, so the next needs-you adds the prefix and the next none
-# removes it.
+# The reconciler builds on the name Discord shows, not the stored one. A
+# marker the captain took off stays off until the thread's state changes; a
+# marker the record never wrote is replaced by the one the inputs ask for.
 
 test_22_drifted_names_reconcile_with_discord() {
   local home slug out
@@ -1438,15 +1487,14 @@ test_22_drifted_names_reconcile_with_discord() {
   deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
   jq -e '.topic_name == "❓ Aceh · long chats"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "the record must store the marked name"
-  # Someone renamed the thread to its bare name on Discord.
+  # The captain took the marker off on Discord; a reminder is no state change.
   emit_as "$home" "$RID" followup 2 "Still need your call." "" "needs-you" >/dev/null
   out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"Aceh · long chats"}')
-  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
-    "a needs-you must re-add the prefix a manual rename removed"
-  emit_as "$home" "$RID" followup 3 "Thanks, carrying on." "" "none" >/dev/null
+  [ "$(renames_in "$out")" = 0 ] || fail "a marker the captain removed must stay off for a reminder: $out"
+  emit_as "$home" "$RID" followup 3 "Landed." "" "done" >/dev/null
   out=$(deliver "$home")
-  assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
-    "the next none must remove the prefix again"
+  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · long chats" \
+    "the next state change must bring a marker back"
   # The reverse drift: Discord shows a marker the record does not know about.
   emit_as "$home" "$RID" followup 4 "Still carrying on." "" "none" >/dev/null
   out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"❓ Aceh · long chats"}')
@@ -1455,16 +1503,16 @@ test_22_drifted_names_reconcile_with_discord() {
   emit_as "$home" "$RID" followup 5 "No change." "" "none" >/dev/null
   out=$(deliver "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "a name Discord already shows must make no rename call: $out"
-  jq -e '.rename.outcome == "unchanged"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+  jq -e '.title.last.outcome == "unchanged"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "an already-correct name must be recorded as unchanged"
   pass "22 the real thread name wins over a drifted record"
 }
 
 # --- 23. rename outcomes are recorded and failures retried -------------------
 #
-# Every rename outcome lands in the thread record. A failed rename keeps the
-# wanted state, names the error, and is retried: a transient failure by the
-# periodic pass, any failure by the next reply in that thread.
+# Every title outcome lands in the thread record. A failed write names the
+# error and is retried: a transient failure by the periodic pass, a permanent
+# refusal only once the thread gets its next reply.
 
 test_23_rename_failures_are_recorded_and_retried() {
   local home slug out record
@@ -1477,18 +1525,17 @@ test_23_rename_failures_are_recorded_and_retried() {
   emit_as "$home" "$RID" followup 2 "Need your call." "" "needs-you" >/dev/null
   out=$(deliver "$home" '{"kind":"rename-fail","outcome":"transient"}')
   assert_contains "$out" "results=sent" "a failed rename must not fail the reply"
-  jq -e '.thread_state == "needs-you" and .topic_name == "Aceh · long chats"
-    and .rename.outcome == "failed" and .rename.name == "❓ Aceh · long chats"
-    and (.rename.error | test("429")) and .rename.retryable == true' "$record" >/dev/null \
+  jq -e '.topic_name == "Aceh · long chats"
+    and .title.last.outcome == "failed" and (.title.last.error | test("500"))' "$record" >/dev/null \
     || fail "a failed rename must be recorded with its error: $(cat "$record")"
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
     "the periodic pass must retry a transient rename failure"
-  jq -e '.topic_name == "❓ Aceh · long chats" and .rename.outcome == "applied"' "$record" >/dev/null \
+  jq -e '.topic_name == "❓ Aceh · long chats" and .title.last.outcome == "applied"' "$record" >/dev/null \
     || fail "a retried rename must be recorded as applied: $(cat "$record")"
   emit_as "$home" "$RID" final 3 "Landed." "" "done" >/dev/null
   out=$(deliver "$home" '{"kind":"rename-fail","outcome":"permanent"}')
-  jq -e '.thread_state == "done" and .rename.outcome == "failed" and .rename.retryable == false' \
+  jq -e '.title.last.outcome == "failed" and .title.refused.name == "✅ Aceh · long chats"' \
     "$record" >/dev/null || fail "a permanent failure must be recorded: $(cat "$record")"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "the periodic pass must leave a permanent failure for the next reply: $out"
@@ -1496,7 +1543,7 @@ test_23_rename_failures_are_recorded_and_retried() {
   out=$(deliver "$home")
   assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · long chats" \
     "the next reply in the thread must retry a failed rename"
-  jq -e '.topic_name == "✅ Aceh · long chats" and .rename.outcome == "applied"' "$record" >/dev/null \
+  jq -e '.topic_name == "✅ Aceh · long chats" and .title.last.outcome == "applied"' "$record" >/dev/null \
     || fail "the reply's retry must be recorded: $(cat "$record")"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "an applied rename must not be retried: $out"
@@ -1505,10 +1552,9 @@ test_23_rename_failures_are_recorded_and_retried() {
 
 # --- 24. a reminder marked while a decision is open clears with it ----------
 #
-# Firstmate may re-mark needs-you after a decision post, as a reminder, while
-# that decision is still open. The marker belongs to that open decision, so
-# resolving it still clears the thread even though the reminder came later
-# than the post.
+# The decision post itself marks the thread at once. Firstmate may re-mark
+# needs-you after it, as a reminder, while that decision is still open: the
+# reminder belongs to that decision, so resolving it still clears the thread.
 
 test_24_reminders_while_a_decision_is_open_clear_with_it() {
   local home slug out
@@ -1519,19 +1565,20 @@ test_24_reminders_while_a_decision_is_open_clear_with_it() {
   deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
   open_decision_key "$home" north
   emit_decision_post "$home" "$RID" 2 north
-  deliver "$home" >/dev/null
-  FM_EXT_NOW_OVERRIDE=$(( $(date +%s) + 120 )) \
-    emit_as "$home" "$RID" followup 3 "Reminder: the route call above still needs you." "" "needs-you" >/dev/null
   out=$(deliver "$home")
   assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
-    "the reminder must mark the thread needs-you"
+    "the decision post must mark the thread as soon as it lands"
+  emit_as "$home" "$RID" followup 3 "Reminder: the route call above still needs you." "" "needs-you" >/dev/null
+  out=$(deliver "$home")
+  [ "$(renames_in "$out")" = 0 ] || fail "a reminder must keep the decision's marker: $out"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "an open decision must keep the reminder's marker: $out"
   resolve_decision_key "$home" north North
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
     "resolving the decision the reminder was about must clear the marker"
-  jq -e '.thread_state == "none"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+  jq -e '.topic_name == "Aceh · long chats"' \
+    "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "the cleared reminder must be recorded: $(cat "$home/state/ext-outbox/$slug.thread.json")"
   pass "24 a reminder marked while a decision is open clears with it"
 }
@@ -1600,13 +1647,13 @@ PY
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
     "an unpublished open decision must not prevent auto-clear"
-  jq -e '.thread_state == "none"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+  jq -e '.topic_name == "Aceh · long chats"' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "auto-clear must be recorded despite the failed first send"
-  FM_EXT_NOW_OVERRIDE=$(( $(date +%s) + 120 )) \
-    emit_as "$home" "$RID" followup 5 "A new question." "" "needs-you" >/dev/null
+  emit_as "$home" "$RID" followup 5 "A new question." "" "needs-you" >/dev/null
   deliver "$home" >/dev/null
-  jq -e '.marked_open != true' "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
-    || fail "an unpublished decision must not own a new marker"
+  jq -e '.topic_name == "❓ Aceh · long chats"' \
+    "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
+    || fail "an unpublished decision must not own a new marker: $(cat "$home/state/ext-outbox/$slug.thread.json")"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "the new question must retain its marker: $out"
   pass "25 unpublished decisions do not keep the marker"
@@ -1658,7 +1705,8 @@ test_26_opened_threads_route_like_request_threads() {
   assert_contains "$out" "posted-to=$opened Tracking the ranking fix here." \
     "the first message must post inside the opened thread"
   out=$(home_env "$home" "$OPEN" --key infoconnect-532 --lookup)
-  assert_equals "$(printf '%s\n' "$out" | sed -n 2p)" "posted thread=$opened messages=9000000001" \
+  assert_equals "$(printf '%s\n' "$out" | sed -n 2p)" \
+    "posted thread=$opened messages=$(jq -r '.discord_message_ids | join(",")' "$home"/state/ext-outbox/*.answer.1.receipt.json)" \
     "lookup must report the thread and message ids from the receipt"
 
   # A follow-up and a state change land in the same thread.
@@ -1825,8 +1873,7 @@ def send(payload):
     return {"discord_message_id": "900000000000000001"}
 def deliver(path):
     return poster.deliver_one(path, send=send, create_thread=create,
-                              home=home, react=lambda *args: None,
-                              rename_thread=lambda *args: {"ok": True})
+                              home=home, react=lambda *args: None)
 def wait_for_open():
     before = (len(creates), len(sent))
     for kind in ("followup", "final"):
@@ -1960,8 +2007,7 @@ test_31_retitle_follows_the_conversation() {
     "a retitle must rename the thread to the new base and keep its marker"
   [ "$(printf '%s\n' "$out" | grep -c '^thread-create=')" = 0 ] \
     || fail "a retitle must not create a second thread: $out"
-  jq -e '.retitle == "InfoConnect · v0.5.11 migration"
-    and .topic_name == "❓ InfoConnect · v0.5.11 migration"' \
+  jq -e '.topic_name == "❓ InfoConnect · v0.5.11 migration"' \
     "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "the record must store the new base name: $(cat "$home/state/ext-outbox/$slug.thread.json")"
 
@@ -2065,11 +2111,11 @@ test_32_retitles_are_screened_and_never_leave_home() {
     "a thread this home did not create must never be retitled"
 
   # And the poster refuses an unusable retitle field, wherever it came from.
-  if ! home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
+  if ! home_env "$home" env PYTHONPATH="$PLUGIN:$TMP_ROOT" "$PYTHON_BIN" - "$home" "$slug" <<'PY'
 import json, os, sys
 from pathlib import Path
-sys.path.insert(0, os.environ["PYTHONPATH"])
 import outbox_poster as poster
+from title_helper import apply_reply
 home, slug = Path(sys.argv[1]), sys.argv[2]
 os.environ["FM_HOME"] = str(home)
 context = json.loads((home / "state/ext-context" / (slug + ".json")).read_text())
@@ -2082,42 +2128,28 @@ def rename(thread_id, name):
 assert json.loads((home / "state/ext-outbox" / (slug + ".thread.json")).read_text())["creator"] == "firstmate"
 for bad in ("fm-ship-login now", "A" * 61, "two\nlines", "", 7, None):
     calls.clear()
-    poster.maybe_rename_topic_thread(dict(base, thread_retitle=bad), "777777777777777777", home,
-                                     rename_thread=rename)
+    apply_reply(dict(base, thread_retitle=bad), "777777777777777777", home, rename_thread=rename)
     assert calls == [], bad
-# A good retitle reaches the thread - keeping the marker the record has - and a
-# thread with no record of ours never does.
+# A good retitle reaches the thread under the marker its inputs ask for, and
+# a thread with no record of ours never does.
 calls.clear()
-poster.maybe_rename_topic_thread(dict(base, thread_retitle="InfoConnect · ledger import"),
-                                 "777777777777777777", home, rename_thread=rename, read_thread=lambda _: "")
+apply_reply(dict(base, thread_retitle="InfoConnect · ledger import"), "777777777777777777", home,
+            rename_thread=rename)
 assert calls == ["✅ InfoConnect · ledger import"], calls
-for shown, requested, expected in (
-    ("❓ old topic", None, "❓ "),
-    ("✅ old topic", None, "✅ "),
-    ("old topic", None, ""),
-    ("❓ old topic", "done", "✅ "),
-    ("✅ old topic", "none", ""),
-    ("old topic", "needs-you", "❓ "),
-    ("", None, "❓ "),
-    (None, None, "❓ "),
-):
-    def read(thread_id):
-        if shown is None:
-            raise RuntimeError("unreadable")
-        return shown
+# A live title that cannot be read is never guessed at.
+def unreadable(thread_id):
+    raise RuntimeError("unreadable")
+for read in (lambda _: "", unreadable):
     calls.clear()
-    payload = dict(base, thread_retitle="InfoConnect · ledger import")
-    if requested is not None:
-        payload["thread_state"] = requested
-    poster.maybe_rename_topic_thread(payload, "777777777777777777", home,
-                                     rename_thread=rename, read_thread=read)
-    assert calls == [expected + "InfoConnect · ledger import"], (shown, requested, calls)
+    apply_reply(dict(base, thread_retitle="InfoConnect · ledger export"), "777777777777777777", home,
+                rename_thread=rename, read_thread=read)
+    assert calls == [], calls
 for guarded in (dict(base, thread_retitle="InfoConnect · ledger import", thread_id="444444444444444444"),
                 dict(base, thread_retitle="InfoConnect · ledger import", channel_id="555555555555555555",
                      thread_id="555555555555555555"),
                 dict(base, thread_retitle="InfoConnect · ledger import", origin="slash")):
     calls.clear()
-    poster.maybe_rename_topic_thread(guarded, "", home, rename_thread=rename)
+    apply_reply(guarded, "", home, rename_thread=rename)
     assert calls == [], guarded
 PY
   then fail "an unusable retitle or a foreign thread must never be retitled"
@@ -2147,13 +2179,13 @@ test_33_retitle_retries_and_opened_threads_follow() {
     "a failed retitle must still post the reply"
   [ -f "$home/state/ext-outbox/$slug.followup.2.receipt.json" ] \
     || fail "a failed retitle must still record the reply receipt"
-  jq -e '.retitle == "InfoConnect · v0.5.11 migration" and .rename.outcome == "failed"
-    and .rename.name == "InfoConnect · v0.5.11 migration" and .rename.retryable == true' "$record" >/dev/null \
+  jq -e '.title.last.outcome == "failed"
+    and .topic_name == "Aceh · long chats"' "$record" >/dev/null \
     || fail "a failed retitle must be recorded with the name it wanted: $(cat "$record")"
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/InfoConnect · v0.5.11 migration" \
     "the periodic pass must retry a failed retitle toward the new base name"
-  jq -e '.topic_name == "InfoConnect · v0.5.11 migration" and .rename.outcome == "applied"' "$record" >/dev/null \
+  jq -e '.topic_name == "InfoConnect · v0.5.11 migration" and .title.last.outcome == "applied"' "$record" >/dev/null \
     || fail "a retried retitle must be recorded as applied: $(cat "$record")"
 
   emit_as "$home" "$RID" followup 3 "Still on the migration." "" "needs-you" >/dev/null
@@ -2265,20 +2297,20 @@ test_35_open_decisions_keep_the_marker_and_defer_the_reply_state() {
   out=$(deliver "$home")
   [ "$(renames_in "$out")" = 0 ] \
     || fail "a thread already marked needs-you must not be renamed again: $out"
-  jq -e '.thread_state == "needs-you"' "$record" >/dev/null \
+  jq -e '.topic_name == "❓ Aceh · long chats"' "$record" >/dev/null \
     || fail "the decision post must keep the thread needs-you: $(cat "$record")"
   emit_as "$home" "$RID" followup 3 "Carrying on with the rest." "" none >/dev/null
   out=$(deliver "$home")
   [ "$(renames_in "$out")" = 0 ] \
     || fail "a none while a decision is open must not rename the thread: $out"
-  jq -e '.thread_state == "needs-you" and .deferred_state == "none"' "$record" >/dev/null \
-    || fail "the deferred none must be recorded behind the open decision: $(cat "$record")"
+  jq -e '.topic_name == "❓ Aceh · long chats"' "$record" >/dev/null \
+    || fail "the none must wait behind the open decision: $(cat "$record")"
   emit_as "$home" "$RID" followup 4 "Everything else landed." "" "done" >/dev/null
   out=$(deliver "$home")
   [ "$(renames_in "$out")" = 0 ] \
     || fail "a done while a decision is open must not rename the thread: $out"
-  jq -e '.thread_state == "needs-you" and .deferred_state == "done"' "$record" >/dev/null \
-    || fail "the newest requested state must replace the earlier one: $(cat "$record")"
+  jq -e '.topic_name == "❓ Aceh · long chats"' "$record" >/dev/null \
+    || fail "the done must wait behind the open decision: $(cat "$record")"
   emit_as "$home" "$RID" followup 5 "Still waiting for your direction." "" needs-you >/dev/null
   out=$(deliver "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "a reminder must keep the question marker: $out"
@@ -2288,9 +2320,8 @@ test_35_open_decisions_keep_the_marker_and_defer_the_reply_state() {
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · long chats" \
     "the deferred done must land when the last decision closes"
-  jq -e '.thread_state == "done" and .topic_name == "✅ Aceh · long chats"
-    and (has("deferred_state") | not)' "$record" >/dev/null \
-    || fail "the applied deferred state must be recorded and cleared: $(cat "$record")"
+  jq -e '.topic_name == "✅ Aceh · long chats"' "$record" >/dev/null \
+    || fail "the applied done must be recorded: $(cat "$record")"
   # The same rule for none: a deferral applies the bare name.
   open_decision_key "$home" south
   emit_decision_post "$home" "$RID" 6 south needs-you
@@ -2302,20 +2333,19 @@ test_35_open_decisions_keep_the_marker_and_defer_the_reply_state() {
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
     "a deferred none must restore the bare name when the last decision closes"
-  jq -e '.thread_state == "none" and (has("deferred_state") | not)' "$record" >/dev/null \
-    || fail "the applied none must be recorded and cleared: $(cat "$record")"
+  jq -e '.topic_name == "Aceh · long chats"' "$record" >/dev/null \
+    || fail "the applied none must be recorded: $(cat "$record")"
   pass "35 open decisions keep the marker and defer the reply's state"
 }
 
-# --- 36. the sweep re-asserts a marker an open decision needs ---------------
+# --- 36. an open decision marks the thread at once, on the captain's words ---
 #
-# A decision post delivered without a thread state can leave an eligible
-# thread with an open question and no marker. The periodic pass re-asserts
-# needs-you under the same eligibility and best-effort rules as any rename: a
-# captain-made thread is never touched, a permanent refusal (an archived
-# thread) is recorded and left for the next reply, and that reply retries.
+# A decision post delivered without a thread state still marks its thread as
+# soon as Discord permits. The captain's own words stay the base for good: a
+# marker he swapped is replaced by the one an open decision asks for at the
+# next change, and a later retitle never replaces his words.
 
-test_36_sweep_reasserts_a_marker_an_open_decision_needs() {
+test_36_open_decisions_mark_the_thread_on_the_captains_words() {
   local home slug record out
   home="$TMP_ROOT/c36"
   setup_home "$home"
@@ -2323,32 +2353,28 @@ test_36_sweep_reasserts_a_marker_an_open_decision_needs() {
   record="$home/state/ext-outbox/$slug.thread.json"
   emit_as "$home" "$RID" answer 1 "Looking into it." "Aceh · long chats" none >/dev/null
   deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
-  jq -e '.thread_state == "none"' "$record" >/dev/null \
-    || fail "the creating reply must record its state"
   open_decision_key "$home" north
   emit_decision_post "$home" "$RID" 2 north
   out=$(deliver "$home")
-  [ "$(renames_in "$out")" = 0 ] || fail "an unmarked decision post must not rename by itself: $out"
-  out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
-    "the sweep must re-assert needs-you on a thread with an open decision"
-  jq -e '.thread_state == "needs-you" and .marked_open == true' "$record" >/dev/null \
-    || fail "the re-asserted marker must be recorded as the decision's: $(cat "$record")"
+    "an unmarked decision post must mark its thread at once"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "an already-marked thread must not be renamed again: $out"
-  out=$(sweep "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"❓ Aceh · compaction recap"}')
-  [ "$(renames_in "$out")" = 0 ] || fail "a manual title with the correct marker must stay: $out"
-  out=$(sweep "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"✅ Aceh · compaction recap"}')
-  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · compaction recap" \
-    "the sweep must repair the marker while preserving the manual title"
-  resolve_decision_key "$home" north North
-  emit_as "$home" "$RID" followup 3 "Naming this for the migration." "" "" "Aceh · migration" >/dev/null
+  emit_as "$home" "$RID" followup 3 "Still on it." "" none >/dev/null
   out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"✅ Aceh · compaction recap"}')
-  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · migration" \
-    "a retitle after the answer must preserve the live terminal marker"
+  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · compaction recap" \
+    "the open decision's marker must come back on the captain's own words"
+  jq -e '.title.manual_base == "Aceh · compaction recap"' "$record" >/dev/null \
+    || fail "the captain's words must be kept: $(cat "$record")"
+  resolve_decision_key "$home" north North
+  emit_as "$home" "$RID" followup 4 "Naming this for the migration." "" "" "Aceh · migration" >/dev/null
+  out=$(deliver "$home")
+  assert_contains "$out" "thread-rename=777777777777777777/Aceh · compaction recap" \
+    "closing the decision must clear the marker"
+  assert_not_contains "$out" "Aceh · migration" "a retitle must never replace the captain's words"
   out=$(sweep "$home")
-  [ "$(renames_in "$out")" = 0 ] || fail "auto-clear must leave the recorded terminal marker: $out"
-  pass "36 the sweep re-asserts a marker an open decision needs"
+  [ "$(renames_in "$out")" = 0 ] || fail "a settled thread must not be renamed again: $out"
+  pass "36 open decisions mark the thread at once, on the captain's words"
 }
 
 test_36b_reassert_stays_best_effort_and_never_unarchives() {
@@ -2361,10 +2387,9 @@ test_36b_reassert_stays_best_effort_and_never_unarchives() {
   deliver "$home" '{"kind":"thread","request":"'"$RID"'","thread_id":"777777777777777777"}' >/dev/null
   open_decision_key "$home" north
   emit_decision_post "$home" "$RID" 2 north
-  deliver "$home" >/dev/null
-  out=$(sweep "$home" '{"kind":"rename-fail","outcome":"permanent"}')
-  [ "$(renames_in "$out")" = 0 ] || fail "a refused rename must never fail the sweep: $out"
-  jq -e '.rename.outcome == "failed" and .rename.retryable == false' "$record" >/dev/null \
+  out=$(deliver "$home" '{"kind":"rename-fail","outcome":"permanent"}')
+  [ "$(renames_in "$out")" = 0 ] || fail "a refused rename must never fail delivery: $out"
+  jq -e '.title.last.outcome == "failed" and .title.refused.name == "❓ Aceh · long chats"' "$record" >/dev/null \
     || fail "an archived thread's refusal must be recorded as permanent: $(cat "$record")"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "the sweep must not retry a permanent refusal: $out"
@@ -2372,53 +2397,35 @@ test_36b_reassert_stays_best_effort_and_never_unarchives() {
   out=$(deliver "$home")
   assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
     "the next reply in the thread must retry the refused marker"
-  jq -e '.rename.outcome == "applied" and .thread_state == "needs-you"' "$record" >/dev/null \
+  jq -e '.title.last.outcome == "applied" and .topic_name == "❓ Aceh · long chats"' "$record" >/dev/null \
     || fail "the reply's retry must be recorded: $(cat "$record")"
   pass "36b reassert stays best effort and never unarchives"
 }
 
-test_36c_retry_and_retitle_cannot_hide_an_open_decision() {
+test_36c_an_unreadable_ledger_leaves_the_title_until_it_recovers() {
   local home out
   home="$TMP_ROOT/c36c"
   setup_home "$home"
   intake_as "$home" "how do long chats compact?" "$MESSAGE" "$CHANNEL" message >/dev/null
   emit_as "$home" "$RID" answer 1 "Looking into it." "Aceh · long chats" none >/dev/null
   deliver "$home" >/dev/null
-  emit_as "$home" "$RID" followup 2 "The review is complete." "" "done" >/dev/null
-  deliver "$home" '{"kind":"rename-fail","outcome":"transient"}' >/dev/null
   open_decision_key "$home" north
-  emit_decision_post "$home" "$RID" 3 north
+  emit_decision_post "$home" "$RID" 2 north
   out=$(deliver "$home")
   assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · long chats" \
-    "the retry of done must show the newly posted decision instead"
-  emit_as "$home" "$RID" followup 4 "Naming this for the migration." "" "" "Aceh · migration" >/dev/null
-  out=$(deliver "$home" '{"kind":"actual","thread_id":"777777777777777777","name":"Aceh · long chats"}')
-  assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · migration" \
-    "a retitle must restore a missing marker while a decision is open"
-  emit_as "$home" "$RID" followup 5 "Continuing." "" none "Aceh · rollout" >/dev/null
+    "the decision post must mark the thread"
+  emit_as "$home" "$RID" followup 3 "Continuing." "" none "Aceh · rollout" >/dev/null
   out=$(deliver "$home" '{"kind":"decision-ledger-offline"}')
   assert_contains "$out" "results=sent" "an unavailable ledger must leave delivery intact"
-  [ "$(renames_in "$out")" = 0 ] || fail "an unavailable ledger must not clear a marker: $out"
+  [ "$(renames_in "$out")" = 0 ] || fail "an unavailable ledger must leave the title alone: $out"
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/❓ Aceh · rollout" \
     "recovery must apply the requested title while the question is still open"
   resolve_decision_key "$home" north North
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/Aceh · rollout" \
-    "the latest marker requested during the outage must land after the decision closes"
-  open_decision_key "$home" south
-  emit_decision_post "$home" "$RID" 6 south needs-you
-  deliver "$home" >/dev/null
-  emit_as "$home" "$RID" followup 7 "The remaining work is complete." "" "done" >/dev/null
-  deliver "$home" '{"kind":"decision-ledger-offline"}' >/dev/null
-  emit_as "$home" "$RID" followup 8 "Still waiting for your direction." "" needs-you >/dev/null
-  out=$(deliver "$home")
-  [ "$(renames_in "$out")" = 0 ] || fail "a reminder after recovery must preserve the question marker: $out"
-  resolve_decision_key "$home" south South
-  out=$(sweep "$home")
-  assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · rollout" \
-    "a reminder immediately after recovery must keep the terminal state requested during the outage"
-  pass "36c retries and retitles honor the decision ledger"
+    "the state requested during the outage must land after the decision closes"
+  pass "36c an unreadable ledger leaves the title until it recovers"
 }
 
 test_36d_sweep_rechecks_after_concurrent_publication() {
@@ -2436,14 +2443,16 @@ test_36d_sweep_rechecks_after_concurrent_publication() {
   resolve_decision_key "$home" north North
   open_decision_key "$home" south
   emit_decision_post "$home" "$RID" 4 south
-  out=$(sweep "$home" '{"kind":"post-during-rename","file":"'"$slug"'.followup.4.json"}')
-  [ "$(sed -n 's/^thread-rename=//p' <<<"$out" | tail -n 1)" = "777777777777777777/❓ Aceh · long chats" ] \
-    || fail "a decision published during auto-clear must restore the live question marker: $out"
+  out=$(sweep "$home" '{"kind":"post-after-ledger-read","file":"'"$slug"'.followup.4.json"}')
+  [ -f "$home/state/ext-outbox/$slug.followup.4.receipt.json" ] \
+    || fail "the second decision must land before the PATCH check"
+  [ "$(renames_in "$out")" = 0 ] \
+    || fail "a decision published before PATCH must prevent the obsolete done write: $out"
   resolve_decision_key "$home" south South
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · long chats" \
     "auto-clear must retain the deferred done through a concurrent publication"
-  pass "36d a stale sweep restores the question marker"
+  pass "36d a decision published before PATCH prevents an obsolete title write"
 }
 
 test_36e_targeted_lookup_includes_cross_thread_replacements() {
@@ -2511,7 +2520,7 @@ Reply with the number."
   message=$(sed -n 's/^discord-post=//p' <<<"$out")
   jq -e 'has("components") | not' <<<"$message" >/dev/null \
     || fail "the free-text Discord message must have no interactive components: $message"
-  jq -e '.thread_state == "needs-you" and .marked_open == true' "$record" >/dev/null \
+  jq -e '.topic_name == "❓ Aceh · long chats"' "$record" >/dev/null \
     || fail "the free-text question must mark the thread needs-you: $(cat "$record")"
   threads=$(home_env "$home" "$DECISION" threads --thread 777777777777777777)
   assert_contains "$threads" '"open":1' "the free-text question must count as an open decision"
@@ -2521,7 +2530,7 @@ Reply with the number."
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
     "recording the answer must clear the question's marker"
-  jq -e '.thread_state == "none"' "$record" >/dev/null \
+  jq -e '.topic_name == "Aceh · long chats"' "$record" >/dev/null \
     || fail "the cleared free-text question must be recorded: $(cat "$record")"
   open_decision_key "$home" south
   emit_decision_post "$home" "$RID" 3 south needs-you
@@ -2569,9 +2578,9 @@ test_32_retitles_are_screened_and_never_leave_home
 test_33_retitle_retries_and_opened_threads_follow
 test_34_emit_requires_creating_title_and_terminal_state
 test_35_open_decisions_keep_the_marker_and_defer_the_reply_state
-test_36_sweep_reasserts_a_marker_an_open_decision_needs
+test_36_open_decisions_mark_the_thread_on_the_captains_words
 test_36b_reassert_stays_best_effort_and_never_unarchives
-test_36c_retry_and_retitle_cannot_hide_an_open_decision
+test_36c_an_unreadable_ledger_leaves_the_title_until_it_recovers
 test_36d_sweep_rechecks_after_concurrent_publication
 test_36e_targeted_lookup_includes_cross_thread_replacements
 test_37_free_text_question_records_a_decision_without_buttons

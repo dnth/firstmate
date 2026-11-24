@@ -35,15 +35,16 @@
 # line, at most 60 characters, screened like reply text) on the reply that
 # creates it; once the thread exists, plain later --thread-title values are
 # recorded without replacing its name. Over-long, multi-line, or unsafe titles are
-# refused here instead of silently cut. --thread-retitle replaces that name on
-# any reply into an existing Firstmate-created topic thread: it passes the
-# same screen and bounds and becomes the thread's base name. A rejected
-# retitle is dropped with a warning while the reply still posts. Both title
-# flags may be given; the explicit retitle sets the existing thread's base,
-# while --thread-title only names a thread at creation.
-# --thread-state requests a marker on the existing topic thread.
-# "Topic threads" in docs/configuration.md owns marker handling, and the
-# ext-respond skill owns when Firstmate requests a marker or retitle.
+# refused here instead of silently cut. --thread-retitle asks for a new base
+# name on any reply into an existing Firstmate-created topic thread: it passes
+# the same screen and bounds. A rejected retitle is dropped with a warning
+# while the reply still posts. Both title flags may be given; the explicit
+# retitle asks for the existing thread's new base, while --thread-title only
+# names a thread at creation.
+# --thread-state asks for a marker on the existing topic thread.
+# "Thread title reconciler" in docs/configuration.md owns how a state and a
+# retitle become the thread's title, and the ext-respond skill owns when
+# Firstmate passes them.
 #
 # Writes state/ext-outbox/<slug>.<kind>.<generation>.json once. Re-emitting the
 # same identity is a no-op success. A posting marker without a receipt is
