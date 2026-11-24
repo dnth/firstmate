@@ -143,6 +143,8 @@ emit_as() {
 # the reconciler's ten-minute pace, so each step may change the title once.
 TITLE_EDGE=$(cat <<'PY'
 import io, json, os, sys, threading, time
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0, os.environ["PYTHONPATH"])
 import outbox_poster
@@ -189,26 +191,37 @@ outbox_poster.discord_thread_name = fake_read
 if any(item["kind"] == "decision-ledger-offline" for item in extra):
     outbox_poster._decision_cli = lambda: home / "missing-decision-cli"
 def settle_titles():
-    # The title worker finishes, the decision sweep runs, and the reconciler
-    # takes its loop passes until nothing it can write now is left due.
-    for _ in range(2):
-        for worker in threading.enumerate():
-            if worker.name == "fm-ext-autoname":
-                worker.join(timeout=60)
-        summaries = outbox_poster.decision_threads(home)
-        if summaries is not None:
-            thread_title.sweep_decisions(home, summaries, now=now)
-        thread_title.run_due(home, now=now, rename=fake_rename, read_thread=fake_read)
+    # The title worker finishes, the decision-post sweep settles closed posts
+    # and marks threads whose decisions changed, the safety sweep marks every
+    # thread, and the reconciler takes its loop passes at the fake time until
+    # nothing it can write now is left due.
+    with patch.object(thread_title, "time", SimpleNamespace(time=lambda: now)):
+        for sweep in (True, False):
+            for worker in threading.enumerate():
+                if worker.name == "fm-ext-autoname":
+                    worker.join(timeout=60)
+            if sweep:
+                try:  # the gateway's step runner logs and carries on
+                    outbox_poster.reconcile_decision_posts(home, full=True, edit=lambda *args: None)
+                except Exception as err:
+                    print(f"decision sweep skipped: {err}", file=sys.stderr)
+            outbox_poster.sweep_thread_titles(home)
+            if sweep:
+                thread_title.safety_sweep(home)
+            thread_title.run_due(home, rename=fake_rename, read_thread=fake_read)
 PY
 )
 
-# The delivery hand-off plus one reconciler pass for one reply, as the gateway
-# runs them while judging is off, on the same per-home fake clock as deliver.
-# Discord shows the last title Firstmate wrote unless read_thread says otherwise.
+# A reply Discord accepted, recorded as the poster records it (chunk progress
+# with the reply's own thread state and retitle), plus one reconciler pass as
+# the gateway runs it while judging is off, on the same per-home fake clock as
+# deliver. Discord shows the last title Firstmate wrote unless read_thread
+# says otherwise.
 cat > "$TMP_ROOT/title_helper.py" <<'PY'
-import time
+import json, time
+from types import SimpleNamespace
+from unittest.mock import patch
 import outbox_poster as poster
-import thread_autoname as autoname
 import thread_title as title
 
 _seq = [0]
@@ -220,11 +233,13 @@ def apply_reply(payload, thread_id, home, rename_thread=None, read_thread=None, 
         return "skipped"
     _seq[0] += 1
     message_id = str(((int(time.time() * 1000) - 1420070400000) << 22) + _seq[0])
-    autoname.handle_post(home, target, {"message_id": message_id,
-                                        "state": payload.get("thread_state") or "",
-                                        "retitle": payload.get("thread_retitle") or "",
-                                        "decision": isinstance(payload.get("decision"), dict)},
-                         judging=False)
+    path = home / "state" / "ext-outbox" / f"applied-{message_id}.progress.json"
+    path.write_text(json.dumps({
+        "request_id": payload.get("request_id") or "", "total": 1, "posted_count": 1, "inflight": None,
+        "discord_message_ids": [message_id], "topic_thread_id": target,
+        "title_input": {"state": payload.get("thread_state") or "",
+                        "retitle": payload.get("thread_retitle") or "",
+                        "decision": isinstance(payload.get("decision"), dict)}}))
     clock_file = home / "fake-clock"
     now = max(time.time(), float(clock_file.read_text()) if clock_file.exists() else 0) + title.PACE_SECS + 1
     clock_file.write_text(str(now))
@@ -236,8 +251,9 @@ def apply_reply(payload, thread_id, home, rename_thread=None, read_thread=None, 
     def recorded(tid):
         return poster.load_thread_record_by_id(tid, home).get("topic_name", "")
 
-    return title.reconcile(home, target, now=now, rename=rename,
-                           read_thread=read_thread or recorded, thread_owner=thread_owner)
+    with patch.object(title, "time", SimpleNamespace(time=lambda: now)):
+        return title.reconcile(home, target, judging="off", rename=rename,
+                               read_thread=read_thread or recorded, thread_owner=thread_owner)
 PY
 
 deliver() {
@@ -1399,7 +1415,7 @@ test_20_button_requests_mark_their_thread() {
     "a button request's answer must post in the thread it was clicked in"
   assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
     "a none from an in-thread button request must clear the question mark"
-  jq -e '.title.verdict.status == "none" and .topic_name == "Aceh · long chats" and .title.last.outcome == "applied"' \
+  jq -e '.topic_name == "Aceh · long chats" and .title.last.outcome == "applied"' \
     "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "the thread record must follow the button request's state: $(cat "$home/state/ext-outbox/$slug.thread.json")"
   pass "20 a decision-button request marks the thread it was clicked in"
@@ -1495,9 +1511,9 @@ test_22_drifted_names_reconcile_with_discord() {
 
 # --- 23. rename outcomes are recorded and failures retried -------------------
 #
-# Every title outcome lands in the thread record. A failed write keeps the
-# wanted inputs, names the error, and is retried: a transient failure by the
-# periodic pass, any failure by the next reply in that thread.
+# Every title outcome lands in the thread record. A failed write names the
+# error and is retried: a transient failure by the periodic pass, a permanent
+# refusal only once the thread gets its next reply.
 
 test_23_rename_failures_are_recorded_and_retried() {
   local home slug out record
@@ -1510,7 +1526,7 @@ test_23_rename_failures_are_recorded_and_retried() {
   emit_as "$home" "$RID" followup 2 "Need your call." "" "needs-you" >/dev/null
   out=$(deliver "$home" '{"kind":"rename-fail","outcome":"transient"}')
   assert_contains "$out" "results=sent" "a failed rename must not fail the reply"
-  jq -e '.title.verdict.status == "open-question" and .topic_name == "Aceh · long chats"
+  jq -e '.topic_name == "Aceh · long chats"
     and .title.last.outcome == "failed" and (.title.last.error | test("500"))' "$record" >/dev/null \
     || fail "a failed rename must be recorded with its error: $(cat "$record")"
   out=$(sweep "$home")
@@ -1520,7 +1536,7 @@ test_23_rename_failures_are_recorded_and_retried() {
     || fail "a retried rename must be recorded as applied: $(cat "$record")"
   emit_as "$home" "$RID" final 3 "Landed." "" "done" >/dev/null
   out=$(deliver "$home" '{"kind":"rename-fail","outcome":"permanent"}')
-  jq -e '.title.verdict.status == "done" and .title.last.outcome == "failed" and (.title.due_at // 0) == 0' \
+  jq -e '.title.last.outcome == "failed" and .title.refused.name == "✅ Aceh · long chats"' \
     "$record" >/dev/null || fail "a permanent failure must be recorded: $(cat "$record")"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "the periodic pass must leave a permanent failure for the next reply: $out"
@@ -1562,7 +1578,7 @@ test_24_reminders_while_a_decision_is_open_clear_with_it() {
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
     "resolving the decision the reminder was about must clear the marker"
-  jq -e '.topic_name == "Aceh · long chats" and .title.verdict.status == "none"' \
+  jq -e '.topic_name == "Aceh · long chats"' \
     "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "the cleared reminder must be recorded: $(cat "$home/state/ext-outbox/$slug.thread.json")"
   pass "24 a reminder marked while a decision is open clears with it"
@@ -1636,7 +1652,7 @@ PY
     || fail "auto-clear must be recorded despite the failed first send"
   emit_as "$home" "$RID" followup 5 "A new question." "" "needs-you" >/dev/null
   deliver "$home" >/dev/null
-  jq -e '.topic_name == "❓ Aceh · long chats" and .title.verdict.during_decision == false' \
+  jq -e '.topic_name == "❓ Aceh · long chats"' \
     "$home/state/ext-outbox/$slug.thread.json" >/dev/null \
     || fail "an unpublished decision must not own a new marker: $(cat "$home/state/ext-outbox/$slug.thread.json")"
   out=$(sweep "$home")
@@ -2164,7 +2180,7 @@ test_33_retitle_retries_and_opened_threads_follow() {
     "a failed retitle must still post the reply"
   [ -f "$home/state/ext-outbox/$slug.followup.2.receipt.json" ] \
     || fail "a failed retitle must still record the reply receipt"
-  jq -e '.title.base == "InfoConnect · v0.5.11 migration" and .title.last.outcome == "failed"
+  jq -e '.title.last.outcome == "failed"
     and .topic_name == "Aceh · long chats"' "$record" >/dev/null \
     || fail "a failed retitle must be recorded with the name it wanted: $(cat "$record")"
   out=$(sweep "$home")
@@ -2288,14 +2304,14 @@ test_35_open_decisions_keep_the_marker_and_defer_the_reply_state() {
   out=$(deliver "$home")
   [ "$(renames_in "$out")" = 0 ] \
     || fail "a none while a decision is open must not rename the thread: $out"
-  jq -e '.topic_name == "❓ Aceh · long chats" and .title.verdict.status == "none"' "$record" >/dev/null \
-    || fail "the deferred none must be recorded behind the open decision: $(cat "$record")"
+  jq -e '.topic_name == "❓ Aceh · long chats"' "$record" >/dev/null \
+    || fail "the none must wait behind the open decision: $(cat "$record")"
   emit_as "$home" "$RID" followup 4 "Everything else landed." "" "done" >/dev/null
   out=$(deliver "$home")
   [ "$(renames_in "$out")" = 0 ] \
     || fail "a done while a decision is open must not rename the thread: $out"
-  jq -e '.topic_name == "❓ Aceh · long chats" and .title.verdict.status == "done"' "$record" >/dev/null \
-    || fail "the newest requested state must replace the earlier one: $(cat "$record")"
+  jq -e '.topic_name == "❓ Aceh · long chats"' "$record" >/dev/null \
+    || fail "the done must wait behind the open decision: $(cat "$record")"
   emit_as "$home" "$RID" followup 5 "Still waiting for your direction." "" needs-you >/dev/null
   out=$(deliver "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "a reminder must keep the question marker: $out"
@@ -2305,8 +2321,8 @@ test_35_open_decisions_keep_the_marker_and_defer_the_reply_state() {
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/✅ Aceh · long chats" \
     "the deferred done must land when the last decision closes"
-  jq -e '.title.verdict.status == "done" and .topic_name == "✅ Aceh · long chats"' "$record" >/dev/null \
-    || fail "the applied deferred state must be recorded and cleared: $(cat "$record")"
+  jq -e '.topic_name == "✅ Aceh · long chats"' "$record" >/dev/null \
+    || fail "the applied done must be recorded: $(cat "$record")"
   # The same rule for none: a deferral applies the bare name.
   open_decision_key "$home" south
   emit_decision_post "$home" "$RID" 6 south needs-you
@@ -2318,8 +2334,8 @@ test_35_open_decisions_keep_the_marker_and_defer_the_reply_state() {
   out=$(sweep "$home")
   assert_contains "$out" "thread-rename=777777777777777777/Aceh · long chats" \
     "a deferred none must restore the bare name when the last decision closes"
-  jq -e '.title.verdict.status == "none" and .topic_name == "Aceh · long chats"' "$record" >/dev/null \
-    || fail "the applied none must be recorded and cleared: $(cat "$record")"
+  jq -e '.topic_name == "Aceh · long chats"' "$record" >/dev/null \
+    || fail "the applied none must be recorded: $(cat "$record")"
   pass "35 open decisions keep the marker and defer the reply's state"
 }
 
@@ -2374,7 +2390,7 @@ test_36b_reassert_stays_best_effort_and_never_unarchives() {
   emit_decision_post "$home" "$RID" 2 north
   out=$(deliver "$home" '{"kind":"rename-fail","outcome":"permanent"}')
   [ "$(renames_in "$out")" = 0 ] || fail "a refused rename must never fail delivery: $out"
-  jq -e '.title.last.outcome == "failed" and (.title.due_at // 0) == 0' "$record" >/dev/null \
+  jq -e '.title.last.outcome == "failed" and .title.refused.name == "❓ Aceh · long chats"' "$record" >/dev/null \
     || fail "an archived thread's refusal must be recorded as permanent: $(cat "$record")"
   out=$(sweep "$home")
   [ "$(renames_in "$out")" = 0 ] || fail "the sweep must not retry a permanent refusal: $out"

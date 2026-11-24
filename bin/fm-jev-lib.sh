@@ -12,17 +12,20 @@
 # wins. Callers copy an environment key into the non-exported _FM_JEV_KEY and
 # unset TYPESAFE_API_KEY before sourcing, so no child process inherits it.
 # The key reaches curl through a header file descriptor, never argv.
+# A .env that exists but cannot be read is neither present nor absent: the
+# key state is unknown, and callers must not treat it as "off".
 #
 # Defines:
 #   FM_JEV_BASE      https://api.typesafe.ai
 #   FM_JEV_MODEL     jev-latest
 #   FM_JEV_TIMEOUT   5 seconds
-#   fm_jev_load_key  read the home key if the caller captured no environment key
+#   fm_jev_load_key  read the home key if the caller captured no environment
+#                    key; sets FM_JEV_KEY_STATE to present, absent, or unknown
 #   fm_jev_available true when a key is loaded
 #   fm_jev_post <response-file>
 #                    POST stdin as the JSON body and print
 #                    "<http> <latency_ms>" (000 on a transport failure), for
-#                    `read -r HTTP FM_JEV_LATENCY_MS <<< "$(fm_jev_post ...)"`.
+#                    `read -r HTTP LATENCY_MS <<< "$(fm_jev_post ...)"`.
 #                    A non-200 body is left in response-file for the caller to
 #                    report.
 #
@@ -42,8 +45,26 @@ FM_JEV_BASE=https://api.typesafe.ai
 FM_JEV_MODEL=jev-latest
 FM_JEV_TIMEOUT=5
 
+FM_JEV_KEY_STATE=absent
+
+# shellcheck disable=SC2034  # FM_JEV_KEY_STATE is read by sourcing callers
 fm_jev_load_key() {
-  [ -n "${_FM_JEV_KEY:-}" ] || _FM_JEV_KEY=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+  local env="$FM_HOME/.env"
+  if [ -n "${_FM_JEV_KEY:-}" ]; then
+    FM_JEV_KEY_STATE=present
+    return 0
+  fi
+  if [ ! -e "$env" ] && [ ! -L "$env" ]; then
+    FM_JEV_KEY_STATE=absent
+    return 0
+  fi
+  if [ ! -f "$env" ] || [ ! -r "$env" ]; then
+    FM_JEV_KEY_STATE=unknown
+    return 0
+  fi
+  _FM_JEV_KEY=$(fmx_env_get TYPESAFE_API_KEY "$env")
+  FM_JEV_KEY_STATE=absent
+  [ -z "$_FM_JEV_KEY" ] || FM_JEV_KEY_STATE=present
 }
 
 fm_jev_available() {

@@ -1162,64 +1162,71 @@ Once any chunk has posted, retries keep that generation's original destination e
 Creating a topic thread never widens who the allowlist admits.
 The [ext-respond skill](../.agents/skills/ext-respond/SKILL.md#the-reply-is-public-treat-it-as-such) owns the unchanged public-safety rules for reply text.
 The intake records the fallback name plus the request text in the durable destination context; the poster reuses one request-wide `state/ext-outbox/<slug>.thread.json` record so every generation shares the same thread.
-[`save_thread_record` in the poster](../contrib/hermes-gateway-firstmate-comms/outbox_poster.py) owns the record fields, and its `title` object holds the reconciler's inputs and bookkeeping.
+[`save_thread_record` in the poster](../contrib/hermes-gateway-firstmate-comms/outbox_poster.py) owns the record fields, and its `title` object holds the reconciler's verdict log and bookkeeping.
 The [bridge regression test](../tests/fm-ext-topic-threads.test.sh) owns the create-once, stay-in-thread, fallback, bounded-name, title, explicit-state, retitle, auto-clear, drift, retry, opened-thread, and unchanged-allowlist coverage.
 
 ### Thread title reconciler
 
 One reconciler per topic thread is the only code that writes a thread's Discord title; creating the thread names it once, and every later change goes through the reconciler in [`thread_title.py`](../contrib/hermes-gateway-firstmate-comms/thread_title.py).
-It keeps these inputs in the thread's record:
+Each pass recomputes the title from durable state alone, so a restart loses nothing and a pass that raced newer state is corrected by the next one.
+It reads:
 
-- the open decisions in the thread and the newest closure time, read from the decision ledger through `bin/fm-ext-decision.sh threads`, whose header owns which posts count as open and where a closure time comes from;
-- the latest status verdict, with the Firstmate message it was judged through;
-- a proposed base name tied to its Jev verdict, or an independently requested explicit retitle;
-- the captain's own words, once seen.
+- the decision ledger through `bin/fm-ext-decision.sh threads`, whose header owns which posts count as open, closed, or unknown, whether each carried buttons, and where a closure time comes from;
+- the Firstmate messages Discord accepted, from chunk progress, each with its reply's own thread state and retitle;
+- the thread's verdict log in its record: one Jev verdict per judged message;
+- the last title this home wrote, the captain's own words once seen, and a marker he removed;
+- Discord's waits in `state/ext-autoname/cooldowns.json`.
 
-The decision sweep, the after-post judge, and the one-time catch-up only update those inputs; none of them renames a thread.
+The decision sweep, the after-post judge, and the catch-up only add inputs or mark a thread due; none of them renames a thread.
+A pass runs when a reply is accepted, a verdict arrives, a decision opens or closes, or a pace or Discord wait ends, and a safety sweep marks every thread due at gateway start and every 10 minutes.
 
 **Status source.**
-With judging on, after every Firstmate post in an eligible thread a background worker reads the thread's text through that post and asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
-When the topic drifted, the live title has a public project prefix, and the captain has not named the thread, [`bin/fm-ext-thread-name.sh`](../bin/fm-ext-thread-name.sh) proposes a screened `<Project> · <topic>` base.
+With judging on, after every Firstmate post in an eligible thread a background worker looks at the thread's newest accepted Firstmate message and, when it has no verdict yet, reads the thread's text through it and asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
+Only that newest message is judged; a message superseded before its turn is never judged, and a failed judgment is retried by the safety sweep.
+When the topic drifted, the live title has a public `<Project> · ` prefix, and the captain has not named the thread, [`bin/fm-ext-thread-name.sh`](../bin/fm-ext-thread-name.sh) proposes a screened `<Project> · <topic>` base; with no public prefix no name is proposed.
 Model input is the thread's message text, which may include private interaction text.
-While judging is on, a reply's explicit state and retitle do not touch the title.
-When the key check confirms the Jev key is absent, the reply's explicit state is the status (`needs-you` as `open-question`, `done`, or `none` for no marker) and a screened retitle is the new base.
-After Discord accepts each chunk, the poster records its progress and queues it for judging, even when later chunks fail.
-Judging, naming, and the key check run on the background worker.
+The status comes from the verdict on the newest accepted message; until that verdict arrives, the marker of the last paced write holds.
+When the key check confirms the Jev key is absent, the newest complete reply's explicit state is the status (`needs-you` as `open-question`, `done`, or `none` for no marker) and its screened retitle is the base; while judging is on, explicit state and retitle do not touch the title.
+An accepted chunk counts even when later chunks of its reply fail.
+Judging, naming, and the key check run on the background worker and never delay a reply.
 
 **Markers.**
 Precedence is `❓ ` > `⚠️ ` > `⏳ ` > `✅ ` > no marker.
 `❓ ` shows for any open decision and for an `open-question` status, including a plain question with no button; `⚠️ ` comes only from a Jev `blocked` status, never from worker status events; `⏳ ` is `running` and `✅ ` is `done`.
-A question belongs to a decision when it carries that decision or the ledger shows a decision was open at the question's message cutoff.
-A kept Jev status carries forward only when the question is the next accepted message and repeats an open decision.
-After closure, the decision's own question contributes no marker.
-So a `done` judged while a decision is open is kept and lands at the next permitted slot after the last decision closes.
-A Jev verdict is stale once a newer Firstmate message in that thread has been accepted by Discord, counted from chunk progress rather than only whole-delivery receipts; a stale verdict and its proposed base are refused when recorded and never applied.
-Before PATCH, the reconciler checks the input revision, accepted-message cutoff, and decision snapshot again.
+A question asked while a decision was open, by the ledger's post and closure times, belongs to that decision: once every decision has closed it contributes no marker, and the newest earlier status that was not such a question stands.
+So a `done` judged while a decision is open is kept and lands at the next permitted slot after the last decision closes, even when a reminder about the decision followed it.
+A Jev verdict is stale once a newer Firstmate message in that thread has been accepted by Discord, and a stale verdict is dropped when it arrives.
 
 **The captain's words.**
 The reconciler reads the live title before every write and never writes when it cannot.
 When the live base differs from the last base this home wrote, the captain renamed the thread: his words stay the base on that thread for good and only the marker changes after that, even when the topic drifts, and the naming model is not asked.
 A marker the captain removes stays off until the marker the inputs ask for changes.
 
+**Compare and write.**
+Right before a write, the reconciler reads the live title, the newest accepted message, and the decision ledger again; if any changed, it recomputes, and after three tries it leaves the thread for the next pass.
+It writes nothing while any decision's state is unknown, the ledger or the live title cannot be read, or the key check gives no clear answer.
+A write records its attempt first, so a write whose answer was lost is recognized as ours when the live title matches it.
+When a reply was accepted or a decision changed before a write landed and after its inputs were read, the next pass corrects that write without waiting for our pace.
+
 **Pace and limits.**
 A title is written only when the desired title differs from the live one.
 Our pace is at most one title change per thread per 10 minutes, stamped when a write lands; when the slot opens, the newest desired title is written and any intermediate one is skipped.
-Only the `❓ ` a published open decision button asks for skips that pace, and only the marker: a base change waits for the next slot.
-Discord's limits always hold the next write, including that `❓ `.
-An `X-RateLimit-Remaining` of 0 waits out `X-RateLimit-Reset-After` or the absolute `X-RateLimit-Reset`, and a title read or write that receives HTTP 429 waits out its retry deadline.
-A global limit holds every thread.
-If a PATCH response is lost, the next read checks whether it landed and restores the pace and decision marker bookkeeping.
-A transient failure or an unreadable title is retried on the 30-second decision sweep, a permanent refusal such as an archived thread waits for the thread's next input, and a failure of Jev, the naming model, or Discord leaves the title as it is and never blocks or loses a reply.
-The reconciler runs on its own gateway thread, and a restart resumes recorded waits.
+Only the `❓ ` a published open decision button asks for, which changes the marker alone, and a correction of our own raced write skip that pace.
+Discord's limits always hold the next title-path request, including those: every Discord answer on the title path stamps its wait when the answer arrives.
+An `X-RateLimit-Remaining` of 0 waits out `X-RateLimit-Reset-After` or the absolute `X-RateLimit-Reset`, and HTTP 429 on a title read, message read, or write waits out its `retry_after`, `Retry-After`, or reset; a global 429 holds every thread.
+A transient failure or an unreadable title is retried after 30 seconds, a permanent refusal such as an archived thread waits for the thread's next reply, and a failure of Jev, the naming model, or Discord leaves the title as it is and never blocks or loses a reply.
 
 **Catch-up.**
-Once per home with judging on, in the background when the gateway starts, the 10 eligible threads Firstmate posted in most recently are judged once each.
-`state/ext-autoname/catch-up.json` keeps that thread list and each thread's progress, written before the first model call and after each thread, so a restart resumes instead of repeating a finished thread's model calls or renames.
+The first judge scan with judging on is the catch-up.
+Before its first model call it writes `state/ext-autoname/catch-up.json` with the 10 eligible threads Firstmate posted in most recently and the newest accepted message id at that moment.
+Those threads are judged once each; an older thread is judged only after it gets a newer post.
+Each verdict is the thread's own progress, so a restart resumes without repeating a finished thread's model calls or renames.
 
 **Judging on or off.**
-Judging is on when [typed dispatch resolution's key](#typed-dispatch-resolution-env-typesafe_api_key) is present; `bin/fm-ext-thread-judge.sh --check` is the one key-presence check, through the shared Jev client in [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh).
+[`bin/fm-ext-thread-judge.sh --check`](../bin/fm-ext-thread-judge.sh) is the one key check, through the shared Jev client in [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh): it prints `on` when [typed dispatch resolution's key](#typed-dispatch-resolution-env-typesafe_api_key) is present, `off` when it is confirmed absent, `unknown` when the home's `.env` cannot be read, and `inactive` when the bridge is off.
+Only `on` and `off` allow title work.
 The gateway strips that key from every other subprocess it runs, so only the judge receives it.
-The [thread auto-name regression test](../tests/fm-ext-thread-autoname.test.sh) owns the one-writer, precedence, pace, rate-limit, closure, freshness, captain's-words, catch-up, and off-the-delivery-path coverage.
+The [thread auto-name regression test](../tests/fm-ext-thread-autoname.test.sh) owns the one-writer, precedence, pace, rate-limit, closure, freshness, captain's-words, compare-and-write, correction, catch-up, and off-the-delivery-path coverage.
 
 ### Thread context (name, project, history)
 

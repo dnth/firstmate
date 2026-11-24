@@ -6,8 +6,10 @@
 #   fm-ext-thread-judge.sh --state-file <json>
 #   fm-ext-thread-judge.sh --check
 #
-# --check is the one "is judging on" test the gateway asks: exit 0 when the
-# shared Jev key gate in bin/fm-jev-lib.sh finds a key, 2 when it does not.
+# --check is the one "is judging on" test the gateway asks. It prints one word
+# and exits 0: "inactive" when the local ext-bridge is not active, "on" when
+# the shared Jev key gate in bin/fm-jev-lib.sh finds a key, "off" when the key
+# is confirmed absent, and "unknown" when the home's .env cannot be read.
 # It makes no network call and reads no state file.
 #
 # Input file (message text only; no attachments, images, filenames, or ids):
@@ -68,9 +70,17 @@ while [ "$#" -gt 0 ]; do
   shift || true
 done
 if [ "$CHECK" = 1 ]; then
+  if ! fm_ext_active "$FM_HOME"; then
+    echo inactive
+    exit 0
+  fi
   fm_jev_load_key
-  fm_jev_available && exit 0
-  exit 2
+  case "$FM_JEV_KEY_STATE" in
+    present) echo on ;;
+    absent) echo off ;;
+    *) echo unknown ;;
+  esac
+  exit 0
 fi
 [ -n "$STATE_FILE" ] || { usage; exit 2; }
 [ -f "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ] || die "state file not found: $STATE_FILE"

@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Behavior tests for the topic-thread title reconciler and its inputs.
 #
-# One reconciler per thread is the only code that writes a Discord title. After
-# every Firstmate post, Jev judges the thread's status and topic fit; the
-# decision sweep reads the decision ledger; a one-time catch-up judges the ten
-# threads Firstmate posted in most recently. Those paths only update inputs.
-# The reconciler applies marker precedence, keeps the captain's own words,
-# paces judged changes to one per thread per ten minutes, lets only a decision
-# button's question mark skip that pace, and always obeys Discord's rate
-# limits. docs/configuration.md "Thread title reconciler" owns the contract.
+# One reconciler per thread is the only code that writes a Discord title, and
+# it works from durable state alone: the decision ledger, the chunks Discord
+# accepted (with each reply's own state and retitle), the thread's Jev verdict
+# log, and Discord's cooldowns. After every Firstmate post a background judge
+# scan asks Jev for the thread's status and topic fit; the first scan is the
+# one-time catch-up of the ten threads Firstmate posted in most recently. The
+# reconciler applies marker precedence, keeps the captain's own words, paces
+# changes to one per thread per ten minutes, lets only a decision button's
+# question mark and a correction of its own raced write skip that pace, and
+# always obeys Discord's rate limits. docs/configuration.md "Thread title
+# reconciler" owns the contract.
 #
 # Hermetic: no Discord, Jev, or model network. The real poster, intake, emit,
 # decision ledger, bin/fm-ext-thread-judge.sh, bin/fm-ext-thread-name.sh, and
@@ -16,8 +19,9 @@
 # boundary by a stand-in curl that returns a recorded answer from
 # tests/fixtures/thread-autoname/<case>.json; the naming model is a stand-in
 # opencode. Discord is a local HTTP server that keeps thread names, messages,
-# and every title write, and can answer a write with HTTP 429 and rate-limit
-# headers. Time is a fake clock passed to the reconciler.
+# and every title write, and can answer with HTTP 429 and rate-limit headers.
+# Time is a fake clock shared by every process a test runs: Python's clock,
+# the decision ledger's clock, and the ids of new Discord messages follow it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -91,7 +95,8 @@ chmod +x "$STUBS/curl" "$STUBS/opencode"
 # The shared Python side: a local Discord, the fake sender and thread creator
 # the poster is given, and small helpers every test uses.
 cat > "$TMP_ROOT/driver.py" <<'EOF'
-import json, os, sys, threading, time
+import json, os, re, sys, threading, time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -127,15 +132,29 @@ def save(data):
 
 def snowflake(data):
     data["seq"] += 1
-    return str(((int(time.time() * 1000) - EPOCH_MS) << 22) + data["seq"])
+    return str(((int(CLOCK[0] * 1000) - EPOCH_MS) << 22) + data["seq"])
 
 
-# The fake clock: one origin per home, shared by every process a test runs, and
-# far enough ahead of real time that anything queued "now" is already due.
+# The fake clock: one origin per home, ahead of real time, persisted so each
+# process a test runs continues where the last one stopped. Python's clock,
+# the decision ledger's clock, and new Discord message ids all follow it.
 _data = load()
-T0 = _data.setdefault("t0", time.time() + 1000)
+T0 = _data.setdefault("t0", int(time.time()) + 1000)
+CLOCK = [_data.get("now", T0)]
 save(_data)
-CLOCK = [T0]
+time.time = lambda: CLOCK[0]
+
+
+def set_clock(at):
+    with LOCK:
+        CLOCK[0] = at
+        os.environ["FM_EXT_NOW_OVERRIDE"] = str(int(at))
+        data = load()
+        data["now"] = at
+        save(data)
+
+
+set_clock(CLOCK[0])
 
 
 class Discord(BaseHTTPRequestHandler):
@@ -191,7 +210,8 @@ class Discord(BaseHTTPRequestHandler):
             if status == 200:
                 data["threads"][thread_id]["name"] = name
             save(data)
-        CLOCK[0] += step.get("elapsed", 0)
+        if step.get("elapsed"):
+            set_clock(CLOCK[0] + step["elapsed"])
         if step.get("disconnect"):
             self.close_connection = True
             return
@@ -261,14 +281,33 @@ def use(case):
         os.environ.pop("FM_TEST_JEV", None)
 
 
-def tick(offset):
-    """One decision sweep and one reconciler pass at T0 + offset seconds."""
-    summaries = poster.decision_threads(HOME)
-    if summaries is not None:
-        title.sweep_decisions(HOME, summaries, now=T0 + offset)
-    CLOCK[0] = T0 + offset
-    with patch.object(title, "time", SimpleNamespace(time=lambda: CLOCK[0])):
-        return title.run_due(HOME)
+def tick(offset, **kwargs):
+    """One reconcile-loop step at T0 + offset seconds.
+
+    It settles decision posts, marks threads whose decisions changed, and runs
+    the safety sweep, as the gateway's loops do, then reconciles every due
+    thread. Only the reconciler writes.
+    """
+    set_clock(T0 + offset)
+    settle_decisions()
+    poster.sweep_thread_titles(HOME)
+    title.safety_sweep(HOME)
+    return title.run_due(HOME, **kwargs)
+
+
+@contextmanager
+def only(marker):
+    """Hold every queued reply except the one whose file name has ``marker``."""
+    outbox = HOME / "state" / "ext-outbox"
+    held = [path for path in outbox.glob("*.json")
+            if re.search(r"\.(answer|followup)\.\d+\.json$", path.name) and marker not in path.name]
+    for path in held:
+        path.rename(path.with_suffix(".held"))
+    try:
+        yield
+    finally:
+        for path in held:
+            path.with_suffix(".held").rename(path)
 
 
 def threads():
@@ -303,6 +342,10 @@ def patches(thread_id=None):
 
 def record(thread_id):
     return poster.load_thread_record_by_id(thread_id, HOME).get("title") or {}
+
+
+def verdicts(thread_id):
+    return record(thread_id).get("verdicts") or []
 
 
 def jev_calls():
@@ -351,8 +394,8 @@ py() {
 }
 
 # new_thread <home> <message-id> <title> <first post>: a top-level request whose
-# first answer creates a titled topic thread. Judging sees no recorded answer
-# here, so the creating post leaves the title alone.
+# first answer creates a titled topic thread. Jev has no recorded answer here,
+# so judging the creating post fails and leaves the title alone.
 new_thread() {
   local home=$1 message=$2 title=$3 text=$4
   printf '%s' "Please look at: $title" > "$home/request-$message.txt"
@@ -395,13 +438,15 @@ resolve_key() {  # <home> <key-slug>
   printf 'resolved [key=%s]: answered: North\n' "$2" >> "$1/state/route-fix.status"
 }
 
+
 M1=444444444444444441
 
 # --- 1. only the reconciler writes a title -------------------------------------------
 #
-# The judge worker, the decision sweep, and the catch-up pass only update
-# inputs: while they run, Discord sees no title write at all. The reconciler's
-# own pass then writes the one title those inputs ask for.
+# The judge worker, the decision sweep, and the judge scan only record inputs:
+# while they run, Discord sees no title write at all. The post itself marks
+# the thread due, so the reconciler's next pass writes the one title those
+# inputs ask for.
 
 test_1_only_the_reconciler_writes_titles() {
   local home="$TMP_ROOT/t1" out
@@ -412,19 +457,19 @@ test_1_only_the_reconciler_writes_titles() {
   out=$(py "$home" <<'PY'
 (thread,) = threads()
 assert deliver("open-question") == ["sent", "sent"]
-assert record(thread)["verdict"]["status"] == "open-question", record(thread)
+assert verdicts(thread)[-1]["status"] == "open-question", record(thread)
 assert poster.decision_threads(HOME, thread)[thread]["open"] == 1
 assert patches() == [], "the judge worker wrote a title"
-autoname.catch_up(HOME)
-assert patches() == [], "catch-up wrote a title"
+autoname.judge_scan(HOME, retry_failed=True)
+assert patches() == [], "the judge scan wrote a title"
 poster.sweep_thread_titles(HOME)
 assert patches() == [], "the decision sweep wrote a title"
-assert title.run_due(HOME, now=T0) == [thread]
+assert title.run_due(HOME) == [thread]
 assert [p["name"] for p in patches()] == ["❓ Aceh · nightly reindex"], patches()
 print("ok")
 PY
   ) || fail "only the reconciler may write: $out"
-  pass "the judge worker, decision sweep, and catch-up write no title; the reconciler does"
+  pass "the judge worker, judge scan, and decision sweep write no title; the reconciler does"
 }
 
 # --- 2. marker precedence follows the recorded verdicts -------------------------------
@@ -446,20 +491,14 @@ test_2_marker_precedence_follows_recorded_verdicts() {
 (thread,) = threads()
 steps = []
 for generation, case in ((2, "open-question"), (3, "running"), (4, "done"), (5, "blocked")):
-    path = next((HOME / "state" / "ext-outbox").glob(f"*.followup.{generation}.json"))
-    queued = sorted((HOME / "state" / "ext-outbox").glob("*.followup.*.json"))
-    hidden = [p for p in queued if p != path and ".progress." not in p.name and ".receipt." not in p.name]
-    for other in hidden:
-        other.rename(other.with_suffix(".held"))
-    deliver(case)
-    for other in hidden:
-        other.with_suffix(".held").rename(other)
+    with only(f"followup.{generation}"):
+        deliver(case)
     tick(generation * 601)
     steps.append(name(thread))
 assert steps == ["❓ Aceh · nightly reindex", "⏳ Aceh · nightly reindex",
                  "✅ Aceh · nightly reindex", "⚠️ Aceh · nightly reindex"], steps
 deliver("blocked")
-assert record(thread)["verdict"]["status"] == "blocked"
+assert verdicts(thread)[-1]["status"] == "blocked"
 tick(6 * 601 + 10)
 assert name(thread) == "❓ Aceh · nightly reindex", name(thread)
 print("ok")
@@ -470,9 +509,9 @@ PY
 
 # --- 3. with judging off, a reply's own state marks the thread, never ⚠️ ---------------
 #
-# Without the Jev key the reconciler follows each reply's explicit state. A
-# worker that reports itself blocked on a keyed decision shows ❓ for that
-# decision: ⚠️ comes only from Jev reading the thread.
+# Without the Jev key the reconciler follows each reply's explicit state, read
+# from the chunks Discord accepted. A worker that reports itself blocked on a
+# keyed decision shows ❓ for that decision: ⚠️ comes only from Jev.
 
 test_3_explicit_states_drive_markers_when_judging_is_off() {
   local home="$TMP_ROOT/t3" out
@@ -528,10 +567,8 @@ PY
   post "$home" "$M1" followup 4 "The OCR box refused the worker: credential expired."
   out=$(py "$home" <<'PY'
 (thread,) = threads()
-held = next((HOME / "state" / "ext-outbox").glob("*.followup.4.json"))
-held.rename(held.with_suffix(".held"))
-deliver("done")
-held.with_suffix(".held").rename(held)
+with only("followup.3"):
+    deliver("done")
 tick(60)
 assert name(thread) == "⏳ Aceh · nightly reindex" and len(patches()) == 1, patches()
 deliver("blocked")
@@ -561,7 +598,7 @@ deliver("open-question")
 summary = poster.decision_threads(HOME, thread)[thread]
 assert summary["open"] == 2 and summary["open_buttons"] == 1, summary
 assert load()["threads"][thread]["messages"][-1]["components"]
-assert record(thread)["discord_after"] == T0 + 604.25
+assert title.blocked_until(HOME, thread) == T0 + 604.25
 script({"status": 429, "retry_after": 7.5})
 tick(606)
 assert patches()[-1]["status"] == 429 and name(thread) == "⚠️ Aceh · nightly reindex"
@@ -577,10 +614,11 @@ PY
 
 # --- 5. a done judged during an open decision lands after closure ---------------------
 #
-# The latest verdict is kept while a decision is open. When the ledger closes
-# the last decision, the kept done is applied at the next permitted slot. A
-# question asked while the decision was open belongs to that decision and does
-# not keep ❓ after it closes.
+# Verdicts judged while a decision is open are kept. When the ledger closes
+# the last decision, the kept done is applied at the next permitted slot, and
+# a reminder about the decision posted before it closed does not replace it.
+# A question asked while the decision was open belongs to that decision and
+# does not keep ❓ after it closes.
 
 test_5_done_during_a_decision_lands_after_closure() {
   local home="$TMP_ROOT/t5" out
@@ -607,7 +645,7 @@ PY
 (thread,) = threads()
 deliver("done")
 tick(20)
-assert name(thread) == "❓ Aceh · nightly reindex" and record(thread)["verdict"]["status"] == "done"
+assert name(thread) == "❓ Aceh · nightly reindex" and verdicts(thread)[-1]["status"] == "done"
 PY
   ) || fail "done replaced the open decision's ❓: $out"
   post "$home" "$M1" followup 5 "Reminder: the route call above still needs you."
@@ -615,6 +653,7 @@ PY
 (thread,) = threads()
 judge = autoname.judge
 def close_while_judging(state, home):
+    set_clock(CLOCK[0] + 1)
     with (HOME / "state" / "route-fix.status").open("a") as status:
         status.write("resolved [key=route-a]: answered: North\n")
     settle_decisions()
@@ -622,20 +661,12 @@ def close_while_judging(state, home):
 
 with patch.object(autoname, "judge", close_while_judging):
     deliver("open-question")
-tick(30)
-assert record(thread)["verdict"]["status"] == "done", "a reminder of the decision replaced the kept done"
-assert title.fresh(HOME, thread, record(thread)["verdict"]["cutoff"])
-PY
-  ) || fail "the reminder did not keep the done: $out"
-  out=$(py "$home" <<'PY'
-(thread,) = threads()
-settle_decisions()
 summary = poster.decision_threads(HOME, thread)[thread]
 assert summary["open"] == 0 and summary["last_closed_at"] > 0, summary
 tick(40)
 assert name(thread) == "❓ Aceh · nightly reindex", "the kept done skipped our pace"
 tick(601)
-assert name(thread) == "✅ Aceh · nightly reindex", name(thread)
+assert name(thread) == "✅ Aceh · nightly reindex", "the decision reminder replaced the kept done"
 print("ok")
 PY
   ) || fail "the kept done did not land at the next slot after closure: $out"
@@ -651,7 +682,6 @@ PY
   resolve_key "$home" route-c
   out=$(py "$home" <<'PY'
 (thread,) = threads()
-settle_decisions()
 tick(601)
 assert name(thread) == "Aceh · nightly reindex", name(thread)
 print("ok")
@@ -664,7 +694,8 @@ PY
 #
 # A verdict is stale once a newer Firstmate message reached Discord, counted
 # from chunk progress, so a visible chunk of a reply whose later chunk failed
-# (and so has no receipt) still makes an older verdict stale.
+# still makes an older verdict stale. A chunk accepted while a pass computes
+# stops that pass from writing.
 
 test_6_stale_verdicts_are_dropped() {
   local home="$TMP_ROOT/t6" out
@@ -673,7 +704,7 @@ test_6_stale_verdicts_are_dropped() {
   out=$(py "$home" <<'PY'
 (thread,) = threads()
 cutoff = load()["threads"][thread]["messages"][-1]["id"]
-assert title.record_verdict(HOME, thread, "running", False, cutoff, "Aceh · GPU cutover") == "recorded"
+assert title.record_verdict(HOME, thread, cutoff, "running", False, "Aceh · GPU cutover") == "recorded"
 newer = str(int(cutoff) + 1)
 slug = next((HOME / "state" / "ext-outbox").glob("*.thread.json")).name.split(".")[0]
 progress = HOME / "state" / "ext-outbox" / f"{slug}.followup.9.progress.json"
@@ -686,20 +717,18 @@ def accept_while_screening(value, home):
 
 poster.screened_title = accept_while_screening
 tick(0)
-assert progress.exists() and patches() == [], "a concurrent accepted chunk did not invalidate PATCH"
+assert progress.exists() and patches() == [], "a concurrent accepted chunk did not stop the write"
 poster.screened_title = screen
-assert not list((HOME / "state" / "ext-outbox").glob("*.followup.9.receipt.json"))
-assert title.record_verdict(HOME, thread, "done", True, cutoff) == "stale"
-tick(0)
-assert patches() == [], "a stale verdict was applied"
-assert record(thread)["verdict"]["status"] == "running", "the stale done replaced the kept verdict"
-assert title.record_verdict(HOME, thread, "done", True, newer) == "recorded"
+assert title.record_verdict(HOME, thread, cutoff, "done", True) == "stale"
 tick(1)
+assert patches() == [], "a stale verdict was applied"
+assert title.record_verdict(HOME, thread, newer, "done", True) == "recorded"
+tick(2)
 assert name(thread) == "✅ Aceh · nightly reindex", "a newer fit verdict inherited the stale base"
 print("ok")
 PY
   ) || fail "a verdict older than a visible post was used: $out"
-  pass "verdicts older than a Discord-accepted chunk are dropped, at input and at reconcile"
+  pass "verdicts older than a Discord-accepted chunk are dropped, at input and before the write"
 }
 
 # --- 7. the captain's own words stay for good ------------------------------------------
@@ -707,7 +736,7 @@ PY
 # A live base that differs from the last base Firstmate wrote is the captain's
 # rename. His words stay on that thread for good, even when Jev says the topic
 # drifted; only the marker changes. A marker he removes stays off until the
-# thread's state changes.
+# thread's state changes, and a rename made while a pass computes wins.
 
 test_7_manual_renames_keep_the_captains_words() {
   local home="$TMP_ROOT/t7" out
@@ -728,7 +757,7 @@ PY
 (thread,) = threads()
 os.environ["FM_TEST_NAME"] = "Aceh · OCR GPU migration"
 deliver("drift")
-assert record(thread)["verdict"]["topic_fits"] is False
+assert verdicts(thread)[-1]["topic_fits"] is False
 tick(601)
 assert name(thread) == "⏳ GPU box move", name(thread)
 assert record(thread)["manual_base"] == "GPU box move"
@@ -752,10 +781,11 @@ PY
 (thread,) = threads()
 deliver(None)
 tick(3300)
-deliver_id = load()["threads"][thread]["messages"][-1]["id"]
-assert title.record_verdict(HOME, thread, "done", True, deliver_id) == "recorded"
+assert name(thread) == "GPU box move", "an unjudged post restored the removed marker"
+newest = load()["threads"][thread]["messages"][-1]["id"]
+assert title.record_verdict(HOME, thread, newest, "done", True) == "recorded"
 tick(3301)
-assert name(thread) == "GPU box move", "staleness erased the captain's removal of the same marker"
+assert name(thread) == "GPU box move", "a repeated state restored the removed marker"
 PY
   ) || fail "a repeated state restored the removed marker: $out"
   post "$home" "$M1" followup 6 "Reopening: the new box drops jobs under load."
@@ -767,14 +797,38 @@ assert name(thread) == "⏳ GPU box move", name(thread)
 print("ok")
 PY
   ) || fail "the next state change did not restore the marker: $out"
-  pass "the captain's words stay for good with only the marker changing; a removed marker waits for a state change"
+
+  home="$TMP_ROOT/t7b"
+  setup_home "$home"
+  new_thread "$home" "$M1" "Aceh · search latency" "Search latency is back to normal."
+  post "$home" "$M1" followup 2 "Moving on to the OCR GPU migration you asked for next."
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+os.environ["FM_TEST_NAME"] = "Aceh · OCR GPU migration"
+deliver("drift")
+assert verdicts(thread)[-1]["base"] == "Aceh · OCR GPU migration", verdicts(thread)
+reads = []
+def rename_between_reads(thread_id):
+    reads.append(thread_id)
+    if len(reads) == 2:
+        captain_renames(thread_id, "GPU box move")
+    return title.discord_read_title(thread_id)
+
+tick(0, read_thread=rename_between_reads)
+assert not any("OCR GPU migration" in p["name"] for p in patches()), patches()
+assert name(thread).endswith("GPU box move") and record(thread)["manual_base"] == "GPU box move", name(thread)
+print("ok")
+PY
+  ) || fail "a rename made during a pass was overwritten: $out"
+  pass "the captain's words stay for good, even mid-pass; a removed marker waits for a state change"
 }
 
-# --- 8. catch-up: ten newest threads, saved before the first call, resumes ---------------
+# --- 8. catch-up: ten newest threads, fixed before the first call, resumes ---------------
 #
-# The one-time catch-up saves its ten-thread list before the first model call
-# and each thread's progress after it, so a restart resumes without repeating a
-# finished thread's model calls or renames, and never widens past ten threads.
+# The first judge scan fixes its ten-thread list and the newest message at
+# that moment before the first model call. Each verdict is the thread's own
+# progress, so a restart resumes without repeating a finished thread's model
+# calls or renames, and older threads wait for a newer post.
 
 test_8_catch_up_resumes_after_restart() {
   local home="$TMP_ROOT/t8" out i
@@ -782,48 +836,32 @@ test_8_catch_up_resumes_after_restart() {
   for i in 01 02 03 04 05 06 07 08 09 10 11 12; do
     new_thread "$home" "4444444444444444$i" "Aceh · topic $i" "Working on topic $i."
   done
-  printf 'TYPESAFE_API_KEY=fixture-key\n' > "$home/.env"
+  printf 'TYPESAFE_API_KEY=%s\n' fixture-key > "$home/.env"
   for kill_at in 1 4; do
     home_env "$home" env FM_TEST_KILL_AT="$kill_at" "$PYTHON_BIN" -c '
 import os, sys
 from driver import *
 os.environ["FM_TEST_KILL_PID"] = str(os.getpid())
 use("running")
-autoname.catch_up(HOME)
-' >/dev/null 2>&1 && fail "catch-up run was not interrupted at call $kill_at"
+autoname.judge_scan(HOME)
+' >/dev/null 2>&1 && fail "the judge scan was not interrupted at call $kill_at"
     out=$(py "$home" <<PY
 state = json.loads((HOME / "state" / "ext-autoname" / "catch-up.json").read_text())
-assert len(state["threads"]) == 10 and not state["completed"], state
-assert len(state["done"]) == {1: 0, 4: 2}[$kill_at], state
+assert len(state["threads"]) == 10, state
 names = {t: name(t) for t in threads()}
-cohort = {names[item["thread_id"]] for item in state["threads"]}
-assert cohort == {"Aceh · topic %02d" % n for n in range(3, 13)}, cohort
+assert {names[t] for t in state["threads"]} == {"Aceh · topic %02d" % n for n in range(3, 13)}, state
+judged = [t for t in threads() if verdicts(t)]
+assert len(judged) == {1: 0, 4: 2}[$kill_at], judged
 print("ok")
 PY
-    ) || fail "catch-up did not save its list and progress (kill at $kill_at): $out"
+    ) || fail "the judge scan did not save its list and progress (kill at $kill_at): $out"
   done
   out=$(py "$home" <<'PY'
 use("running")
-def stop_before_checkpoint(path, data):
-    raise InterruptedError("stop after recording the verdict")
-
-with patch.object(autoname, "_save_catch_up", stop_before_checkpoint):
-    try:
-        autoname.catch_up(HOME)
-    except InterruptedError:
-        pass
-    else:
-        raise AssertionError("catch-up did not reach its next checkpoint")
-
-assert len(jev_calls()) == 5
-PY
-  ) || fail "catch-up did not reach the committed-verdict window: $out"
-  out=$(py "$home" <<'PY'
-use("running")
-judged = autoname.catch_up(HOME)
-assert len(judged) == 7, judged
+judged = autoname.judge_scan(HOME)
+assert len(judged) == 8, judged
 tick(0)
-assert autoname.catch_up(HOME) == []
+assert autoname.judge_scan(HOME, retry_failed=True) == []
 calls = [call["state"]["thread"]["name"] for call in jev_calls()]
 counts = {n: calls.count(n) for n in set(calls)}
 assert set(counts) == {"Aceh · topic %02d" % n for n in range(3, 13)}, counts
@@ -833,8 +871,17 @@ written = [p["thread"] for p in patches()]
 assert len(written) == 10 == len(set(written)), patches()
 print("ok")
 PY
-  ) || fail "catch-up repeated finished threads or went past ten: $out"
-  pass "catch-up saves ten threads before the first call and resumes after a restart without repeats"
+  ) || fail "the judge scan repeated finished threads or went past ten: $out"
+  post "$home" "444444444444444401" followup 2 "Topic 01 is moving again."
+  out=$(py "$home" <<'PY'
+before = len(jev_calls())
+deliver("running")
+calls = jev_calls()[before:]
+assert [c["state"]["thread"]["name"] for c in calls] == ["Aceh · topic 01"], calls
+print("ok")
+PY
+  ) || fail "an older thread was not judged after a newer post: $out"
+  pass "catch-up fixes ten threads before the first call, resumes without repeats, and older threads wait for a post"
 }
 
 # --- 9. judging stays off the delivery path, and failures leave the title alone ----------
@@ -845,7 +892,7 @@ PY
 # on, and gateway subprocesses other than the judge never see the key.
 
 test_9_judging_never_delays_replies_and_failures_keep_the_title() {
-  local home="$TMP_ROOT/t9" out
+  local home="$TMP_ROOT/t9" out ENV_KEY=from-env
   setup_home "$home"
   new_thread "$home" "$M1" "Aceh · search latency" "Search latency is back to normal."
   post "$home" "$M1" followup 2 "A worker is checking the cache warm-up."
@@ -857,17 +904,17 @@ use("running")
 assert poster.drain_outbox(send=send, home=HOME, react=lambda *a: None, create_thread=create) == ["sent"]
 # The judge is held until this process releases it, so a delivery that waited
 # for judging could not have returned before the verdict was recorded.
-assert "verdict" not in record(thread), "delivery returned only after the judge finished"
+assert not verdicts(thread), "delivery returned only after the judge finished"
 assert any(t.name == "fm-ext-autoname" and t.is_alive() for t in threading.enumerate())
 for _ in range(250):
     if (CAPTURE / "jev-entered").exists():
         break
     time.sleep(0.02)
 assert (CAPTURE / "jev-entered").exists(), "the judge never started"
-assert "verdict" not in record(thread)
+assert not verdicts(thread)
 (CAPTURE / "jev-release").write_text("")
 settle()
-assert record(thread)["verdict"]["status"] == "running"
+assert verdicts(thread)[-1]["status"] == "running"
 print("ok")
 ') || fail "delivery waited for the judge: $out"
   rm -f "$home/capture/jev-entered" "$home/capture/jev-release"
@@ -877,15 +924,13 @@ print("ok")
 (thread,) = threads()
 tick(0)
 assert name(thread) == "⏳ Aceh · search latency"
-before = record(thread).get("verdict")
-held = next((HOME / "state" / "ext-outbox").glob("*.followup.4.json"))
-held.rename(held.with_suffix(".held"))
-deliver(None)
-assert record(thread).get("verdict") == before, "a failed Jev call changed the inputs"
-held.with_suffix(".held").rename(held)
+before = verdicts(thread)
+with only("followup.3"):
+    deliver(None)
+assert verdicts(thread) == before, "a failed Jev call changed the inputs"
 os.environ.pop("FM_TEST_NAME", None)
 deliver("drift")
-assert record(thread).get("verdict") == before, "a failed naming call changed the inputs"
+assert verdicts(thread) == before, "a failed naming call changed the inputs"
 tick(601)
 assert name(thread) == "⏳ Aceh · search latency" and len(patches()) == 1, patches()
 print("ok")
@@ -905,13 +950,18 @@ print("ok")
 PY
   ) || fail "a Discord failure was not left alone and retried: $out"
 
-  home_env "$home" env FM_HOME="$TMP_ROOT/no-key-home" "$JUDGE" --check
-  expect_code 2 "$?" "the judge check with no key anywhere"
-  home_env "$home" "$JUDGE" --check
-  expect_code 0 "$?" "the judge check with the home .env key"
-  home_env "$TMP_ROOT/no-key-home" env TYPESAFE_API_KEY=from-env "$JUDGE" --check
-  expect_code 0 "$?" "the judge check with an environment key"
-  out=$(home_env "$home" env TYPESAFE_API_KEY=from-env "$PYTHON_BIN" -c '
+  mkdir -p "$TMP_ROOT/no-key-home" "$TMP_ROOT/bad-key-home/.env" "$TMP_ROOT/inactive-config"
+  out=$(home_env "$home" env FM_HOME="$TMP_ROOT/no-key-home" "$JUDGE" --check)
+  [ "$out" = off ] || fail "the judge check with no key anywhere said: $out"
+  out=$(home_env "$home" "$JUDGE" --check)
+  [ "$out" = on ] || fail "the judge check with the home .env key said: $out"
+  out=$(home_env "$home" env FM_HOME="$TMP_ROOT/no-key-home" "TYPESAFE_API_KEY=$ENV_KEY" "$JUDGE" --check)
+  [ "$out" = on ] || fail "the judge check with an environment key said: $out"
+  out=$(home_env "$home" env FM_HOME="$TMP_ROOT/bad-key-home" "$JUDGE" --check)
+  [ "$out" = unknown ] || fail "the judge check with an unreadable .env said: $out"
+  out=$(home_env "$home" env FM_CONFIG_OVERRIDE="$TMP_ROOT/inactive-config" "$JUDGE" --check)
+  [ "$out" = inactive ] || fail "the judge check with the bridge off said: $out"
+  out=$(home_env "$home" env "TYPESAFE_API_KEY=$ENV_KEY" "$PYTHON_BIN" -c '
 import sys
 from driver import *
 from tool_path import firstmate_env
@@ -922,16 +972,22 @@ print("ok")
   pass "judging runs off the delivery path, failures keep the title, and one key check gates judging"
 }
 
+# --- 10. Discord's limits hold across threads, slow answers, and lost answers -------------
+#
+# A bot-wide 429, from a write or from a title read, holds every thread, timed
+# from when Discord answered. A write whose answer was lost still counts as
+# our write and keeps its pace.
+
 test_10_title_request_limits_survive_a_slow_response_and_lost_ack() {
   local home="$TMP_ROOT/t10" out
   setup_home "$home" off
   new_thread "$home" "$M1" "Aceh · first thread" "Starting the first task."
   new_thread "$home" "444444444444444442" "Aceh · second thread" "Starting the second task."
+  post "$home" "$M1" followup 2 "The first task is finished." --thread-state "done"
+  post "$home" "444444444444444442" followup 2 "The second task is finished." --thread-state "done"
   out=$(py "$home" <<'PY'
 a, b = threads()
-for thread in (a, b):
-    cutoff = load()["threads"][thread]["messages"][-1]["id"]
-    assert title.record_explicit(HOME, thread, "done", "", cutoff)
+deliver()
 script({"status": 429, "retry_after": 7.5, "global": True, "elapsed": 10})
 tick(0)
 assert len(patches()) == 1, "a global PATCH limit allowed the next thread to write"
@@ -949,17 +1005,32 @@ tick(23)
 assert len(patches()) == 3, patches()
 lost = patches()[1]["thread"]
 assert name(lost).startswith("✅ ")
-cutoff = load()["threads"][lost]["messages"][-1]["id"]
-assert title.record_explicit(HOME, lost, "none", "", cutoff)
+print(lost)
+PY
+  ) || fail "Discord title request limits failed: $out"
+  local lost=${out##*$'\n'} message
+  message=$(home_env "$home" "$PYTHON_BIN" -c '
+import sys
+from driver import *
+record = poster.load_thread_record_by_id(sys.argv[1], HOME)
+print(record["request_id"].split(":")[-1])' "$lost")
+  post "$home" "$message" followup 3 "Another task is starting." --thread-state none
+  out=$(py "$home" <<'PY'
+lost = patches()[1]["thread"]
+set_clock(T0 + 40)
+deliver()
 tick(64)
 tick(632)
 assert len(patches()) == 3, "a lost PATCH response erased the pace of the landed write"
 tick(633)
 assert len(patches()) == 4 and not name(lost).startswith("✅ "), patches()
+print("ok")
 PY
-  ) || fail "Discord title request pacing failed: $out"
-  pass "global waits apply across threads and a lost write response preserves pace"
+  ) || fail "a lost write answer lost its pace: $out"
+  pass "bot-wide waits apply across threads from the answer time, and a lost write answer keeps its pace"
 }
+
+# --- 11. partial replies are judged; private labels stay private --------------------------
 
 test_11_partial_posts_are_judged_and_private_labels_stay_private() {
   local home="$TMP_ROOT/t11" out text
@@ -990,13 +1061,15 @@ assert calls[0]["state"]["thread"]["project"] == ""
 assert not (CAPTURE / "namer.txt").exists(), "a private checkout name reached the naming model"
 tick(0)
 assert name(thread) == "⏳ " + first_name, name(thread)
+print("ok")
 PY
   ) || fail "a partially delivered reply was skipped or exposed a private label: $out"
   pass "an accepted chunk is judged even if a later chunk fails, without sourcing private labels"
 }
 
+# --- 12. legacy intent, and no title work without a clear key check or bridge ------------
 
-test_12_legacy_decisions_close_and_a_failed_key_check_keeps_the_title() {
+test_12_legacy_intent_and_unclear_checks_keep_the_title() {
   local home="$TMP_ROOT/t12" out
   setup_home "$home" off
   new_thread "$home" "$M1" "Aceh · legacy thread" "The legacy task is complete."
@@ -1006,10 +1079,14 @@ test_12_legacy_decisions_close_and_a_failed_key_check_keeps_the_title() {
 topic = poster.load_thread_record_by_id(thread, HOME)
 question_name = "❓ Aceh · legacy thread"
 with topic["path"].open("w") as state:
-    json.dump({"request_id": topic["request_id"], "topic_thread_id": thread,
+    json.dump({"request_id": topic["request_id"], "topic_thread_id": thread, "creator": "firstmate",
                "topic_name": question_name, "marked_open": True, "deferred_state": "done"}, state)
 captain_renames(thread, question_name)
-poster.save_thread_record(topic["path"], topic["request_id"], thread, opening_posted=True)
+# Replies delivered before the reconciler kept no title input in their progress.
+for path in (HOME / "state" / "ext-outbox").glob("*.progress.json"):
+    data = json.loads(path.read_text())
+    data.pop("title_input", None)
+    path.write_text(json.dumps(data))
 tick(0)
 assert name(thread) == "✅ Aceh · legacy thread", name(thread)
 
@@ -1021,11 +1098,55 @@ def failed_check(args, *pos, **kwargs):
 
 with patch.object(autoname.subprocess, "run", failed_check):
     assert deliver() == ["sent"]
-tick(601)
+    tick(601)
 assert name(thread) == "✅ Aceh · legacy thread", "a failed key check enabled the explicit fallback"
+(HOME / "config" / "ext-bridge").unlink()
+tick(1300)
+assert name(thread) == "✅ Aceh · legacy thread" and len(patches()) == 1, "title work ran with the bridge off"
+print("ok")
 PY
-  ) || fail "legacy intent or key-check handling failed: $out"
-  pass "legacy marked decisions close and an unavailable key check leaves the title alone"
+  ) || fail "legacy intent or check handling failed: $out"
+  pass "a legacy deferred done lands; an unclear key check or a disabled bridge leaves the title alone"
+}
+
+# --- 13. a write that raced newer state is corrected without our pace ---------------------
+#
+# A reply Discord accepted while our title write was in flight makes that
+# write wrong. The next pass corrects it at once; a change that arrives after
+# the write landed still waits for the pace.
+
+test_13_a_raced_write_is_corrected_without_waiting() {
+  local home="$TMP_ROOT/t13" out
+  setup_home "$home" off
+  new_thread "$home" "$M1" "Aceh · nightly reindex" "Looking at the reindex schedule now."
+  post "$home" "$M1" followup 2 "The reindex finished." --thread-state "done"
+  post "$home" "$M1" followup 3 "A follow-up run is starting." --thread-state none
+  post "$home" "$M1" followup 4 "The follow-up run finished." --thread-state "done"
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+with only("followup.2"):
+    deliver()
+
+def accept_reply_mid_write(thread_id, name):
+    with only("followup.3"):
+        deliver()
+    script({"elapsed": 5})
+    return title.discord_write_title(thread_id, name)
+
+tick(0, rename=accept_reply_mid_write)
+assert name(thread) == "✅ Aceh · nightly reindex", patches()
+tick(6)
+assert name(thread) == "Aceh · nightly reindex", "the raced write was not corrected at once"
+set_clock(T0 + 10)
+deliver()
+tick(20)
+assert name(thread) == "Aceh · nightly reindex", "a later change skipped the pace"
+tick(607)
+assert name(thread) == "✅ Aceh · nightly reindex", name(thread)
+print("ok")
+PY
+  ) || fail "a raced title write was not corrected: $out"
+  pass "a write that raced an accepted reply is corrected at once; later changes keep the pace"
 }
 
 test_1_only_the_reconciler_writes_titles
@@ -1037,7 +1158,7 @@ test_6_stale_verdicts_are_dropped
 test_7_manual_renames_keep_the_captains_words
 test_8_catch_up_resumes_after_restart
 test_9_judging_never_delays_replies_and_failures_keep_the_title
-
 test_10_title_request_limits_survive_a_slow_response_and_lost_ack
 test_11_partial_posts_are_judged_and_private_labels_stay_private
-test_12_legacy_decisions_close_and_a_failed_key_check_keeps_the_title
+test_12_legacy_intent_and_unclear_checks_keep_the_title
+test_13_a_raced_write_is_corrected_without_waiting

@@ -46,10 +46,11 @@ for a later outcome header.
 ``reconcile_decision_posts`` edits only that final message under the display
 rules in docs/configuration.md, "Decision buttons".
 
-Topic-thread titles are written only by ``thread_title``; a delivery hands
-its thread state, retitle, and decision flag to ``thread_autoname`` through
-``queue_title_inputs``, and ``sweep_thread_titles`` feeds the decision
-ledger. docs/configuration.md, "Thread title reconciler", owns the contract.
+Topic-thread titles are written only by ``thread_title``. A delivery keeps
+its thread state, retitle, and decision flag in its chunk progress and wakes
+``thread_autoname`` through ``queue_title_work``; ``sweep_thread_titles``
+marks threads whose decision posts changed. docs/configuration.md, "Thread
+title reconciler", owns the contract.
 
 A payload with ``media`` uploads its staged files with its last chunk as one
 multipart message; docs/configuration.md, "Outbound media", owns the single
@@ -1169,22 +1170,19 @@ def title_thread_for(payload: dict, thread_id: str, home: Path) -> str:
     return "" if not recorded or recorded.get("creator") == "adopted" else recorded["topic_thread_id"]
 
 
-def queue_title_inputs(payload: dict, thread_id: str, message_id: str, home: Path, last: bool) -> None:
-    """Queue a Discord-accepted chunk for the background title worker."""
+def queue_title_work(payload: dict, thread_id: str, home: Path) -> None:
+    """A chunk of this reply reached Discord: wake the title worker and return.
+
+    The reply's own title inputs already live in its chunk progress; this
+    only marks the thread due and queues judging, so nothing here can delay
+    or fail a delivery.
+    """
     try:
         target = title_thread_for(payload, thread_id, home)
-        if not target:
-            return
-        state = payload.get("thread_state") if last else None
-        retitle = payload.get("thread_retitle") if last else None
-        _thread_autoname().after_post(home, target, {
-            "message_id": message_id,
-            "state": state if isinstance(state, str) else "",
-            "retitle": retitle if isinstance(retitle, str) else "",
-            "decision": last and isinstance(payload.get("decision"), dict),
-        })
+        if target:
+            _thread_autoname().after_post(home, target)
     except Exception as err:
-        print(f"fm-ext-poster: title inputs skipped: {err}", file=sys.stderr)
+        print(f"fm-ext-poster: title work skipped: {err}", file=sys.stderr)
 
 
 def decision_threads(home: Path, thread_id: str = "") -> dict[str, dict] | None:
@@ -1203,6 +1201,7 @@ def decision_threads(home: Path, thread_id: str = "") -> dict[str, dict] | None:
             item = json.loads(line)
             threads[str(item["thread_id"])] = {"open": int(item["open"]), "closed": int(item["closed"]),
                                                "open_buttons": int(item["open_buttons"]),
+                                               "unknown": int(item["unknown"]),
                                                "posts": item["posts"],
                                                "last_posted_at": _epoch(item["last_posted_at"]),
                                                "last_closed_at": _epoch(item["last_closed_at"]),
@@ -1213,15 +1212,15 @@ def decision_threads(home: Path, thread_id: str = "") -> dict[str, dict] | None:
 
 
 def sweep_thread_titles(home: Path | None = None) -> list[str]:
-    """The periodic pass: refresh every thread's decision input from the ledger.
+    """After the decision sweep: mark due every thread whose decision posts changed.
 
-    It only updates inputs; ``thread_title.run_due`` writes any title change.
+    It writes nothing; ``thread_title.run_due`` reconciles the threads.
     """
     home = home or firstmate_home()
     summaries = decision_threads(home)
     if summaries is None:
         return []
-    return _thread_title().sweep_decisions(home, summaries)
+    return _thread_title().ledger_events(home, summaries)
 
 
 def discord_create_thread(payload: dict, name: str) -> dict:
@@ -1950,6 +1949,14 @@ def deliver_one(
         "limit": split["limit"],
         "cap": split["cap"],
     }
+    if not isinstance(progress.get("title_input"), dict):
+        # The reply's own thread state and retitle, kept with the chunks
+        # Discord accepted so the title reconciler can read them after a
+        # restart.
+        state, retitle = payload.get("thread_state"), payload.get("thread_retitle")
+        progress["title_input"] = {"state": state if isinstance(state, str) else "",
+                                   "retitle": retitle if isinstance(retitle, str) else "",
+                                   "decision": isinstance(payload.get("decision"), dict)}
     if isinstance(payload.get("decision"), dict):
         # The post record a click and a later edit find this decision by.
         post_decision = dict(payload["decision"])
@@ -2098,7 +2105,7 @@ def deliver_one(
             progress["posted_at"] = time.time()
         with _THREAD_RECORD_LOCK:
             write_progress(payload, progress, home)
-        queue_title_inputs(payload, thread_id, ids[-1], home, last)
+        queue_title_work(payload, thread_id, home)
     posted_at = time.time()
     receipt_record = {
         "ok": True,
@@ -2205,9 +2212,16 @@ def outbox_reconcile_loop(interval: float) -> None:
 def thread_title_loop(interval: float) -> None:
     """Run the title reconciler for every due thread every ``interval`` seconds.
 
-    This is the only thread that writes topic-thread titles.
+    This is the only thread that writes topic-thread titles. A safety sweep
+    marks every thread due and retries failed judgments on start and every
+    ``thread_title.SAFETY_SECS``.
     """
+    last_safety = None
     while True:
+        if last_safety is None or time.monotonic() - last_safety >= _thread_title().SAFETY_SECS:
+            last_safety = time.monotonic()
+            _run_step("title-safety", lambda: (_thread_title().safety_sweep(firstmate_home()),
+                                               _thread_autoname().start_scan(retry_failed=True)))
         _run_step("titles", lambda: _thread_title().run_due())
         time.sleep(interval)
 
@@ -2234,4 +2248,3 @@ def start_outbox_watcher(interval: float | None = None) -> None:
                      name="fm-ext-outbox-reconcile", daemon=True).start()
     threading.Thread(target=thread_title_loop, args=(wait,),
                      name="fm-ext-thread-title", daemon=True).start()
-    _thread_autoname().start_catch_up()

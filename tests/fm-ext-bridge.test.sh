@@ -3638,13 +3638,21 @@ missing = [key for key in dict.fromkeys(k for update in updates for k in update)
            if key not in record]
 poster.tempfile.mkstemp = real_mkstemp
 
-# The reconciler's Discord write runs outside the record lock: a reply's input
-# saved meanwhile is neither blocked nor lost, and the thread is due again.
+# The reconciler's Discord write runs outside the record lock: a record save
+# meanwhile is neither blocked nor lost, and a reply Discord accepted while
+# the write was in flight is corrected on the next pass without our pace.
 poster.dedicated_channel = lambda home: os.environ["RID"].split(":")[2]
 poster.decision_threads = lambda home, thread_id="": {}
 poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"], topic_name="Topic",
                           creator="firstmate", title={})
-title.record_explicit(home, os.environ["THREAD"], "done", "", "900000000000000001")
+outbox = path.parent
+def accepted(name, state):
+    message_id = str(((int(time.time() * 1000) - 1420070400000) << 22) + int(name[-1]))
+    (outbox / f"{name}.progress.json").write_text(json.dumps({
+        "request_id": os.environ["RID"], "topic_thread_id": os.environ["THREAD"], "total": 1,
+        "posted_count": 1, "discord_message_ids": [message_id],
+        "title_input": {"state": state, "retitle": "", "decision": False}}))
+accepted("reply-1", "done")
 remote = {os.environ["THREAD"]: "Topic"}
 entered, release, saved = threading.Event(), threading.Event(), threading.Event()
 def blocked_write(thread_id, name):
@@ -3653,27 +3661,27 @@ def blocked_write(thread_id, name):
     remote[thread_id] = name
     return {}
 writing = threading.Thread(target=title.reconcile, args=(home, os.environ["THREAD"]),
-                           kwargs={"rename": blocked_write, "read_thread": remote.get})
+                           kwargs={"judging": "off", "rename": blocked_write, "read_thread": remote.get})
 writing.start()
 assert entered.wait(3)
 def reply():
-    title.record_explicit(home, os.environ["THREAD"], "needs-you", "", "900000000000000002")
+    accepted("reply-2", "needs-you")
+    poster.save_thread_record(path, os.environ["RID"], os.environ["THREAD"], open_attempt=True)
     saved.set()
 delivery = threading.Thread(target=reply)
 delivery.start()
 try:
     assert saved.wait(1), "a Discord write blocked a reply's record save"
 finally:
+    time.sleep(0.01)
     release.set()
     writing.join(5)
     delivery.join(5)
-after = poster._read_thread_record(path)
+after = json.loads(path.read_text())
 assert remote[os.environ["THREAD"]] == "✅ Topic"
-assert after["topic_name"] == "✅ Topic"
-assert after["title"]["verdict"]["status"] == "open-question", after
-assert after["title"]["due_at"] > 0, "the newer input must leave the thread due"
-assert title.reconcile(home, os.environ["THREAD"], rename=blocked_write, read_thread=remote.get,
-                       now=time.time() + title.PACE_SECS + 1) == "applied"
+assert after["topic_name"] == "✅ Topic" and after["open_attempt"] is True, after
+assert title.reconcile(home, os.environ["THREAD"], judging="off", rename=blocked_write,
+                       read_thread=remote.get) == "applied"
 assert remote[os.environ["THREAD"]] == "❓ Topic"
 
 print(json.dumps({"missing": missing, "record": record}))

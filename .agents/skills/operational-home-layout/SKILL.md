@@ -101,7 +101,7 @@ state/               volatile runtime signals; gitignored
   ext-inbox/         generated local Communication Officer pending request payloads; ext-respond drains it when the ext-bridge is on; bin/fm-ext-inbox.sh owns clearing dispositions in its header
   ext-context/       generated local Communication Officer destination context, thread-history sidecars, and one-wake offer markers, keyed by request slug; docs/configuration.md "Thread context (name, project, history)" owns the history contract
   ext-outbox/        generated local Communication Officer reply payloads, delivery markers, and recorded no-reply dispositions, plus dedicated waiting-pin snapshots; docs/configuration.md owns their separate delivery contracts
-  ext-autoname/      generated one-time topic-thread judging catch-up list and progress (catch-up.json); docs/configuration.md "Thread title reconciler" owns it
+  ext-autoname/      generated topic-thread title state: the catch-up list and horizon (catch-up.json) and Discord's title-path waits (cooldowns.json); docs/configuration.md "Thread title reconciler" owns both
   public-followup/   generated private transport for promised public replies: commitment registrations, typed terminal-result inbox, accepted/rejected ledgers (AGENTS.md section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload

@@ -1084,7 +1084,6 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     bin/fm-jev-lib.sh)
-      printf '%s\n' backend-dispatch
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh" "__script__:fm-ext-thread-autoname.test.sh"
       ;;
     bin/fm-ext-thread-judge.sh|bin/fm-ext-thread-name.sh)
