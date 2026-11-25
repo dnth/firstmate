@@ -28,6 +28,7 @@ It stops at the finding and follows `validation-supervision` for escalation and 
    The smallest downstream changes needed to keep that behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within scope even when they touch files not named at intake.
    Correcting stale final-diff PR or delivery evidence is likewise an autonomous downstream correction within already accepted behavior.
 3. Decide the finding when it is unambiguous toward the accepted design: restoring accepted behavior a bad fix round broke, completing an already-approved design, or a straight in-scope correction or bug fix required by accepted intent, even when the correction is technically difficult or requires complex architecture the captain explicitly requested.
+   Weigh likelihood: a finding whose only path needs two or more independent infrastructure failures at once, or an exact-timing race with no user- or operator-visible path, is decided as ignore with a follow-up issue rather than a fix round, unless it risks data loss, security exposure, or wrong results on a normal path.
 4. Escalate only genuinely ambiguous findings:
    - a Fix that would materially expand the contract by adding a new guarantee, threat model, subsystem, abstraction, compatibility surface, state machine, continuous-monitoring requirement, generalized framework, or broader architecture not required by the accepted intent
    - a product or architecture call not settled by accepted intent
