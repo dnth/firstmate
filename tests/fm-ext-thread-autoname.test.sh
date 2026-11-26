@@ -1351,8 +1351,8 @@ assert "QA gate still waits" not in logged and "Which window" not in logged, "me
 print("ok")
 PY
   ) || fail "a done closing reply did not end at ✅ or its log was wrong: $out"
-  post "$home" "$M1" followup 4 "Closing reply removed before judging." --thread-state done
-  post "$home" "$M1" followup 5 "Wrap-up with another chunk on the way." --thread-state done
+  post "$home" "$M1" followup 4 "Closing reply removed before judging." --thread-state 'done'
+  post "$home" "$M1" followup 5 "Wrap-up with another chunk on the way." --thread-state 'done'
   out=$(py "$home" <<'PY'
 from driver import _append
 
