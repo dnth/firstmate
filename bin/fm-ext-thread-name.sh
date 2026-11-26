@@ -5,9 +5,9 @@
 # Usage:
 #   fm-ext-thread-name.sh --state-file <json>
 #
-# Input file: the same text-only thread state bin/fm-ext-thread-judge.sh takes
-# ({"thread": {"name", "project", "messages"}}). Nothing but that text reaches
-# the naming model; this tool never reads Discord, attachments, or images.
+# Input file: the thread state documented in bin/fm-ext-thread-judge.sh.
+# The naming model receives the name, project, and messages. This tool never
+# reads Discord, attachments, or images.
 #
 # Output: the screened base name on stdout, or exit 1 with one reason on
 # stderr. The proposal is always "<Project> · <topic>": a model answer without

@@ -1,14 +1,10 @@
 """After-post judging for Firstmate's topic threads, as a durable scan.
 
 docs/configuration.md, "Thread title reconciler", owns the contract. This
-module never renames anything. ``judge_scan`` looks at each eligible thread's
-newest Discord-accepted Firstmate message (from chunk progress, so a restart
-or a later failed chunk loses nothing) and, when that message has no verdict
-yet, asks Jev (``bin/fm-ext-thread-judge.sh``) for the thread's status and
-topic fit, asks the naming model (``bin/fm-ext-thread-name.sh``) for a new
-base when the topic drifted under a public project prefix, and adds the
-result to the thread's verdict log. The verdict log is the only checkpoint:
-a thread is judged again only when its newest message has no usable verdict.
+module hands verdicts to ``thread_title``, which alone writes title updates.
+``judge_scan`` selects the newest Discord-accepted Firstmate message from
+chunk progress, so a later failed chunk cannot hide it. Only a usable
+verdict satisfies the scan checkpoint.
 
 The one-time catch-up is the first scan: ``state/ext-autoname/catch-up.json``
 fixes, before the first model call, the newest message id at that moment
