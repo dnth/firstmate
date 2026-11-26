@@ -12,9 +12,9 @@ Durable state it reads:
 - the accepted-message log: chunk progress records the poster writes as
   Discord accepts each chunk, including each reply's explicit thread state
   and retitle (``title_input``);
-- the thread record's ``title`` object: the Jev verdict log (one entry per
-  judged message), the last bot write, a write whose answer was lost, the
-  pace stamp, the captain's words, and a marker he removed;
+- the thread record's ``title`` object: the Jev verdict log, the last bot
+  write, a write whose answer was lost, the pace stamp, the captain's
+  words, and a marker he removed;
 - the cooldowns file ``state/ext-autoname/cooldowns.json``: Discord's
   bot-global and per-thread deadlines, stamped when each response arrived.
 
@@ -68,6 +68,8 @@ SAFETY_SECS = 600.0
 _DISCORD_EPOCH = 1420070400.0
 # Compare-and-write retries inside one pass before leaving it to the next.
 _ATTEMPTS = 3
+_AUDIT_VERDICT_LIMIT = 20
+_FULL_VERDICT_LIMIT = 20
 
 _DUE: dict[tuple[Path, str], float] = {}
 _DUE_LOCK = threading.Lock()
@@ -334,28 +336,78 @@ def _change_title(home: Path, thread_id: str, change, topic_name: str = "") -> b
     return True
 
 
+def _publish_verdict(title: dict, verdict: dict) -> None:
+    cutoff = _id(verdict["message_id"])
+    previous = _verdict_at(title, cutoff)
+    if any(previous.get(key) != value for key, value in verdict.items() if key != "at"):
+        applicable = [entry for entry in _applicable_verdicts(title) if _id(entry.get("message_id")) != cutoff]
+        applicable.append(dict(verdict, at=time.time()))
+        applicable.sort(key=lambda entry: _id(entry["message_id"]))
+        audit = [entry for entry in title.get("verdicts") or [] if entry.get("audit_only")]
+        historical = [_reconcile_verdict(entry) for entry in applicable[:-_FULL_VERDICT_LIMIT]]
+        title["verdicts"] = historical + applicable[-_FULL_VERDICT_LIMIT:] + audit
+    if (title.get("judge_failed") or {}).get("message_id") == str(cutoff):
+        title["judge_failed"] = None
+
+
 def record_verdict(home: Path, thread_id: str, message_id: object, status: str, topic_fits: bool,
-                   base: str = "") -> str:
+                   base: str = "", judged: dict | None = None,
+                   confidence: float | None = None, *, pending_name: bool = False) -> str:
     """Add a Jev verdict judged through ``message_id`` to the thread's log.
 
-    A verdict on a message older than the newest accepted one is stale and
-    dropped. Returns recorded, stale, or gone.
+    The entry's ``message_id`` is the newest judged message. ``judged`` is the
+    bounded input summary for that judgment (thread name, project, the reply's
+    own explicit state when it declared one, and message count), and
+    ``confidence`` is the model's own confidence in its status. No message
+    text is recorded.
+
+    Stale verdicts and those awaiting a name are retained for audit only.
+    Returns recorded, pending-name, stale, or gone.
     """
     if status not in STATUS_MARKER or status == "none":
         raise ValueError(f"unknown status {status!r}")
     cutoff = _id(message_id)
+    verdict = {"message_id": str(cutoff), "status": status, "topic_fits": bool(topic_fits),
+               "base": base or "", "at": time.time()}
+    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+        verdict["confidence"] = float(confidence)
+    if judged:
+        verdict["judged"] = dict(judged)
 
     def change(title):
-        verdict = {"message_id": str(cutoff), "status": status, "topic_fits": bool(topic_fits),
-                   "base": base or ""}
-        previous = _verdict_at(title, cutoff)
-        if any(previous.get(key) != value for key, value in verdict.items()):
-            log = [entry for entry in title.get("verdicts") or [] if _id(entry.get("message_id")) != cutoff]
-            log.append(dict(verdict, at=time.time()))
-            log.sort(key=lambda entry: _id(entry["message_id"]))
-            title["verdicts"] = log
-        if (title.get("judge_failed") or {}).get("message_id") == str(cutoff):
-            title["judge_failed"] = None
+        if stale or pending_name:
+            log = title.get("verdicts") or []
+            audit = [entry for entry in log if entry.get("audit_only")]
+            audit.append(dict(verdict, audit_only=True))
+            title["verdicts"] = _applicable_verdicts(title) + audit[-_AUDIT_VERDICT_LIMIT:]
+        else:
+            _publish_verdict(title, verdict)
+
+    with poster._THREAD_RECORD_LOCK:
+        stale = newest_accepted(home).get(thread_id, 0) > cutoff
+        if not _change_title(home, thread_id, change):
+            return "gone"
+    if stale:
+        return "stale"
+    if pending_name:
+        return "pending-name"
+    mark_due(home, thread_id)
+    return "recorded"
+
+
+def publish_named_verdict(home: Path, thread_id: str, cutoff: int, base: str) -> str:
+    """Make the scan's latest audited verdict for this message usable."""
+    def change(title):
+        log = title.get("verdicts") or []
+        for index in range(len(log) - 1, -1, -1):
+            entry = log[index]
+            if entry.get("audit_only") and _id(entry.get("message_id")) == cutoff:
+                title["verdicts"] = log[:index] + log[index + 1:]
+                verdict = dict(entry, base=base)
+                del verdict["audit_only"]
+                _publish_verdict(title, verdict)
+                return
+        return False
 
     with poster._THREAD_RECORD_LOCK:
         if newest_accepted(home).get(thread_id, 0) > cutoff:
@@ -410,16 +462,20 @@ def _during_decision(posts: list[dict], message_id: int) -> bool:
                for post in posts)
 
 
+def _applicable_verdicts(title: dict) -> list[dict]:
+    return [entry for entry in title.get("verdicts") or []
+            if not entry.get("audit_only") and entry.get("status") in STATUS_MARKER]
+
+
 def _verdict_at(title: dict, cutoff: int) -> dict:
-    return next((entry for entry in reversed(title.get("verdicts") or [])
-                 if _id(entry.get("message_id")) == cutoff and entry.get("status") in STATUS_MARKER), {})
+    return next((entry for entry in reversed(_applicable_verdicts(title))
+                 if _id(entry.get("message_id")) == cutoff), {})
 
 
 def _entries(view: dict, title: dict, judging: bool) -> list[dict]:
     """Status entries, oldest first: Jev verdicts, or the replies' own states."""
     if judging:
-        return [dict(entry, message_id=_id(entry.get("message_id"))) for entry in title.get("verdicts") or []
-                if entry.get("status") in STATUS_MARKER]
+        return [dict(entry, message_id=_id(entry.get("message_id"))) for entry in _applicable_verdicts(title)]
     entries = []
     seed = (title.get("seed") or {}).get("state")
     if seed in EXPLICIT_STATUS:
@@ -478,8 +534,13 @@ def plan(title: dict, view: dict, judging: bool) -> dict:
         elif not judging:
             retitles = [post["retitle"] for post in view["posts"] if post["complete"] and post["retitle"]]
             base = (retitles[-1] if retitles else (title.get("seed") or {}).get("retitle")) or live_base
-    return {"desired": marker + base, "computed": computed, "verdict": verdict,
+    return {"desired": marker + base, "computed": computed, "verdict": _reconcile_verdict(verdict),
             "decision_question": marker == QUESTION and int(summary.get("open_buttons") or 0) > 0}
+
+
+def _reconcile_verdict(verdict: dict) -> dict:
+    return {key: verdict[key] for key in ("message_id", "status", "topic_fits", "base", "at")
+            if key in verdict}
 
 
 def _correction(title: dict, view: dict, verdict: dict) -> bool:
@@ -709,7 +770,7 @@ def reconcile(home: Path, thread_id: str, *, judging: str | None = None, rename=
                     raise _InputsMoved
 
                 def save_attempt(current):
-                    if judging == "on" and _verdict_at(current, view["newest"]) != verdict:
+                    if judging == "on" and _reconcile_verdict(_verdict_at(current, view["newest"])) != verdict:
                         return False
                     attempt["at"] = time.time()
                     current.update(changes, attempt=attempt)
