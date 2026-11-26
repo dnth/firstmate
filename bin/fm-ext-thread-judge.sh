@@ -12,17 +12,23 @@
 # is confirmed absent, and "unknown" when the home's .env cannot be read.
 # It makes no network call and reads no state file.
 #
-# Input file (message text only; no attachments, images, filenames, or ids):
+# Input file (message text and the judged reply's own declared state; no
+# attachments, images, filenames, or ids):
 #   {"thread": {"name": "<current base name, marker stripped>",
 #               "project": "<Project or empty>",
+#               "reply_state": "needs-you|done|none",
 #               "messages": [{"role": "firstmate|captain|participant",
 #                             "text": "..."}]}}
+# reply_state is optional: it is the thread state the judged reply itself
+# declared, and it is omitted when that reply declared none.
 # This tool adds nothing but the two questions below and never reads Discord.
 #
 # Output (stdout, one JSON object, exit 0):
 #   {"status": "open-question|running|done|blocked",
+#    "confidence": 0.0-1.0,
 #    "topic_fits": true|false}
-# status is one Choice; topic_fits is a Noul thresholded at 0.5 by
+# status is one Choice and confidence is the model's own for that choice;
+# topic_fits is a Noul thresholded at 0.5 by
 # TOPIC_FIT_THRESHOLD in this script, so code - never prose - decides the bool.
 #
 # Opt-in and transport: bin/fm-jev-lib.sh owns the TYPESAFE_API_KEY gate,
@@ -102,11 +108,11 @@ REQUEST=$(jq -n --slurpfile state "$STATE_FILE" --arg model "$FM_JEV_MODEL" '
     questions: {
       status: {
         type: "choice",
-        instructions: "What is the current status of the work described in `thread.messages`?",
+        instructions: "What is the current status of the work described in `thread.messages`, read from its newest message?",
         criteria: {
-          "open-question": "The thread asks the captain a question, or needs a decision, approval, or choice from the captain before work can continue.",
-          running: "Work is under way or queued, and nothing in the thread asks the captain to answer, decide, or approve anything.",
-          done: "The work or topic is finished, settled, delivered, merged, or otherwise needs nothing further from anyone.",
+          "open-question": "The newest message asks the captain a question, or needs a decision, approval, or choice from the captain before work can continue. A message that only notes an external gate, a recorded decision, or a deferred item while closing the thread does not ask the captain anything.",
+          running: "Work is under way or queued, and nothing in the newest message asks the captain to answer, decide, or approve anything.",
+          done: "The work or topic is finished, settled, delivered, merged, or otherwise needs nothing further from anyone. When `thread.reply_state` is `done` and the newest message closes the thread, answer done unless that message itself asks the captain something.",
           blocked: "Work is blocked, failed, or waiting on an external dependency, permission, credential, or other obstacle that is not a question the thread has already put to the captain."
         }
       },
@@ -144,6 +150,7 @@ jq -ce --argjson threshold "$TOPIC_FIT_THRESHOLD" '
   then
     {
       status: $choice,
+      confidence: .answers.status.confidence,
       topic_fits: (.answers.topic_fits.noul >= $threshold)
     }
   else empty end

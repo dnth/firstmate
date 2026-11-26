@@ -105,6 +105,8 @@ Before composing a dedicated-channel reply, consult the [topic-thread contract](
 Emit refuses a reply that would create the thread without `--thread-title`, and any `answer` or `final` without an explicit `--thread-state`; its header owns both rules.
 Your title and state flags are inputs: the [thread title reconciler](../../../docs/configuration.md#thread-title-reconciler) alone writes the thread's title, paces it, and keeps the captain's own words.
 When the home has the Jev key, the reconciler judges the thread after every post and leaves explicit state and retitle inputs unused.
+The judge answers from the newest message and receives the thread state that reply itself declared, so a `done` closing reply stays ✅ even when it only notes an external gate, a recorded decision, or a deferred item; a question in that newest message still shows ❓.
+Each verdict records the judge's input summary - thread name, project, the reply's state, message count, and newest message id - with its confidence, never message text.
 Emit still requires the state and creating title described above, and retitle is optional.
 
 - **Title the creating reply** with `<Project> · <2-5 word topic>` (for example `Aceh · ingestion status`), especially when the request is vague, long, or procedural.

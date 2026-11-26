@@ -147,13 +147,16 @@ def _run_tool(tool: str, state: dict, home: Path, timeout: float, jev: bool) -> 
 
 
 def judge(state: dict, home: Path) -> dict:
-    """Jev's {status, topic_fits} for one thread; raises on any failure."""
+    """Jev's {status, confidence, topic_fits} for one thread; raises on any failure."""
     result = _run_tool("fm-ext-thread-judge.sh", state, home, timeout=30, jev=True)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"judge exited {result.returncode}")
     verdict = json.loads(result.stdout)
+    confidence = verdict.get("confidence")
     if (verdict.get("status") not in ("open-question", "running", "done", "blocked")
-            or not isinstance(verdict.get("topic_fits"), bool)):
+            or not isinstance(verdict.get("topic_fits"), bool)
+            or not isinstance(confidence, (int, float)) or isinstance(confidence, bool)
+            or not 0 <= confidence <= 1):
         raise RuntimeError("judge returned an unusable verdict")
     return verdict
 
@@ -171,6 +174,14 @@ def propose_name(state: dict, home: Path) -> str:
 
 # --- judging one thread ----------------------------------------------------------------
 
+def _reply_state(home: Path, thread_id: str, through: int) -> str:
+    """The judged reply's own explicit thread state, or "" when it declared none."""
+    for entry in thread_title.accepted_posts(home).get(thread_id) or []:
+        if entry["message_id"] == through and entry.get("state") in thread_title.EXPLICIT_STATUS:
+            return entry["state"]
+    return ""
+
+
 def judge_thread(home: Path, record: dict, through: int) -> str:
     """Judge a thread through one accepted message and add the verdict to its log.
 
@@ -182,10 +193,17 @@ def judge_thread(home: Path, record: dict, through: int) -> str:
         base = thread_title.split_marker(live)[1]
         # The project comes only from the thread's own public name.
         project = thread_context.project_from_name(base)
-        state = {"thread": {"name": base, "project": project,
-                            "messages": thread_messages(record, home, through)}}
-        if not state["thread"]["messages"]:
+        messages = thread_messages(record, home, through)
+        if not messages:
             raise RuntimeError("no thread text to judge")
+        thread = {"name": base, "project": project, "messages": messages}
+        reply_state = _reply_state(home, thread_id, through)
+        if reply_state:
+            thread["reply_state"] = reply_state
+        state = {"thread": thread}
+        judged = {"name": base, "project": project, "messages": len(messages)}
+        if reply_state:
+            judged["reply_state"] = reply_state
         verdict = judge(state, home)
         new_base = ""
         if not verdict["topic_fits"] and project and not thread_title.captain_named(record, live):
@@ -197,7 +215,8 @@ def judge_thread(home: Path, record: dict, through: int) -> str:
         thread_title.record_judge_failure(home, thread_id, through)
         return "failed"
     return thread_title.record_verdict(home, thread_id, through, verdict["status"],
-                                       verdict["topic_fits"], new_base)
+                                       verdict["topic_fits"], new_base,
+                                       judged=judged, confidence=verdict["confidence"])
 
 
 # --- the scan -----------------------------------------------------------------------

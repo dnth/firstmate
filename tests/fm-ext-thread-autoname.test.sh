@@ -1259,6 +1259,76 @@ PY
   pass "a successful title GET holds compare and history reads, and the judge resumes at expiry"
 }
 
+# --- 14. the judge reads the reply's own state, and every call is logged ---------------
+#
+# The judged reply's explicit state reaches the judge, and a reply that
+# declared none is judged without that field. A `done` closing reply ends at
+# ✅ even when an earlier open question is still in the history. Each verdict
+# records the judge's input summary and confidence, never message text.
+
+test_14_the_judge_reads_the_reply_state_and_logs_each_call() {
+  local home="$TMP_ROOT/t14" out
+  setup_home "$home"
+  new_thread "$home" "$M1" "Aceh · nightly reindex" "Looking at the reindex schedule now."
+  post "$home" "$M1" followup 2 "Which window should the reindex use, 02:00 or 03:00?"
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+seen = []
+def fake_judge(state, home):
+    thread_state = state["thread"]
+    seen.append({"has_state": "reply_state" in thread_state,
+                 "state": thread_state.get("reply_state"),
+                 "newest": thread_state["messages"][-1]["text"],
+                 "messages": len(thread_state["messages"])})
+    return {"status": "open-question", "confidence": 0.41, "topic_fits": True}
+
+with patch.object(autoname, "judge", fake_judge):
+    deliver()
+tick(0)
+assert name(thread) == "❓ Aceh · nightly reindex", name(thread)
+assert seen and not seen[-1]["has_state"], "a reply that declared no state sent one"
+assert seen[-1]["newest"].startswith("Which window"), seen[-1]
+entry = verdicts(thread)[-1]
+assert entry["status"] == "open-question" and entry["confidence"] == 0.41, entry
+assert entry["judged"] == {"name": "Aceh · nightly reindex", "project": "Aceh",
+                           "messages": seen[-1]["messages"]}, entry
+assert entry["message_id"] == load()["threads"][thread]["messages"][-1]["id"], entry
+print("ok")
+PY
+  ) || fail "the judge input or log record was wrong without a declared state: $out"
+  post "$home" "$M1" answer 3 "Noted: the QA gate still waits for your word. Closing this thread." \
+    --thread-state "done"
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+seen = []
+def fake_judge(state, home):
+    thread_state = state["thread"]
+    seen.append({"state": thread_state.get("reply_state"),
+                 "newest": thread_state["messages"][-1]["text"],
+                 "messages": len(thread_state["messages"])})
+    return {"status": "done", "confidence": 0.78, "topic_fits": True}
+
+with patch.object(autoname, "judge", fake_judge):
+    deliver()
+assert seen, "the closing reply was not judged"
+assert seen[-1]["state"] == "done", seen[-1]
+assert seen[-1]["newest"].startswith("Noted: the QA gate"), seen[-1]
+tick(601)
+assert name(thread) == "✅ Aceh · nightly reindex", name(thread)
+assert verdicts(thread)[-2]["status"] == "open-question", "the earlier question lost its verdict"
+entry = verdicts(thread)[-1]
+assert entry["status"] == "done" and entry["confidence"] == 0.78, entry
+assert entry["message_id"] == load()["threads"][thread]["messages"][-1]["id"], entry
+assert entry["judged"] == {"name": "Aceh · nightly reindex", "project": "Aceh",
+                           "reply_state": "done", "messages": seen[-1]["messages"]}, entry
+logged = json.dumps(verdicts(thread))
+assert "QA gate still waits" not in logged and "Which window" not in logged, "message text was logged"
+print("ok")
+PY
+  ) || fail "a done closing reply did not end at ✅ or its log was wrong: $out"
+  pass "the judge receives the judged reply's state when it declared one and nothing when it did not, a done closing reply ends at ✅, and each call logs its input and confidence"
+}
+
 test_1_only_the_reconciler_writes_titles
 test_2_marker_precedence_follows_recorded_verdicts
 test_3_explicit_states_drive_markers_when_judging_is_off
@@ -1273,3 +1343,4 @@ test_11_partial_posts_are_judged_and_private_labels_stay_private
 test_12_legacy_intent_and_unclear_checks_keep_the_title
 test_13_a_raced_write_is_corrected_without_waiting
 test_get_cooldowns_gate_compare_and_history
+test_14_the_judge_reads_the_reply_state_and_logs_each_call

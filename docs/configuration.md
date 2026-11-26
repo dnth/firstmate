@@ -1174,7 +1174,7 @@ It reads:
 
 - the decision ledger through `bin/fm-ext-decision.sh threads`, whose header owns which posts count as open, closed, or unknown, whether each carried buttons, and where a closure time comes from;
 - the Firstmate messages Discord accepted, from chunk progress, each with its reply's own thread state and retitle;
-- the thread's verdict log in its record: one Jev verdict per judged message;
+- the thread's verdict log in its record: one Jev verdict per judged message, each entry carrying the judged input summary and the model's confidence but never message text;
 - the last title this home wrote, the captain's own words once seen, and a marker he removed;
 - Discord's waits in `state/ext-autoname/cooldowns.json`.
 
@@ -1185,13 +1185,16 @@ A safety sweep marks eligible threads due at gateway start and every 10 minutes.
 **Status source.**
 With judging on, an accepted chunk in an eligible thread queues a background scan.
 The scan selects each thread's newest accepted Firstmate message at scan start and, when that message has no verdict, reads the thread's text through it and asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
+The judge answers from the newest message and receives the thread state that reply itself declared (`needs-you`, `done`, or `none`), which is absent when the reply declared none.
+A closing reply that only notes an external gate, a recorded decision, or a deferred item is `done`, and a declared `done` on a closing message means `done` unless that message itself asks the captain something.
+Each verdict entry records the judge's input summary - thread name, project, `reply_state`, message count, and newest message id - with its confidence and no message text.
 The safety sweep retries failed judgments for the newest accepted message.
 When the topic drifted, the live title has a public `<Project> · ` prefix, and the captain has not named the thread, [`bin/fm-ext-thread-name.sh`](../bin/fm-ext-thread-name.sh) proposes a screened `<Project> · <topic>` base; with no public prefix no name is proposed.
 The models receive the current base title, its project prefix when present, and thread message text, which may include private interaction text.
 The status comes from the verdict on the newest accepted message; until that verdict arrives, the marker of the last paced write holds.
 When the key check confirms the Jev key is absent, the reconciler uses the latest explicit state and latest screened retitle from complete replies, which can come from different replies.
 An explicit state of `needs-you` means `open-question`, `done` means complete, and `none` requests no status marker.
-While judging is on, the reconciler ignores explicit state and retitle inputs.
+While judging is on, the reconciler itself still ignores explicit state and retitle inputs; only the judge reads the judged reply's own state, and only as an input to its verdict.
 An accepted chunk counts even when later chunks of its reply fail.
 Judging, naming, and the key check run on the background worker and never delay a reply.
 

@@ -335,8 +335,15 @@ def _change_title(home: Path, thread_id: str, change, topic_name: str = "") -> b
 
 
 def record_verdict(home: Path, thread_id: str, message_id: object, status: str, topic_fits: bool,
-                   base: str = "") -> str:
+                   base: str = "", judged: dict | None = None,
+                   confidence: float | None = None) -> str:
     """Add a Jev verdict judged through ``message_id`` to the thread's log.
+
+    The entry's ``message_id`` is the newest judged message. ``judged`` is the
+    bounded input summary for that judgment (thread name, project, the reply's
+    own explicit state when it declared one, and message count), and
+    ``confidence`` is the model's own confidence in its status. No message
+    text is recorded.
 
     A verdict on a message older than the newest accepted one is stale and
     dropped. Returns recorded, stale, or gone.
@@ -348,6 +355,10 @@ def record_verdict(home: Path, thread_id: str, message_id: object, status: str, 
     def change(title):
         verdict = {"message_id": str(cutoff), "status": status, "topic_fits": bool(topic_fits),
                    "base": base or ""}
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+            verdict["confidence"] = float(confidence)
+        if judged:
+            verdict["judged"] = dict(judged)
         previous = _verdict_at(title, cutoff)
         if any(previous.get(key) != value for key, value in verdict.items()):
             log = [entry for entry in title.get("verdicts") or [] if _id(entry.get("message_id")) != cutoff]
