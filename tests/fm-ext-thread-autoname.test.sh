@@ -660,14 +660,14 @@ assert name(thread) == "❓ Aceh · nightly reindex" and verdicts(thread)[-1]["s
 PY
   ) || fail "done replaced the open decision's ❓: $out"
   local generation
-  for generation in {5..13}; do
+  for generation in {5..25}; do
     post "$home" "$M1" followup "$generation" "Reminder: the route call above still needs you."
     py "$home" <<'PY' >/dev/null || fail "decision reminder was not judged"
 set_clock(CLOCK[0] + 1)
 deliver("open-question")
 PY
   done
-  post "$home" "$M1" followup 14 "Reminder: the route call above still needs you."
+  post "$home" "$M1" followup 26 "Reminder: the route call above still needs you."
   out=$(py "$home" <<'PY'
 (thread,) = threads()
 judge = autoname.judge
@@ -680,9 +680,14 @@ def close_while_judging(state, home):
 
 with patch.object(autoname, "judge", close_while_judging):
     deliver("open-question")
+entries = verdicts(thread)
+assert [entry for entry in entries if "judged" in entry or "confidence" in entry] == entries[-20:], entries
+assert all("judged" in entry and "confidence" in entry for entry in entries[-20:]), entries
+(kept_done,) = (entry for entry in entries if entry["status"] == "done")
+assert "judged" not in kept_done and "confidence" not in kept_done, kept_done
 summary = poster.decision_threads(HOME, thread)[thread]
 assert summary["open"] == 0 and summary["last_closed_at"] > 0, summary
-tick(40)
+tick(50)
 assert name(thread) == "❓ Aceh · nightly reindex", "the kept done skipped our pace"
 tick(601)
 assert name(thread) == "✅ Aceh · nightly reindex", "the decision reminder replaced the kept done"
@@ -861,8 +866,16 @@ PY
   out=$(py "$home" <<'PY'
 (thread,) = threads()
 os.environ["FM_TEST_NAME"] = "Aceh · OCR GPU migration"
-deliver("drift")
+propose = autoname.propose_name
+def finish_later(state, home):
+    assert verdicts(thread)[-1]["audit_only"] is True
+    set_clock(T0 + 2)
+    return propose(state, home)
+
+with patch.object(autoname, "propose_name", finish_later):
+    assert deliver("drift") == ["sent"]
 assert verdicts(thread)[-1]["base"] == "Aceh · OCR GPU migration", verdicts(thread)
+assert verdicts(thread)[-1]["at"] == T0 + 2, verdicts(thread)
 reads = []
 def rename_between_reads(thread_id):
     reads.append(thread_id)
@@ -870,7 +883,7 @@ def rename_between_reads(thread_id):
         captain_renames(thread_id, "GPU box move")
     return title.discord_read_title(HOME, thread_id)
 
-tick(0, read_thread=rename_between_reads)
+tick(2, read_thread=rename_between_reads)
 assert not any("OCR GPU migration" in p["name"] for p in patches()), patches()
 assert name(thread).endswith("GPU box move") and record(thread)["manual_base"] == "GPU box move", name(thread)
 print("ok")
@@ -978,14 +991,20 @@ print("ok")
   post "$home" "$M1" followup 4 "Moving on to the OCR GPU migration you asked for next."
   out=$(py "$home" <<'PY'
 (thread,) = threads()
+script({"remaining": "0"})
 tick(0)
 assert name(thread) == "⚠️ Aceh · search latency"
+set_clock(T0 + 1)
 before = verdicts(thread)
+calls = len(jev_calls())
 with only("followup.3"):
-    deliver(None)
+    assert deliver(None) == ["sent"]
+assert len(jev_calls()) == calls + 1
+assert jev_calls()[-1]["state"]["thread"]["messages"][-1]["text"] == "Cache is warm; checking the next box."
 assert verdicts(thread) == before, "a failed Jev call changed the inputs"
 os.environ.pop("FM_TEST_NAME", None)
-deliver("drift")
+assert deliver("drift") == ["sent"]
+assert len(jev_calls()) == calls + 2
 entry = verdicts(thread)[-1]
 assert verdicts(thread)[:-1] == before
 assert entry["audit_only"] is True and entry["base"] == "", entry
@@ -995,6 +1014,7 @@ assert entry["judged"] == {"name": "Aceh · search latency", "project": "Aceh", 
 tick(601)
 assert name(thread) == "⚠️ Aceh · search latency" and len(patches()) == 1, patches()
 assert autoname.judge_scan(HOME, retry_failed=True) == []
+assert len(jev_calls()) == calls + 3
 assert len(verdicts(thread)) == len(before) + 2, "the audit entry suppressed a retry"
 print("ok")
 PY
@@ -1280,7 +1300,10 @@ test_14_the_judge_reads_the_reply_state_and_logs_each_call() {
   post "$home" "$M1" followup 2 "Which window should the reindex use, 02:00 or 03:00?"
   out=$(py "$home" <<'PY'
 (thread,) = threads()
+calls = len(jev_calls())
 assert deliver("open-question") == ["sent"]
+assert len(jev_calls()) == calls + 1
+script({"remaining": "0"})
 tick(0)
 assert name(thread) == "❓ Aceh · nightly reindex", name(thread)
 assert jev_calls()[-1]["state"]["thread"] == {
@@ -1302,7 +1325,10 @@ PY
     --thread-state "done"
   out=$(py "$home" <<'PY'
 (thread,) = threads()
+set_clock(T0 + 1)
+calls = len(jev_calls())
 assert deliver("done") == ["sent"]
+assert len(jev_calls()) == calls + 1
 assert jev_calls()[-1]["state"]["thread"] == {
     "name": "Aceh · nightly reindex", "project": "Aceh", "reply_state": "done",
     "messages": [
@@ -1311,6 +1337,7 @@ assert jev_calls()[-1]["state"]["thread"] == {
         {"role": "firstmate", "text": "Noted: the QA gate still waits for your word. Closing this thread."},
     ],
 }
+script({"remaining": "0"})
 tick(601)
 assert name(thread) == "✅ Aceh · nightly reindex", name(thread)
 assert verdicts(thread)[-2]["status"] == "open-question", "the earlier question lost its verdict"
@@ -1330,6 +1357,7 @@ PY
 from driver import _append
 
 (thread,) = threads()
+set_clock(T0 + 602)
 before = verdicts(thread)
 calls = len(jev_calls())
 with patch.object(autoname, "after_post"), only("followup.4"):
@@ -1337,7 +1365,10 @@ with patch.object(autoname, "after_post"), only("followup.4"):
 data = load()
 data["threads"][thread]["messages"].pop()
 save(data)
+history_path = f"/channels/{thread}/messages"
+history_reads = data["gets"].count(history_path)
 assert autoname.judge_scan(HOME) == []
+assert load()["gets"].count(history_path) == history_reads + 1, "the scan skipped the history read"
 assert len(jev_calls()) == calls and verdicts(thread) == before, "the deleted reply was judged"
 
 with patch.object(autoname, "after_post"):
@@ -1355,6 +1386,7 @@ def next_chunk_lands(*args):
 
 with patch.object(title, "discord_read_messages", next_chunk_lands):
     assert autoname.judge_scan(HOME) == []
+assert len(jev_calls()) == calls + 1, "the scan skipped the selected chunk"
 entry = verdicts(thread)[-1]
 sent = jev_calls()[-1]["state"]["thread"]
 assert sent["reply_state"] == "done", sent
@@ -1365,6 +1397,7 @@ tick(1202)
 assert name(thread) == "✅ Aceh · nightly reindex", name(thread)
 use("done")
 assert autoname.judge_scan(HOME) == [thread]
+assert len(jev_calls()) == calls + 2
 assert jev_calls()[-1]["state"]["thread"]["messages"][-1]["text"] == "The second chunk."
 print("ok")
 PY

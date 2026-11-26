@@ -69,6 +69,7 @@ _DISCORD_EPOCH = 1420070400.0
 # Compare-and-write retries inside one pass before leaving it to the next.
 _ATTEMPTS = 3
 _AUDIT_VERDICT_LIMIT = 20
+_FULL_VERDICT_LIMIT = 20
 
 _DUE: dict[tuple[Path, str], float] = {}
 _DUE_LOCK = threading.Lock()
@@ -340,10 +341,11 @@ def _publish_verdict(title: dict, verdict: dict) -> None:
     previous = _verdict_at(title, cutoff)
     if any(previous.get(key) != value for key, value in verdict.items() if key != "at"):
         applicable = [entry for entry in _applicable_verdicts(title) if _id(entry.get("message_id")) != cutoff]
-        applicable.append(verdict)
+        applicable.append(dict(verdict, at=time.time()))
         applicable.sort(key=lambda entry: _id(entry["message_id"]))
         audit = [entry for entry in title.get("verdicts") or [] if entry.get("audit_only")]
-        title["verdicts"] = applicable + audit
+        historical = [_reconcile_verdict(entry) for entry in applicable[:-_FULL_VERDICT_LIMIT]]
+        title["verdicts"] = historical + applicable[-_FULL_VERDICT_LIMIT:] + audit
     if (title.get("judge_failed") or {}).get("message_id") == str(cutoff):
         title["judge_failed"] = None
 
@@ -532,8 +534,13 @@ def plan(title: dict, view: dict, judging: bool) -> dict:
         elif not judging:
             retitles = [post["retitle"] for post in view["posts"] if post["complete"] and post["retitle"]]
             base = (retitles[-1] if retitles else (title.get("seed") or {}).get("retitle")) or live_base
-    return {"desired": marker + base, "computed": computed, "verdict": verdict,
+    return {"desired": marker + base, "computed": computed, "verdict": _reconcile_verdict(verdict),
             "decision_question": marker == QUESTION and int(summary.get("open_buttons") or 0) > 0}
+
+
+def _reconcile_verdict(verdict: dict) -> dict:
+    return {key: verdict[key] for key in ("message_id", "status", "topic_fits", "base", "at")
+            if key in verdict}
 
 
 def _correction(title: dict, view: dict, verdict: dict) -> bool:
@@ -543,7 +550,7 @@ def _correction(title: dict, view: dict, verdict: dict) -> bool:
         return False
     landed = float(written.get("at") or 0)
     basis = written.get("basis") or {}
-    if ("verdict" in basis and verdict != basis["verdict"]
+    if ("verdict" in basis and verdict != _reconcile_verdict(basis["verdict"])
             and 0 < float(verdict.get("at") or 0) < landed):
         return True
     if any(entry["message_id"] > int(basis.get("newest") or 0) and message_time(entry["message_id"]) < landed
@@ -763,7 +770,7 @@ def reconcile(home: Path, thread_id: str, *, judging: str | None = None, rename=
                     raise _InputsMoved
 
                 def save_attempt(current):
-                    if judging == "on" and _verdict_at(current, view["newest"]) != verdict:
+                    if judging == "on" and _reconcile_verdict(_verdict_at(current, view["newest"])) != verdict:
                         return False
                     attempt["at"] = time.time()
                     current.update(changes, attempt=attempt)
