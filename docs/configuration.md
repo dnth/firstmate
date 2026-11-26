@@ -1186,7 +1186,7 @@ A safety sweep marks eligible threads due at gateway start and every 10 minutes.
 With judging on, an accepted chunk in an eligible thread queues a background scan.
 The scan selects each thread's newest accepted Firstmate message at scan start and, when that message has no usable verdict and is still present in the fetched history, asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
 The judge answers from the newest message and receives the thread state that reply itself declared (`needs-you`, `done`, or `none`), which is absent when the reply declared none.
-A closing reply that only notes an external gate, a recorded decision, or a deferred item is `done`, and a declared `done` on a closing message means `done` unless that message itself asks the captain something.
+A closing reply that only notes a pending approval, an external gate, a recorded decision, or a deferred item is `done`, and a declared `done` on a closing message means `done` unless that message itself asks the captain something.
 Each verdict entry initially records the judge's input summary - thread name, project, `reply_state`, message count, and newest message id - with its confidence and no message text.
 The newest 20 usable verdicts per thread retain their full details, and older usable verdicts keep only the fields the reconciler needs for title and decision history.
 Verdicts that arrive stale or await a usable name are marked `audit_only`, with up to 20 such entries retained per thread.

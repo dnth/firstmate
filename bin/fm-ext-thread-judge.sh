@@ -110,10 +110,10 @@ REQUEST=$(jq -n --slurpfile state "$STATE_FILE" --arg model "$FM_JEV_MODEL" '
         type: "choice",
         instructions: "What is the current status of the work described in `thread.messages`, read from its newest message?",
         criteria: {
-          "open-question": "The newest message asks the captain a question, or needs a decision, approval, or choice from the captain before work can continue. A message that only notes an external gate, a recorded decision, or a deferred item while closing the thread does not ask the captain anything.",
-          running: "The newest message leaves work open and says it is under way or queued, without asking the captain to answer, decide, or approve anything.",
-          done: "The newest message finishes, settles, delivers, merges, or otherwise closes the work or topic without asking the captain something. A closing message that only notes an external gate, a recorded decision, or a deferred item is done even without `thread.reply_state`. When `thread.reply_state` is `done` and the newest message closes the thread, answer done unless that message itself asks the captain something.",
-          blocked: "The newest message leaves work open because it failed or is waiting on an external dependency, permission, credential, or other obstacle, without asking the captain to answer, decide, or approve anything."
+          "open-question": "The newest message asks the captain for a response, decision, approval, or choice, or leaves work open in this thread pending such a response.",
+          running: "The newest message leaves work open and says it is under way or queued, with no request to the captain or need for their response to continue.",
+          done: "The newest message finishes, settles, delivers, merges, or otherwise closes the work or topic without asking the captain something. A closing message that only notes a pending approval, an external gate, a recorded decision, or a deferred item is done even without `thread.reply_state`. When `thread.reply_state` is `done` and the newest message closes the thread, answer done unless that message itself asks the captain something.",
+          blocked: "The newest message leaves work open because it failed or is waiting on an external dependency, permission, credential, or other obstacle, with no request to the captain or need for their response to continue."
         }
       },
       topic_fits: {

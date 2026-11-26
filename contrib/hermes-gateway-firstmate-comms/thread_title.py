@@ -550,7 +550,7 @@ def _correction(title: dict, view: dict, verdict: dict) -> bool:
         return False
     landed = float(written.get("at") or 0)
     basis = written.get("basis") or {}
-    if ("verdict" in basis and verdict != _reconcile_verdict(basis["verdict"])
+    if ("verdict" in basis and verdict != basis["verdict"]
             and 0 < float(verdict.get("at") or 0) < landed):
         return True
     if any(entry["message_id"] > int(basis.get("newest") or 0) and message_time(entry["message_id"]) < landed

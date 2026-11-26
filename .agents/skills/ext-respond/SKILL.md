@@ -104,8 +104,10 @@ When you settle a decision that has a button post any other way, such as a typed
 Before composing a dedicated-channel reply, consult the [topic-thread contract](../../../docs/configuration.md#topic-threads-one-thread-per-request); the [emit header and help](../../../bin/fm-ext-emit.sh) own the title, retitle, and state flags.
 Emit refuses a reply that would create the thread without `--thread-title`, and any `answer` or `final` without an explicit `--thread-state`; its header owns both rules.
 Your title and state flags are inputs: the [thread title reconciler](../../../docs/configuration.md#thread-title-reconciler) alone writes the thread's title, paces it, and keeps the captain's own words.
-When the home has the Jev key, the reconciler judges the thread after every post and leaves explicit state and retitle inputs unused.
-The judge answers from the newest message and receives the thread state that reply itself declared, so a `done` closing reply stays ✅ even when it only notes an external gate, a recorded decision, or a deferred item; a question in that newest message still shows ❓.
+When the home has the Jev key, the judge evaluates the newest message after each post and receives the thread state that reply itself declared.
+While judging is on, the reconciler uses that verdict and leaves explicit state and retitle inputs unused.
+The judge is instructed to return `done` for a closing reply that only notes a pending approval, an external gate, a recorded decision, or a deferred item, and `open-question` if the newest reply asks the captain for a response.
+The displayed marker follows the decision precedence and pacing in the [thread title rules](../../../docs/configuration.md#thread-title-reconciler).
 Each verdict records the judge's input summary - thread name, project, the reply's state, message count, and newest message id - with its confidence, never message text.
 Emit still requires the state and creating title described above, and retitle is optional.
 
