@@ -1174,7 +1174,7 @@ It reads:
 
 - the decision ledger through `bin/fm-ext-decision.sh threads`, whose header owns which posts count as open, closed, or unknown, whether each carried buttons, and where a closure time comes from;
 - the Firstmate messages Discord accepted, from chunk progress, each with its reply's own thread state and retitle;
-- the thread's verdict log in its record: one Jev verdict per judged message, each entry carrying the judged input summary and the model's confidence but never message text;
+- the thread's verdict log in its record, including verdicts retained for audit;
 - the last title this home wrote, the captain's own words once seen, and a marker he removed;
 - Discord's waits in `state/ext-autoname/cooldowns.json`.
 
@@ -1184,10 +1184,12 @@ A safety sweep marks eligible threads due at gateway start and every 10 minutes.
 
 **Status source.**
 With judging on, an accepted chunk in an eligible thread queues a background scan.
-The scan selects each thread's newest accepted Firstmate message at scan start and, when that message has no verdict, reads the thread's text through it and asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
+The scan selects each thread's newest accepted Firstmate message at scan start and, when that message has no usable verdict and is still present in the fetched history, asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
 The judge answers from the newest message and receives the thread state that reply itself declared (`needs-you`, `done`, or `none`), which is absent when the reply declared none.
 A closing reply that only notes an external gate, a recorded decision, or a deferred item is `done`, and a declared `done` on a closing message means `done` unless that message itself asks the captain something.
 Each verdict entry records the judge's input summary - thread name, project, `reply_state`, message count, and newest message id - with its confidence and no message text.
+Verdicts that arrive stale or await a usable name are marked `audit_only`, with up to 20 such entries retained per thread.
+Audit-only entries never affect titles or count as finished judgments.
 The safety sweep retries failed judgments for the newest accepted message.
 When the topic drifted, the live title has a public `<Project> · ` prefix, and the captain has not named the thread, [`bin/fm-ext-thread-name.sh`](../bin/fm-ext-thread-name.sh) proposes a screened `<Project> · <topic>` base; with no public prefix no name is proposed.
 The models receive the current base title, its project prefix when present, and thread message text, which may include private interaction text.
@@ -1203,7 +1205,7 @@ Precedence is `❓ ` > `⚠️ ` > `⏳ ` > `✅ ` > no marker.
 `❓ ` shows for any open decision and for an `open-question` status, including a plain question with no button; `⚠️ ` comes only from a Jev `blocked` status, never from worker status events; `⏳ ` is `running` and `✅ ` is `done`.
 A question asked while a decision was open, by the ledger's post and closure times, belongs to that decision: once every decision has closed it contributes no marker, and the newest earlier status that was not such a question stands.
 So a `done` judged while a decision is open is kept and lands at the next permitted slot after the last decision closes, even when a reminder about the decision followed it.
-A Jev verdict is stale once a newer Firstmate message in that thread has been accepted by Discord, and a stale verdict is dropped when it arrives.
+A Jev verdict that arrives after Discord accepts a newer Firstmate message in that thread stays audit-only.
 
 **The captain's words.**
 The reconciler reads the live title before every write and never writes when it cannot.
@@ -1229,7 +1231,7 @@ A transient failure or an unreadable title is retried after 30 seconds, a perman
 The first judge scan with judging on is the catch-up.
 Before its first model call it writes `state/ext-autoname/catch-up.json` with the 10 eligible threads Firstmate posted in most recently and the newest accepted message id at that moment.
 Those threads are judged once each; an older thread is judged only after it gets a newer post.
-Each verdict is the thread's own progress, so a restart resumes without repeating a finished thread's model calls or renames.
+Each usable verdict is the thread's own progress, so a restart resumes without repeating a finished thread's model calls or renames.
 
 **Judging on or off.**
 [`bin/fm-ext-thread-judge.sh --check`](../bin/fm-ext-thread-judge.sh) is the one key check, through the shared Jev client in [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh): it prints `on` when [typed dispatch resolution's key](#typed-dispatch-resolution-env-typesafe_api_key) is present, `off` when it is confirmed absent, `unknown` when the home's `.env` cannot be read, and `inactive` when the bridge is off.

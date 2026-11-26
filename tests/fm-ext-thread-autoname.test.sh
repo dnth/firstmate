@@ -956,7 +956,7 @@ test_9_judging_never_delays_replies_and_failures_keep_the_title() {
 import sys, time
 from driver import *
 (thread,) = threads()
-use("running")
+use("blocked")
 assert poster.drain_outbox(send=send, home=HOME, react=lambda *a: None, create_thread=create) == ["sent"]
 # The judge is held until this process releases it, so a delivery that waited
 # for judging could not have returned before the verdict was recorded.
@@ -970,7 +970,7 @@ assert (CAPTURE / "jev-entered").exists(), "the judge never started"
 assert not verdicts(thread)
 (CAPTURE / "jev-release").write_text("")
 settle()
-assert verdicts(thread)[-1]["status"] == "running"
+assert verdicts(thread)[-1]["status"] == "blocked"
 print("ok")
 ') || fail "delivery waited for the judge: $out"
   rm -f "$home/capture/jev-entered" "$home/capture/jev-release"
@@ -979,16 +979,23 @@ print("ok")
   out=$(py "$home" <<'PY'
 (thread,) = threads()
 tick(0)
-assert name(thread) == "⏳ Aceh · search latency"
+assert name(thread) == "⚠️ Aceh · search latency"
 before = verdicts(thread)
 with only("followup.3"):
     deliver(None)
 assert verdicts(thread) == before, "a failed Jev call changed the inputs"
 os.environ.pop("FM_TEST_NAME", None)
 deliver("drift")
-assert verdicts(thread) == before, "a failed naming call changed the inputs"
+entry = verdicts(thread)[-1]
+assert verdicts(thread)[:-1] == before
+assert entry["audit_only"] is True and entry["base"] == "", entry
+assert entry["message_id"] == load()["threads"][thread]["messages"][-1]["id"], entry
+assert (entry["status"], entry["topic_fits"], entry["confidence"]) == ("running", False, 0.95), entry
+assert entry["judged"] == {"name": "Aceh · search latency", "project": "Aceh", "messages": 4}, entry
 tick(601)
-assert name(thread) == "⏳ Aceh · search latency" and len(patches()) == 1, patches()
+assert name(thread) == "⚠️ Aceh · search latency" and len(patches()) == 1, patches()
+assert autoname.judge_scan(HOME, retry_failed=True) == []
+assert len(verdicts(thread)) == len(before) + 2, "the audit entry suppressed a retry"
 print("ok")
 PY
   ) || fail "a Jev or naming failure changed the title: $out"
@@ -998,7 +1005,7 @@ PY
 deliver("done")
 script({"status": 500})
 tick(1300)
-assert patches()[-1]["status"] == 500 and name(thread) == "⏳ Aceh · search latency", patches()
+assert patches()[-1]["status"] == 500 and name(thread) == "⚠️ Aceh · search latency", patches()
 assert record(thread)["last"]["outcome"] == "failed"
 tick(1300 + title.RETRY_SECS)
 assert name(thread) == "✅ Aceh · search latency", name(thread)
@@ -1273,25 +1280,20 @@ test_14_the_judge_reads_the_reply_state_and_logs_each_call() {
   post "$home" "$M1" followup 2 "Which window should the reindex use, 02:00 or 03:00?"
   out=$(py "$home" <<'PY'
 (thread,) = threads()
-seen = []
-def fake_judge(state, home):
-    thread_state = state["thread"]
-    seen.append({"has_state": "reply_state" in thread_state,
-                 "state": thread_state.get("reply_state"),
-                 "newest": thread_state["messages"][-1]["text"],
-                 "messages": len(thread_state["messages"])})
-    return {"status": "open-question", "confidence": 0.41, "topic_fits": True}
-
-with patch.object(autoname, "judge", fake_judge):
-    deliver()
+assert deliver("open-question") == ["sent"]
 tick(0)
 assert name(thread) == "❓ Aceh · nightly reindex", name(thread)
-assert seen and not seen[-1]["has_state"], "a reply that declared no state sent one"
-assert seen[-1]["newest"].startswith("Which window"), seen[-1]
+assert jev_calls()[-1]["state"]["thread"] == {
+    "name": "Aceh · nightly reindex", "project": "Aceh",
+    "messages": [
+        {"role": "firstmate", "text": "Looking at the reindex schedule now."},
+        {"role": "firstmate", "text": "Which window should the reindex use, 02:00 or 03:00?"},
+    ],
+}
 entry = verdicts(thread)[-1]
-assert entry["status"] == "open-question" and entry["confidence"] == 0.41, entry
+assert (entry["status"], entry["topic_fits"], entry["confidence"]) == ("open-question", True, 1.0), entry
 assert entry["judged"] == {"name": "Aceh · nightly reindex", "project": "Aceh",
-                           "messages": seen[-1]["messages"]}, entry
+                           "messages": 2}, entry
 assert entry["message_id"] == load()["threads"][thread]["messages"][-1]["id"], entry
 print("ok")
 PY
@@ -1300,32 +1302,73 @@ PY
     --thread-state "done"
   out=$(py "$home" <<'PY'
 (thread,) = threads()
-seen = []
-def fake_judge(state, home):
-    thread_state = state["thread"]
-    seen.append({"state": thread_state.get("reply_state"),
-                 "newest": thread_state["messages"][-1]["text"],
-                 "messages": len(thread_state["messages"])})
-    return {"status": "done", "confidence": 0.78, "topic_fits": True}
-
-with patch.object(autoname, "judge", fake_judge):
-    deliver()
-assert seen, "the closing reply was not judged"
-assert seen[-1]["state"] == "done", seen[-1]
-assert seen[-1]["newest"].startswith("Noted: the QA gate"), seen[-1]
+assert deliver("done") == ["sent"]
+assert jev_calls()[-1]["state"]["thread"] == {
+    "name": "Aceh · nightly reindex", "project": "Aceh", "reply_state": "done",
+    "messages": [
+        {"role": "firstmate", "text": "Looking at the reindex schedule now."},
+        {"role": "firstmate", "text": "Which window should the reindex use, 02:00 or 03:00?"},
+        {"role": "firstmate", "text": "Noted: the QA gate still waits for your word. Closing this thread."},
+    ],
+}
 tick(601)
 assert name(thread) == "✅ Aceh · nightly reindex", name(thread)
 assert verdicts(thread)[-2]["status"] == "open-question", "the earlier question lost its verdict"
 entry = verdicts(thread)[-1]
-assert entry["status"] == "done" and entry["confidence"] == 0.78, entry
+assert (entry["status"], entry["topic_fits"], entry["confidence"]) == ("done", True, 1.0), entry
 assert entry["message_id"] == load()["threads"][thread]["messages"][-1]["id"], entry
 assert entry["judged"] == {"name": "Aceh · nightly reindex", "project": "Aceh",
-                           "reply_state": "done", "messages": seen[-1]["messages"]}, entry
+                           "reply_state": "done", "messages": 3}, entry
 logged = json.dumps(verdicts(thread))
 assert "QA gate still waits" not in logged and "Which window" not in logged, "message text was logged"
 print("ok")
 PY
   ) || fail "a done closing reply did not end at ✅ or its log was wrong: $out"
+  post "$home" "$M1" followup 4 "Closing reply removed before judging." --thread-state done
+  post "$home" "$M1" followup 5 "Wrap-up with another chunk on the way." --thread-state done
+  out=$(py "$home" <<'PY'
+from driver import _append
+
+(thread,) = threads()
+before = verdicts(thread)
+calls = len(jev_calls())
+with patch.object(autoname, "after_post"), only("followup.4"):
+    assert deliver("done") == ["sent"]
+data = load()
+data["threads"][thread]["messages"].pop()
+save(data)
+assert autoname.judge_scan(HOME) == []
+assert len(jev_calls()) == calls and verdicts(thread) == before, "the deleted reply was judged"
+
+with patch.object(autoname, "after_post"):
+    assert deliver("blocked") == ["sent"]
+selected = load()["threads"][thread]["messages"][-1]["id"]
+progress = next((HOME / "state" / "ext-outbox").glob("*.followup.5.progress.json"))
+read_history = title.discord_read_messages
+def next_chunk_lands(*args):
+    newer = _append(thread, BOT, "The second chunk.")
+    state = json.loads(progress.read_text())
+    state["discord_message_ids"].append(newer)
+    state.update(total=2, posted_count=2)
+    progress.write_text(json.dumps(state))
+    return read_history(*args)
+
+with patch.object(title, "discord_read_messages", next_chunk_lands):
+    assert autoname.judge_scan(HOME) == []
+entry = verdicts(thread)[-1]
+sent = jev_calls()[-1]["state"]["thread"]
+assert sent["reply_state"] == "done", sent
+assert sent["messages"][-1] == {"role": "firstmate", "text": "Wrap-up with another chunk on the way."}, sent
+assert entry["message_id"] == selected and entry["audit_only"] is True, entry
+assert entry["status"] == "blocked" and entry["judged"]["reply_state"] == "done", entry
+tick(1202)
+assert name(thread) == "✅ Aceh · nightly reindex", name(thread)
+use("done")
+assert autoname.judge_scan(HOME) == [thread]
+assert jev_calls()[-1]["state"]["thread"]["messages"][-1]["text"] == "The second chunk."
+print("ok")
+PY
+  ) || fail "the accepted message, reply state, and verdict came apart: $out"
   pass "the judge receives the judged reply's state when it declared one and nothing when it did not, a done closing reply ends at ✅, and each call logs its input and confidence"
 }
 

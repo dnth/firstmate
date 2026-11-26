@@ -8,7 +8,7 @@ yet, asks Jev (``bin/fm-ext-thread-judge.sh``) for the thread's status and
 topic fit, asks the naming model (``bin/fm-ext-thread-name.sh``) for a new
 base when the topic drifted under a public project prefix, and adds the
 result to the thread's verdict log. The verdict log is the only checkpoint:
-a thread is judged again only when its newest message has no verdict.
+a thread is judged again only when its newest message has no usable verdict.
 
 The one-time catch-up is the first scan: ``state/ext-autoname/catch-up.json``
 fixes, before the first model call, the newest message id at that moment
@@ -126,6 +126,8 @@ def thread_messages(record: dict, home: Path, through: int) -> list[dict]:
         budget -= len(message["text"])
         kept.append(message)
     kept.reverse()
+    if str(through) not in seen:
+        raise RuntimeError("accepted message missing from judge history")
     return kept
 
 
@@ -174,49 +176,40 @@ def propose_name(state: dict, home: Path) -> str:
 
 # --- judging one thread ----------------------------------------------------------------
 
-def _reply_state(home: Path, thread_id: str, through: int) -> str:
-    """The judged reply's own explicit thread state, or "" when it declared none."""
-    for entry in thread_title.accepted_posts(home).get(thread_id) or []:
-        if entry["message_id"] == through and entry.get("state") in thread_title.EXPLICIT_STATUS:
-            return entry["state"]
-    return ""
-
-
-def judge_thread(home: Path, record: dict, through: int) -> str:
+def judge_thread(home: Path, record: dict, post: dict) -> str:
     """Judge a thread through one accepted message and add the verdict to its log.
 
-    Returns recorded, stale, waiting (Discord asked us to wait), or failed.
+    Returns recorded, stale, gone, waiting (Discord asked us to wait), or failed.
     """
     thread_id = record["topic_thread_id"]
+    through = post["message_id"]
     try:
         live = thread_title.discord_read_title(home, thread_id)
         base = thread_title.split_marker(live)[1]
         # The project comes only from the thread's own public name.
         project = thread_context.project_from_name(base)
         messages = thread_messages(record, home, through)
-        if not messages:
-            raise RuntimeError("no thread text to judge")
         thread = {"name": base, "project": project, "messages": messages}
-        reply_state = _reply_state(home, thread_id, through)
-        if reply_state:
-            thread["reply_state"] = reply_state
-        state = {"thread": thread}
         judged = {"name": base, "project": project, "messages": len(messages)}
-        if reply_state:
+        reply_state = post["state"]
+        if reply_state in thread_title.EXPLICIT_STATUS:
+            thread["reply_state"] = reply_state
             judged["reply_state"] = reply_state
+        state = {"thread": thread}
         verdict = judge(state, home)
-        new_base = ""
-        if not verdict["topic_fits"] and project and not thread_title.captain_named(record, live):
-            new_base = propose_name(state, home)
+        needs_name = not verdict["topic_fits"] and bool(project) and not thread_title.captain_named(record, live)
+        outcome = thread_title.record_verdict(home, thread_id, through, verdict["status"],
+                                              verdict["topic_fits"], judged=judged,
+                                              confidence=verdict["confidence"], pending_name=needs_name)
+        if outcome == "pending-name":
+            return thread_title.publish_named_verdict(home, thread_id, through, propose_name(state, home))
+        return outcome
     except thread_title.RateLimited:
         return "waiting"
     except Exception as err:
         _log(f"thread {thread_id} keeps its title: {err}")
         thread_title.record_judge_failure(home, thread_id, through)
         return "failed"
-    return thread_title.record_verdict(home, thread_id, through, verdict["status"],
-                                       verdict["topic_fits"], new_base,
-                                       judged=judged, confidence=verdict["confidence"])
 
 
 # --- the scan -----------------------------------------------------------------------
@@ -225,7 +218,7 @@ def _catch_up_path(home: Path) -> Path:
     return poster.state_dir(home) / "ext-autoname" / "catch-up.json"
 
 
-def _catch_up(home: Path, newest: dict[str, int], eligible: dict[str, dict]) -> dict:
+def _catch_up(home: Path, newest: dict[str, dict], eligible: dict[str, dict]) -> dict:
     """The saved catch-up cohort, written once before the first model call."""
     path = _catch_up_path(home)
     if not path.is_symlink() and path.is_file():
@@ -235,14 +228,16 @@ def _catch_up(home: Path, newest: dict[str, int], eligible: dict[str, dict]) -> 
                 return data
         except (OSError, ValueError):
             pass
-    ranked = sorted((thread for thread in newest if thread in eligible), key=newest.__getitem__, reverse=True)
-    data = {"horizon": str(max(newest.values(), default=0)), "threads": ranked[:CATCH_UP_LIMIT]}
+    ranked = sorted((thread for thread in newest if thread in eligible),
+                    key=lambda thread: newest[thread]["message_id"], reverse=True)
+    horizon = max((post["message_id"] for post in newest.values()), default=0)
+    data = {"horizon": str(horizon), "threads": ranked[:CATCH_UP_LIMIT]}
     thread_title._atomic_json(path, data)
     return data
 
 
 def judge_scan(home: Path | None = None, threads=None, retry_failed: bool = False) -> list[str]:
-    """Judge every thread whose newest accepted message has no verdict yet.
+    """Judge every thread whose newest accepted message has no usable verdict yet.
 
     ``threads`` limits the scan; ``retry_failed`` also retries a message
     whose judgment failed before (the safety sweep passes it). Returns the
@@ -252,26 +247,26 @@ def judge_scan(home: Path | None = None, threads=None, retry_failed: bool = Fals
     with _SCAN_LOCK:
         if judging_state(home) != "on":
             return []
-        newest = thread_title.newest_accepted(home)
+        newest = {thread: posts[-1] for thread, posts in thread_title.accepted_posts(home).items()}
         eligible = {record["topic_thread_id"]: record for record in thread_title._eligible_records(home)
                     if record.get("creator") == "firstmate"}
         cohort = _catch_up(home, newest, eligible)
         horizon = thread_title._id(cohort.get("horizon"))
         judged = []
-        for thread_id in sorted(newest, key=newest.__getitem__, reverse=True):
+        for thread_id, post in sorted(newest.items(), key=lambda item: item[1]["message_id"], reverse=True):
             if threads is not None and thread_id not in threads:
                 continue
             record = eligible.get(thread_id)
-            through = newest[thread_id]
+            through = post["message_id"]
             if not record or (through <= horizon and thread_id not in cohort["threads"]):
                 continue
             title = record.get("title") or {}
-            if any(thread_title._id(entry.get("message_id")) == through for entry in title.get("verdicts") or []):
+            if thread_title._verdict_at(title, through):
                 continue
             failed = title.get("judge_failed") or {}
             if not retry_failed and thread_title._id(failed.get("message_id")) == through:
                 continue
-            outcome = judge_thread(home, record, through)
+            outcome = judge_thread(home, record, post)
             with _LOCK:
                 _WAITING.discard((home, thread_id))
                 if outcome == "waiting":
