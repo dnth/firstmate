@@ -72,6 +72,18 @@ if [ -n "${FM_TEST_JEV_HOLD:-}" ]; then
     sleep 0.02
   done
 fi
+if [ "${FM_TEST_SPLIT_JUDGE:-}" = 1 ]; then
+  if jq -e '
+    .questions.status.instructions | contains("judge the newest reply with all its chunks read together")
+  ' <<< "$body" >/dev/null && jq -e '
+    .state.thread.messages as $messages | $messages[-1].reply as $reply
+    | $reply != null and any($messages[]; .reply == $reply and (.text | contains("Closing this thread.")))
+  ' <<< "$body" >/dev/null; then
+    FM_TEST_JEV="$FM_TEST_FIXTURES/done.json"
+  else
+    FM_TEST_JEV="$FM_TEST_FIXTURES/blocked.json"
+  fi
+fi
 if [ -n "${FM_TEST_JEV:-}" ] && [ -f "$FM_TEST_JEV" ]; then
   jq '.jev' "$FM_TEST_JEV" > "$out"
   printf '200'
@@ -196,9 +208,16 @@ class Discord(BaseHTTPRequestHandler):
                     save(data)
                     headers = [("X-RateLimit-Remaining", "0"), ("X-RateLimit-Reset", str(reset))]
                 return self.reply(200, {"id": parts[1], "name": thread["name"], "owner_id": BOT}, headers)
-            before = int(parse_qs(url.query).get("before", ["9" * 20])[0])
+            if len(parts) == 4:
+                message = next((m for m in thread["messages"] if m["id"] == parts[3]), None)
+                if message is None:
+                    return self.reply(404, {"message": "Unknown Message", "code": 10008})
+                return self.reply(200, message)
+            query = parse_qs(url.query)
+            before = int(query.get("before", ["9" * 20])[0])
+            limit = int(query.get("limit", ["100"])[0])
             messages = [m for m in thread["messages"] if int(m["id"]) < before]
-            return self.reply(200, list(reversed(messages))[:100])
+            return self.reply(200, list(reversed(messages))[:limit])
 
     def do_POST(self):
         thread_id = urlparse(self.path).path.strip("/").split("/")[1]
@@ -1289,7 +1308,7 @@ PY
 # --- 14. the judge reads the reply's own state, and every call is logged ---------------
 #
 # The judged reply's explicit state reaches the judge, and a reply that
-# declared none is judged without that field. A `done` closing reply ends at
+# declared no state is judged without that field. A `done` closing reply ends at
 # ✅ even when an earlier open question is still in the history. Each verdict
 # records the judge's input summary and confidence, never message text.
 
@@ -1424,8 +1443,7 @@ test_15_the_judge_criteria_keep_a_closing_note_and_a_question_apart() {
   post "$home" "$M1" answer 2 "Noted: the QA gate still waits for your word. Closing this thread." \
     --thread-state "done"
   out=$(py "$home" <<'PY'
-(thread,) = threads()
-assert deliver("done") == ["sent"]
+assert deliver() == ["sent"]
 call = jev_calls()[-1]
 criteria = call["questions"]["status"]["criteria"]
 assert call["state"]["thread"]["messages"][-1]["text"] == \
@@ -1433,30 +1451,29 @@ assert call["state"]["thread"]["messages"][-1]["text"] == \
 assert call["state"]["thread"]["reply_state"] == "done", call
 assert "closes out the work and only notes a pending approval" in criteria["open-question"], criteria
 assert "needs the captain to answer, decide, or approve" in criteria["open-question"], criteria
+assert "even if it reports a completed step" in criteria["open-question"], criteria
 assert "closes the work or topic" in criteria["done"], criteria
-assert "open-question, not done" in criteria["done"], criteria
-assert "neither closes out the work nor needs an answer from the captain" in criteria["blocked"], criteria
+assert "and no response, decision, or approval from the captain is required" in criteria["done"], criteria
+assert "Apply both conditions regardless of `thread.reply_state`" in criteria["done"], criteria
+assert "Continuing the work does not require a response, decision, or approval from the captain" in criteria["blocked"], criteria
 assert "newest reply" in call["questions"]["status"]["instructions"], call["questions"]["status"]
 assert "`reply`" in call["questions"]["status"]["instructions"], call["questions"]["status"]
 print("ok")
 PY
   ) || fail "the closing noting a gate did not reach the done-only criteria: $out"
-  post "$home" "$M1" followup 3 "Deployment needs your approval before I can proceed." \
-    --thread-state needs-you --no-buttons "the reply states a wait on the captain without a button"
+  post "$home" "$M1" followup 3 "I merged the change. Production deployment needs your approval before I can proceed."
   out=$(py "$home" <<'PY'
-(thread,) = threads()
-assert deliver("open-question") == ["sent"]
+assert deliver() == ["sent"]
 call = jev_calls()[-1]
 assert call["state"]["thread"]["messages"][-1]["text"] == \
-    "Deployment needs your approval before I can proceed.", call
-assert call["state"]["thread"]["reply_state"] == "needs-you", call
+    "I merged the change. Production deployment needs your approval before I can proceed.", call
+assert "reply_state" not in call["state"]["thread"], call
 print("ok")
 PY
   ) || fail "the captain-approval wait did not reach the judge as the newest message: $out"
   post "$home" "$M1" followup 4 "Which window should the reindex use, 02:00 or 03:00?"
   out=$(py "$home" <<'PY'
-(thread,) = threads()
-assert deliver("open-question") == ["sent"]
+assert deliver() == ["sent"]
 call = jev_calls()[-1]
 assert call["state"]["thread"]["messages"][-1]["text"] == \
     "Which window should the reindex use, 02:00 or 03:00?", call
@@ -1483,7 +1500,8 @@ test_16_a_split_reply_is_judged_as_one_reply() {
   post "$home" "$M1" followup 2 "$text" --thread-state "done"
   out=$(py "$home" <<'PY'
 (thread,) = threads()
-assert deliver("done") == ["sent"]
+os.environ["FM_TEST_SPLIT_JUDGE"] = "1"
+assert deliver() == ["sent"]
 sent = jev_calls()[-1]["state"]["thread"]
 texts = [m["text"] for m in sent["messages"]]
 assert len(texts) == 3 and texts[0] == "Looking at the reindex schedule now.", texts
@@ -1491,7 +1509,7 @@ assert "Closing this thread." in texts[1], texts
 assert texts[2] == "External gate still awaits vendor approval.", texts
 assert sent["reply_state"] == "done", sent
 assert sent["messages"][1]["reply"] == sent["messages"][2]["reply"], sent["messages"]
-assert sent["messages"][2]["reply"] != sent["messages"][0]["reply"], sent["messages"]
+assert {m["reply"] for m in sent["messages"]} == {1, 2}, sent["messages"]
 tick(0)
 assert name(thread) == "✅ Aceh · nightly reindex", name(thread)
 usable = [entry for entry in verdicts(thread) if not entry.get("audit_only")]
@@ -1500,21 +1518,67 @@ print("ok")
 PY
   ) || fail "the split reply did not reach the judge as one reply or did not end done: $out"
   unset FM_EXT_DISCORD_REPLY_MAX_CHARS
-  pass "a two-chunk close-out carries one reply id, the gate-only last chunk is read with its close, and the thread ends at ✅"
+  post "$home" "$M1" followup 3 "External gate still awaits vendor approval."
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+set_clock(T0 + 601)
+os.environ["FM_TEST_SPLIT_JUDGE"] = "1"
+assert deliver() == ["sent"]
+tick(601)
+usable = [entry for entry in verdicts(thread) if not entry.get("audit_only")]
+assert usable[-1]["status"] == "blocked", usable[-1]
+assert usable[-1]["message_id"] == load()["threads"][thread]["messages"][-1]["id"]
+print("ok")
+PY
+  ) || fail "the same gate note sent alone did not produce a blocked verdict: $out"
+
+  home="$TMP_ROOT/t16long"
+  setup_home "$home"
+  new_thread "$home" "$M1" "Aceh · nightly reindex" "Looking at the reindex schedule now."
+  local padding
+  printf -v padding ' routine log entry %.0s' {1..480}
+  post "$home" "$M1" followup 2 "$text $padding"
+  out=$(py "$home" <<'PY'
+from driver import _append
+
+(thread,) = threads()
+os.environ["FM_TEST_SPLIT_JUDGE"] = "1"
+accepted = []
+def busy_send(payload):
+    receipt = send(payload)
+    accepted.append(receipt["discord_message_id"])
+    if len(accepted) == 1:
+        for _ in range(41):
+            _append(thread, os.environ["FM_TEST_CAPTAIN"], "A separate discussion.")
+    return receipt
+
+with patch.object(autoname, "after_post"):
+    assert poster.drain_outbox(send=busy_send, home=HOME, react=lambda *args: None) == ["sent"]
+assert autoname.judge_scan(HOME) == [thread]
+messages = jev_calls()[-1]["state"]["thread"]["messages"]
+published = [m["content"] for m in load()["threads"][thread]["messages"] if m["id"] in accepted]
+assert len(accepted) > 4 and sum(map(len, published)) > 8000, accepted
+assert [m["text"] for m in messages if m["reply"] == messages[-1]["reply"]] == published
+assert verdicts(thread)[-1]["status"] == "done", verdicts(thread)
+print("ok")
+PY
+  ) || fail "the latest reply lost chunks outside the optional history limits: $out"
+  pass "split close-outs keep their full text and the judge distinguishes a standalone gate note"
 }
 
 # --- 17. a drift rename may move to another known project label ----------------------
 #
-# The prefix may switch only to a project label this home's threads already
-# carry, it stays the thread's own label when the model keeps it, and an
-# unknown label is refused. Test 7 owns the captain-named thread.
+# An approved public label may be used before a project has its own thread.
+# Prior titles cannot authorize a switch. Test 7 owns captain-name protection.
 
 test_17_a_drift_rename_may_move_to_another_known_project_label() {
   local home="$TMP_ROOT/t17a" out
-  local M2=444444444444444442
   setup_home "$home"
+  mkdir -p "$home/data"
+  printf '%s\n' '- firstmate [direct-PR] - registered project (added 2026-11-23)' \
+    '- private-client - registered project (added 2026-11-23)' > "$home/data/projects.md"
+  printf '%s\n' '{"firstmate":"Firstmate","unregistered":"Ghost Project"}' > "$home/config/ext-project-labels.json"
   new_thread "$home" "$M1" "Hybrid Search Engine · log check" "Search latency is back to normal."
-  new_thread "$home" "$M2" "Firstmate · review edge-case noise" "Reviewing the title judge."
   post "$home" "$M1" followup 2 "Moving on to the Firstmate thread-title judge you asked about."
   out=$(py "$home" <<'PY'
 first = next(t for t in threads() if "log check" in name(t))
@@ -1525,7 +1589,8 @@ tick(0)
 assert name(first) == "⏳ Firstmate · thread title judge fix", name(first)
 prompt = (CAPTURE / "namer.txt").read_text()
 assert "--- known project labels ---" in prompt, prompt
-assert "Firstmate" in prompt and "Hybrid Search Engine" in prompt, prompt
+assert "--- known project labels ---\nFirstmate\n" in prompt, prompt
+assert "private-client" not in prompt and "Ghost Project" not in prompt, prompt
 assert not record(first).get("manual_base"), record(first)
 print("ok")
 PY
@@ -1546,16 +1611,19 @@ PY
   ) || fail "a drift rename that keeps the thread project did not keep its prefix: $out"
 
   home="$TMP_ROOT/t17c"
+  local M2=444444444444444442
   setup_home "$home"
   new_thread "$home" "$M1" "Hybrid Search Engine · log check" "Search latency is back to normal."
+  new_thread "$home" "$M2" "Ghost Project · prior title" "A previous discussion."
   post "$home" "$M1" followup 2 "Another pass over the same log."
   out=$(py "$home" <<'PY'
-(thread,) = threads()
+thread = next(t for t in threads() if "log check" in name(t))
 os.environ["FM_TEST_NAME"] = "Ghost Project · invented prefix"
 assert deliver("drift") == ["sent"]
 tick(0)
 assert name(thread) == "Hybrid Search Engine · log check", name(thread)
 assert not any("Ghost" in p["name"] for p in patches(thread)), patches(thread)
+assert "Ghost Project" not in (CAPTURE / "namer.txt").read_text()
 print("ok")
 PY
   ) || fail "an unknown project label was not refused: $out"

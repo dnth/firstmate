@@ -13,8 +13,9 @@
 # Output: the screened base name on stdout, or exit 1 with one reason on
 # stderr. The proposal is always "<Project> · <topic>": a model answer without
 # a project prefix and a nonempty topic is refused. The prefix must be the
-# thread's current project label, or a different known project label from the
-# input's `projects` list when the conversation clearly moved to that project;
+# thread's current project label, or a public label from
+# config/ext-project-labels.json for a project registered in data/projects.md
+# when the conversation clearly moved to that project;
 # any other prefix is refused, so a prefix is never free text. The result must
 # pass bin/fm-ext-topic.sh --check-title (bounds and shared safety screen).
 #
@@ -53,11 +54,24 @@ command -v opencode >/dev/null 2>&1 || die "opencode not installed"
 
 PROJECT=$(jq -er '.thread.project | strings | select(length > 0 and . != "unknown")' "$STATE_FILE") \
   || die "thread project is unknown"
-# Known project labels: this thread's own, plus those the home's threads use.
-OTHER_LABELS=$(jq -r '(.projects // []) | .[]? | strings
-  | select(length > 0 and length <= 60 and . != "unknown" and (contains("\n") | not))' "$STATE_FILE" 2>/dev/null) \
-  || die "could not read the known project labels"
-LABELS=$(printf '%s\n%s\n' "$PROJECT" "$OTHER_LABELS" | awk 'NF' | sort -u)
+FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(dirname "$SCRIPT_DIR")}}
+REGISTRY="${FM_DATA_OVERRIDE:-$FM_HOME/data}/projects.md"
+PUBLIC_LABELS="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/ext-project-labels.json"
+LABELS=
+if [ -f "$REGISTRY" ] && [ -f "$PUBLIC_LABELS" ] && [ ! -L "$PUBLIC_LABELS" ]; then
+  candidates=$(jq -r --rawfile registry "$REGISTRY" --arg current "$PROJECT" '
+    ($registry | split("\n") | map(capture("^- (?<slug>[^[:space:]]+) (\\[[^]]+\\] )?- ").slug)) as $registered
+    | objects | to_entries[] | .key as $slug
+    | select($registered | index($slug)) | .value | strings
+    | select(length > 0 and length <= 56 and . != "unknown" and . != $current)
+    | select((test("[[:cntrl:]]") or contains(" · ")) | not)
+  ' "$PUBLIC_LABELS" 2>/dev/null) || candidates=
+  LABELS=$(while IFS= read -r label; do
+    [ -n "$label" ] || continue
+    screened=$(printf '%s · x\n' "$label" | "$SCRIPT_DIR/fm-ext-topic.sh" --check-title --title-file - 2>/dev/null) || continue
+    [ "$screened" = "$label · x" ] && printf '%s\n' "$label"
+  done <<< "$candidates" | sort -u)
+fi
 
 WORK=$(mktemp -d) || die "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT

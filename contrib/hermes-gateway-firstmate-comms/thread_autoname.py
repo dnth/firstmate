@@ -42,7 +42,7 @@ except ImportError:  # loaded from sys.path in hermetic tests
 # Catch-up judges only this many of the threads Firstmate posted in most
 # recently.
 CATCH_UP_LIMIT = 10
-# Bound what one judgment sends: newest messages first, whole messages only.
+# Bounds for optional history beyond the newest reply.
 TEXT_BUDGET_CHARS = 8000
 MESSAGE_MAX_CHARS = 2000
 MESSAGE_LIMIT = 40
@@ -102,33 +102,52 @@ def _captains(record: dict, home: Path) -> set[str]:
 
 def thread_messages(record: dict, home: Path, through: int) -> list[dict]:
     """The thread's text through message ``through``, oldest first."""
-    raw = thread_title.discord_read_messages(home, record["topic_thread_id"], through, MESSAGE_LIMIT)
+    thread_id = record["topic_thread_id"]
+    raw = thread_title.discord_read_messages(home, thread_id, through, MESSAGE_LIMIT)
+    latest_id = str(through)
+    entries = {str(item.get("id")): item for item in raw if isinstance(item, dict)}
     posts = poster.firstmate_posts(home)
+    newest_reply = posts.get(latest_id, {}).get("reply")
+    if latest_id not in entries or newest_reply is None:
+        raise RuntimeError("accepted message missing from judge history")
+    newest_ids = {key for key, post in posts.items()
+                  if post.get("reply") == newest_reply and int(key) <= through}
+    for key in sorted(newest_ids - entries.keys(), key=int):
+        entries[key] = thread_title.discord_read_message(home, thread_id, key)
+
     captains = _captains(record, home)
-    kept, seen, budget = [], set(), TEXT_BUDGET_CHARS
-    for item in sorted((item for item in raw if isinstance(item, dict)),
-                       key=lambda item: thread_title._id(item.get("id")), reverse=True):
+    candidates = []
+    for key in sorted(entries, key=thread_title._id, reverse=True):
+        item = entries[key]
         entry = thread_context._entry(item, "", "", posts, "")
-        if entry is None or entry["id"] in seen or int(entry["id"]) > through:
+        required = key in newest_ids
+        if entry is None:
+            if required:
+                raise RuntimeError("accepted reply chunk missing from judge history")
+            continue
+        if int(key) > through:
             continue
         role = "firstmate" if entry["role"] == "firstmate" else (
             "captain" if entry["author_id"] in captains else "participant")
-        message = _message(role, entry["text"])
-        if message is None:
-            continue
-        if role == "firstmate":
-            reply = (posts.get(entry["id"]) or {}).get("reply")
-            if reply:
-                message["reply"] = reply
-        if len(kept) >= MESSAGE_LIMIT or len(message["text"]) > budget:
-            break
-        seen.add(entry["id"])
-        budget -= len(message["text"])
+        message = {"role": role, "text": entry["text"]} if required else _message(role, entry["text"])
+        if message:
+            candidates.append((key, message))
+
+    budget = TEXT_BUDGET_CHARS - sum(len(message["text"]) for key, message in candidates if key in newest_ids)
+    remaining = MESSAGE_LIMIT - len(newest_ids)
+    kept, aliases = [], {}
+    for key, message in candidates:
+        if key not in newest_ids:
+            if remaining <= 0 or len(message["text"]) > budget:
+                remaining = 0
+                continue
+            remaining -= 1
+            budget -= len(message["text"])
+        if message["role"] == "firstmate":
+            reply = posts[key]["reply"]
+            message["reply"] = aliases.setdefault(reply, len(aliases) + 1)
         kept.append(message)
-    kept.reverse()
-    if str(through) not in seen:
-        raise RuntimeError("accepted message missing from judge history")
-    return kept
+    return list(reversed(kept))
 
 
 # --- the two model calls -----------------------------------------------------------
@@ -176,20 +195,6 @@ def propose_name(state: dict, home: Path) -> str:
 
 # --- judging one thread ----------------------------------------------------------------
 
-def project_labels(home: Path, project: str) -> list[str]:
-    """Every project label this home's Firstmate-created threads carry.
-
-    A label is the ``<Project> · `` prefix of a thread this home named, so a
-    drift rename may move to another known project but never invent a prefix.
-    """
-    labels = {project} if project else set()
-    for record in thread_title._eligible_records(home):
-        label = thread_context.project_from_name(str(record.get("topic_name") or ""))
-        if label:
-            labels.add(label)
-    return sorted(labels)
-
-
 def judge_thread(home: Path, record: dict, post: dict) -> str:
     """Judge a thread through one accepted message and add the verdict to its log.
 
@@ -216,8 +221,7 @@ def judge_thread(home: Path, record: dict, post: dict) -> str:
                                               verdict["topic_fits"], judged=judged,
                                               confidence=verdict["confidence"], pending_name=needs_name)
         if outcome == "pending-name":
-            named = dict(state, projects=project_labels(home, project))
-            return thread_title.publish_named_verdict(home, thread_id, through, propose_name(named, home))
+            return thread_title.publish_named_verdict(home, thread_id, through, propose_name(state, home))
         return outcome
     except thread_title.RateLimited:
         return "waiting"

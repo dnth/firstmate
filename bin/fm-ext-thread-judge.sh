@@ -19,16 +19,11 @@
 #               "reply_state": "needs-you|done|none",
 #               "messages": [{"role": "firstmate|captain|participant",
 #                             "text": "...",
-#                             "reply": "<reply id>"}]},
-#    "projects": ["<known project label>", ...]}
+#                             "reply": 1}]}}
 # reply_state is optional: it is the thread state the judged reply itself
 # declared, and it is omitted when the reply declared no state.
-# reply is present on a Firstmate message and is the same value for every
-# chunk Discord split from one reply, so the judge reads those chunks as one
-# message; a message without it stands alone.
-# projects is optional and read only by bin/fm-ext-thread-name.sh, which may
-# move a drifted thread to one of those known project labels; the judge
-# ignores it.
+# reply is a request-local integer shared by the chunks of one Firstmate
+# reply. A message without it stands alone.
 # This tool adds nothing but the two questions below and never reads Discord.
 #
 # Output (stdout, one JSON object, exit 0):
@@ -118,10 +113,10 @@ REQUEST=$(jq -n --slurpfile state "$STATE_FILE" --arg model "$FM_JEV_MODEL" '
         type: "choice",
         instructions: "What is the current status of the work described in `thread.messages`, read from its newest reply? Messages that share a non-empty `reply` value are chunks of one Firstmate reply that Discord split; judge the newest reply with all its chunks read together as one message. A message without a `reply` value stands alone.",
         criteria: {
-          "open-question": "The newest reply needs the captain to answer, decide, or approve something before the work in this thread can proceed, whether it asks a question or says it is waiting on the captain, as in `Deployment needs your approval before I can proceed`. A reply that closes out the work and only notes a pending approval, an external gate, a recorded decision, or a deferred item does not ask the captain anything and is not this choice.",
-          running: "The newest reply leaves work open and says it is under way or queued, and it neither needs an answer from the captain to proceed nor reports a failure or an external obstacle.",
-          done: "The newest reply finishes, settles, delivers, merges, or otherwise closes the work or topic, including a closing reply that only notes a pending approval, an external gate, a recorded decision, or a deferred item, and even when `thread.reply_state` is absent. When `thread.reply_state` is `done` and the newest reply closes the thread, answer done unless that reply needs the captain to answer for the work in this thread to proceed; such a reply is open-question, not done.",
-          blocked: "The newest reply leaves work open because it failed or is waiting on an external dependency, permission, credential, or other obstacle, and it neither closes out the work nor needs an answer from the captain to proceed."
+          "open-question": "The newest reply needs the captain to answer, decide, or approve something before the work in this thread can proceed. This applies even if it reports a completed step or has no question mark, as in `I merged the change. Production deployment needs your approval before I can proceed`. A reply that closes out the work and only notes a pending approval, an external gate, a recorded decision, or a deferred item has no such dependency.",
+          running: "The newest reply leaves work open and says it is under way or queued. The work can proceed without a response, decision, or approval from the captain, and remains under way or queued without an obstacle stopping it.",
+          done: "The newest reply finishes, settles, delivers, merges, or otherwise closes the work or topic, and no response, decision, or approval from the captain is required for work in this thread to proceed. Apply both conditions regardless of `thread.reply_state`. This includes a closing reply that only notes a pending approval, an external gate, a recorded decision, or a deferred item.",
+          blocked: "The newest reply leaves work open and stopped because it failed or is waiting on an external dependency, permission, credential, or other obstacle. Continuing the work does not require a response, decision, or approval from the captain."
         }
       },
       topic_fits: {

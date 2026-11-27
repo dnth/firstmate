@@ -304,6 +304,14 @@ def discord_read_messages(home: Path, thread_id: str, through: int, limit: int) 
     return data
 
 
+def discord_read_message(home: Path, thread_id: str, message_id: str) -> dict:
+    raw = _request(home, thread_id, "GET", f"/channels/{thread_id}/messages/{message_id}")
+    data = json.loads(raw.decode("utf-8") or "{}")
+    if not isinstance(data, dict) or str(data.get("id")) != message_id:
+        raise poster.DiscordSendError("ambiguous", "discord returned the wrong message")
+    return data
+
+
 def discord_write_title(home: Path, thread_id: str, name: str, prepare=None) -> None:
     """PATCH one thread's name, honoring and recording Discord's cooldowns."""
     if not poster._SNOWFLAKE.fullmatch(thread_id):

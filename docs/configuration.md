@@ -1185,10 +1185,12 @@ A safety sweep marks eligible threads due at gateway start and every 10 minutes.
 **Status source.**
 With judging on, an accepted chunk in an eligible thread queues a background scan.
 The scan selects each thread's newest accepted Firstmate message at scan start and, when that message has no usable verdict and is still present in the fetched history, asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
-The judge answers from the newest reply, and every Firstmate message carries that reply's id, so chunks Discord split from one reply are judged together as one unit.
+Each Firstmate message carries a request-local integer shared by the chunks of its reply.
+The judge reads every accepted chunk of the newest reply through the selected message, even when older chunks fall outside the limits on optional history.
 It receives the thread state that reply itself declared (`needs-you`, `done`, or `none`), which is absent when the reply declared no state.
-A closing reply that only notes a pending approval, an external gate, a recorded decision, or a deferred item is `done`, and a declared `done` on a closing message means `done` unless that message itself needs an answer from the captain.
-A reply that needs the captain to answer, decide, or approve something before the thread's work can proceed is `open-question` even without a question mark.
+A reply is `done` when it closes the work and no response, decision, or approval from the captain is required for the thread's work to proceed, regardless of declared state.
+A closing reply may note a pending approval, an external gate, a recorded decision, or a deferred item.
+A reply that needs the captain to answer, decide, or approve something before the thread's work can proceed is `open-question` even without a question mark or after completing an earlier step.
 For a valid Jev response, the log records `status`, `topic_fits`, and status `confidence` alongside the newest judged `message_id` and a `judged` summary with the thread name, project, message count, and any `reply_state` sent to Jev.
 The verdict log contains no message text.
 The newest 20 usable verdicts per thread retain their full details, and older usable verdicts keep only the fields the reconciler needs for title and decision history.
@@ -1197,8 +1199,11 @@ When the screened name is recorded for the still-current message, the verdict be
 Audit-only entries never affect titles or count as finished judgments.
 The safety sweep retries failed judgments for the newest accepted message.
 When the topic drifted, the live title has a public `<Project> · ` prefix, and the captain has not named the thread, [`bin/fm-ext-thread-name.sh`](../bin/fm-ext-thread-name.sh) proposes a screened `<Project> · <topic>` base; with no public prefix no name is proposed.
-The prefix is the thread's current project label unless the conversation clearly moved to another project, and then it may be a different known project label, meaning one this home's Firstmate-created threads already carry; any other prefix is refused, so the prefix is never free text.
-The models receive the current base title, its project prefix when present, the known project labels, and thread message text, which may include private interaction text.
+The prefix is the thread's current project label unless the conversation clearly moved to another project with an approved public label.
+The optional local `config/ext-project-labels.json` maps registered project slugs to approved public labels, for example `{"firstmate":"Firstmate"}`.
+Only screened labels for slugs in the home's `data/projects.md` registry are eligible for a switch, including projects with no existing topic thread.
+Both models receive the current base title, its project prefix when present, and thread message text, which may include private interaction text.
+Only the naming model receives the approved alternate public labels.
 The status comes from the verdict on the newest accepted message; until that verdict arrives, the marker of the last paced write holds.
 When the key check confirms the Jev key is absent, the reconciler uses the latest explicit state and latest screened retitle from complete replies, which can come from different replies.
 An explicit state of `needs-you` means `open-question`, `done` means complete, and `none` requests no status marker.
