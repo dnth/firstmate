@@ -30,8 +30,11 @@
 // 120000 ms) likewise retires it and re-delivers through the runtime's
 // turn-forcing send, bounded to one forced delivery per interval, so an idle
 // or streaming main that never starts a turn for the hidden send is not deaf
-// for the rest of the session. Decision-owned wakes bypass coalescing and the
-// bound entirely. An open episode stops suppressing once the adapter reports a
+// for the rest of the session. The same interval bounds a hand-off the runtime
+// reported consumed but never put in front of the model (no message_start for
+// the wake): an open episode with no entered-turn evidence forces the turn and
+// is ledgered `by=unentered-bound`. Decision-owned wakes bypass coalescing and
+// the bound entirely. An open episode stops suppressing once the adapter reports a
 // settled main (mainSettled) and no turn has started since: the run it relied
 // on ended without draining, so the next close forces a turn, and the newest
 // close coalesced during that run is force-delivered at settlement itself
@@ -176,6 +179,12 @@ type SessionGeneration = {
   mainFallbackInFlightTurnEnds: number;
   mainFallbackWakeSentAtMs: number | null;
   mainFallbackWakeConsumedAtMs: number | null;
+  // When the last tracked main hand-off was accepted for delivery, and when a
+  // main hand-off was last observed entering its own model turn. Consumption is
+  // not entry: the runtime raises before_agent_start when it merely stages a
+  // hidden next-turn prompt, so only this pair bounds a stranded hand-off.
+  mainFallbackHandOffAtMs: number | null;
+  mainFallbackWakeEnteredAtMs: number | null;
   lastTurnStartAtMs: number | null;
   lastTurnEndAtMs: number | null;
   // True from a terminal agent run end the adapter reported (mainSettled)
@@ -384,6 +393,8 @@ function createGeneration(): SessionGeneration {
     mainFallbackInFlightTurnEnds: 0,
     mainFallbackWakeSentAtMs: null,
     mainFallbackWakeConsumedAtMs: null,
+    mainFallbackHandOffAtMs: null,
+    mainFallbackWakeEnteredAtMs: null,
     lastTurnStartAtMs: null,
     lastTurnEndAtMs: null,
     mainIdle: false,
@@ -648,6 +659,8 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           `in_flight_turn_ends=${owner.mainFallbackInFlightTurnEnds}`,
           `successor_granted=${owner.mainFallbackSuccessorGranted ? 1 : 0}`,
           `last_consume_at_ms=${owner.mainFallbackWakeConsumedAtMs ?? 0}`,
+          `last_hand_off_at_ms=${owner.mainFallbackHandOffAtMs ?? 0}`,
+          `last_entered_turn_at_ms=${owner.mainFallbackWakeEnteredAtMs ?? 0}`,
           `last_turn_start_at_ms=${owner.lastTurnStartAtMs ?? 0}`,
           `last_turn_end_at_ms=${owner.lastTurnEndAtMs ?? 0}`,
           `updated_at_ms=${Date.now()}`,
@@ -768,6 +781,8 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         owner.mainFallbackInFlightRows = null;
         owner.mainFallbackInFlightTurnEnds = 0;
         owner.mainFallbackWakeSentAtMs = null;
+        owner.mainFallbackHandOffAtMs = null;
+        owner.mainFallbackWakeEnteredAtMs = null;
         owner.mainFallbackEpisode = false;
         owner.mainFallbackSuccessor = false;
         owner.mainFallbackSuccessorGranted = false;
@@ -910,6 +925,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       owner.mainFallbackWakeInFlight = content;
       owner.mainFallbackInFlightTurnEnds = 0;
       owner.mainFallbackWakeSentAtMs = sentAtMs;
+      // A new hand-off carries no entered-turn evidence of its own; an earlier
+      // hand-off's entry never excuses this one.
+      owner.mainFallbackHandOffAtMs = sentAtMs;
+      owner.mainFallbackWakeEnteredAtMs = null;
       // Rows pending at send time are the drain-evidence baseline: if a later
       // boundary finds every one retired, the wake was handled even though no
       // consumption event ever surfaced.
@@ -1045,12 +1064,51 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     return !(owner.lastTurnStartAtMs !== null && owner.lastTurnStartAtMs >= owner.mainFallbackWakeSentAtMs);
   }
 
+  // Model-entry bound. The runtime can report a hand-off consumed without ever
+  // putting it in front of the model: OMP raises before_agent_start the moment
+  // it stages a hidden next-turn send behind a streaming run, which clears the
+  // in-flight marker. If the wake's own message_start never follows and main
+  // never reports a terminal run end either, the episode stays open with no
+  // handler whose drain could cover later closes - the 27 Nov stall, where 34
+  // close notifications were suppressed for 90 minutes. The same wall-clock
+  // interval bounds it. Entry at or after the hand-off is the evidence that
+  // clears it, so a wake genuinely reaching its turn keeps today's suppression;
+  // the retry is one forced send per interval, driven by the next main-bound
+  // close, never a timer.
+  function unenteredHandOffPastBound(owner: SessionGeneration): boolean {
+    if (!owner.mainFallbackEpisode) return false;
+    if (owner.mainFallbackWakeInFlight) return false;
+    if (owner.mainFallbackHandOffAtMs === null) return false;
+    if (Date.now() - owner.mainFallbackHandOffAtMs < mainFallbackWakeInFlightBoundMs) return false;
+    return !(
+      owner.mainFallbackWakeEnteredAtMs !== null &&
+      owner.mainFallbackWakeEnteredAtMs >= owner.mainFallbackHandOffAtMs
+    );
+  }
+
+  // Retire a stranded hand-off whose only evidence is consumption, starting a
+  // fresh bound interval at the forced send so the recovery cannot loop tight.
+  function retireUnenteredHandOff(owner: SessionGeneration, close: string, reason: string): void {
+    const stranded = [...owner.sentWakes].reverse().find(([, sent]) => sent.consumed);
+    owner.mainFallbackHandOffAtMs = Date.now();
+    owner.mainFallbackWakeEnteredAtMs = null;
+    recordWakeEvent(owner, "consumed", [
+      ["wake", stranded?.[0] ?? "-"],
+      ["close", close],
+      ["stranded_close", stranded?.[1].close ?? "-"],
+      ["by", "unentered-bound"],
+      ["after_ms", stranded ? Date.now() - stranded[1].sentAtMs : 0],
+      ["reason", reason],
+    ]);
+    persistEpisodeState(owner);
+  }
+
   async function deliverMainWake(
     owner: SessionGeneration,
     message: string,
     pending: PendingActionableClose,
   ): Promise<MainWakeOutcome> {
-    // Three bypasses ahead of ordinary episode coalescing. A stale in-flight
+    // Four bypasses ahead of ordinary episode coalescing. A stale in-flight
     // marker - accepted but unconsumed past
     // FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS - no longer earns suppression; the
     // wake re-delivers through the runtime's turn-forcing send so a main that
@@ -1064,16 +1122,22 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     // the run that owned the episode ended without acknowledging its rows, so
     // the close forces a turn instead of waiting on a drain that will not come.
     // Any in-flight marker is retired, and the next turn_start clears idle.
+    // The fourth is a hand-off the runtime reported consumed but never put in
+    // front of the model past the same bound (unenteredHandOffPastBound): its
+    // marker is already gone, so it is retired from the ledger instead.
     const staleInFlight = coalesceMainFallbackWakes && inFlightWakeUnconsumedPastBound(owner);
     const decisionBypass = coalesceMainFallbackWakes && Boolean(isDecisionOwnedWake?.(message));
     const idleEpisode = coalesceMainFallbackWakes && owner.mainFallbackEpisode && owner.mainIdle;
-    const forceTurn = staleInFlight || decisionBypass || idleEpisode;
+    const unenteredBound = coalesceMainFallbackWakes && unenteredHandOffPastBound(owner);
+    const forceTurn = staleInFlight || decisionBypass || idleEpisode || unenteredBound;
     if (forceTurn && owner.mainFallbackWakeInFlight) {
       consumeWake(
         owner,
         owner.mainFallbackWakeInFlight,
         staleInFlight ? "inflight-bound" : decisionBypass ? "decision-bypass" : "idle-bypass",
       );
+    } else if (unenteredBound) {
+      retireUnenteredHandOff(owner, pending.token, closeReason(message));
     }
     if (coalesceMainFallbackWakes && owner.mainFallbackWakeInFlight) {
       owner.mainFallbackEpisode = true;
@@ -1790,6 +1854,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // enters a model turn. Consumption alone does not prove model entry.
   function wakeEnteredTurn(content: string, deliveryId?: string, evidence?: WakeDeliveryEvidence): void {
     const owner = generation;
+    // Model entry is the only evidence that a hand-off is being handled rather
+    // than staged; deliverMainWake bounds an open episode on it.
+    owner.mainFallbackWakeEnteredAtMs = Date.now();
     const delivery = [...owner.sentWakes].find(([id, sent]) =>
       sent.content === content && (!deliveryId || id === deliveryId));
     const id = delivery?.[0] ?? evidence?.wakeId;

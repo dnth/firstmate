@@ -2922,15 +2922,24 @@ if (!/consumed\t.*\tby=unentered-bound/.test(ledger().split("\n").find((line) =>
   throw new Error(`the ledger did not name the unentered-bound bypass: ${ledger()}`);
 }
 
+// One forced send per interval: a close landing inside the renewed bound is
+// suppressed behind the forced in-flight marker, never re-sent tight.
+appendRow("check", "crew-c.turn-ended");
+writeFileSync(`${state}/wake-now-3`, "go\n");
+await waitFor(() => count() === 4, "successor arm after the third close");
+await sleep(300);
+if (wakes.length !== 2) throw new Error(`a second forced send fired inside the renewed bound: ${wakes.length}`);
+if (!/suppressed\t.*\tbehind=in-flight/.test(ledger())) throw new Error(`the third close was not suppressed behind the forced marker: ${ledger()}`);
+
 // The forced wake does enter its turn. Once it does, the same wall clock no
 // longer earns a forced send: a later close stays suppressed behind the
 // episode, exactly as before this bypass existed.
 await enterTurn(wakes[1]);
 if (episodeField("in_flight") !== "0") throw new Error(`the forced hand-off was not consumed on entry: ${episodeState()}`);
 await sleep(2800);
-appendRow("check", "crew-c.turn-ended");
-writeFileSync(`${state}/wake-now-3`, "go\n");
-await waitFor(() => count() === 4, "successor arm after the third close");
+appendRow("check", "crew-d.turn-ended");
+writeFileSync(`${state}/wake-now-4`, "go\n");
+await waitFor(() => count() === 5, "successor arm after the fourth close");
 await sleep(300);
 if (wakes.length !== 2) throw new Error(`a hand-off that entered its turn still forced a send: ${wakes.length}`);
 if (!ledger().includes("behind=episode")) throw new Error(`the entered hand-off was not suppressed behind the episode: ${ledger()}`);
