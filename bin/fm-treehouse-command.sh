@@ -41,6 +41,9 @@ fm_treehouse_root_prepare_existing "$pool_root" || {
   echo "error: RunPod Treehouse requires physically contained pool directories" >&2
   exit 1
 }
+# Treehouse can resolve configuration through the source Git directory.
+# Keep the validated root authoritative even when it reads the source config.
+export TREEHOUSE_ROOT="$pool_root"
 
 repo_root=$("$DOWNSTREAM_GIT" -C "$PWD" rev-parse --show-toplevel 2>/dev/null) || {
   echo "error: RunPod Treehouse could not read the repository root" >&2

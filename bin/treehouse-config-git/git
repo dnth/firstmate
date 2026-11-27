@@ -6,7 +6,9 @@ SOURCE_REPO=${FM_TREEHOUSE_CONFIG_SOURCE_REPO:?}
 DOWNSTREAM_GIT=${FM_TREEHOUSE_CONFIG_DOWNSTREAM_GIT:?}
 
 if [ "$PWD" = "$OVERLAY_REPO" ]; then
-  if [ "$#" -eq 2 ] && [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then
+  if { [ "$#" -eq 2 ] && [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; } \
+    || { [ "$#" -eq 4 ] && [ "$1" = -c ] && [ "$2" = submodule.recurse=false ] \
+      && [ "$3" = rev-parse ] && [ "$4" = --show-toplevel ]; }; then
     printf '%s\n' "$OVERLAY_REPO"
     exit 0
   fi

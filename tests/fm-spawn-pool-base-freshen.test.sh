@@ -315,11 +315,10 @@ SH
 #!/usr/bin/env bash
 set -e
 cd "$FM_FAKE_POOL"
-git checkout --detach --force origin/main >/dev/null || true
+git -c submodule.recurse=false read-tree --reset -u origin/main || true
 cd "$FM_FAKE_HEALTHY_POOL"
-git checkout --detach --force origin/main >/dev/null
-git reset --hard origin/main >/dev/null
-git clean -fd >/dev/null
+git -c submodule.recurse=false read-tree --reset -u origin/main
+git -c submodule.recurse=false clean -fd >/dev/null
 printf '%s\n' "$FM_FAKE_HEALTHY_POOL"
 SH
   chmod +x "$fake_treehouse"
@@ -330,6 +329,10 @@ SH
   assert_contains "$out" "$healthy" "guarded acquisition did not continue to the healthy pooled slot"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "guarded acquisition changed the skipped non-ancestor slot"
+  [ "$(cat "$POOL_DIR/local.txt")" = 'unique local commit' ] \
+    || fail "guarded acquisition overwrote tracked files in the skipped slot"
+  assert_grep 'pool-local-config' "$healthy/treehouse.toml" \
+    "guarded acquisition discarded the healthy slot's pool-local config"
 
   invoked="$CASE_DIR/provider-invoked"
   cat > "$fake_treehouse" <<'SH'

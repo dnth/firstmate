@@ -21,8 +21,16 @@ if [ -f "$COMPLETE_FILE" ]; then
   exec "$REAL_GIT" "$@"
 fi
 
+# Treehouse 3.1.8 prefixes checkout-related Git commands with this setting.
+# Keep it on the delegated command while inspecting the subcommand itself.
+git_command=("$REAL_GIT")
+if [ "${1:-}" = -c ] && [ "${2:-}" = submodule.recurse=false ]; then
+  git_command+=(-c submodule.recurse=false)
+  shift 2
+fi
+
 if [ "${1:-}" = status ]; then
-  out=$("$REAL_GIT" "$@")
+  out=$("${git_command[@]}" "$@")
   status=$?
   [ "$status" -eq 0 ] || exit "$status"
   case " $* " in
@@ -55,7 +63,7 @@ checkout|switch|reset)
       "$PWD" "$ref" >> "$ERROR_FILE"
     exit 42
   fi
-  "$REAL_GIT" "$@" || exit $?
+  "${git_command[@]}" "$@" || exit $?
   : > "$SAFE_FILE"
   exit 0
   ;;
@@ -86,7 +94,7 @@ read-tree)
       "$PWD" "$ref" >> "$ERROR_FILE"
     exit 42
   fi
-  "$REAL_GIT" "$@" || exit $?
+  "${git_command[@]}" "$@" || exit $?
   : > "$SAFE_FILE"
   exit 0
   ;;
@@ -103,7 +111,7 @@ if [ "${1:-}" = clean ]; then
       "$PWD" >> "$ERROR_FILE"
     exit 42
   }
-  "$REAL_GIT" "$@" -e treehouse.toml || exit $?
+  "${git_command[@]}" "$@" -e treehouse.toml || exit $?
   : > "$COMPLETE_FILE"
   exit 0
 fi
@@ -240,9 +248,9 @@ if [ "${1:-}" = worktree ] && [ "${2:-}" = add ]; then
       exit 42
     }
   fi
-  "$REAL_GIT" "$@" || exit $?
+  "${git_command[@]}" "$@" || exit $?
   : > "$COMPLETE_FILE"
   exit 0
 fi
 
-exec "$REAL_GIT" "$@"
+exec "${git_command[@]}" "$@"
