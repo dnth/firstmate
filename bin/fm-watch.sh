@@ -964,10 +964,8 @@ EOF
   return 0
 }
 
-# Undelivered main-wake alarm: the queue-layer backstop for the
-# accepted-but-unconsumed delivery wedge (a main-bound notification whose in-
-# flight marker outlives FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS - see
-# bin/fm-primary-watch-core.ts - and every later wake coalesced behind it).
+# Undelivered main-wake alarm: the queue-layer backstop when OMP's delivery
+# retries leave a durable row unpresented (see docs/omp-supervision-branch.md).
 # While the oldest main-owned durable row sits unpresented past
 # FM_MAIN_WAKE_UNDELIVERED_ALARM_SECS, one wedge alarm fires per oldest-row
 # episode, strictly read-only against the queue and skipped while state/.afk

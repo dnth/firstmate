@@ -30,12 +30,10 @@
 // 120000 ms) likewise retires it and re-delivers through the runtime's
 // turn-forcing send, bounded to one forced delivery per interval, so an idle
 // or streaming main that never starts a turn for the hidden send is not deaf
-// for the rest of the session. The same interval bounds a hand-off the runtime
-// reported consumed but never put in front of the model (no message_start for
-// the wake): an open episode with no entered-turn evidence forces the turn and
-// is ledgered `by=unentered-bound`. Decision-owned wakes bypass coalescing and
-// the bound entirely. An open episode stops suppressing once the adapter reports a
-// settled main (mainSettled) and no turn has started since: the run it relied
+// for the rest of the session. See docs/omp-supervision-branch.md for the
+// model-entry bound after the in-flight marker clears. Decision-owned wakes
+// bypass coalescing and the bound entirely. An open episode stops suppressing
+// once the adapter reports a settled main (mainSettled) and no turn has started since: the run it relied
 // on ended without draining, so the next close forces a turn, and the newest
 // close coalesced during that run is force-delivered at settlement itself
 // (once per batch of closes newer than the last hand-off). A check close is
@@ -1059,17 +1057,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     return !(owner.lastTurnStartAtMs !== null && owner.lastTurnStartAtMs >= owner.mainFallbackWakeSentAtMs);
   }
 
-  // Model-entry bound. The runtime can report a hand-off consumed without ever
-  // putting it in front of the model: OMP raises before_agent_start the moment
-  // it stages a hidden next-turn send behind a streaming run, which clears the
-  // in-flight marker. If the wake's own message_start never follows and main
-  // never reports a terminal run end either, the episode stays open with no
-  // handler whose drain could cover later closes - the 27 Nov stall, where 34
-  // close notifications were suppressed for 90 minutes. The same wall-clock
-  // interval bounds it. Entry for that delivery is the evidence that
-  // clears it, so a wake genuinely reaching its turn keeps today's suppression;
-  // the retry is one forced send per interval, driven by the next main-bound
-  // close, never a timer.
+  // OMP can clear the in-flight marker at staging, before the model sees the
+  // wake. Keep entry evidence tied to the latest tracked delivery so an older
+  // staged wake entering late cannot credit its replacement.
   function unenteredHandOffPastBound(owner: SessionGeneration): SentWake | null {
     const handOff = owner.mainFallbackHandOff;
     if (!owner.mainFallbackEpisode || owner.mainFallbackWakeInFlight || !handOff) return null;
@@ -1096,9 +1086,8 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     // the run that owned the episode ended without acknowledging its rows, so
     // the close forces a turn instead of waiting on a drain that will not come.
     // Any in-flight marker is retired, and the next turn_start clears idle.
-    // The fourth is a hand-off the runtime reported consumed but never put in
-    // front of the model past the same bound (unenteredHandOffPastBound): its
-    // marker is already gone, so it is retired from the ledger instead.
+    // The model-entry bypass applies after the marker clears. A consumed
+    // hand-off's retirement adds evidence under its original ledger identity.
     const staleInFlight = coalesceMainFallbackWakes && inFlightWakeUnconsumedPastBound(owner);
     const decisionBypass = coalesceMainFallbackWakes && Boolean(isDecisionOwnedWake?.(message));
     const idleEpisode = coalesceMainFallbackWakes && owner.mainFallbackEpisode && owner.mainIdle;
