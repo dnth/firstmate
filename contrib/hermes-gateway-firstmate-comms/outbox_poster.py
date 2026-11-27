@@ -1658,6 +1658,11 @@ def react_to_request(payload: dict, emoji: str, react: ReactFn | None = None) ->
 
 
 def firstmate_posts(home: Path) -> dict[str, dict]:
+    """Each posted Firstmate message id mapped to its reply's provenance.
+
+    ``request_id`` is the outbox request, and ``reply`` identifies the reply
+    generation, so every chunk Discord split from one reply shares it.
+    """
     outbox = state_dir(home) / "ext-outbox"
     posts = {}
     if outbox.is_symlink() or not outbox.is_dir():
@@ -1674,9 +1679,13 @@ def firstmate_posts(home: Path) -> dict[str, dict]:
         posted = data.get("discord_message_ids")
         if isinstance(posted, list):
             request_id = data.get("request_id")
+            reply = path.name[: -len(".progress.json")]
             for message_id in posted:
                 if _SNOWFLAKE.fullmatch(str(message_id or "")):
-                    posts.setdefault(str(message_id), {"request_id": request_id if isinstance(request_id, str) else ""})
+                    posts.setdefault(str(message_id), {
+                        "request_id": request_id if isinstance(request_id, str) else "",
+                        "reply": reply,
+                    })
     return posts
 
 

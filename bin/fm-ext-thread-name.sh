@@ -6,13 +6,17 @@
 #   fm-ext-thread-name.sh --state-file <json>
 #
 # Input file: the thread state documented in bin/fm-ext-thread-judge.sh.
-# The naming model receives the name, project, and messages. This tool never
-# reads Discord, attachments, or images.
+# The naming model receives the name, the current project label, the other
+# known project labels, and the messages. This tool never reads Discord,
+# attachments, or images.
 #
 # Output: the screened base name on stdout, or exit 1 with one reason on
 # stderr. The proposal is always "<Project> · <topic>": a model answer without
-# the project prefix and a nonempty topic is refused. The result must pass
-# bin/fm-ext-topic.sh --check-title (bounds and shared safety screen).
+# a project prefix and a nonempty topic is refused. The prefix must be the
+# thread's current project label, or a different known project label from the
+# input's `projects` list when the conversation clearly moved to that project;
+# any other prefix is refused, so a prefix is never free text. The result must
+# pass bin/fm-ext-topic.sh --check-title (bounds and shared safety screen).
 #
 # OpenCode runs the fixed OpenCode Go DeepSeek V4.1 Flash model for at most
 # 120 seconds, using private input and structured output.
@@ -49,6 +53,11 @@ command -v opencode >/dev/null 2>&1 || die "opencode not installed"
 
 PROJECT=$(jq -er '.thread.project | strings | select(length > 0 and . != "unknown")' "$STATE_FILE") \
   || die "thread project is unknown"
+# Known project labels: this thread's own, plus those the home's threads use.
+OTHER_LABELS=$(jq -r '(.projects // []) | .[]? | strings
+  | select(length > 0 and length <= 60 and . != "unknown" and (contains("\n") | not))' "$STATE_FILE" 2>/dev/null) \
+  || die "could not read the known project labels"
+LABELS=$(printf '%s\n%s\n' "$PROJECT" "$OTHER_LABELS" | awk 'NF' | sort -u)
 
 WORK=$(mktemp -d) || die "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
@@ -57,10 +66,15 @@ PROMPT="$WORK/prompt.txt" OUT="$WORK/out.txt"
 {
   printf '%s\n' 'You name Discord work threads.'
   printf '%s\n' "Read the conversation below and answer with a short new thread name in the form: <Project> · <topic>"
-  printf '%s\n' "The project is: $PROJECT"
+  printf '%s\n' "The current project label is: $PROJECT"
+  printf '%s\n' 'Other known project labels, if any, follow on their own lines.'
+  printf '%s\n' 'Keep the current project label unless the conversation has clearly moved to the work of another project from that list; then use that project label exactly as listed.'
+  printf '%s\n' 'Do not invent a project label.'
   printf '%s\n' 'Keep the topic to a few concrete words (the whole name must be at most 60 characters).'
   printf '%s\n' 'Do not include a status emoji, quotes, markdown, a file path, a task id, a hostname, a token, or a sentence.'
   printf '%s\n' 'Answer with the name only, on one line.'
+  printf '\n%s\n' '--- known project labels ---'
+  printf '%s\n' "$LABELS"
   printf '\n%s\n' '--- conversation ---'
   jq -r '
     .thread.name as $name |
@@ -84,6 +98,11 @@ printf '%s\n' "$CANDIDATE" > "$WORK/candidate"
 TITLE=$("$SCRIPT_DIR/fm-ext-topic.sh" --check-title --title-file "$WORK/candidate") \
   || die "naming model produced an unsafe title"
 case "$TITLE" in
-  "$PROJECT · "?*) printf '%s\n' "$TITLE" ;;
+  *" · "?*) ;;
   *) die "naming model produced no title for the thread project" ;;
 esac
+PREFIX=${TITLE%% · *}
+if [ "$PREFIX" != "$PROJECT" ] && ! printf '%s\n' "$LABELS" | grep -Fxq -- "$PREFIX"; then
+  die "naming model produced an unknown project prefix"
+fi
+printf '%s\n' "$TITLE"

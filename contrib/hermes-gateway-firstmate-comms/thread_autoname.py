@@ -116,6 +116,10 @@ def thread_messages(record: dict, home: Path, through: int) -> list[dict]:
         message = _message(role, entry["text"])
         if message is None:
             continue
+        if role == "firstmate":
+            reply = (posts.get(entry["id"]) or {}).get("reply")
+            if reply:
+                message["reply"] = reply
         if len(kept) >= MESSAGE_LIMIT or len(message["text"]) > budget:
             break
         seen.add(entry["id"])
@@ -172,6 +176,20 @@ def propose_name(state: dict, home: Path) -> str:
 
 # --- judging one thread ----------------------------------------------------------------
 
+def project_labels(home: Path, project: str) -> list[str]:
+    """Every project label this home's Firstmate-created threads carry.
+
+    A label is the ``<Project> · `` prefix of a thread this home named, so a
+    drift rename may move to another known project but never invent a prefix.
+    """
+    labels = {project} if project else set()
+    for record in thread_title._eligible_records(home):
+        label = thread_context.project_from_name(str(record.get("topic_name") or ""))
+        if label:
+            labels.add(label)
+    return sorted(labels)
+
+
 def judge_thread(home: Path, record: dict, post: dict) -> str:
     """Judge a thread through one accepted message and add the verdict to its log.
 
@@ -198,7 +216,8 @@ def judge_thread(home: Path, record: dict, post: dict) -> str:
                                               verdict["topic_fits"], judged=judged,
                                               confidence=verdict["confidence"], pending_name=needs_name)
         if outcome == "pending-name":
-            return thread_title.publish_named_verdict(home, thread_id, through, propose_name(state, home))
+            named = dict(state, projects=project_labels(home, project))
+            return thread_title.publish_named_verdict(home, thread_id, through, propose_name(named, home))
         return outcome
     except thread_title.RateLimited:
         return "waiting"
