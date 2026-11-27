@@ -12,12 +12,9 @@
 #
 # Output: the screened base name on stdout, or exit 1 with one reason on
 # stderr. The proposal is always "<Project> · <topic>": a model answer without
-# a project prefix and a nonempty topic is refused. The prefix must be the
-# thread's current project label. A nonempty config/ext-project-labels lets
-# the name use the built-in Firstmate label or a configured public label for
-# a project registered in data/projects.md when the conversation clearly moves.
-# Any other prefix is refused. The result must pass bin/fm-ext-topic.sh
-# --check-title (bounds and shared safety screen).
+# a project prefix and a nonempty topic is refused. For eligible project
+# labels, see docs/configuration.md#thread-title-reconciler. The result must
+# pass bin/fm-ext-topic.sh --check-title (bounds and shared safety screen).
 #
 # OpenCode runs the fixed OpenCode Go DeepSeek V4.1 Flash model for at most
 # 120 seconds, using private input and structured output.
