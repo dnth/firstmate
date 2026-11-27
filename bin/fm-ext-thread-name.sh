@@ -72,9 +72,9 @@ LABELS=$(
       fi
     fi
   } | while IFS= read -r label; do
-    case "$label" in
-      ''|unknown|"$PROJECT"|*" · "*) continue ;;
-    esac
+    if [[ -z "$label" || "$label" == unknown || "$label" == "$PROJECT" || "$label" == *" · "* ]]; then
+      continue
+    fi
     screened=$(printf '%s · x\n' "$label" | "$SCRIPT_DIR/fm-ext-topic.sh" --check-title --title-file - 2>/dev/null) || continue
     [ "$screened" = "$label · x" ] && printf '%s\n' "$label"
   done | sort -u
