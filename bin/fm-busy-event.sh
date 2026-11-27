@@ -117,7 +117,7 @@ fi
 # mtime in the future - still ends in a lock-timeout refusal, about
 # FM_BUSY_LOCK_STALE_SECS + 2 seconds after the wait began.
 lock_acquire() {
-  local stale=${FM_BUSY_LOCK_STALE_SECS:-5} start= tick now mtime age
+  local stale=${FM_BUSY_LOCK_STALE_SECS:-5} start='' tick now mtime age
   # A digit-only setting keeps its decimal value: 08 in shell arithmetic is an
   # invalid octal, which would abort the writer under `set -u`.
   case "$stale" in ''|*[!0-9]*) stale=5 ;; esac

@@ -1557,6 +1557,7 @@ test_spawn_relaunch_retires_busy_gen_before_unarmed_replacement() {
   jq --arg pane "$pane" '.agent_status[$pane] = "idle" | .agent_name[$pane] = "devin"' \
     "$CASE_DIR/fake/herdr-state.json" > "$CASE_DIR/herdr-idle.json"
   mv "$CASE_DIR/herdr-idle.json" "$CASE_DIR/fake/herdr-state.json"
+  # shellcheck disable=SC2016 # The child Bash expands its own positional parameters.
   verdict=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" bash -c '
     . "$1/bin/fm-backend.sh"
     . "$1/bin/fm-busy-lib.sh"
@@ -1567,6 +1568,7 @@ test_spawn_relaunch_retires_busy_gen_before_unarmed_replacement() {
        --gen "$gen" --source claude-hook --event user-prompt-submit 2>/dev/null; then
     fail "the retired generation could still write a busy event after the replacement"
   fi
+  # shellcheck disable=SC2016 # The child Bash expands its own positional parameters.
   verdict=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" bash -c '
     . "$1/bin/fm-backend.sh"
     . "$1/bin/fm-busy-lib.sh"
