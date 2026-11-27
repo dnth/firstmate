@@ -467,7 +467,7 @@ fm_pr_poll_prepare() {
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
-  [ -f "$template" ] || return 1
+  [ -f "$template" ] && [ ! -L "$template" ] || return 1
   # A second mate never owns a PR poll under its own id: its PRs are landed
   # under a main-owned landing record (bin/fm-landing.sh), and a poll armed
   # here would be orphaned the moment its restore rewrites the task record.

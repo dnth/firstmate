@@ -1561,12 +1561,37 @@ SH
   pass "a registered poll survives a template update, stays armed, and fires without executing state-file bytes"
 }
 
+test_symlinked_template_preserves_registered_poll() {
+  local dir state template url=https://github.com/o/r/pull/1
+  dir=$(make_case symlinked-template-rearm)
+  state="$dir/home/state"
+  template="$dir/fm-pr-poll.sh"
+  cp "$POLL" "$template"
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url" "$template"
+  fm_pr_poll_snapshot_capture "$state" task-a "$template" || fail "could not capture the original poll"
+
+  mv "$template" "$template.original"
+  ln -s "$template.original" "$template"
+  if fm_pr_poll_prepare "$state" task-a github "$url" github.com o/r 1 "$template" &&
+    fm_pr_poll_publish_prepared; then
+    fail "re-arm accepted a symlinked template"
+  fi
+  fm_pr_poll_cleanup
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$template" \
+    || fail "the original poll validated with a symlinked repository template"
+  mv -f "$template.original" "$template"
+  fm_pr_poll_snapshot_matches "$state" task-a "$template" \
+    || fail "re-arm changed the original registration or poll artifacts"
+  pass "a refused re-arm preserves its registered poll when the repository template is symlinked"
+}
+
 # Generation binding never trusts a runnable name on its own: a check whose
 # bytes changed after registration, or a check with no registration at all, is
 # refused both when the armed generation still equals today's template and when
 # the template has since changed.
 test_altered_or_unregistered_checks_stay_refused() {
-  local dir state historical_poll registration_hash rc scenario generation
+  local dir state template historical_poll registration_hash rc scenario generation
   for scenario in altered unregistered; do
     for generation in armed-generation current-generation; do
       dir=$(make_case "poll-refused-$scenario-$generation")
@@ -1576,29 +1601,20 @@ test_altered_or_unregistered_checks_stay_refused() {
       printf '\n# previous template generation\n' >> "$historical_poll"
       chmod 0600 "$historical_poll"
       write_poll_meta "$state" task-a https://github.com/o/r/pull/1
-      case "$scenario:$generation" in
-        altered:armed-generation)
-          seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$historical_poll"
-          ;;
-        altered:current-generation)
-          seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
-          ;;
-        unregistered:armed-generation)
-          cp "$historical_poll" "$state/task-a.check.sh"
-          chmod 0600 "$state/task-a.check.sh"
-          ;;
-        unregistered:current-generation)
-          cp "$POLL" "$state/task-a.check.sh"
-          chmod 0600 "$state/task-a.check.sh"
-          ;;
+      case "$generation" in
+        armed-generation) template=$historical_poll ;;
+        current-generation) template=$POLL ;;
       esac
+      seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$template"
+      fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+        || fail "$scenario:$generation fixture was not an intact registration"
       if [ "$scenario" = altered ]; then
-        fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
-          || fail "$scenario:$generation fixture was not an intact registration"
         registration_hash=$(fm_pr_sha256 "$state/task-a.pr-poll-registration")
         printf '# forged after registration\n' >> "$state/task-a.check.sh"
         [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$registration_hash" ] \
           || fail "$scenario:$generation fixture rewrote its own trust"
+      else
+        rm "$state/task-a.pr-poll-registration" || fail "$scenario:$generation could not remove only the registration"
       fi
       ! fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
         || fail "$scenario:$generation was accepted"
@@ -2490,6 +2506,7 @@ test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_registered_poll_survives_template_update
+test_symlinked_template_preserves_registered_poll
 test_altered_or_unregistered_checks_stay_refused
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
