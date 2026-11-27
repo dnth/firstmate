@@ -1436,12 +1436,59 @@ test_relaunch_without_delivery_identity_writes_none() {
   pass "fm-spawn --relaunch: a task not yet registered gains no empty delivery records"
 }
 
+# --- retired incarnation's busy generation -----------------------------------
+# A stopped incarnation's busy wiring is retired with it. The task record's
+# busy_gen= line names the generation a later steer resolves, so a line left
+# behind after the sidecar and record are gone makes the next incarnation's
+# interrupt target a generation that no longer exists.
+# The replacement launch is refused here on purpose (no durable worktree lease),
+# which leaves the post-retirement record in place for this test to read.
+
+test_control_relaunch_retires_recorded_busy_gen() {
+  local rec id meta gen new_gen changed
+  id=$(case_id busy-retire)
+  rec=$(make_case busy-retire "$id" pool)
+  read_case "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  write_meta "$meta" "$id" tmux "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" "$id")
+  printf 'busy_gen=%s\n' "$gen" >> "$meta"
+  grep -v '^busy_gen=' "$meta" > "$CASE_DIR/expected.meta"
+  : > "$CASE_DIR/fake/tmux-state/ses-$id.windows"
+
+  run_control "$CASE_DIR" "$HOME_DIR" "$id"
+  [ "$CONTROL_STATUS" -ne 0 ] \
+    || fail "a replacement without a durable lease should refuse; got: $CONTROL_OUT"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "the retired incarnation's gen sidecar survived launch refusal"
+  assert_absent "$HOME_DIR/state/$id.busy-state" "the retired incarnation's busy record survived launch refusal"
+  assert_no_grep "busy_gen=" "$meta" "the retired incarnation's busy_gen survived in the task record"
+  changed=$(diff "$CASE_DIR/expected.meta" "$meta") \
+    || fail "retiring the busy generation changed the rest of the task record:"$'\n'"$changed"
+
+  # The replacement arms its own generation; only that generation can be
+  # recorded for it, and the retired one can never write its busy state again.
+  new_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" "$id")
+  printf 'busy_gen=%s\n' "$new_gen" >> "$meta"
+  [ "$(grep -c '^busy_gen=' "$meta")" -eq 1 ] || fail "the task record carries more than one busy generation"
+  [ "$(sed -n 's/^busy_gen=//p' "$meta")" = "$new_gen" ] \
+    || fail "the task record names a generation other than the replacement's armed one"
+  assert_grep "gen=$new_gen " "$HOME_DIR/state/$id.busy-state" \
+    "the replacement's busy record is not bound to its own generation"
+  if "$ROOT/bin/fm-busy-event.sh" apply "$HOME_DIR/state" "$id" idle \
+       --gen "$gen" --source claude-hook --event stop 2>/dev/null; then
+    fail "the retired generation could still write the replacement's busy record"
+  fi
+  pass "fm-control relaunch: a retired incarnation's busy_gen goes with it and cannot mark the replacement"
+}
+
 # --- run ---------------------------------------------------------------------
 
 test_tmux_gone_relaunch_recreates_in_worktree
 test_relaunch_skips_duplicate_brief_guard
 test_relaunch_preserves_delivery_identity_mid_handoff
 test_relaunch_without_delivery_identity_writes_none
+test_control_relaunch_retires_recorded_busy_gen
 test_tmux_gone_relaunch_durable_lease_ownership
 test_tmux_gone_relaunch_claim_without_lease_refuses
 test_control_relaunch_treats_missing_endpoint_as_stopped
