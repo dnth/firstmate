@@ -31,7 +31,6 @@ VERSIONED_CLAUDE="$CLAUDE_VERSION_DIR/2.1.220"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-bin")
 ln -s /bin/bash "$FAKEBIN/claude"
 NAMED_CLAUDE="$FAKEBIN/claude"
-
 # --- unit layer: identity behind a deterministic process table ---------------
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
@@ -220,6 +219,120 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_omp_daemon_broker_is_never_the_session() {
+  local dir fakebin got rc entry runtime launch broker_runtime broker_launch distro shape proc_root
+  dir="$TMP_ROOT/omp-daemon-worker"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/scope" "$dir/@oh-my-pi/pi-coding-agent/src"
+  mkdir -p "$dir/proc/2147483600" "$dir/proc/2147483647"
+  printf 'OMP_DAEMON_RUNTIME_DIR=%s\0' "$dir/scope" > "$dir/proc/2147483600/environ"
+  cp "$dir/proc/2147483600/environ" "$dir/proc/2147483647/environ"
+  fm_fake_exit0 "$fakebin" omp bun renamed-omp other-bun
+  printf '#!/usr/bin/env bun\n' > "$dir/@oh-my-pi/pi-coding-agent/src/cli.ts"
+  chmod +x "$dir/@oh-my-pi/pi-coding-agent/src/cli.ts"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  2147483647:comm=) printf '%s\n' "${FM_TEST_OMP_EXE##*/}" ;;
+  2147483600:comm=) printf '%s\n' "${FM_TEST_BROKER_EXE##*/}" ;;
+  2147483647:args=) printf '%s\n' "$FM_TEST_OMP_LAUNCH  __omp_worker_daemon_broker is the bug to investigate" ;;
+  2147483647:ppid=) printf '%s\n' 1 ;;
+  2147483600:args=) printf '%s\n' "$FM_TEST_BROKER_LAUNCH __omp_worker_daemon_broker" ;;
+  2147483600:ppid=) printf '%s\n' 2147483647 ;;
+  2147483599:comm=) printf '%s\n' codex ;;
+  2147483599:args=) printf '%s\n' 'codex __omp_worker_daemon_broker is the bug to investigate' ;;
+  2147483599:ppid=) printf '%s\n' 1 ;;
+  2147483598:comm=) printf '%s\n' bun ;;
+  2147483598:args=) printf '%s\n' 'bun /opt/project/cli.ts __omp_worker_daemon_broker' ;;
+  2147483598:ppid=) printf '%s\n' 2147483599 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=)
+    case "$FM_TEST_OMP_SHAPE" in
+      broker|shared) printf '%s\n' 2147483600 ;;
+      direct) printf '%s\n' 2147483647 ;;
+      codex) printf '%s\n' 2147483598 ;;
+    esac
+    ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" -d txt "*)
+    case " $* " in
+      *" -p 2147483600 "*) printf 'n%s\n' "$FM_TEST_BROKER_EXE" ;;
+      *" -p 2147483647 "*) printf 'n%s\n' "$FM_TEST_OMP_EXE" ;;
+    esac
+    ;;
+  *" -p 2147483600 "*|*" -p 2147483647 "*)
+    printf 'n%s/broker.pid\n' "$FM_TEST_BROKER_SCOPE" ;;
+esac
+SH
+  chmod +x "$fakebin/lsof"
+
+  for distro in standalone bun-script renamed-standalone; do
+    case "$distro" in
+      standalone) runtime="$fakebin/omp"; entry="$runtime" ;;
+      bun-script) runtime="$fakebin/bun"; entry="$dir/@oh-my-pi/pi-coding-agent/src/cli.ts" ;;
+      renamed-standalone) runtime="$fakebin/renamed-omp"; entry="$runtime" ;;
+    esac
+    printf '18.8.4\n2147483647\n%s\n%s\n' "$runtime" "$entry" > "$dir/state/.omp-primary-extension-loaded"
+    printf '2147483647\n' > "$dir/state/.lock"
+    launch=$runtime
+    [ "$runtime" = "$entry" ] || launch="$runtime $entry"
+    printf '{"pid":2147483600}' > "$dir/scope/broker.pid"
+    for shape in direct broker shared codex; do
+      broker_runtime=$runtime
+      broker_launch=$launch
+      if [ "$shape" = shared ]; then
+        if [ "$distro" = bun-script ]; then
+          broker_runtime="$fakebin/other-bun"
+          broker_launch="$broker_runtime $entry"
+        else
+          broker_runtime="$fakebin/omp"
+          [ "$runtime" != "$broker_runtime" ] || broker_runtime="$fakebin/renamed-omp"
+          broker_launch=$broker_runtime
+        fi
+      fi
+      for proc_root in "$dir/proc" "$dir/no-proc"; do
+        got=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TEST_OMP_EXE="$runtime" \
+          FM_OMP_PROCESS_EXPECTED_BUN="$runtime" FM_OMP_PROCESS_EXPECTED_BIN="$entry" \
+          FM_TEST_BROKER_EXE="$broker_runtime" FM_TEST_BROKER_LAUNCH="$broker_launch" \
+          FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_BROKER_SCOPE="$dir/scope" \
+          FM_TEST_OMP_LAUNCH="$launch" FM_TEST_OMP_SHAPE="$shape" \
+          lib_eval "$fakebin" '
+            rc=0
+            fm_harness_ancestry_pid || rc=$?
+            printf "ancestry exit: %s\n" "$rc"
+            if fm_session_lock_owned_by_self "$FM_STATE_OVERRIDE"; then printf "owns session lock\n"; fi
+            for pid in 2147483647 2147483600 2147483599; do
+              if fm_harness_pid_alive "$pid"; then printf "live: %s\n" "$pid"; fi
+            done
+          ')
+        case "$shape" in
+          direct) rc=$'2147483647\nancestry exit: 0\nowns session lock' ;;
+          broker|shared) rc='ancestry exit: 2' ;;
+          codex) rc=$'2147483599\nancestry exit: 0' ;;
+        esac
+        [ "$got" = "$rc"$'\nlive: 2147483647\nlive: 2147483599' ] \
+          || fail "$distro $shape: wrong ancestry or holder liveness: $got"
+      done
+    done
+  done
+  pass "session-lock: standalone and Bun-script OMP brokers stop ancestry and read stale"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -355,10 +468,65 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+test_e2e_fm_lock_under_omp_daemon_broker() {
+  local dir runtime session_pid worker_pid
+  dir="$TMP_ROOT/e2e-omp-daemon-broker"
+  runtime=$(fm_test_realpath "$(command -v node)") || fail "cannot resolve the fixture's Node executable"
+  mkdir -p "$dir/state"
+  install_autoarm_scripts "$dir"
+  cat > "$dir/worker.cjs" <<'JS'
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const lease = fs.openSync(process.env.OMP_DAEMON_RUNTIME_DIR + "/broker.pid", "w");
+fs.writeFileSync(lease, JSON.stringify({pid: process.pid}));
+const lock = spawnSync(process.env.FM_LOCK, [], {encoding: "utf8"});
+fs.writeFileSync(process.env.FM_HOME + "/state/worker.out", lock.stderr);
+fs.writeFileSync(process.env.FM_HOME + "/state/worker.rc", String(lock.status));
+setInterval(() => {}, 1000);
+JS
+  cat > "$dir/session.sh" <<'SH'
+printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
+OMP_DAEMON_RUNTIME_DIR="$FM_HOME/state" "$BROKER_RUNTIME" "$FM_HOME/worker.cjs" __omp_worker_daemon_broker &
+held=$!
+trap 'kill "$held" 2>/dev/null; wait "$held" 2>/dev/null' EXIT
+printf '%s\n' "$held" > "$FM_HOME/state/worker-pid"
+i=0
+while [ "$i" -lt 200 ] && [ ! -s "$FM_HOME/state/worker.rc" ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -s "$FM_HOME/state/worker.rc" ] || exit 1
+printf '%s\n' "$held" > "$FM_HOME/state/.lock"
+"$FM_LOCK" status > "$FM_HOME/state/status.out"
+"$FM_LOCK" > "$FM_HOME/state/session.out" 2>&1
+printf '%s\n' "$?" > "$FM_HOME/state/session.rc"
+SH
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_LOCK="$dir/bin/fm-lock.sh" \
+    FM_OMP_PROCESS_EXPECTED_BUN="$runtime" FM_OMP_PROCESS_EXPECTED_BIN="$runtime" \
+    BROKER_RUNTIME="$runtime" \
+    "$NAMED_CLAUDE" "$dir/session.sh" || fail "the OMP broker fixture never finished"
+
+  expect_code 1 "$(cat "$dir/state/worker.rc")" \
+    "fm-lock.sh under an OMP daemon broker must refuse: $(cat "$dir/state/worker.out")"
+  grep -q 'OMP daemon broker' "$dir/state/worker.out" \
+    || fail "the refusal does not name the OMP daemon broker: $(cat "$dir/state/worker.out")"
+  session_pid=$(cat "$dir/state/session-pid")
+  worker_pid=$(cat "$dir/state/worker-pid")
+  assert_contains "$(cat "$dir/state/status.out")" "lock: stale (pid $worker_pid" \
+    "fm-lock status must report a live broker as stale"
+  expect_code 0 "$(cat "$dir/state/session.rc")" \
+    "the session could not reclaim a lock pinned to a live OMP daemon broker: $(cat "$dir/state/session.out")"
+  [ "$(cat "$dir/state/.lock")" = "$session_pid" ] \
+    || fail "the reclaimed lock names $(cat "$dir/state/.lock"), expected session $session_pid (broker $worker_pid)"
+  pass "session-lock e2e: fm-lock.sh names the OMP daemon broker and reclaims a broker-pinned lock"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_omp_daemon_broker_is_never_the_session
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_e2e_fm_lock_under_omp_daemon_broker

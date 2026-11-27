@@ -70,6 +70,12 @@ Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
 
+### OMP session lock
+
+The session-lock ancestry walk stops at a confirmed shared OMP daemon broker, so a named bash call cannot acquire the session lock using the PID of the session that started that broker.
+[`bin/fm-session-lock-lib.sh`](../bin/fm-session-lock-lib.sh) confirms the broker by matching a PID-only lease record, located through the process's launch environment on Linux or its open lease file on macOS, independently of the primary session's OMP installation.
+[`bin/fm-lock.sh`](../bin/fm-lock.sh) names the broker when it refuses acquisition and reports a lock recorded against a confirmed broker as stale.
+
 ### Composer, busy state, and delivery
 
 Agent liveness and composer safety are separate checks.

@@ -644,10 +644,12 @@ Zellij has no verified recovery-grade agent process probe, while Orca and cmux d
 ### Guarded Treehouse entry
 
 The Treehouse-backed ordinary acquisition integration was inspected on 2026-08-12 against the then-pinned Treehouse v2.1.1 contract.
-The installer now pins Treehouse v2.3.0, whose release provides fail-closed pool-slot verification; Firstmate's current spawn and teardown regression suites cover the integration, while this dated inspection remains historical evidence rather than a v2.3.0 verification claim.
+The dated inspection applies to that release.
+See the [checksum-verified CI installer](../../bin/fm-install-treehouse.sh) for the current pin and the [toolchain guide](../configuration.md#toolchain) for bootstrap compatibility.
+Firstmate's spawn and teardown regression suites cover the integration.
 Tmux, Zellij, and cmux submit the shared guarded acquisition command, then resolve the acquired worktree through their existing current-path adapter only after the wrapper enters its verified lease.
 Herdr now uses the acquisition-owned ready-file handoff described in [`herdr-backend.md`](../herdr-backend.md#watching-and-task-containers), with portable coverage in `tests/fm-spawn-dispatch-profile.test.sh` and real-Herdr coverage in `tests/fm-backend-herdr-presentation-e2e.test.sh`.
-Orca is not applicable because it owns task worktrees and never invokes Treehouse.
+Orca manages its own task worktree acquisition.
 
 The command and output below preserve the original 2026-08-12 cross-adapter inspection as dated evidence that each adapter exposed a current-path primitive; the Herdr line no longer describes its allocation-authority path.
 
