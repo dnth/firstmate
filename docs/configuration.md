@@ -737,8 +737,9 @@ It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-hea
 Normal completed runs keep local-only and no-origin skips silent.
 If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
 A killed refresh (or a teardown process kill) can leave an orphaned `.git/packed-refs.lock` in a clone, which makes the next refresh's fetch fail with Git's `Unable to create '...packed-refs.lock': File exists`.
-On that signature only, `fm-fleet-sync.sh` retries the fetch with a bounded wait for the lock to self-clear, then removes the lock and retries once more only when it can prove the lock stale, exactly like the `fm-teardown.sh` `index.lock` recovery.
+On that signature only, `fm-fleet-sync.sh` retries the fetch with a bounded wait for the lock to self-clear, then removes the lock and retries once more only when it can prove the lock stale.
 It never removes a live lock, leaves any other failure shape untouched, and prints every wait, retry, and removal to stderr plus a one-line `recovered:` summary to stdout on success so that this session-start relay still surfaces the recovery.
+Treehouse returns in `fm-teardown.sh` use the same staleness proof and can also wait once for a young holderless `index.lock` to reach the threshold.
 The locked session-start bootstrap step also runs the guarded secondmate sync for recorded live homes, then propagates declared inherited local material into each validated live home.
 Local routes use direct guarded filesystem operations, while remote routes delegate sync and allowlisted transfer through their configured SSH host without probing any unconfigured fleet.
 It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason, inheritance failed, or a divergent shared captain-preference copy was quarantined.
@@ -1548,7 +1549,7 @@ FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's 
 FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=15   # seconds allowed for each read-only Treehouse pool audit; 0 disables the audit
 FM_TREEHOUSE_AUDIT_TIMEOUT=30        # aggregate seconds allowed for the read-only Treehouse pool audit; 0 disables the audit
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
-FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale; a holderless lock younger than this is waited out once
+FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # minimum mtime age for stale worktree index.lock recovery; Treehouse returns can wait once for a young holderless lock
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature
 FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=   # legacy alias for FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS when the new variable is unset
@@ -1610,10 +1611,10 @@ FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 When it is unset or blank, `FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS` remains a compatible fallback, and a blank fallback uses the 1-second default.
 An invalid nonblank wait falls back to 1 second rather than interrupting teardown.
 Teardown never removes a lock during the retry window, and after that window it attempts stale-lock cleanup only for a still-present lock that passes the configured age and live-holder checks.
-When the retries exhaust and the remaining lock provably has no live holder but its mtime age is still below `FM_STALE_WORKTREE_LOCK_AGE_SECS`, teardown waits out the remaining age once before re-checking the staleness proof, so an orphaned lock stays eligible instead of being refused only for being young.
+When Treehouse return retries exhaust and the remaining lock has no live holder and a nonnegative mtime age below `FM_STALE_WORKTREE_LOCK_AGE_SECS`, teardown waits out the remaining age once before applying the staleness proof.
 The proof itself does not change: still present, no live holder, and mtime age at least the threshold, re-checked right before removal.
 
-`fm-fleet-sync.sh` applies the same shape to an orphaned `.git/packed-refs.lock`: it retries only Git's `Unable to create '...packed-refs.lock': File exists` fetch failure up to `FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES` times (nonnegative integer; unset, blank, or invalid uses the default of 3), waiting `FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS` seconds (nonnegative whole or fractional; invalid falls back to 1 second) before each.
+`fm-fleet-sync.sh` retries only Git's `Unable to create '...packed-refs.lock': File exists` fetch failure up to `FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES` times (nonnegative integer; unset, blank, or invalid uses the default of 3), waiting `FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS` seconds (nonnegative whole or fractional; invalid falls back to 1 second) before each.
 Only after those retries exhaust does it remove the lock, and only when it is provably stale - still present, mtime age at least `FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS` (default 30), and no `lsof` holder of the lock file or of the clone worktree itself (a live `git` keeps that as its cwd even in the window after it closes the lock and before it exits).
 A live lock, a missing `lsof`, any failed check, or any other fetch failure keeps today's behavior.
 Every wait, retry, and removal is printed to stderr, and a successful recovery also prints one `recovered:` summary line to stdout so a session-start refresh - which discards fleet-sync stderr and relays only stdout - still surfaces it.

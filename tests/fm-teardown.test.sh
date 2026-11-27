@@ -49,6 +49,7 @@
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
 #   (r2) holderless index.lock younger than the staleness age  -> wait out the age, ALLOW
+#   (r3) holderless index.lock with a future mtime             -> lock kept, REFUSE
 #   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
 #   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
 #   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
@@ -493,42 +494,23 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
-# treehouse return orphans a fresh, holderless index.lock on its first attempt
+# treehouse return orphans a holderless index.lock on its first attempt
 # (simulating a killed git that dies without cleaning up), then keeps failing on
 # the lock signature while the file remains. Once teardown removes the lock, the
-# next return succeeds. Requires TREEHOUSE_ATTEMPT_FILE.
-add_orphaned_young_lock_treehouse() {
+# next return succeeds.
+add_orphaned_index_lock_fixture() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = return ]; then
-  shift
-  wt=""
-  for a in "$@"; do
-    case "$a" in
-      --force) ;;
-      *) wt=$a ;;
-    esac
-  done
-  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
-  case "$lock" in
-    /*|'') ;;
-    *) lock="$wt/$lock" ;;
-  esac
-  if [ -z "$lock" ]; then
-    lock="index.lock"
+  set -e
+  lock=$(git -C "${3:?}" rev-parse --path-format=absolute --git-path index.lock)
+  [ "$lock" = "${INDEX_LOCK_PATH:?}" ]
+  attempts="${INDEX_LOCK_FIXTURE:?}/treehouse-attempts"
+  if [ ! -e "$attempts" ]; then
+    TZ=UTC0 touch -t 200001010000.00 "$lock"
   fi
-  count_file="${TREEHOUSE_ATTEMPT_FILE:?}"
-  count=0
-  if [ -f "$count_file" ]; then
-    count=$(cat "$count_file")
-  fi
-  count=$(( count + 1 ))
-  printf '%s\n' "$count" > "$count_file"
-  if [ "$count" -eq 1 ]; then
-    mkdir -p "$(dirname "$lock")" 2>/dev/null || true
-    : > "$lock" 2>/dev/null || true
-  fi
+  printf '.\n' >> "$attempts"
   if [ -e "$lock" ]; then
     echo "fatal: Unable to create '$lock': File exists." >&2
     exit 128
@@ -537,7 +519,26 @@ if [ "${1:-}" = return ]; then
 fi
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/treehouse"
+  cat > "$case_dir/fakebin/date" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = '+%s' ] && [ -e "${INDEX_LOCK_PATH:?}" ]; then
+  cat "${INDEX_LOCK_FIXTURE:?}/clock"
+else
+  exec "${REAL_DATE_FOR_TEST:?}" "$@"
+fi
+SH
+  cat > "$case_dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+set -e
+clock="${INDEX_LOCK_FIXTURE:?}/clock"
+lock_state=missing
+[ ! -e "${INDEX_LOCK_PATH:?}" ] || lock_state=present
+printf '%s %s\n' "$*" "$lock_state" >> "$INDEX_LOCK_FIXTURE/sleeps"
+case "${1:-}" in ''|*[!0-9]*) exit 1 ;; esac
+read -r now < "$clock"
+printf '%s\n' "$(( now + $1 ))" > "$clock"
+SH
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/date" "$case_dir/fakebin/sleep"
 }
 
 git_index_lock_path() {
@@ -1334,43 +1335,57 @@ test_stale_index_lock_cleared_and_teardown_succeeds() {
 
 # A killed git can orphan a lock that no live process holds and that is still
 # younger than the staleness age. The retry window alone can never satisfy the
-# age half of the proof, so teardown must wait out the remaining age once. The
-# 3s threshold is a test-only shrink of the 30s default so that wait is quick.
-test_holderless_young_index_lock_waits_for_staleness_then_succeeds() {
-  local case_dir rc lock attempt_file
-  case_dir=$(make_case young-index-lock)
+# age half of the proof, so teardown must wait out the remaining age once.
+# The test overrides the 30s default with decimal 08 and advances a fixture clock
+# so a lock aged 3s must survive the retry and be present when the 5s wait starts.
+test_holderless_index_lock_age() {
+  local name=$1 start_time=$2 threshold=$3 case_dir rc lock real_date
+  case_dir=$(make_case "$name")
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
-  add_orphaned_young_lock_treehouse "$case_dir"
+  add_orphaned_index_lock_fixture "$case_dir"
   add_lsof_no_holder "$case_dir"
-  lock=$(git_index_lock_path "$case_dir/wt")
-
-  attempt_file="$case_dir/treehouse-attempts"
-  : > "$attempt_file"
+  lock=$(git -C "$case_dir/wt" rev-parse --path-format=absolute --git-path index.lock) \
+    || fail "$name: could not resolve the worktree index lock path"
+  case "$lock" in /*) ;; *) fail "$name: expected an absolute index lock path" ;; esac
+  real_date=$(command -v date)
+  printf '%s\n' "$start_time" > "$case_dir/clock"
 
   set +e
-  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  INDEX_LOCK_PATH="$lock" INDEX_LOCK_FIXTURE="$case_dir" REAL_DATE_FOR_TEST="$real_date" \
   FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
   FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
-  FM_STALE_WORKTREE_LOCK_AGE_SECS=3 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS="$threshold" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "young-index-lock: teardown should succeed after waiting out the holderless lock's age"
-  assert_grep "has no live holder but is" "$case_dir/stderr" \
-    "young-index-lock: teardown did not report the holderless young lock"
-  assert_grep "before re-checking staleness" "$case_dir/stderr" \
-    "young-index-lock: teardown did not report the one-time age wait"
+  if [ "$name" = future-index-lock ]; then
+    expect_code 1 "$rc" "$name: teardown should refuse a future-dated lock"
+    assert_grep "not provably stale" "$case_dir/stderr" "$name: teardown did not explain the refusal"
+    assert_not_contains "$(cat "$case_dir/stderr")" "before re-checking staleness" \
+      "$name: teardown announced an age wait for a future-dated lock"
+    [ -e "$lock" ] || fail "$name: teardown removed the future-dated lock"
+    [ -e "$case_dir/state/task-x1.meta" ] || fail "$name: teardown removed the task record"
+    [ "$(cat "$case_dir/sleeps")" = '0 present' ] || fail "$name: expected only the regular retry sleep"
+    pass "holderless index.lock with a future mtime is kept without an age wait"
+    return
+  fi
+
+  expect_code 0 "$rc" "$name: teardown should succeed after waiting out the holderless lock's age"
+  assert_grep "is 3s old; waiting 5s before re-checking staleness" "$case_dir/stderr" \
+    "$name: teardown did not report the remaining age"
+  [ "$(cat "$case_dir/sleeps")" = $'0 present\n5 present' ] \
+    || fail "$name: expected one 5s wait with the lock still present after the regular retry"
   assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
     "young-index-lock: teardown did not clear the lock after the wait"
   assert_absent "$lock" "young-index-lock: lock file should have been removed after the wait"
   assert_absent "$case_dir/state/task-x1.meta" "young-index-lock: teardown did not complete"
-  [ "$(cat "$attempt_file")" = 3 ] \
-    || fail "young-index-lock: expected initial attempt, retry, and post-cleanup return; got $(cat "$attempt_file")"
+  [ "$(cat "$case_dir/treehouse-attempts")" = $'.\n.\n.' ] \
+    || fail "$name: expected initial attempt, retry, and post-cleanup return"
   pass "holderless index.lock younger than the staleness age is waited out once and cleared"
 }
 
@@ -4247,7 +4262,8 @@ test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
-test_holderless_young_index_lock_waits_for_staleness_then_succeeds
+test_holderless_index_lock_age young-index-lock 946684803 08
+test_holderless_index_lock_age future-index-lock 946681200 8
 test_live_index_lock_is_never_removed_and_teardown_refuses
 test_lsof_error_never_clears_index_lock
 test_stale_index_lock_cleanup_rechecks_dirty_worktree
