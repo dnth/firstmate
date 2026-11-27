@@ -213,24 +213,22 @@ test_live_writer_lock_is_waited_for_not_broken() {
   pass "a live writer's lock is waited for and never broken"
 }
 
-# Digit-only stale settings retain decimal meaning, including 08.
-test_leading_zero_stale_setting_waits_for_live_writer() {
-  local state gen retire_pid
+test_leading_zero_stale_setting_reclaims_at_eight_seconds() {
+  local state gen lock born finished
   state=$(new_state_dir leading-zero-stale)
   gen=$("$EV" arm "$state" t1)
-  mkdir "$state/t1.busy-state.lock"
-  : > "$state/t1.busy-state.lock/holder"
-  env FM_BUSY_LOCK_STALE_SECS=08 "$EV" retire "$state" t1 --gen "$gen" >/dev/null 2>&1 &
-  retire_pid=$!
-  sleep 1
-  kill -0 "$retire_pid" 2>/dev/null || fail "retire did not wait for a live writer's lock"
-  [ -e "$state/t1.busy-state.lock/holder" ] || fail "retire broke a live writer's lock"
-  [ -e "$state/t1.busy-state" ] || fail "retire bypassed a live writer's lock"
-  rm -f "$state/t1.busy-state.lock/holder"
-  rmdir "$state/t1.busy-state.lock"
-  wait "$retire_pid" || fail "retire failed after the live writer released its lock"
+  lock="$state/t1.busy-state.lock"
+  mkdir "$lock"
+  born=$(( $(date +%s) - 6 ))
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die "$!\n"' "$born" "$lock" \
+    || fail "could not backdate the orphan lock"
+  FM_BUSY_LOCK_STALE_SECS=08 "$EV" retire "$state" t1 --gen "$gen" \
+    || fail "retire failed at the decimal threshold"
+  finished=$(date +%s)
+  [ "$((finished - born))" -ge 8 ] || fail "retire reclaimed the lock before the eight-second threshold"
+  [ ! -e "$lock" ] || fail "retire left the orphan lock behind"
   [ ! -e "$state/t1.busy-state" ] || fail "retire left the record behind"
-  pass "a decimal leading-zero stale setting waits for a live writer and completes retirement"
+  pass "a decimal leading-zero stale setting reclaims an orphan lock at eight seconds"
 }
 
 # The wait stays bounded: a lock that never ages past the stale bound - live
@@ -535,7 +533,7 @@ test_retire_missing_sidecar_is_idempotent
 test_stale_lock_broken_under_gnu_stat
 test_fresh_orphan_lock_is_broken_on_the_first_retire
 test_live_writer_lock_is_waited_for_not_broken
-test_leading_zero_stale_setting_waits_for_live_writer
+test_leading_zero_stale_setting_reclaims_at_eight_seconds
 test_lock_that_stays_young_is_refused_within_a_bound
 test_stale_gen_event_rejected
 test_stale_gen_record_unknown

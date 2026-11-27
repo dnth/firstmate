@@ -1623,7 +1623,7 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ] \
    && { [ "$RELAUNCH_PRIOR_HARNESS" = omp ] || [ "$HARNESS_ARG" = omp ]; }; then
   RELAUNCH_SWITCH_COORD=1
 fi
-if [ "$RELAUNCH_SWITCH_COORD" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ]; then
   control_lock="$STATE/.control-$ID.lock"
   if [ -z "${FM_CONTROL_RELAUNCH_TX:-}" ] || [ "$(cat "$control_lock/pid" 2>/dev/null || true)" != "${FM_CONTROL_RELAUNCH_LOCK_OWNER:-$PPID}" ]; then
     if ! fm_lock_try_acquire "$control_lock"; then
@@ -1633,8 +1633,9 @@ if [ "$RELAUNCH_SWITCH_COORD" -eq 1 ]; then
     SPAWN_CONTROL_LOCK=$control_lock
   fi
   if [ "$RELAUNCH_PRIOR_GEN" != "$(fm_meta_get "$RELAUNCH_META" spawn_gen)" ] \
-     || [ "$RELAUNCH_PRIOR_MODEL" != "$(fm_meta_get "$RELAUNCH_META" model)" ] \
-     || [ "$RELAUNCH_PRIOR_EFFORT" != "$(fm_meta_get "$RELAUNCH_META" effort)" ]; then
+     || { [ "$RELAUNCH_SWITCH_COORD" -eq 1 ] \
+          && { [ "$RELAUNCH_PRIOR_MODEL" != "$(fm_meta_get "$RELAUNCH_META" model)" ] \
+               || [ "$RELAUNCH_PRIOR_EFFORT" != "$(fm_meta_get "$RELAUNCH_META" effort)" ]; }; }; then
     echo "error: task $ID changed while acquiring relaunch ownership; retry the relaunch" >&2
     exit 1
   fi
@@ -2581,6 +2582,7 @@ if [ "$HARNESS" = omp ]; then
       exit 1
     fi
     if [ -f "$OMP_PRIOR_META" ]; then
+      OMP_PRIOR_SPAWN_GEN=$(fm_meta_get "$OMP_PRIOR_META" spawn_gen)
       OMP_PRIOR_BACKEND=$(fm_backend_of_meta "$OMP_PRIOR_META")
       OMP_PRIOR_TARGET=$(fm_backend_target_of_meta "$OMP_PRIOR_META")
       if [ -z "$OMP_PRIOR_TARGET" ]; then
@@ -4788,6 +4790,13 @@ fi
 # registries derive the state dir and id; the signal appends the gen suffix.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
+if [ "$RELAUNCH" -eq 1 ] || [ "$OMP_SECONDMATE_RELAUNCH" -eq 1 ]; then
+  prior_spawn_gen=${RELAUNCH_PRIOR_GEN-${OMP_PRIOR_SPAWN_GEN-}}
+  fm_busy_retire_incarnation "$STATE_REAL" "$ID" "$prior_spawn_gen" || {
+    echo "error: could not retire task $ID's busy generation before relaunch" >&2
+    exit 1
+  }
+fi
 TURNEND="$STATE_REAL/$ID.turn-ended"
 TURNEND_SIGNAL="$FM_ROOT/bin/fm-turnend-signal.sh"
 if [ "$HARNESS" = omp ]; then

@@ -476,6 +476,7 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 LABEL="fm-$ID"
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
+TASK_SPAWN_GEN=$(fm_meta_get "$META" spawn_gen)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
 [ -n "$KIND" ] || KIND=ship
@@ -628,47 +629,9 @@ do_interrupt() {
   printf '%s cancel=%s' "$proof" "$cancel"
 }
 
-# Drop busy_gen from the task record when it still names <gen>. The busy writer
-# owns the sidecar and the record, and spawn owns the task record's busy_gen
-# line, so the writer cannot clear it itself: teardown and spawn call the writer
-# while already holding this task's record lock, so a child that took it would
-# wait on its own parent.
-clear_retired_meta_busy_gen() {  # <gen>
-  local gen=$1 meta="$STATE/$ID.meta" lock tmp
-  [ -n "$gen" ] || return 0
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock" || return 1
-  # The record may already carry a replacement incarnation's generation; that
-  # one is live and must never be dropped by the retirement of an older one.
-  if [ "$(fm_meta_get "$meta" busy_gen)" != "$gen" ]; then
-    fm_lock_release "$lock"
-    return 0
-  fi
-  tmp=$(mktemp "$STATE/.$ID.meta.retire.XXXXXX") || {
-    fm_lock_release "$lock"
-    return 1
-  }
-  if ! sed '/^busy_gen=/d' "$meta" > "$tmp" || ! mv -f -- "$tmp" "$meta"; then
-    rm -f -- "$tmp"
-    fm_lock_release "$lock"
-    return 1
-  fi
-  fm_lock_release "$lock"
-}
-
 retire_busy_incarnation() {
-  local gen=
-  if [ -f "$STATE/$ID.busy-gen" ]; then
-    # Retire the exact generation armed now. A replacement that armed its own
-    # generation between this read and the writer's lock makes the writer
-    # refuse, and the record is then left alone rather than rewritten.
-    gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
-    if [ -n "$gen" ] \
-      && "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$gen" >/dev/null 2>&1; then
-      clear_retired_meta_busy_gen "$gen" || true
-    fi
-  fi
+  fm_busy_retire_incarnation "$STATE" "$ID" "$TASK_SPAWN_GEN" \
+    || die "could not retire task $ID's busy generation"
 }
 
 # do_exit: stop the running agent, preserving its worktree. Prints
@@ -693,7 +656,6 @@ do_exit() {
       state=$(agent_state)
       case "$state" in
         dead)
-          retire_busy_incarnation
           printf 'stopped'
           return 0
           ;;
@@ -719,9 +681,6 @@ do_exit() {
   state=$(wait_agent_state "$EXIT_WAIT" dead missing) || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
-  # The incarnation is over: retire its busy wiring so no stale record or
-  # orphaned generation survives the agent that produced it.
-  retire_busy_incarnation
   printf 'stopped'
 }
 
@@ -735,7 +694,6 @@ MS_REQUEST_SCHEMA=fm-model-switch.request.v1
 MS_ACK_SCHEMA=fm-model-switch.ack.v1
 MS_READY_SCHEMA=fm-model-switch.ready.v1
 MS_DIR="$STATE/$ID.omp-doorbell-ready.requests"
-MS_SPAWN_GEN=$(fm_meta_get "$META" spawn_gen)
 MS_META_LOCK=$(fm_meta_lock_path "$META" 2>/dev/null || true)
 MS_CHANNEL_WHY=
 MS_RECONCILED=0
@@ -783,7 +741,7 @@ ms_meta_apply() {
   local tmp rc=0
   ms_lock_meta || { echo "error: task $ID's metadata lock could not be acquired" >&2; return 1; }
   if [ -f "$META" ] && [ ! -L "$META" ] \
-     && [ "$(fm_meta_get "$META" spawn_gen)" = "$MS_SPAWN_GEN" ] \
+     && [ "$(fm_meta_get "$META" spawn_gen)" = "$TASK_SPAWN_GEN" ] \
      && tmp=$(mktemp "$STATE/.model-switch-$ID.XXXXXX"); then
     if FM_SWITCH_READBACK_MODEL="$1" FM_SWITCH_READBACK_EFFORT="$2" awk '
          /^(model|effort)=/ { next }
@@ -860,8 +818,8 @@ ms_fold_ack() {
   local ack=$1 order=$2 high_water=$3
   MS_FOLD_UPDATED=0
   ms_read_ack "$ack" || return 1
-  [ "$MS_A_GEN" = "$MS_SPAWN_GEN" ] || return 2
-  [ "$(fm_meta_get "$META" spawn_gen)" = "$MS_SPAWN_GEN" ] || return 3
+  [ "$MS_A_GEN" = "$TASK_SPAWN_GEN" ] || return 2
+  [ "$(fm_meta_get "$META" spawn_gen)" = "$TASK_SPAWN_GEN" ] || return 3
   ms_verify_ack
   case "$MS_A_OUTCOME" in
     applied|partial)
@@ -898,7 +856,7 @@ reconcile_model_switch() {
     [ ! -f "$f" ] || folded+=("$f")
   done
   if [ -n "${folded[0]:-}" ]; then
-    high_water=$(jq -s --arg gen "$MS_SPAWN_GEN" --arg schema "$MS_ACK_SCHEMA" '
+    high_water=$(jq -s --arg gen "$TASK_SPAWN_GEN" --arg schema "$MS_ACK_SCHEMA" '
       map(select(.schema == $schema and .spawnGen == $gen and (.outcome == "applied" or .outcome == "partial")
         and (.ackSequence | type) == "number"
         and (.target.model != null and .target.model != "" and .after.model == .target.model)
@@ -958,8 +916,8 @@ ms_channel_ready() {
     MS_CHANNEL_WHY="its model-switch ready marker is unreadable"
     return 1
   fi
-  if [ "$gen" != "$MS_SPAWN_GEN" ]; then
-    MS_CHANNEL_WHY="its ready marker belongs to worker generation $gen, not the recorded $MS_SPAWN_GEN"
+  if [ "$gen" != "$TASK_SPAWN_GEN" ]; then
+    MS_CHANNEL_WHY="its ready marker belongs to worker generation $gen, not the recorded $TASK_SPAWN_GEN"
     return 1
   fi
   if ! fm_pid_alive "$pid"; then
@@ -974,7 +932,7 @@ ms_report_ack() {
   ms_read_ack "$ack" \
     || die "the acknowledgement for request $rid is unreadable ($ack); the live model is unknown"
   [ "$MS_A_ID" = "$rid" ] || die "the acknowledgement at $ack names request $MS_A_ID, not $rid"
-  if [ "$MS_A_GEN" = "$MS_SPAWN_GEN" ]; then
+  if [ "$MS_A_GEN" = "$TASK_SPAWN_GEN" ]; then
     case "$MS_A_OUTCOME:$MS_A_REASON" in
       refused:invalid-request) ;;
       *)
@@ -1039,7 +997,7 @@ do_switch_model() {
   ack=$(ms_path "$rid" ack.json)
   staged="$MS_DIR/.model-switch.$rid.staging.${BASHPID:-$$}"
   if ! ( umask 077
-         jq -n --arg schema "$MS_REQUEST_SCHEMA" --arg id "$rid" --arg gen "$MS_SPAWN_GEN" \
+         jq -n --arg schema "$MS_REQUEST_SCHEMA" --arg id "$rid" --arg gen "$TASK_SPAWN_GEN" \
            --arg model "$NEW_MODEL" --arg effort "$NEW_EFFORT" --argjson at "$started" \
            '{schema: $schema, id: $id, spawnGen: $gen, model: $model,
              effort: (if $effort == "" then null else $effort end), requestedAtMonotonicUs: $at}' > "$staged" ) \
@@ -1562,11 +1520,11 @@ do_relaunch() {
     # the endpoint in the checkpointed worktree. Only a proven-missing endpoint
     # skips do_exit - every other state still has a live or unprovable pane
     # behind it, and `fm-control exit` on a missing endpoint still refuses.
-    retire_busy_incarnation
     exit_result=already-stopped
   else
     exit_result=$(do_exit)
   fi
+  retire_busy_incarnation
   if fm_control_model_switch_supported "$PRIOR_HARNESS" "$KIND"; then
     reconcile_model_switch || die "could not reconcile the stopped worker's model switch"
     cp -p "$META" "$META_PRIOR" || die "could not preserve the reconciled task record"
@@ -1653,6 +1611,7 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
+    retire_busy_incarnation
     if fm_control_model_switch_supported "$HARNESS" "$KIND"; then reconcile_model_switch || true; fi
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
