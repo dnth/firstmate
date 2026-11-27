@@ -1183,18 +1183,34 @@ A safety sweep marks eligible threads due at gateway start and every 10 minutes.
 
 **Status source.**
 With judging on, an accepted chunk in an eligible thread queues a background scan.
-The scan selects each thread's newest accepted Firstmate message at scan start and, when that message has no usable verdict and is still present in the fetched history, asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
-The judge answers from the newest message and receives the thread state that reply itself declared (`needs-you`, `done`, or `none`), which is absent when the reply declared none.
-A closing reply that only notes a pending approval, an external gate, a recorded decision, or a deferred item is `done`, and a declared `done` on a closing message means `done` unless that message itself asks the captain something.
+The scan selects each thread's newest accepted Firstmate message at scan start and, when that reply remains judgeable and the message has no usable verdict, asks Jev, through [`bin/fm-ext-thread-judge.sh`](../bin/fm-ext-thread-judge.sh), for its status (`open-question`, `running`, `done`, or `blocked`) and whether its name still fits.
+Jev reads all chunks accepted through the selected message as one reply, including chunks recovered from outside the recent history window.
+The judge script's input header defines the request-local grouping field.
+The newest reply has a separate, fixed limit of 47,500 characters, based on the default reply-splitting budget.
+The judge may also receive up to 40 other recent messages within an 8,000-character history budget.
+If an accepted chunk returns Discord HTTP 404 or the accepted reply text exceeds the limit, the scan skips the Jev call and logs one audit-only entry with reason `incomplete reply, chunk deleted` or `reply too long to judge`.
+Later chunks of the same reply leave that skip in effect, and a newer reply can be judged.
+Jev receives the selected reply's declared state as `reply_state`, including the literal `none` for an explicit `--thread-state none`.
+The field is omitted when the reply declared no state.
+A reply is `done` when it closes the work and no response, decision, or approval from the captain is required for the thread's work to proceed, regardless of declared state.
+A closing reply may note a pending approval, an external gate, a recorded decision, or a deferred item.
+When no captain response is needed, work still under way or queued is `running`, and work stopped by an external obstacle is `blocked`.
+A reply that needs the captain to answer, decide, or approve something before the thread's work can proceed is `open-question` even without a question mark or after completing an earlier step.
 For a valid Jev response, the log records `status`, `topic_fits`, and status `confidence` alongside the newest judged `message_id` and a `judged` summary with the thread name, project, message count, and any `reply_state` sent to Jev.
 The verdict log contains no message text.
 The newest 20 usable verdicts per thread retain their full details, and older usable verdicts keep only the fields the reconciler needs for title and decision history.
-Verdicts that arrive after Discord accepts a newer Firstmate message or that await a usable name are marked `audit_only`, with up to 20 such entries retained per thread.
+The thread retains up to 20 audit-only entries in total, including skips, verdicts that arrive after Discord accepts a newer Firstmate message, and verdicts awaiting a usable name.
 When the screened name is recorded for the still-current message, the verdict becomes usable and its timestamp reflects that moment.
 Audit-only entries never affect titles or count as finished judgments.
-The safety sweep retries failed judgments for the newest accepted message.
+The safety sweep retries transient judgment failures for the newest accepted message.
 When the topic drifted, the live title has a public `<Project> · ` prefix, and the captain has not named the thread, [`bin/fm-ext-thread-name.sh`](../bin/fm-ext-thread-name.sh) proposes a screened `<Project> · <topic>` base; with no public prefix no name is proposed.
-The models receive the current base title, its project prefix when present, and thread message text, which may include private interaction text.
+The prefix is the thread's current project label unless the conversation clearly moved to another project with an approved public label.
+The optional local `config/ext-project-labels` is a regular file that lists one registry slug and its approved public label per line, separated by a tab.
+A configured label must pass the shared title screen and its slug must appear in the home's `data/projects.md` registry, including projects with no existing topic thread.
+A nonempty regular file enables the screened built-in `Firstmate` alternate without requiring a map or registry entry for it.
+An absent or empty map or a symlink keeps renames on the current project prefix.
+Both models receive the current base title, its project prefix when present, and thread message text, which may include private interaction text.
+The naming model receives the approved alternate public labels and recent history bounded by 40 messages and 8,000 characters.
 The status comes from the verdict on the newest accepted message; until that verdict arrives, the marker of the last paced write holds.
 When the key check confirms the Jev key is absent, the reconciler uses the latest explicit state and latest screened retitle from complete replies, which can come from different replies.
 An explicit state of `needs-you` means `open-question`, `done` means complete, and `none` requests no status marker.
@@ -1204,7 +1220,8 @@ Judging, naming, and the key check run on the background worker and never delay 
 
 **Markers.**
 Precedence is `❓ ` > `⚠️ ` > `⏳ ` > `✅ ` > no marker.
-`❓ ` shows for any open decision and for an `open-question` status, including a plain question with no button; `⚠️ ` comes only from a Jev `blocked` status, never from worker status events; `⏳ ` is `running` and `✅ ` is `done`.
+`❓ ` shows for any open decision and for an `open-question` status even without a decision button.
+`⚠️ ` comes only from a Jev `blocked` status, `⏳ ` means `running`, and `✅ ` means `done`.
 A question asked while a decision was open, by the ledger's post and closure times, belongs to that decision: once every decision has closed it contributes no marker, and the newest earlier status that was not such a question stands.
 So a `done` judged while a decision is open is kept and lands at the next permitted slot after the last decision closes, even when a reminder about the decision followed it.
 
@@ -1231,14 +1248,14 @@ A transient failure or an unreadable title is retried after 30 seconds, a perman
 **Catch-up.**
 The first judge scan with judging on is the catch-up.
 Before its first model call it writes `state/ext-autoname/catch-up.json` with the 10 eligible threads Firstmate posted in most recently and the newest accepted message id at that moment.
-Those threads are judged once each; an older thread is judged only after it gets a newer post.
-Each usable verdict is the thread's own progress, so a restart resumes without repeating a finished thread's model calls or renames.
+Catch-up checks those threads for a usable verdict or recorded skip before calling the judge, and an older thread becomes eligible when it gets a newer post.
+The thread's verdict log preserves catch-up progress across restarts.
 
 **Judging on or off.**
 [`bin/fm-ext-thread-judge.sh --check`](../bin/fm-ext-thread-judge.sh) is the one key check, through the shared Jev client in [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh): it prints `on` when [typed dispatch resolution's key](#typed-dispatch-resolution-env-typesafe_api_key) is present, `off` when it is confirmed absent, `unknown` when the home's `.env` cannot be read, and `inactive` when the bridge is off.
 Only `on` and `off` allow title work.
 The gateway strips that key from every other subprocess it runs, so only the judge receives it.
-The [thread auto-name regression test](../tests/fm-ext-thread-autoname.test.sh) covers the judge request and verdict log as well as the one-writer, precedence, pace, rate-limit, closure, freshness, captain's-words, compare-and-write, correction, catch-up, and off-the-delivery-path guarantees.
+The [thread auto-name regression test](../tests/fm-ext-thread-autoname.test.sh) covers the judge request, split replies and audit-only skips, and verdict log as well as the status criteria, one-writer, precedence, pace, rate-limit, closure, freshness, captain's-words, project-label, compare-and-write, correction, catch-up, and off-the-delivery-path guarantees.
 
 ### Thread context (name, project, history)
 

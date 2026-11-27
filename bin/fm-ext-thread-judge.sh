@@ -13,14 +13,17 @@
 # It makes no network call and reads no state file.
 #
 # Input file (message text and the judged reply's own declared state; no
-# attachments, images, filenames, or ids):
+# attachments, images, filenames, or Discord ids):
 #   {"thread": {"name": "<current base name, marker stripped>",
 #               "project": "<Project or empty>",
 #               "reply_state": "needs-you|done|none",
 #               "messages": [{"role": "firstmate|captain|participant",
-#                             "text": "..."}]}}
+#                             "text": "...",
+#                             "reply": 1}]}}
 # reply_state is optional: it is the thread state the judged reply itself
-# declared, and it is omitted when that reply declared none.
+# declared, and it is omitted when the reply declared no state.
+# reply is a request-local integer shared by the chunks of one Firstmate
+# reply. A message without it stands alone.
 # This tool adds nothing but the two questions below and never reads Discord.
 #
 # Output (stdout, one JSON object, exit 0):
@@ -108,12 +111,12 @@ REQUEST=$(jq -n --slurpfile state "$STATE_FILE" --arg model "$FM_JEV_MODEL" '
     questions: {
       status: {
         type: "choice",
-        instructions: "What is the current status of the work described in `thread.messages`, read from its newest message?",
+        instructions: "What is the current status of the work described in `thread.messages`, read from its newest reply? Messages that share a non-empty `reply` value are chunks of one Firstmate reply that Discord split; judge the newest reply with all its chunks read together as one message. A message without a `reply` value stands alone.",
         criteria: {
-          "open-question": "The newest message asks the captain for a response, decision, approval, or choice, or leaves work open in this thread pending such a response.",
-          running: "The newest message leaves work open and says it is under way or queued, with no request to the captain or need for their response to continue.",
-          done: "The newest message finishes, settles, delivers, merges, or otherwise closes the work or topic without asking the captain something. A closing message that only notes a pending approval, an external gate, a recorded decision, or a deferred item is done even without `thread.reply_state`. When `thread.reply_state` is `done` and the newest message closes the thread, answer done unless that message itself asks the captain something.",
-          blocked: "The newest message leaves work open because it failed or is waiting on an external dependency, permission, credential, or other obstacle, with no request to the captain or need for their response to continue."
+          "open-question": "The newest reply needs the captain to answer, decide, or approve something before the work in this thread can proceed. This applies even if it reports a completed step or has no question mark, as in `I merged the change. Production deployment needs your approval before I can proceed`. A reply that closes out the work and only notes a pending approval, an external gate, a recorded decision, or a deferred item has no such dependency.",
+          running: "The newest reply leaves work open and says it is under way or queued. The work can proceed without a response, decision, or approval from the captain, and remains under way or queued without an obstacle stopping it.",
+          done: "The newest reply closes the work in this thread, and no response, decision, or approval from the captain is required for that work to proceed. A completed step such as a merge or handoff qualifies only if it closes the work in this thread. Work that remains under way, queued, or stopped by an obstacle is still open. Apply both conditions regardless of `thread.reply_state`. This includes a closing reply that only notes a pending approval, an external gate, a recorded decision, or a deferred item.",
+          blocked: "The newest reply leaves work open and stopped because it failed or is waiting on an external dependency, permission, credential, or other obstacle. Continuing the work does not require a response, decision, or approval from the captain."
         }
       },
       topic_fits: {

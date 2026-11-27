@@ -103,8 +103,11 @@ When you settle a decision that has a button post any other way, such as a typed
 
 Before composing a dedicated-channel reply, consult the [topic-thread contract](../../../docs/configuration.md#topic-threads-one-thread-per-request); the [emit header and help](../../../bin/fm-ext-emit.sh) own the title, retitle, and state flags.
 Emit refuses a reply that would create the thread without `--thread-title`, and any `answer` or `final` without an explicit `--thread-state`; its header owns both rules.
-When judging is on, the judge evaluates the newest accepted message with its reply's declared state, and the reconciler uses the verdict without applying explicit state or retitle inputs.
-A closing reply that merely notes an outstanding item calls for a `done` verdict, and a reply that asks the captain for a response calls for `open-question`.
+When judging is on, the judge evaluates the newest reply, reading all the chunks Discord split from that reply as one message, with its reply's declared state, and the reconciler uses the verdict without applying explicit state or retitle inputs.
+A reply calls for `done` when it closes the work in the thread without requiring a captain response, decision, or approval.
+A closing reply can mention a deferred item or an outstanding gate in passing.
+A completed step leaves the thread `running` if its work is under way or queued, or `blocked` if its work is stopped by an external obstacle.
+A reply that needs such a response calls for `open-question`, even if it reports a completed step or never poses a direct question.
 See the [thread title reconciler](../../../docs/configuration.md#thread-title-reconciler) for verdict logging, marker precedence, and pacing.
 
 - **Title the creating reply** with `<Project> · <2-5 word topic>` (for example `Aceh · ingestion status`), especially when the request is vague, long, or procedural.

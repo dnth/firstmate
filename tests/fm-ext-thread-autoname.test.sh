@@ -72,8 +72,22 @@ if [ -n "${FM_TEST_JEV_HOLD:-}" ]; then
     sleep 0.02
   done
 fi
+if [ "${FM_TEST_SPLIT_JUDGE:-}" = 1 ]; then
+  if jq -e '
+    .questions.status.instructions | contains("judge the newest reply with all its chunks read together")
+  ' <<< "$body" >/dev/null && jq -e '
+    .state.thread.messages as $messages | $messages[-1].reply as $reply
+    | $reply != null and any($messages[]; .reply == $reply and (.text | contains("Closing this thread.")))
+  ' <<< "$body" >/dev/null; then
+    FM_TEST_JEV="$FM_TEST_FIXTURES/done.json"
+  else
+    FM_TEST_JEV="$FM_TEST_FIXTURES/blocked.json"
+  fi
+fi
 if [ -n "${FM_TEST_JEV:-}" ] && [ -f "$FM_TEST_JEV" ]; then
-  jq '.jev' "$FM_TEST_JEV" > "$out"
+  jq --arg drift "${FM_TEST_SPLIT_DRIFT:-}" '
+    .jev | if $drift == "1" then .answers.topic_fits.noul = 0.01 else . end
+  ' "$FM_TEST_JEV" > "$out"
   printf '200'
 else
   printf '{"error":"stand-in"}' > "$out"
@@ -196,9 +210,16 @@ class Discord(BaseHTTPRequestHandler):
                     save(data)
                     headers = [("X-RateLimit-Remaining", "0"), ("X-RateLimit-Reset", str(reset))]
                 return self.reply(200, {"id": parts[1], "name": thread["name"], "owner_id": BOT}, headers)
-            before = int(parse_qs(url.query).get("before", ["9" * 20])[0])
+            if len(parts) == 4:
+                message = next((m for m in thread["messages"] if m["id"] == parts[3]), None)
+                if message is None:
+                    return self.reply(404, {"message": "Unknown Message", "code": 10008})
+                return self.reply(200, message)
+            query = parse_qs(url.query)
+            before = int(query.get("before", ["9" * 20])[0])
+            limit = int(query.get("limit", ["100"])[0])
             messages = [m for m in thread["messages"] if int(m["id"]) < before]
-            return self.reply(200, list(reversed(messages))[:100])
+            return self.reply(200, list(reversed(messages))[:limit])
 
     def do_POST(self):
         thread_id = urlparse(self.path).path.strip("/").split("/")[1]
@@ -1289,7 +1310,7 @@ PY
 # --- 14. the judge reads the reply's own state, and every call is logged ---------------
 #
 # The judged reply's explicit state reaches the judge, and a reply that
-# declared none is judged without that field. A `done` closing reply ends at
+# declared no state is judged without that field. A `done` closing reply ends at
 # ✅ even when an earlier open question is still in the history. Each verdict
 # records the judge's input summary and confidence, never message text.
 
@@ -1306,13 +1327,15 @@ assert len(jev_calls()) == calls + 1
 script({"remaining": "0"})
 tick(0)
 assert name(thread) == "❓ Aceh · nightly reindex", name(thread)
-assert jev_calls()[-1]["state"]["thread"] == {
-    "name": "Aceh · nightly reindex", "project": "Aceh",
-    "messages": [
-        {"role": "firstmate", "text": "Looking at the reindex schedule now."},
-        {"role": "firstmate", "text": "Which window should the reindex use, 02:00 or 03:00?"},
-    ],
-}
+sent = jev_calls()[-1]["state"]["thread"]
+assert (sent["name"], sent["project"]) == ("Aceh · nightly reindex", "Aceh"), sent
+assert "reply_state" not in sent, sent
+assert [(m["role"], m["text"]) for m in sent["messages"]] == [
+    ("firstmate", "Looking at the reindex schedule now."),
+    ("firstmate", "Which window should the reindex use, 02:00 or 03:00?"),
+], sent["messages"]
+assert all(m.get("reply") for m in sent["messages"]), sent["messages"]
+assert sent["messages"][0]["reply"] != sent["messages"][1]["reply"], sent["messages"]
 entry = verdicts(thread)[-1]
 assert (entry["status"], entry["topic_fits"], entry["confidence"]) == ("open-question", True, 1.0), entry
 assert entry["judged"] == {"name": "Aceh · nightly reindex", "project": "Aceh",
@@ -1329,14 +1352,16 @@ set_clock(T0 + 1)
 calls = len(jev_calls())
 assert deliver("done") == ["sent"]
 assert len(jev_calls()) == calls + 1
-assert jev_calls()[-1]["state"]["thread"] == {
-    "name": "Aceh · nightly reindex", "project": "Aceh", "reply_state": "done",
-    "messages": [
-        {"role": "firstmate", "text": "Looking at the reindex schedule now."},
-        {"role": "firstmate", "text": "Which window should the reindex use, 02:00 or 03:00?"},
-        {"role": "firstmate", "text": "Noted: the QA gate still waits for your word. Closing this thread."},
-    ],
-}
+sent = jev_calls()[-1]["state"]["thread"]
+assert (sent["name"], sent["project"], sent["reply_state"]) == (
+    "Aceh · nightly reindex", "Aceh", "done"), sent
+assert [m["text"] for m in sent["messages"]] == [
+    "Looking at the reindex schedule now.",
+    "Which window should the reindex use, 02:00 or 03:00?",
+    "Noted: the QA gate still waits for your word. Closing this thread.",
+], sent["messages"]
+assert len({m.get("reply") for m in sent["messages"]}) == 3, sent["messages"]
+assert all(m.get("reply") for m in sent["messages"]), sent["messages"]
 script({"remaining": "0"})
 tick(601)
 assert name(thread) == "✅ Aceh · nightly reindex", name(thread)
@@ -1369,7 +1394,8 @@ history_path = f"/channels/{thread}/messages"
 history_reads = data["gets"].count(history_path)
 assert autoname.judge_scan(HOME) == []
 assert load()["gets"].count(history_path) == history_reads + 1, "the scan skipped the history read"
-assert len(jev_calls()) == calls and verdicts(thread) == before, "the deleted reply was judged"
+assert len(jev_calls()) == calls, "the deleted reply was judged"
+assert verdicts(thread)[:-1] == before and verdicts(thread)[-1]["skip_reason"] == "incomplete reply, chunk deleted"
 
 with patch.object(autoname, "after_post"):
     assert deliver("blocked") == ["sent"]
@@ -1390,7 +1416,8 @@ assert len(jev_calls()) == calls + 1, "the scan skipped the selected chunk"
 entry = verdicts(thread)[-1]
 sent = jev_calls()[-1]["state"]["thread"]
 assert sent["reply_state"] == "done", sent
-assert sent["messages"][-1] == {"role": "firstmate", "text": "Wrap-up with another chunk on the way."}, sent
+assert sent["messages"][-1]["text"] == "Wrap-up with another chunk on the way.", sent
+assert sent["messages"][-1].get("reply"), sent
 assert entry["message_id"] == selected and entry["audit_only"] is True, entry
 assert entry["status"] == "blocked" and entry["judged"]["reply_state"] == "done", entry
 tick(1202)
@@ -1403,6 +1430,330 @@ print("ok")
 PY
   ) || fail "the accepted message, reply state, and verdict came apart: $out"
   pass "the judge receives the judged reply's state when it declared one and nothing when it did not, a done closing reply ends at ✅, and each call logs its input and confidence"
+}
+
+# --- 15. the judge criteria keep a closing note and a question apart ------------------
+#
+# A closing message that only notes a pending approval or gate meets only the
+# done criterion, and a message that needs the captain to answer meets only
+# open-question. The judge receives both rules in the criteria it is asked, so
+# this asserts the request itself rather than a canned verdict.
+
+test_15_the_judge_criteria_keep_a_closing_note_and_a_question_apart() {
+  local home="$TMP_ROOT/t15" out
+  setup_home "$home"
+  new_thread "$home" "$M1" "Aceh · nightly reindex" "Looking at the reindex schedule now."
+  post "$home" "$M1" answer 2 "Noted: the QA gate still waits for your word. Closing this thread." \
+    --thread-state "done"
+  out=$(py "$home" <<'PY'
+assert deliver() == ["sent"]
+call = jev_calls()[-1]
+criteria = call["questions"]["status"]["criteria"]
+assert call["state"]["thread"]["messages"][-1]["text"] == \
+    "Noted: the QA gate still waits for your word. Closing this thread.", call
+assert call["state"]["thread"]["reply_state"] == "done", call
+assert "closes out the work and only notes a pending approval" in criteria["open-question"], criteria
+assert "needs the captain to answer, decide, or approve" in criteria["open-question"], criteria
+assert "even if it reports a completed step" in criteria["open-question"], criteria
+assert "closes the work in this thread, and no response, decision, or approval from the captain is required" in criteria["done"], criteria
+assert "A completed step such as a merge or handoff qualifies only if it closes the work in this thread." in criteria["done"], criteria
+assert "Work that remains under way, queued, or stopped by an obstacle is still open." in criteria["done"], criteria
+assert "Apply both conditions regardless of `thread.reply_state`" in criteria["done"], criteria
+assert "leaves work open" in criteria["running"] and "leaves work open" in criteria["blocked"], criteria
+assert "Continuing the work does not require a response, decision, or approval from the captain" in criteria["blocked"], criteria
+assert "newest reply" in call["questions"]["status"]["instructions"], call["questions"]["status"]
+assert "`reply`" in call["questions"]["status"]["instructions"], call["questions"]["status"]
+print("ok")
+PY
+  ) || fail "the closing noting a gate did not reach the done-only criteria: $out"
+  post "$home" "$M1" followup 3 "I merged the change. Production deployment needs your approval before I can proceed."
+  out=$(py "$home" <<'PY'
+assert deliver() == ["sent"]
+call = jev_calls()[-1]
+assert call["state"]["thread"]["messages"][-1]["text"] == \
+    "I merged the change. Production deployment needs your approval before I can proceed.", call
+assert "reply_state" not in call["state"]["thread"], call
+print("ok")
+PY
+  ) || fail "the captain-approval wait did not reach the judge as the newest message: $out"
+  post "$home" "$M1" followup 4 "Which window should the reindex use, 02:00 or 03:00?"
+  out=$(py "$home" <<'PY'
+assert deliver() == ["sent"]
+call = jev_calls()[-1]
+assert call["state"]["thread"]["messages"][-1]["text"] == \
+    "Which window should the reindex use, 02:00 or 03:00?", call
+assert "reply_state" not in call["state"]["thread"], call
+print("ok")
+PY
+  ) || fail "the explicit question did not reach the judge as the newest message: $out"
+  post "$home" "$M1" followup 5 "I merged the fix. Deployment is still blocked on the vendor credential."
+  post "$home" "$M1" followup 6 "I merged the fix. Deployment is queued."
+  out=$(py "$home" <<'PY'
+with only("followup.5"):
+    assert deliver() == ["sent"]
+assert jev_calls()[-1]["state"]["thread"]["messages"][-1]["text"] == (
+    "I merged the fix. Deployment is still blocked on the vendor credential."
+)
+assert deliver() == ["sent"]
+assert jev_calls()[-1]["state"]["thread"]["messages"][-1]["text"] == "I merged the fix. Deployment is queued."
+print("ok")
+PY
+  ) || fail "the queued deployment did not reach the judge as the newest message: $out"
+  pass "the judge request carries the done-only closing rule and the open-question rule for a wait on the captain, and each shape reaches it as the newest message"
+}
+
+# --- 16. a reply Discord split is judged as one reply --------------------------------
+#
+# A long close-out becomes two Discord chunks. Both carry the same reply id, and
+# the criteria tell the judge to read the newest reply through all its chunks, so
+# a final chunk that only notes a gate ends done instead of standing alone.
+
+test_16_a_split_reply_is_judged_as_one_reply() {
+  local home="$TMP_ROOT/t16" out
+  setup_home "$home"
+  new_thread "$home" "$M1" "Aceh · nightly reindex" "Looking at the reindex schedule now."
+  local text=$'Deployment handed off. Closing this thread.\n\nExternal gate still awaits vendor approval.'
+  FM_EXT_DISCORD_REPLY_MAX_CHARS=50
+  export FM_EXT_DISCORD_REPLY_MAX_CHARS
+  post "$home" "$M1" followup 2 "$text" --thread-state "done"
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+os.environ["FM_TEST_SPLIT_JUDGE"] = "1"
+assert deliver() == ["sent"]
+sent = jev_calls()[-1]["state"]["thread"]
+texts = [m["text"] for m in sent["messages"]]
+assert len(texts) == 3 and texts[0] == "Looking at the reindex schedule now.", texts
+assert "Closing this thread." in texts[1], texts
+assert texts[2] == "External gate still awaits vendor approval.", texts
+assert sent["reply_state"] == "done", sent
+assert sent["messages"][1]["reply"] == sent["messages"][2]["reply"], sent["messages"]
+assert {m["reply"] for m in sent["messages"]} == {1, 2}, sent["messages"]
+tick(0)
+assert name(thread) == "✅ Aceh · nightly reindex", name(thread)
+usable = [entry for entry in verdicts(thread) if not entry.get("audit_only")]
+assert usable[-1]["judged"]["messages"] == 3, usable[-1]
+print("ok")
+PY
+  ) || fail "the split reply did not reach the judge as one reply or did not end done: $out"
+  unset FM_EXT_DISCORD_REPLY_MAX_CHARS
+  post "$home" "$M1" followup 3 "External gate still awaits vendor approval."
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+set_clock(T0 + 601)
+os.environ["FM_TEST_SPLIT_JUDGE"] = "1"
+assert deliver() == ["sent"]
+tick(601)
+usable = [entry for entry in verdicts(thread) if not entry.get("audit_only")]
+assert usable[-1]["status"] == "blocked", usable[-1]
+assert usable[-1]["message_id"] == load()["threads"][thread]["messages"][-1]["id"]
+print("ok")
+PY
+  ) || fail "the same gate note sent alone did not produce a blocked verdict: $out"
+
+  home="$TMP_ROOT/t16long"
+  setup_home "$home"
+  new_thread "$home" "$M1" "Aceh · nightly reindex" "Looking at the reindex schedule now."
+  local padding
+  printf -v padding ' routine log entry %.0s' {1..450}
+  post "$home" "$M1" followup 2 "Deployment handed off. Closing this thread.$padding External gate still awaits vendor approval."
+  out=$(py "$home" <<'PY'
+from driver import _append
+
+(thread,) = threads()
+os.environ["FM_TEST_SPLIT_JUDGE"] = "1"
+os.environ["FM_TEST_SPLIT_DRIFT"] = "1"
+os.environ["FM_TEST_NAME"] = "Aceh · deployment handoff"
+accepted = []
+def busy_send(payload):
+    receipt = send(payload)
+    accepted.append(receipt["discord_message_id"])
+    if len(accepted) == 1:
+        for _ in range(41):
+            _append(thread, os.environ["FM_TEST_CAPTAIN"], "A separate discussion.")
+    return receipt
+
+with patch.object(autoname, "after_post"):
+    assert poster.drain_outbox(send=busy_send, home=HOME, react=lambda *args: None) == ["sent"]
+assert autoname.judge_scan(HOME) == [thread]
+messages = jev_calls()[-1]["state"]["thread"]["messages"]
+published = [m["content"] for m in load()["threads"][thread]["messages"] if m["id"] in accepted]
+assert len(accepted) == 5 and sum(map(len, published)) > 8000, accepted
+assert [m["text"] for m in messages if m.get("reply") == messages[-1]["reply"]] == published
+assert any(v.get("status") == "done" and not v.get("audit_only") for v in verdicts(thread)), verdicts(thread)
+prompt = (CAPTURE / "namer.txt").read_text().partition("--- conversation ---\n")[2]
+assert "Closing this thread." not in prompt and "routine log entry" in prompt, prompt
+assert sum(len(line.partition(": ")[2]) for line in prompt.splitlines() if not line.startswith("current name:")) <= 8000
+print("ok")
+PY
+  ) || fail "the latest reply lost chunks outside the optional history limits: $out"
+  pass "split close-outs keep their full text and the judge distinguishes a standalone gate note"
+}
+
+# --- 17. a drift rename may move to another known project label ----------------------
+#
+# An approved public label may be used before a project has its own thread.
+# Prior titles cannot authorize a switch. Test 7 owns captain-name protection.
+
+test_17_a_drift_rename_may_move_to_another_known_project_label() {
+  local home out map
+  for map in missing empty; do
+    home="$TMP_ROOT/t17-$map"
+    setup_home "$home"
+    if [ "$map" = empty ]; then
+      : > "$home/config/ext-project-labels"
+    fi
+    new_thread "$home" "$M1" "Aceh · log check" "Search latency is back to normal."
+    post "$home" "$M1" followup 2 "Moving on to the thread-title judge you asked about."
+    out=$(py "$home" <<'PY'
+(thread,) = threads()
+os.environ["FM_TEST_NAME"] = "Firstmate · thread title judge fix"
+assert deliver("drift") == ["sent"]
+tick(0)
+assert name(thread) == "Aceh · log check", name(thread)
+prompt = (CAPTURE / "namer.txt").read_text()
+labels = prompt.partition("--- known project labels ---\n")[2].partition("--- conversation ---")[0]
+assert not labels.strip(), prompt
+print("ok")
+PY
+    ) || fail "the $map public-label map did not prevent a prefix switch: $out"
+  done
+
+  home="$TMP_ROOT/t17a"
+  setup_home "$home"
+  mkdir -p "$home/data"
+  printf '%s\n' '- hybrid-search - registered project (added 2026-11-23)' > "$home/data/projects.md"
+  printf 'hybrid-search\tHybrid Search Engine\n' > "$home/config/ext-project-labels"
+  new_thread "$home" "$M1" "Hybrid Search Engine · log check" "Search latency is back to normal."
+  post "$home" "$M1" followup 2 "Moving on to the Firstmate thread-title judge you asked about."
+  out=$(py "$home" <<'PY'
+first = next(t for t in threads() if "log check" in name(t))
+os.environ["FM_TEST_NAME"] = "Firstmate · thread title judge fix"
+assert deliver("drift") == ["sent"]
+assert verdicts(first)[-1]["topic_fits"] is False, verdicts(first)
+tick(0)
+assert name(first) == "⏳ Firstmate · thread title judge fix", name(first)
+prompt = (CAPTURE / "namer.txt").read_text()
+assert "--- known project labels ---" in prompt, prompt
+assert "--- known project labels ---\nFirstmate\n" in prompt, prompt
+assert "Keep the current project label unless the conversation has clearly moved" in prompt, prompt
+assert not record(first).get("manual_base"), record(first)
+print("ok")
+PY
+  ) || fail "a drift rename did not move to another known project label: $out"
+
+  home="$TMP_ROOT/t17b"
+  setup_home "$home"
+  mkdir -p "$home/data"
+  printf '%s\n' '- aceh-repo [direct-PR +yolo] - registered project (added 2026-11-23)' \
+    '- private-client - registered project (added 2026-11-23)' > "$home/data/projects.md"
+  printf 'aceh-repo\tAceh\nunregistered\tGhost Project\nprivate-client\t/build/private\n' \
+    > "$home/config/ext-project-labels"
+  new_thread "$home" "$M1" "Hybrid Search Engine · log check" "Search latency is back to normal."
+  post "$home" "$M1" followup 2 "Another pass over the same log."
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+os.environ["FM_TEST_NAME"] = "Hybrid Search Engine · log check follow-up"
+assert deliver("drift") == ["sent"]
+tick(0)
+assert name(thread) == "⏳ Hybrid Search Engine · log check follow-up", name(thread)
+prompt = (CAPTURE / "namer.txt").read_text()
+assert "--- known project labels ---\nAceh\nFirstmate\n" in prompt, prompt
+assert "Keep the current project label unless the conversation has clearly moved" in prompt, prompt
+assert all(label not in prompt for label in ("aceh-repo", "private-client", "Ghost Project", "/build/private")), prompt
+print("ok")
+PY
+  ) || fail "a drift rename that keeps the thread project did not keep its prefix: $out"
+  post "$home" "$M1" followup 3 "Moving to Aceh ingestion."
+  out=$(py "$home" <<'PY'
+(thread,) = threads()
+set_clock(T0 + 601)
+os.environ["FM_TEST_NAME"] = "Aceh · ingestion checks"
+assert deliver("drift") == ["sent"]
+tick(601)
+assert name(thread) == "⏳ Aceh · ingestion checks", name(thread)
+print("ok")
+PY
+  ) || fail "a registered project's configured public label did not authorize a switch: $out"
+
+  home="$TMP_ROOT/t17c"
+  local M2=444444444444444442
+  setup_home "$home"
+  new_thread "$home" "$M1" "Hybrid Search Engine · log check" "Search latency is back to normal."
+  new_thread "$home" "$M2" "Ghost Project · prior title" "A previous discussion."
+  post "$home" "$M1" followup 2 "Another pass over the same log."
+  out=$(py "$home" <<'PY'
+thread = next(t for t in threads() if "log check" in name(t))
+os.environ["FM_TEST_NAME"] = "Ghost Project · invented prefix"
+assert deliver("drift") == ["sent"]
+tick(0)
+assert name(thread) == "Hybrid Search Engine · log check", name(thread)
+assert not any("Ghost" in p["name"] for p in patches(thread)), patches(thread)
+assert "Ghost Project" not in (CAPTURE / "namer.txt").read_text()
+print("ok")
+PY
+  ) || fail "an unknown project label was not refused: $out"
+  pass "a drift rename moves to another known project label, keeps the thread label otherwise, and refuses an unknown prefix"
+}
+
+test_unjudgeable_replies_hold_the_marker() {
+  local scenario home text out
+  for scenario in deleted oversized; do
+    home="$TMP_ROOT/skip-$scenario"
+    setup_home "$home"
+    new_thread "$home" "$M1" "Aceh · nightly reindex" "Looking at the reindex schedule now."
+    case "$scenario" in
+      deleted) text=$'Deployment handed off. Closing this thread.\n\nExternal gate still awaits vendor approval.' ;;
+      oversized) printf -v text ' ordinary log entry %.0s' {1..2450} ;;
+    esac
+    post "$home" "$M1" followup 2 "$text"
+    post "$home" "$M1" followup 3 "The reindex finished."
+    out=$(FM_TEST_SKIP_CASE="$scenario" py "$home" <<'PY'
+(thread,) = threads()
+use("running")
+assert autoname.judge_scan(HOME, retry_failed=True) == [thread]
+tick(0)
+previous = name(thread)
+assert previous == "⏳ Aceh · nightly reindex", previous
+set_clock(T0 + 601)
+scenario = os.environ["FM_TEST_SKIP_CASE"]
+if scenario == "deleted":
+    os.environ["FM_EXT_DISCORD_REPLY_MAX_CHARS"] = "50"
+    reason = "incomplete reply, chunk deleted"
+else:
+    os.environ["FM_EXT_DISCORD_THREAD_MAX"] = "30"
+    reason = "reply too long to judge"
+with patch.object(autoname, "after_post"), only("followup.2"):
+    assert deliver() == ["sent"]
+data = load()
+messages = data["threads"][thread]["messages"][1:]
+latest = messages[-1]["id"]
+if scenario == "deleted":
+    assert len(messages) == 2, messages
+    del data["threads"][thread]["messages"][1]
+    save(data)
+else:
+    assert sum(len(m["content"]) for m in messages) > 47500
+
+calls = len(jev_calls())
+use("done")
+assert autoname.judge_scan(HOME, retry_failed=True) == []
+tick(601)
+reads = list(load()["gets"])
+assert autoname.judge_scan(HOME, retry_failed=True) == []
+assert load()["gets"] == reads and len(jev_calls()) == calls
+skips = [v for v in verdicts(thread) if v.get("skip_reason")]
+assert len(skips) == 1 and skips[0]["audit_only"], skips
+assert (skips[0]["skip_reason"], skips[0]["message_id"]) == (reason, latest), skips
+assert name(thread) == previous, name(thread)
+
+assert deliver("done") == ["sent"]
+tick(601)
+assert len(jev_calls()) == calls + 1 and name(thread) == "✅ Aceh · nightly reindex", verdicts(thread)
+print("ok")
+PY
+    ) || fail "the $scenario reply did not stay skipped until a newer reply: $out"
+  done
+  pass "deleted and oversized replies each log one skip and hold the current marker"
 }
 
 test_1_only_the_reconciler_writes_titles
@@ -1420,3 +1771,7 @@ test_12_legacy_intent_and_unclear_checks_keep_the_title
 test_13_a_raced_write_is_corrected_without_waiting
 test_get_cooldowns_gate_compare_and_history
 test_14_the_judge_reads_the_reply_state_and_logs_each_call
+test_15_the_judge_criteria_keep_a_closing_note_and_a_question_apart
+test_16_a_split_reply_is_judged_as_one_reply
+test_17_a_drift_rename_may_move_to_another_known_project_label
+test_unjudgeable_replies_hold_the_marker
