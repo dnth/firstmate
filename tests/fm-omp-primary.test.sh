@@ -2808,6 +2808,144 @@ JS
   pass "OMP forces a turn after an unconsumed in-flight wake outlives its bound"
 }
 
+# 2026-11-27 wake stall: OMP staged a hidden next-turn wake behind a streaming
+# run and raised before_agent_start 2 ms later, which the core recorded as
+# consumption and used to clear the in-flight marker. The wake never entered a
+# model turn and no terminal agent_end followed, so the episode stayed open and
+# suppressed 34 later main-bound closes for 90 minutes: no escape hatch keyed on
+# model entry. A hand-off consumed without its own message_start past the bound
+# must force one turn-forcing follow-up; a hand-off that did enter a turn keeps
+# today's suppression.
+test_native_omp_unentered_handoff_forces_turn_after_bound() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-unentered-handoff)
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-stop" ]; do
+  if [ -e "$state/wake-now-$count" ]; then
+    printf 'check: check-close-%s\n' "$count"
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS=2500 \
+    node --input-type=module 2>&1 <<'JS'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const episodeFile = `${state}/extensions/omp-primary-watch/main-fallback-episode.state`;
+const ledgerFile = `${state}/extensions/omp-primary-watch/main-wake-deliveries.log`;
+const handlers = new Map();
+const wakes = [];
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  // The runtime accepts the hidden send and raises nothing on its own: the
+  // driver decides which consumption events it emits, so the stranded path is
+  // modeled exactly.
+  sendMessage(message, options) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push({ content: String(message.content ?? ""), options });
+  },
+};
+const queue = `${state}/.wake-queue`;
+const seqFile = `${state}/.wake-queue.seq`;
+let seq = 0;
+const appendRow = (kind, key) => {
+  seq += 1;
+  appendFileSync(queue, `0\t${seq}\t${kind}\t${key}\t${kind}: ${key}\n`);
+  writeFileSync(seqFile, `${seq}\n`);
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8").trim()) : 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await sleep(10); }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const episodeState = () => existsSync(episodeFile) ? readFileSync(episodeFile, "utf8") : "";
+const episodeField = (name) => (episodeState().match(new RegExp(`^${name}=(.*)$`, "m")) || [])[1] ?? "";
+const ledger = () => existsSync(ledgerFile) ? readFileSync(ledgerFile, "utf8") : "";
+const deliverAs = (wake) => wake?.options?.deliverAs ?? "";
+const triggersTurn = (wake) => wake?.options?.triggerTurn === true;
+const enterTurn = (wake) => handlers.get("message_start")({
+  type: "message_start",
+  message: { role: "custom", customType: "firstmate-watcher-wake", content: wake.content },
+});
+
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?unentered-bound=${Date.now()}`);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+
+// Close 1 opens the episode through the ordinary hidden next-turn send.
+appendRow("check", "crew-a.turn-ended");
+writeFileSync(`${state}/wake-now-1`, "go\n");
+await waitFor(() => wakes.length === 1 && count() === 2, "first fallback wake");
+if (!wakes[0].content.includes("check: check-close-1")) throw new Error(`first wake mismatched its close: ${wakes[0].content}`);
+if (deliverAs(wakes[0]) !== "nextTurn" || !triggersTurn(wakes[0])) {
+  throw new Error(`first wake did not use hidden next-turn delivery: ${JSON.stringify(wakes[0].options)}`);
+}
+
+// The runtime stages the send and raises before_agent_start; the wake itself
+// never enters a model turn (no message_start). Only a non-terminal agent_end
+// follows, so main never goes idle.
+await handlers.get("before_agent_start")({ prompt: wakes[0].content }, context);
+if (episodeField("in_flight") !== "0") throw new Error(`the hand-off was not consumed: ${episodeState()}`);
+if (!(Number(episodeField("last_consume_at_ms")) > 0)) throw new Error(`consumption time was not recorded: ${episodeState()}`);
+await handlers.get("agent_end")({ willContinue: true }, context);
+
+// Past the bound with no entered-turn evidence, the next check close must
+// force a turn instead of hiding behind the open episode.
+await sleep(2800);
+appendRow("check", "crew-b.turn-ended");
+writeFileSync(`${state}/wake-now-2`, "go\n");
+await waitFor(() => wakes.length === 2 && count() === 3, "forced follow-up after the unentered bound");
+if (!wakes[1].content.includes("check: check-close-2")) throw new Error(`forced wake mismatched its close: ${wakes[1].content}`);
+if (deliverAs(wakes[1]) !== "followUp" || !triggersTurn(wakes[1])) {
+  throw new Error(`the unentered hand-off was not re-delivered as a forced follow-up: ${JSON.stringify(wakes[1].options)}`);
+}
+if (!/consumed\t.*\tby=unentered-bound/.test(ledger().split("\n").find((line) => line.includes("by=unentered-bound")) ?? "")) {
+  throw new Error(`the ledger did not name the unentered-bound bypass: ${ledger()}`);
+}
+
+// The forced wake does enter its turn. Once it does, the same wall clock no
+// longer earns a forced send: a later close stays suppressed behind the
+// episode, exactly as before this bypass existed.
+await enterTurn(wakes[1]);
+if (episodeField("in_flight") !== "0") throw new Error(`the forced hand-off was not consumed on entry: ${episodeState()}`);
+await sleep(2800);
+appendRow("check", "crew-c.turn-ended");
+writeFileSync(`${state}/wake-now-3`, "go\n");
+await waitFor(() => count() === 4, "successor arm after the third close");
+await sleep(300);
+if (wakes.length !== 2) throw new Error(`a hand-off that entered its turn still forced a send: ${wakes.length}`);
+if (!ledger().includes("behind=episode")) throw new Error(`the entered hand-off was not suppressed behind the episode: ${ledger()}`);
+
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
+console.log("omp-unentered-bound-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP unentered hand-off bound"
+  assert_contains "$out" omp-unentered-bound-ok "an unentered hand-off suppressed later wakes past its bound: $out"
+  pass "OMP forces a turn for a consumed hand-off that never entered its model turn"
+}
+
 # 2026-11-20 idle gap: a main-fallback episode opened by a wake main never
 # acknowledged kept suppressing every later close - two Discord requests and
 # their overdue reminders included - while main sat idle at the prompt. An idle
@@ -3889,6 +4027,7 @@ test_native_omp_main_fallback_coalesces_burst
 test_native_omp_suppressed_check_redelivers_at_episode_close
 test_native_omp_idle_main_wake_consumption_and_stale_bound
 test_native_omp_unconsumed_inflight_wake_forces_turn_after_bound
+test_native_omp_unentered_handoff_forces_turn_after_bound
 test_native_omp_idle_main_hears_wake_behind_open_episode
 test_native_omp_settlement_edges
 test_native_omp_turn_end_with_unacked_wakes_continues_once
