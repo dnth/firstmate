@@ -117,13 +117,18 @@ fi
 # mtime in the future - still ends in a lock-timeout refusal, about
 # FM_BUSY_LOCK_STALE_SECS + 2 seconds after the wait began.
 lock_acquire() {
-  local stale=${FM_BUSY_LOCK_STALE_SECS:-5} start now mtime age
+  local stale=${FM_BUSY_LOCK_STALE_SECS:-5} start= tick now mtime age
   # A digit-only setting keeps its decimal value: 08 in shell arithmetic is an
   # invalid octal, which would abort the writer under `set -u`.
   case "$stale" in ''|*[!0-9]*) stale=5 ;; esac
   stale=$((10#$stale))
-  start=$(date +%s)
   while ! mkdir "$LOCK" 2>/dev/null; do
+    tick=$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC \
+      -e 'printf "%.0f", clock_gettime(CLOCK_MONOTONIC) * 1000' 2>/dev/null) || {
+      echo "error: busy-state monotonic clock unavailable for $ID" >&2
+      return 1
+    }
+    start=${start:-$tick}
     now=$(date +%s)
     mtime=$(lock_mtime "$LOCK" || true)
     # Anything unreadable or non-numeric reads as "just created", so an
@@ -135,12 +140,7 @@ lock_acquire() {
       rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null || true
       mkdir "$LOCK" 2>/dev/null && break
     fi
-    # Whole-second clocks: once stale + 2 seconds have passed since the wait
-    # began, any lock that already existed then has crossed the stale bound
-    # above, so only a younger, re-taken lock can still be in the way. The poll
-    # interval only bounds how quickly that age is noticed; it never shortens
-    # the wait below the stale bound.
-    if [ $((now - start)) -gt $((stale + 1)) ]; then
+    if [ $(((tick - start) / 1000)) -ge $((stale + 2)) ]; then
       echo "error: busy-state lock timeout for $ID" >&2
       return 1
     fi

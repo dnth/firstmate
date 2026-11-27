@@ -2582,7 +2582,6 @@ if [ "$HARNESS" = omp ]; then
       exit 1
     fi
     if [ -f "$OMP_PRIOR_META" ]; then
-      OMP_PRIOR_SPAWN_GEN=$(fm_meta_get "$OMP_PRIOR_META" spawn_gen)
       OMP_PRIOR_BACKEND=$(fm_backend_of_meta "$OMP_PRIOR_META")
       OMP_PRIOR_TARGET=$(fm_backend_target_of_meta "$OMP_PRIOR_META")
       if [ -z "$OMP_PRIOR_TARGET" ]; then
@@ -4790,9 +4789,8 @@ fi
 # registries derive the state dir and id; the signal appends the gen suffix.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
-if [ "$RELAUNCH" -eq 1 ] || [ "$OMP_SECONDMATE_RELAUNCH" -eq 1 ]; then
-  prior_spawn_gen=${RELAUNCH_PRIOR_GEN-${OMP_PRIOR_SPAWN_GEN-}}
-  fm_busy_retire_incarnation "$STATE_REAL" "$ID" "$prior_spawn_gen" || {
+if [ "$RELAUNCH" -eq 1 ]; then
+  fm_busy_retire_incarnation "$STATE_REAL" "$ID" "$RELAUNCH_PRIOR_GEN" || {
     echo "error: could not retire task $ID's busy generation before relaunch" >&2
     exit 1
   }

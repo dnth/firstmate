@@ -630,8 +630,11 @@ do_interrupt() {
 }
 
 retire_busy_incarnation() {
-  fm_busy_retire_incarnation "$STATE" "$ID" "$TASK_SPAWN_GEN" \
-    || die "could not retire task $ID's busy generation"
+  fm_busy_retire_incarnation "$STATE" "$ID" "$TASK_SPAWN_GEN" && return 0
+  if [ "$VERB" = exit ]; then
+    die "could not retire task $ID's busy generation; retry 'fm-control.sh $ID exit' if the endpoint remains, or use 'fm-control.sh $ID relaunch' if it is gone (ships and scouts require --note or --note-file)"
+  fi
+  die "could not retire task $ID's busy generation"
 }
 
 # do_exit: stop the running agent, preserving its worktree. Prints
@@ -646,7 +649,7 @@ do_exit() {
       return 0
       ;;
     alive) ;;
-    missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
+    missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; use 'fm-control.sh $ID relaunch' to reconcile it (ships and scouts require --note or --note-file)" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.

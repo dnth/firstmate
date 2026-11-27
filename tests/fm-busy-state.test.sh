@@ -269,6 +269,42 @@ test_lock_that_stays_young_is_refused_within_a_bound() {
   pass "a lock that stays younger than the stale bound is refused within a bound"
 }
 
+test_lock_deadline_survives_wall_clock_rollback() {
+  local state gen fakebin out status started elapsed
+  state=$(new_state_dir clock-rollback)
+  gen=$("$EV" arm "$state" t1)
+  mkdir "$state/t1.busy-state.lock"
+  fakebin=$(fm_fakebin "$state/../fakebin")
+  cat > "$fakebin/date" <<'SH'
+#!/usr/bin/env bash
+now=$("$FM_TEST_REAL_DATE" "$@") || exit 1
+if [ ! -f "$FM_TEST_DATE_SAMPLE" ]; then
+  printf '%s\n' "$now" > "$FM_TEST_DATE_SAMPLE"
+elif [ "$now" -lt "$(( $(cat "$FM_TEST_DATE_SAMPLE") + 8 ))" ]; then
+  now=$((now - 60))
+fi
+printf '%s\n' "$now"
+SH
+  chmod +x "$fakebin/date"
+  started=$SECONDS
+  out=$(FM_TEST_REAL_DATE="$(command -v date)" FM_TEST_DATE_SAMPLE="$state/../first-sample" \
+    PATH="$fakebin:$PATH" FM_BUSY_LOCK_STALE_SECS=2 "$EV" retire "$state" t1 --gen "$gen" 2>&1) \
+    && status=0 || status=$?
+  elapsed=$((SECONDS - started))
+  [ "$status" = 1 ] || fail "retire did not time out during the wall-clock rollback: $out"
+  case "$out" in
+    *'busy-state lock timeout for t1'*) : ;;
+    *) fail "retire failed for a reason other than its deadline: $out" ;;
+  esac
+  [ "$elapsed" -ge 3 ] && [ "$elapsed" -le 6 ] \
+    || fail "the four-second deadline timed out after $elapsed seconds"
+  [ -d "$state/t1.busy-state.lock" ] || fail "retire reclaimed a lock that still read as fresh"
+  [ "$(fm_busy_current_gen "$state" t1)" = "$gen" ] || fail "a timed-out retire changed the generation"
+  [ "$(fm_busy_classify tmux w1 claude t1 "$state")" = "busy fm-spawn" ] \
+    || fail "a timed-out retire changed the busy verdict"
+  pass "a wall-clock rollback cannot extend the busy-lock deadline"
+}
+
 test_retire_missing_sidecar_is_idempotent() {
   local state gen
   state=$(new_state_dir retire-missing)
@@ -535,6 +571,7 @@ test_fresh_orphan_lock_is_broken_on_the_first_retire
 test_live_writer_lock_is_waited_for_not_broken
 test_leading_zero_stale_setting_reclaims_at_eight_seconds
 test_lock_that_stays_young_is_refused_within_a_bound
+test_lock_deadline_survives_wall_clock_rollback
 test_stale_gen_event_rejected
 test_stale_gen_record_unknown
 test_missing_record_unknown_not_idle

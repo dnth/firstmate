@@ -188,6 +188,20 @@ case "$cmd" in
     line=$(resolve "$target") || exit 1
     ses=${line%%	*}
     wid=$(printf '%s' "$line" | awk -F '\t' '{print $2}')
+    if [ "${FM_TEST_CLOSE_ON_EXIT:-0}" = 1 ]; then
+      case "${!#}" in
+        /exit)
+          : > "$STATE/$ses.exit-typed"
+          exit 0
+          ;;
+        Enter)
+          if [ -f "$STATE/$ses.exit-typed" ]; then
+            : > "$(winfile "$ses")"
+            exit 0
+          fi
+          ;;
+      esac
+    fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       for a in "$@"; do
         case "$a" in
@@ -1469,15 +1483,20 @@ test_control_relaunch_retires_recorded_busy_gen() {
 }
 
 test_control_exit_retries_busy_retirement() {
-  local rec id meta gen
-  id=$(case_id busy-retire-retry)
-  rec=$(make_case busy-retire-retry "$id" pool)
+  local endpoint=$1 rec id meta gen window retry_status
+  id=$(case_id "busy-retire-$endpoint")
+  rec=$(make_case "busy-retire-$endpoint" "$id" pool)
   read_case "$rec"
   meta="$HOME_DIR/state/$id.meta"
   write_meta "$meta" "$id" tmux "$WT_DIR" "$PROJ_DIR" claude
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" "$id")
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" "$id" --state idle)
   printf 'busy_gen=%s\n' "$gen" >> "$meta"
-  printf '@1\tfm-%s\t%s\tbash\n' "$id" "$WT_DIR" > "$CASE_DIR/fake/tmux-state/ses-$id.windows"
+  window="$CASE_DIR/fake/tmux-state/ses-$id.windows"
+  if [ "$endpoint" = closed ]; then
+    printf '@1\tfm-%s\t%s\tclaude\n' "$id" "$WT_DIR" > "$window"
+  else
+    printf '@1\tfm-%s\t%s\tbash\n' "$id" "$WT_DIR" > "$window"
+  fi
 
   cat > "$FAKEBIN_DIR/mv" <<'SH'
 #!/usr/bin/env bash
@@ -1486,19 +1505,33 @@ exec "$FM_TEST_REAL_MV" "$@"
 SH
   chmod +x "$FAKEBIN_DIR/mv"
   CONTROL_OUT=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" \
+    FM_TEST_CLOSE_ON_EXIT=1 FM_CONTROL_POLL=0.05 FM_CONTROL_EXIT_WAIT=5 \
     FM_TEST_FAIL_META="$meta" FM_TEST_REAL_MV="$(command -v mv)" "$CONTROL" "$id" exit 2>&1)
   expect_code 1 "$?" "exit should surface an unsuccessful metadata rewrite; got: $CONTROL_OUT"
   assert_contains "$CONTROL_OUT" "could not retire task $id's busy generation" "exit understated the rewrite failure"
+  assert_contains "$CONTROL_OUT" "use 'fm-control.sh $id relaunch' if it is gone" "exit did not identify the recovery command for a missing endpoint"
   assert_absent "$HOME_DIR/state/$id.busy-gen" "the failed rewrite fixture did not retire the sidecar"
   assert_absent "$HOME_DIR/state/$id.busy-state" "the failed rewrite fixture did not retire the busy record"
   assert_grep "busy_gen=$gen" "$meta" "the failed rewrite lost the recorded generation"
 
   rm "$FAKEBIN_DIR/mv"
   CONTROL_OUT=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" "$CONTROL" "$id" exit 2>&1)
-  expect_code 0 "$?" "exit should finish a partially completed retirement; got: $CONTROL_OUT"
-  assert_contains "$CONTROL_OUT" "already-stopped" "exit did not report that the endpoint was already stopped"
-  assert_no_grep "busy_gen=" "$meta" "exit left the old generation recorded after a retry"
-  pass "fm-control exit: a stopped task can finish retirement after losing its sidecar"
+  retry_status=$?
+  if [ "$endpoint" = closed ]; then
+    expect_code 1 "$retry_status" "exit should refuse an already missing endpoint; got: $CONTROL_OUT"
+    assert_contains "$CONTROL_OUT" "recorded endpoint is gone" "exit retry did not report the missing endpoint"
+    assert_grep "busy_gen=$gen" "$meta" "the refused exit unexpectedly changed the task record"
+    write_pool_state "$CASE_DIR" "$WT_DIR"
+    write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+    run_control "$CASE_DIR" "$HOME_DIR" "$id"
+    expect_code 1 "$CONTROL_STATUS" "relaunch without a durable lease should refuse; got: $CONTROL_OUT"
+    assert_contains "$CONTROL_OUT" "no durable Treehouse lease" "relaunch did not reach the replacement boundary"
+  else
+    expect_code 0 "$retry_status" "exit should finish a partially completed retirement; got: $CONTROL_OUT"
+    assert_contains "$CONTROL_OUT" "already-stopped" "exit did not report that the endpoint was already stopped"
+  fi
+  assert_no_grep "busy_gen=" "$meta" "the recovery command left the old generation recorded"
+  pass "fm-control exit: a $endpoint endpoint can finish retirement after losing its sidecar"
 }
 
 test_spawn_relaunch_retires_busy_gen_before_unarmed_replacement() {
@@ -1550,7 +1583,8 @@ test_relaunch_skips_duplicate_brief_guard
 test_relaunch_preserves_delivery_identity_mid_handoff
 test_relaunch_without_delivery_identity_writes_none
 test_control_relaunch_retires_recorded_busy_gen
-test_control_exit_retries_busy_retirement
+test_control_exit_retries_busy_retirement stopped
+test_control_exit_retries_busy_retirement closed
 test_spawn_relaunch_retires_busy_gen_before_unarmed_replacement
 test_tmux_gone_relaunch_durable_lease_ownership
 test_tmux_gone_relaunch_claim_without_lease_refuses
