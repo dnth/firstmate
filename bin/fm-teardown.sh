@@ -1288,10 +1288,8 @@ teardown_treehouse_return() {
   lock=$(worktree_git_lock_path "$dir") || lock=""
   if [ -n "$lock" ] && [ -e "$lock" ]; then
     lock_desc=$lock
-    # A killed git can orphan a lock that no live process holds while its mtime
-    # is still inside the staleness window. The bounded retries above cannot
-    # outlast that window, so wait out the remaining age once here; the proof
-    # below stays the only thing that authorizes removal.
+    # The retry window can end before an orphaned lock reaches the minimum age.
+    # Only the shared proof below authorizes removal.
     if ! fm_lock_has_live_holder "$lock" "$dir" && lock_age=$(fm_lock_age "$lock") \
       && [ "$lock_age" -ge 0 ] && [ "$lock_age" -lt "$STALE_WORKTREE_LOCK_AGE_SECS" ] \
       && [[ "$STALE_WORKTREE_LOCK_AGE_SECS" =~ ^[[:space:]]*\+?([0-9]+)[[:space:]]*$ ]]; then
