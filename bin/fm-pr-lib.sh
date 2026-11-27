@@ -19,10 +19,12 @@
 # wherever they appear, ignores every other key, and refuses a duplicated pr=
 # record or a malformed identity field.
 #
-# A registered poll binds to the template generation it was armed from through
-# the check's own recorded hash and file identity, so a repository template
-# update leaves an armed poll valid. The watcher executes the current repository
-# poll with validated data and never executes the registered state-file copy.
+# The registration binds the published check to the template copied at arming.
+# The check's bytes and file identity must match the registration's template
+# hash and check identity. Altered or unregistered checks cannot run as merge polls.
+# The watcher passes validated sidecar data to the current repository poll,
+# which must be a regular non-symlink file. It never executes the published
+# state-file copy as a merge poll.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -608,10 +610,8 @@ fm_pr_poll_artifacts_valid() {
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
-  # Authenticate the published generation against its registration below, not
-  # against a template that may have changed during a repository update. The
-  # template must still be a runnable repository file because the watcher runs
-  # it with this poll's validated data and never executes the check bytes.
+  # The repository entry point is checked here. The registration authenticates
+  # the published copy below.
   [ -f "$template" ] && [ ! -L "$template" ] || return 1
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1

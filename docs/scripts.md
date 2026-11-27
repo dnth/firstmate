@@ -135,8 +135,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication and identity-bound retirement |
-| `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
-| `fm-pr-check.sh`         | Publish a static merge poll and atomically record validated PR-path metadata, including the review-manifest and PR-body gate |
+| `fm-pr-poll.sh`          | Poll for PR and MR outcomes using validated sidecar data |
+| `fm-pr-check.sh`         | Arm a [merge poll that stays registered across template updates](../bin/fm-pr-lib.sh) and atomically record validated PR-path metadata, including the review-manifest and PR-body gate |
 | `fm-review-manifest.sh`  | Verify GitHub review manifests and PR body format; its header owns the contract, including Pipeline validation through `fm-pipeline-verify.py` |
 | `fm-landing.sh`          | Track a remote second mate's PRs under main-owned landing records, then settle a merge or close |
 | `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub URL, and verify the real outcome |
