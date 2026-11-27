@@ -31,6 +31,10 @@ VERSIONED_CLAUDE="$CLAUDE_VERSION_DIR/2.1.220"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-bin")
 ln -s /bin/bash "$FAKEBIN/claude"
 NAMED_CLAUDE="$FAKEBIN/claude"
+# OMP's daemon workers are launched through the same `omp` executable, so the
+# fixture needs that name to reproduce a worker's argv[0].
+ln -s /bin/bash "$FAKEBIN/omp"
+NAMED_OMP="$FAKEBIN/omp"
 
 # --- unit layer: identity behind a deterministic process table ---------------
 
@@ -220,6 +224,112 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# Evaluate one library expression as an OMP session would. The fake table makes
+# 2147483647 the launch-bound standalone OMP session, whose identity needs a real
+# executable path plus the PID executable, and 2147483600 OMP's daemon broker.
+# With shape=direct nothing sits between the tool shell and the session; with
+# shape=broker the tool shell runs under the shared broker.
+omp_lib_eval() {  # <fakebin> <shape> <expression>
+  local fakebin=$1 shape=$2 expr=$3
+  FM_TEST_OMP_SHAPE="$shape" FM_TEST_OMP_EXE="$fakebin/omp" \
+    FM_OMP_PROCESS_EXPECTED_BUN="$fakebin/omp" \
+    FM_OMP_PROCESS_EXPECTED_BIN="$fakebin/omp" \
+    lib_eval "$fakebin" "$expr"
+}
+
+# OMP's daemon broker (`omp __omp_worker_daemon_broker`) hosts every bash call
+# made with `name`, carries the bare name `omp`, and is shared by every OMP in
+# one project directory, so it outlives sessions and its parent is whichever OMP
+# started it. It is never the session: the walk must stop at it instead of
+# climbing into an unrelated OMP, and a lock naming it must read stale.
+test_omp_daemon_worker_is_never_the_session() {
+  local dir fakebin got args
+  dir="$TMP_ROOT/omp-daemon-worker"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/omp"
+  chmod +x "$fakebin/omp"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_OMP_SHAPE:-broker}" in
+  2147483647:comm=:*) printf '%s\n' omp ;;
+  2147483647:args=:*) printf '%s\n' 'omp --resume 01a0d36d' ;;
+  2147483647:ppid=:*) printf '%s\n' 1 ;;
+  2147483600:comm=:*) printf '%s\n' /opt/homebrew/Cellar/omp/18.8.4/bin/omp ;;
+  2147483600:args=:*) printf '%s\n' '/opt/homebrew/Cellar/omp/18.8.4/bin/omp __omp_worker_daemon_broker' ;;
+  2147483600:ppid=:*) printf '%s\n' 2147483647 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=:broker) printf '%s\n' 2147483600 ;;
+  *:ppid=:direct) printf '%s\n' 2147483647 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+printf 'n%s\n' "${FM_TEST_OMP_EXE:-}"
+SH
+  chmod +x "$fakebin/lsof"
+
+  # Only an `__omp_worker_*` argument in subcommand position makes a worker; an
+  # ordinary OMP session, and a prompt that merely mentions the token, do not.
+  for args in \
+    '/opt/homebrew/Cellar/omp/18.8.4/bin/omp __omp_worker_daemon_broker' \
+    '/opt/homebrew/Cellar/omp/18.8.4/bin/omp __omp_worker_lsp_mux --stdio' \
+    'omp __omp_worker_text_predict'; do
+    lib_eval "$fakebin" "fm_omp_daemon_worker '$args'" \
+      || fail "an OMP daemon worker argv was not recognized: $args"
+  done
+  for args in \
+    '/opt/homebrew/Cellar/omp/18.8.4/bin/omp' \
+    '/opt/homebrew/Cellar/omp/18.8.4/bin/omp --resume 01a0d36d' \
+    'omp --model x __omp_worker_daemon_broker'; do
+    if lib_eval "$fakebin" "fm_omp_daemon_worker '$args'"; then
+      fail "a non-worker OMP argv was treated as a daemon worker: $args"
+    fi
+  done
+
+  # Non-vacuity: an ordinary tool call straight under the OMP session resolves it,
+  # and nothing claims it runs under a worker.
+  got=$(omp_lib_eval "$fakebin" direct 'fm_harness_ancestry_pid') \
+    || fail "an OMP session directly above the tool shell was not found"
+  [ "$got" = 2147483647 ] || fail "direct ancestry resolved '$got', expected the OMP session pid 2147483647"
+  if omp_lib_eval "$fakebin" direct 'fm_harness_ancestry_under_omp_worker'; then
+    fail "a direct tool call was reported as running under an OMP daemon worker"
+  fi
+  printf '2147483647\n' > "$dir/state/.lock"
+  omp_lib_eval "$fakebin" direct "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the OMP session did not recognize its own lock"
+
+  # Under the broker the walk must stop with no verdict, not climb to the OMP
+  # session above it: that OMP is merely whichever one started the shared worker.
+  if got=$(omp_lib_eval "$fakebin" broker 'fm_harness_ancestry_pid'); then
+    fail "a broker-hosted command resolved harness pid '$got'; the walk must stop at the OMP daemon worker"
+  fi
+  omp_lib_eval "$fakebin" broker 'fm_harness_ancestry_under_omp_worker' \
+    || fail "a broker-hosted command was not reported as running under an OMP daemon worker"
+
+  if omp_lib_eval "$fakebin" broker 'fm_harness_pid_alive 2147483600'; then
+    fail "a live OMP daemon broker was recognized as a harness"
+  fi
+  omp_lib_eval "$fakebin" broker 'fm_harness_pid_alive 2147483647' \
+    || fail "a live OMP session was not recognized as a harness"
+  printf '2147483600\n' > "$dir/state/.lock"
+  if omp_lib_eval "$fakebin" broker "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a lock recorded with the OMP daemon broker pid was claimed as this session's own"
+  fi
+  pass "session-lock: an OMP daemon worker is never the session, and a lock pinned to one reads stale"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -355,10 +465,72 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+# The same shape through the real bin/fm-lock.sh in a real process tree. The fake
+# worker is invoked exactly as OMP starts one - `omp __omp_worker_daemon_broker` -
+# by running a script of that name through an executable named `omp`. Under it
+# acquisition must fail and name the cause instead of recording the worker; the
+# session acquiring directly must then reclaim a lock that a live worker pid
+# pinned. The session is a harness-named process, so the walk would otherwise
+# climb from the worker into it and record the wrong pid.
+test_e2e_fm_lock_under_omp_daemon_worker() {
+  local dir session_pid worker_pid i
+  dir="$TMP_ROOT/e2e-omp-daemon-worker"
+  mkdir -p "$dir/state" "$dir/worker"
+  install_autoarm_scripts "$dir"
+  cat > "$dir/worker/__omp_worker_daemon_broker" <<'SH'
+case "$WORKER_MODE" in
+  lock)
+    "$FM_LOCK" > "$FM_HOME/state/worker.out" 2>&1
+    printf '%s\n' "$?" > "$FM_HOME/state/worker.rc"
+    ;;
+  hold) sleep 30 ;;
+esac
+SH
+  cat > "$dir/session.sh" <<'SH'
+i=0
+while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
+cd "$FM_HOME/worker" || exit 1
+WORKER_MODE=lock "$OMP" __omp_worker_daemon_broker
+WORKER_MODE=hold "$OMP" __omp_worker_daemon_broker &
+held=$!
+printf '%s\n' "$held" > "$FM_HOME/state/worker-pid"
+printf '%s\n' "$held" > "$FM_HOME/state/.lock"
+"$FM_LOCK" > "$FM_HOME/state/session.out" 2>&1
+printf '%s\n' "$?" > "$FM_HOME/state/session.rc"
+kill "$held" 2>/dev/null
+SH
+  FM_HOME="$dir" FM_LOCK="$dir/bin/fm-lock.sh" OMP="$NAMED_OMP" \
+    bash -c '"$0" "$1" &' "$NAMED_CLAUDE" "$dir/session.sh"
+  i=0
+  while [ "$i" -lt 400 ] && [ ! -s "$dir/state/session.rc" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/state/session.rc" ] || fail "the OMP broker fixture never finished"
+
+  expect_code 1 "$(tr -d '[:space:]' < "$dir/state/worker.rc")" \
+    "fm-lock.sh under an OMP daemon worker must refuse: $(cat "$dir/state/worker.out")"
+  grep -q 'OMP daemon worker' "$dir/state/worker.out" \
+    || fail "the refusal does not name the OMP daemon worker: $(cat "$dir/state/worker.out")"
+  session_pid=$(tr -d '[:space:]' < "$dir/state/session-pid")
+  worker_pid=$(tr -d '[:space:]' < "$dir/state/worker-pid")
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/state/session.rc")" \
+    "the session could not reclaim a lock pinned to a live OMP daemon worker: $(cat "$dir/state/session.out")"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session_pid" ] \
+    || fail "the reclaimed lock names $(cat "$dir/state/.lock"), expected the OMP session $session_pid (worker $worker_pid)"
+  pass "session-lock e2e: fm-lock.sh refuses under an OMP daemon worker and the session reclaims a worker-pinned lock"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_omp_daemon_worker_is_never_the_session
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_e2e_fm_lock_under_omp_daemon_worker

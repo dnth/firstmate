@@ -33,7 +33,14 @@ if [ "${1:-}" = "status" ]; then
   exit 0
 fi
 
-me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me=$(fm_harness_ancestry_pid) || {
+  if fm_harness_ancestry_under_omp_worker; then
+    echo "error: cannot locate harness process in ancestry: this command runs under an OMP daemon worker (a bash call with \`name\`), whose ancestry belongs to whichever OMP started that shared worker; rerun it as an ordinary bash call without \`name\`" >&2
+  else
+    echo "error: cannot locate harness process in ancestry" >&2
+  fi
+  exit 1
+}
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
