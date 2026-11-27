@@ -31,12 +31,13 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
-| `exit` | Stop the agent, preserving the worktree and every uncommitted change, without explicitly closing the endpoint. | The backend's recovery-grade classifier reports the agent gone - stopped, or the endpoint positively absent after the command was delivered to an endpoint this plane had already validated and owned. Already-stopped is idempotent success. |
+| `exit` | Stop the agent, preserving the worktree and every uncommitted change, without explicitly closing the endpoint. | The backend confirms the agent stopped or proves the validated endpoint disappeared after exit delivery, and [busy-state retirement](architecture.md#busy-state-is-semantic-per-adapter) succeeds. |
 | `relaunch` | Replace the running agent with a new one in the same worktree, reusing the endpoint when the backend supports it or allocating a fresh endpoint for OMP secondmates, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint published by the replacement launch, and the durable record names the harness and endpoint that are actually running. |
 | `switch-model` | Change a live OMP worker's session model. | See the [verb header](../bin/fm-control.sh). |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
-An endpoint already missing before exit delivery is refused; disappearance after interrupt alone is also insufficient to confirm exit.
+An endpoint already missing before exit delivery is refused, and disappearance after interrupt alone is insufficient to confirm exit.
+If busy-state retirement fails after a confirmed stop, retry `exit` while the endpoint remains or use `relaunch` to recover a missing endpoint.
 Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
@@ -69,11 +70,12 @@ It is not deterministic across the verified adapters: codex and grok resume only
 3. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
-4. **Stop the old agent** through the `exit` verb, with its postcondition.
+4. **Stop the old agent** using the `exit` checks, then complete [busy-state retirement](architecture.md#busy-state-is-semantic-per-adapter) before proceeding.
    An endpoint the backend authoritatively reports missing counts as already stopped - there is no agent to stop - so the transaction journals that verdict and continues instead of refusing.
 5. **Retire an OMP second mate's session artifacts** through `bin/fm-control-lib.sh`'s `fm_control_omp_secondmate_prepare_relaunch`, subject to the recovery checks owned by [configuration's harness support](configuration.md#harness-support).
    Without it the launch owner would refuse the replacement over its own predecessor's leftovers, so an OMP second mate launches fresh with `--secondmate` and its new endpoint is revalidated from the record the launch published rather than the retired one.
-6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded worktree and normally the endpoint - and recreates the endpoint inside that same worktree when the backend proves the recorded one gone - while allowing OMP secondmates to publish a fresh endpoint after clearing the previous harness's per-task wiring and arming a fresh busy generation.
+6. **Launch the replacement** through the spawn owner, which reuses the recorded worktree and normally the endpoint, or recreates the endpoint inside that worktree when the backend proves it gone.
+   Standalone `fm-spawn.sh --relaunch` also enforces [busy-state retirement](architecture.md#busy-state-is-semantic-per-adapter) before publishing the replacement.
    A ship relaunch also recovers the recorded mode and yolo contract when the caller does not repeat them.
    For OMP ships and scouts, the launch owner accepts the prior task artifacts only after the recorded endpoint identity, worktree, and stopped state are proven, then restores the recorded OMP launch options for the replacement.
    The `fm-spawn.sh` header owns the ordinary-worker relaunch isolation boundary; secondmate homes remain exempt.
@@ -132,7 +134,8 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-stall-recovery.test.sh` - exit confirmation when an owned endpoint disappears after exit delivery, with an unrelated endpoint left untouched.
-- `tests/fm-spawn-relaunch-dead-endpoint.test.sh` - proven-gone endpoint recreation in the recorded worktree across tmux, Herdr, zellij, and cmux for both `fm-spawn --relaunch` and `fm-control relaunch`, the lease-ownership gate, the Herdr drifted-shell `cd` recovery, and the live/ambiguous/unprovable refusal matrix.
+- [`tests/fm-spawn-relaunch-dead-endpoint.test.sh`](../tests/fm-spawn-relaunch-dead-endpoint.test.sh) covers proven-gone endpoint recreation in the recorded worktree across tmux, Herdr, zellij, and cmux, the lease-ownership gate, Herdr shell recovery, and refusal for live or unprovable endpoints.
+  It also exercises retirement on exit and replacement and rejects late events after a harness switch.
 - `tests/fm-omp-relaunch-guard.test.sh` - primary home, code root, and project checkout refusals, Git-location spoofing, isolated standalone clone acceptance, and OMP artifact/profile recovery.
 - `tests/fm-secondmate-restart.test.sh` - the persist gate, restart capability routing, local and remote control-plane relaunches, already-current versus unprovable runtime behavior, and a local OMP restart after an update changes its loaded extension closure.
 - `tests/fm-update.test.sh` - fast-forward classification, live secondmate restart/nudge sets, and stopped or malformed endpoint handling.

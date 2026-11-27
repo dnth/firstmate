@@ -182,7 +182,11 @@ Ordinary task-state consumers act only on an exact busy verdict, so an unreadabl
 Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
 Per-generation `state/<id>.turn-ended.<spawn_gen>` files remain wake notifications, not current state; the consumer accepts only the live generation.
 
-Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
+Each record is bound to an incarnation token minted when the task's wiring is armed, so a mismatched event is rejected and a mismatched record classifies as unknown.
+Once a worker has stopped, the lifecycle paths use `fm_busy_retire_incarnation` to retire the semantic record and its sidecar and clear `busy_gen` from metadata before reporting a successful exit or publishing a replacement.
+The helper checks the recorded spawn generation under the metadata lock so an operation targeting an old incarnation cannot clear a successor's metadata, and a retry can finish cleanup when the sidecar is already gone.
+The writer waits for a contended lock to reach the reclaim age within its monotonic deadline, so a fresh orphan can be reclaimed during the first retirement attempt.
+The [writer's lock implementation](../bin/fm-busy-event.sh) owns the timing mechanics, and [the busy-state regression](../tests/fm-busy-state.test.sh) exercises the wait and timeout.
 Three other rendered-text readers deliberately remain outside this contract because they answer delivery questions: the submit acknowledgement and away-mode supervisor-pane busy guard in `bin/fm-tmux-lib.sh`, and the secondmate delivery-confirmation observation in `bin/fm-pending-reply-lib.sh`.
 All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
 
