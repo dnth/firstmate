@@ -2856,7 +2856,9 @@ const api = {
   // driver decides which consumption events it emits, so the stranded path is
   // modeled exactly.
   sendMessage(message, options) {
-    if (message?.customType === "firstmate-watcher-wake") wakes.push({ content: String(message.content ?? ""), options });
+    if (message?.customType === "firstmate-watcher-wake") {
+      wakes.push({ content: String(message.content ?? ""), options, details: message.details });
+    }
   },
 };
 const queue = `${state}/.wake-queue`;
@@ -2876,12 +2878,24 @@ async function waitFor(pred, label) {
 const episodeState = () => existsSync(episodeFile) ? readFileSync(episodeFile, "utf8") : "";
 const episodeField = (name) => (episodeState().match(new RegExp(`^${name}=(.*)$`, "m")) || [])[1] ?? "";
 const ledger = () => existsSync(ledgerFile) ? readFileSync(ledgerFile, "utf8") : "";
+const ledgerRows = (event, ...fields) => ledger().split("\n").filter((line) => {
+  const cells = line.split("\t");
+  return cells[1] === event && fields.every((field) => cells.includes(field));
+});
 const deliverAs = (wake) => wake?.options?.deliverAs ?? "";
 const triggersTurn = (wake) => wake?.options?.triggerTurn === true;
 const enterTurn = (wake) => handlers.get("message_start")({
   type: "message_start",
-  message: { role: "custom", customType: "firstmate-watcher-wake", content: wake.content },
+  message: { role: "custom", customType: "firstmate-watcher-wake", content: wake.content, details: wake.details },
 });
+function expectRetirements(...retired) {
+  const rows = ledgerRows("consumed", "by=unentered-bound");
+  if (rows.length !== retired.length || retired.some(({ details }, i) => {
+    const cells = rows[i].split("\t");
+    return !details?.wakeId || !details?.close || !cells.includes(`wake=${details.wakeId}`) ||
+      !cells.includes(`close=${details.close}`) || cells.some((cell) => /^(stranded_close|reason)=/.test(cell));
+  })) throw new Error(`the ledger did not retire the stranded deliveries: ${ledger()}`);
+}
 
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
 process.argv[1] = process.env.EXTENSION;
@@ -2918,31 +2932,40 @@ if (!wakes[1].content.includes("check: check-close-2")) throw new Error(`forced 
 if (deliverAs(wakes[1]) !== "followUp" || !triggersTurn(wakes[1])) {
   throw new Error(`the unentered hand-off was not re-delivered as a forced follow-up: ${JSON.stringify(wakes[1].options)}`);
 }
-if (!/consumed\t.*\tby=unentered-bound/.test(ledger().split("\n").find((line) => line.includes("by=unentered-bound")) ?? "")) {
-  throw new Error(`the ledger did not name the unentered-bound bypass: ${ledger()}`);
-}
+expectRetirements(wakes[0]);
 
-// One forced send per interval: a close landing inside the renewed bound is
-// suppressed behind the forced in-flight marker, never re-sent tight.
+await handlers.get("before_agent_start")({ prompt: wakes[1].content }, context);
+if (episodeField("in_flight") !== "0") throw new Error(`the forced hand-off was not consumed: ${episodeState()}`);
 appendRow("check", "crew-c.turn-ended");
 writeFileSync(`${state}/wake-now-3`, "go\n");
-await waitFor(() => count() === 4, "successor arm after the third close");
-await sleep(300);
+await waitFor(() => ledgerRows("suppressed", "reason=check: check-close-3", "behind=episode").length === 1,
+  "third close suppressed behind the episode inside the renewed bound");
 if (wakes.length !== 2) throw new Error(`a second forced send fired inside the renewed bound: ${wakes.length}`);
-if (!/suppressed\t.*\tbehind=in-flight/.test(ledger())) throw new Error(`the third close was not suppressed behind the forced marker: ${ledger()}`);
+expectRetirements(wakes[0]);
 
-// The forced wake does enter its turn. Once it does, the same wall clock no
-// longer earns a forced send: a later close stays suppressed behind the
-// episode, exactly as before this bypass existed.
-await enterTurn(wakes[1]);
-if (episodeField("in_flight") !== "0") throw new Error(`the forced hand-off was not consumed on entry: ${episodeState()}`);
+await handlers.get("turn_start")({ type: "turn_start" }, context);
+await enterTurn(wakes[0]);
+if (ledgerRows("turn", `wake=${wakes[0].details.wakeId}`, `close=${wakes[0].details.close}`).length !== 1) {
+  throw new Error(`the late entry was not attributed to the first delivery: ${ledger()}`);
+}
 await sleep(2800);
 appendRow("check", "crew-d.turn-ended");
 writeFileSync(`${state}/wake-now-4`, "go\n");
-await waitFor(() => count() === 5, "successor arm after the fourth close");
-await sleep(300);
-if (wakes.length !== 2) throw new Error(`a hand-off that entered its turn still forced a send: ${wakes.length}`);
-if (!ledger().includes("behind=episode")) throw new Error(`the entered hand-off was not suppressed behind the episode: ${ledger()}`);
+await waitFor(() => wakes.length === 3, "forced follow-up after a late entry by the older wake");
+if (!wakes[2].content.includes("check: check-close-4") || deliverAs(wakes[2]) !== "followUp" || !triggersTurn(wakes[2])) {
+  throw new Error(`the latest unentered wake did not force the fourth close through: ${JSON.stringify(wakes[2])}`);
+}
+expectRetirements(wakes[0], wakes[1]);
+
+await enterTurn(wakes[2]);
+if (episodeField("in_flight") !== "0") throw new Error(`the forced hand-off was not consumed on entry: ${episodeState()}`);
+await sleep(2800);
+appendRow("check", "crew-e.turn-ended");
+writeFileSync(`${state}/wake-now-5`, "go\n");
+await waitFor(() => ledgerRows("suppressed", "reason=check: check-close-5", "behind=episode").length === 1,
+  "fifth close suppressed after the latest wake entered its own turn");
+if (wakes.length !== 3) throw new Error(`a hand-off that entered its turn still forced a send: ${wakes.length}`);
+expectRetirements(wakes[0], wakes[1]);
 
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);

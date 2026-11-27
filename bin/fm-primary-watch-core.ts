@@ -123,6 +123,8 @@ type RestorationResult = {
   recovery?: RecoveryHandoff;
 };
 
+type SentWake = WakeDeliveryEvidence & { content: string; consumed: boolean; enteredAtMs: number | null };
+
 type SessionGeneration = {
   id: number;
   stopping: boolean;
@@ -179,12 +181,7 @@ type SessionGeneration = {
   mainFallbackInFlightTurnEnds: number;
   mainFallbackWakeSentAtMs: number | null;
   mainFallbackWakeConsumedAtMs: number | null;
-  // When the last tracked main hand-off was accepted for delivery, and when a
-  // main hand-off was last observed entering its own model turn. Consumption is
-  // not entry: the runtime raises before_agent_start when it merely stages a
-  // hidden next-turn prompt, so only this pair bounds a stranded hand-off.
-  mainFallbackHandOffAtMs: number | null;
-  mainFallbackWakeEnteredAtMs: number | null;
+  mainFallbackHandOff: SentWake | null;
   lastTurnStartAtMs: number | null;
   lastTurnEndAtMs: number | null;
   // True from a terminal agent run end the adapter reported (mainSettled)
@@ -192,8 +189,8 @@ type SessionGeneration = {
   // protect.
   mainIdle: boolean;
   // Recent main hand-offs by ledger wake id, so the turn that finally carries
-  // a wake can be tied back to its close and hand-off time. Diagnostic only.
-  sentWakes: Map<string, { content: string; close: string; sentAtMs: number; consumed: boolean }>;
+  // a wake can be tied back to its close and hand-off time.
+  sentWakes: Map<string, SentWake>;
 };
 
 export type ArmResult = {
@@ -393,8 +390,7 @@ function createGeneration(): SessionGeneration {
     mainFallbackInFlightTurnEnds: 0,
     mainFallbackWakeSentAtMs: null,
     mainFallbackWakeConsumedAtMs: null,
-    mainFallbackHandOffAtMs: null,
-    mainFallbackWakeEnteredAtMs: null,
+    mainFallbackHandOff: null,
     lastTurnStartAtMs: null,
     lastTurnEndAtMs: null,
     mainIdle: false,
@@ -659,8 +655,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           `in_flight_turn_ends=${owner.mainFallbackInFlightTurnEnds}`,
           `successor_granted=${owner.mainFallbackSuccessorGranted ? 1 : 0}`,
           `last_consume_at_ms=${owner.mainFallbackWakeConsumedAtMs ?? 0}`,
-          `last_hand_off_at_ms=${owner.mainFallbackHandOffAtMs ?? 0}`,
-          `last_entered_turn_at_ms=${owner.mainFallbackWakeEnteredAtMs ?? 0}`,
           `last_turn_start_at_ms=${owner.lastTurnStartAtMs ?? 0}`,
           `last_turn_end_at_ms=${owner.lastTurnEndAtMs ?? 0}`,
           `updated_at_ms=${Date.now()}`,
@@ -781,8 +775,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         owner.mainFallbackInFlightRows = null;
         owner.mainFallbackInFlightTurnEnds = 0;
         owner.mainFallbackWakeSentAtMs = null;
-        owner.mainFallbackHandOffAtMs = null;
-        owner.mainFallbackWakeEnteredAtMs = null;
+        owner.mainFallbackHandOff = null;
         owner.mainFallbackEpisode = false;
         owner.mainFallbackSuccessor = false;
         owner.mainFallbackSuccessorGranted = false;
@@ -879,10 +872,16 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     close = "-",
     kind = "notice",
     reason = closeReason(content),
+    trackMainFallback = false,
   ): Promise<void> | void {
     const id = randomUUID();
     const evidence = { wakeId: id, close, sentAtMs: Date.now() };
-    owner.sentWakes.set(id, { content, close, sentAtMs: evidence.sentAtMs, consumed: false });
+    const sent = { ...evidence, content, consumed: false, enteredAtMs: null };
+    if (trackMainFallback) {
+      owner.mainFallbackHandOff = sent;
+      owner.mainFallbackWakeSentAtMs = sent.sentAtMs;
+    }
+    owner.sentWakes.set(id, sent);
     if (owner.sentWakes.size > 64) owner.sentWakes.delete(owner.sentWakes.keys().next().value as string);
     recordWakeEvent(owner, "sent", [
       ["wake", id], ["close", close], ["kind", kind], ["force", forceTurn ? 1 : 0], ["reason", reason],
@@ -919,16 +918,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    const sentAtMs = Date.now();
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     if (trackMainFallback) {
       owner.mainFallbackWakeInFlight = content;
       owner.mainFallbackInFlightTurnEnds = 0;
-      owner.mainFallbackWakeSentAtMs = sentAtMs;
-      // A new hand-off carries no entered-turn evidence of its own; an earlier
-      // hand-off's entry never excuses this one.
-      owner.mainFallbackHandOffAtMs = sentAtMs;
-      owner.mainFallbackWakeEnteredAtMs = null;
       // Rows pending at send time are the drain-evidence baseline: if a later
       // boundary finds every one retired, the wake was handled even though no
       // consumption event ever surfaced.
@@ -939,7 +932,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         : owner.mainFallbackSuccessor ? "successor"
           : "close";
     try {
-      await notifyWake(content, forceTurn, owner, pending?.token ?? "-", kind, closeReason(message));
+      await notifyWake(content, forceTurn, owner, pending?.token ?? "-", kind, closeReason(message), trackMainFallback);
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       if (trackMainFallback && owner.mainFallbackWakeInFlight === content) {
@@ -966,8 +959,12 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // have now reached main, and the baseline check in turnEnd keeps a new grant
   // waiting until the drain that wake asked for has retired them.
   function consumeWake(owner: SessionGeneration, text: string, evidence: string, deliveryId?: string): void {
+    const tracked = owner.mainFallbackHandOff;
+    const inFlight = owner.mainFallbackWakeInFlight === text && (!deliveryId || deliveryId === tracked?.wakeId);
+    const id = deliveryId ?? (inFlight ? tracked?.wakeId : undefined);
+    const identified = id ? (tracked?.wakeId === id ? tracked : owner.sentWakes.get(id)) : undefined;
     for (const [token, wake] of owner.unconsumedWakes) {
-      if (wake.content !== text) continue;
+      if (wake.content !== text || (id && identified?.close !== token)) continue;
       owner.unconsumedWakes.delete(token);
       wake.pending.delivered = true;
       try {
@@ -978,7 +975,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       }
       break;
     }
-    const inFlight = owner.mainFallbackWakeInFlight === text;
     if (inFlight) {
       owner.mainFallbackWakeInFlight = null;
       owner.mainFallbackInFlightRows = null;
@@ -987,13 +983,12 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       owner.mainFallbackWakeConsumedAtMs = Date.now();
       persistEpisodeState(owner);
     }
-    const delivery = [...owner.sentWakes].find(([id, sent]) =>
-      sent.content === text && !sent.consumed && (!deliveryId || id === deliveryId));
-    if (!delivery) return;
-    const [id, sent] = delivery;
+    const sent = id ? identified : [...owner.sentWakes.values()].find((wake) =>
+      wake.content === text && !wake.consumed);
+    if (!sent || sent.content !== text || sent.consumed) return;
     sent.consumed = true;
     recordWakeEvent(owner, "consumed", [
-      ["wake", id], ["close", sent.close], ["by", evidence], ["after_ms", Date.now() - sent.sentAtMs],
+      ["wake", sent.wakeId], ["close", sent.close], ["by", evidence], ["after_ms", Date.now() - sent.sentAtMs],
     ]);
   }
 
@@ -1071,36 +1066,15 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // never reports a terminal run end either, the episode stays open with no
   // handler whose drain could cover later closes - the 27 Nov stall, where 34
   // close notifications were suppressed for 90 minutes. The same wall-clock
-  // interval bounds it. Entry at or after the hand-off is the evidence that
+  // interval bounds it. Entry for that delivery is the evidence that
   // clears it, so a wake genuinely reaching its turn keeps today's suppression;
   // the retry is one forced send per interval, driven by the next main-bound
   // close, never a timer.
-  function unenteredHandOffPastBound(owner: SessionGeneration): boolean {
-    if (!owner.mainFallbackEpisode) return false;
-    if (owner.mainFallbackWakeInFlight) return false;
-    if (owner.mainFallbackHandOffAtMs === null) return false;
-    if (Date.now() - owner.mainFallbackHandOffAtMs < mainFallbackWakeInFlightBoundMs) return false;
-    return !(
-      owner.mainFallbackWakeEnteredAtMs !== null &&
-      owner.mainFallbackWakeEnteredAtMs >= owner.mainFallbackHandOffAtMs
-    );
-  }
-
-  // Retire a stranded hand-off whose only evidence is consumption, starting a
-  // fresh bound interval at the forced send so the recovery cannot loop tight.
-  function retireUnenteredHandOff(owner: SessionGeneration, close: string, reason: string): void {
-    const stranded = [...owner.sentWakes].reverse().find(([, sent]) => sent.consumed);
-    owner.mainFallbackHandOffAtMs = Date.now();
-    owner.mainFallbackWakeEnteredAtMs = null;
-    recordWakeEvent(owner, "consumed", [
-      ["wake", stranded?.[0] ?? "-"],
-      ["close", close],
-      ["stranded_close", stranded?.[1].close ?? "-"],
-      ["by", "unentered-bound"],
-      ["after_ms", stranded ? Date.now() - stranded[1].sentAtMs : 0],
-      ["reason", reason],
-    ]);
-    persistEpisodeState(owner);
+  function unenteredHandOffPastBound(owner: SessionGeneration): SentWake | null {
+    const handOff = owner.mainFallbackHandOff;
+    if (!owner.mainFallbackEpisode || owner.mainFallbackWakeInFlight || !handOff) return null;
+    if (handOff.enteredAtMs !== null || Date.now() - handOff.sentAtMs < mainFallbackWakeInFlightBoundMs) return null;
+    return handOff;
   }
 
   async function deliverMainWake(
@@ -1128,16 +1102,14 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     const staleInFlight = coalesceMainFallbackWakes && inFlightWakeUnconsumedPastBound(owner);
     const decisionBypass = coalesceMainFallbackWakes && Boolean(isDecisionOwnedWake?.(message));
     const idleEpisode = coalesceMainFallbackWakes && owner.mainFallbackEpisode && owner.mainIdle;
-    const unenteredBound = coalesceMainFallbackWakes && unenteredHandOffPastBound(owner);
-    const forceTurn = staleInFlight || decisionBypass || idleEpisode || unenteredBound;
+    const stranded = coalesceMainFallbackWakes ? unenteredHandOffPastBound(owner) : null;
+    const forceTurn = staleInFlight || decisionBypass || idleEpisode || stranded !== null;
     if (forceTurn && owner.mainFallbackWakeInFlight) {
       consumeWake(
         owner,
         owner.mainFallbackWakeInFlight,
         staleInFlight ? "inflight-bound" : decisionBypass ? "decision-bypass" : "idle-bypass",
       );
-    } else if (unenteredBound) {
-      retireUnenteredHandOff(owner, pending.token, closeReason(message));
     }
     if (coalesceMainFallbackWakes && owner.mainFallbackWakeInFlight) {
       owner.mainFallbackEpisode = true;
@@ -1177,6 +1149,12 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       owner.episodeCoalesced.delete(pending.token);
     }
     try {
+      if (stranded?.consumed) {
+        recordWakeEvent(owner, "consumed", [
+          ["wake", stranded.wakeId], ["close", stranded.close],
+          ["by", "unentered-bound"], ["after_ms", Date.now() - stranded.sentAtMs],
+        ]);
+      }
       return (await sendWake(owner, message, pending, coalesceMainFallbackWakes, forceTurn)) ? "delivered" : "failed";
     } finally {
       // The grant pays for exactly one send attempt: a failure before confirmed
@@ -1268,6 +1246,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     void sendWake(owner, message, undefined, coalesceMainFallbackWakes).catch(() => {
       if (coalesceMainFallbackWakes && !owner.mainFallbackWakeInFlight) {
         owner.mainFallbackEpisode = false;
+        owner.mainFallbackHandOff = null;
         owner.mainFallbackBaselineRows = null;
       }
     });
@@ -1854,16 +1833,18 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // enters a model turn. Consumption alone does not prove model entry.
   function wakeEnteredTurn(content: string, deliveryId?: string, evidence?: WakeDeliveryEvidence): void {
     const owner = generation;
-    // Model entry is the only evidence that a hand-off is being handled rather
-    // than staged; deliverMainWake bounds an open episode on it.
-    owner.mainFallbackWakeEnteredAtMs = Date.now();
     const delivery = [...owner.sentWakes].find(([id, sent]) =>
       sent.content === content && (!deliveryId || id === deliveryId));
     const id = delivery?.[0] ?? evidence?.wakeId;
     const sent = delivery?.[1] ?? evidence;
     if (!id || !sent) return;
+    const enteredAtMs = Date.now();
+    const tracked = owner.mainFallbackHandOff;
+    if (tracked && tracked.wakeId === deliveryId && tracked.content === content) {
+      tracked.enteredAtMs = enteredAtMs;
+    }
     owner.sentWakes.delete(id);
-    recordWakeEvent(owner, "turn", [["wake", id], ["close", sent.close], ["after_ms", Date.now() - sent.sentAtMs]]);
+    recordWakeEvent(owner, "turn", [["wake", id], ["close", sent.close], ["after_ms", enteredAtMs - sent.sentAtMs]]);
   }
 
   // Unread rows main can still present or retire - exactly the set a main drain
@@ -2078,6 +2059,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       // surfaced; keeping the marker would wedge every later wake behind it.
       if (owner.mainFallbackWakeInFlight) consumeWake(owner, owner.mainFallbackWakeInFlight, "turn_end:queue-empty");
       owner.mainFallbackEpisode = false;
+      owner.mainFallbackHandOff = null;
       owner.mainFallbackSuccessor = false;
       owner.mainFallbackSuccessorGranted = false;
       owner.mainFallbackBaselineRows = null;
