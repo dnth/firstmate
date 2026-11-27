@@ -75,7 +75,7 @@ A main fall-back follow-up is delivered once OMP accepts it (`sendMessage` resol
 A streaming main consumes at `before_agent_start` or the user `message_start` carrying the exact wake text.
 An idle-main injection opens an agent-initiated turn through `agent.prompt()` directly, which emits no `before_agent_start`; there the first `turn_start` after the accepted send is the consumption evidence, and the wake's own `message_start` (role `custom`, `customType` `firstmate-watcher-wake`) acknowledges it too.
 Any of these marks the row delivered, and a marker that outlives a full turn boundary without any of them - or whose send-time queue rows were drained - is cleared as consumed at `turn_end`, so a missed consumption signal cannot suppress every later wake.
-A marker that stays unconsumed past `FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS` is likewise cleared as consumed the next time a main-bound wake arrives, which re-delivers through the turn-forcing send described in "Main-fallback re-entry coalescing" below.
+See [Main-fallback re-entry coalescing](#main-fallback-re-entry-coalescing) for the wall-clock retry rules.
 A follow-up accepted but not yet consumed is kept in the generation's unconsumed set, so a session replacement can replay only the wakes the runtime had not yet started to read.
 The episode mirror persisted at `state/extensions/omp-primary-watch/main-fallback-episode.state` records the in-flight marker, whether a successor grant is outstanding, and the send, consume, and turn-boundary timestamps so a wedge is diagnosable from disk; `bin/fm-guard.sh` warns when that file shows an in-flight wake older than a turn.
 Beside it, `main-wake-deliveries.log` is the OMP-only delivery ledger, appended between trims to its newest 2000 lines once it passes 512 KiB.
@@ -123,9 +123,12 @@ A boundary that arrives while a delivery run is mid-flight is replayed when the 
 A queue that cannot be counted is treated as nonempty, so an episode is never retired early on unreadable state.
 Real captain messages retain priority and are never coalesced, because only the watcher fallback path reads the episode guard; decision-owned wakes are never coalesced either, and always use the turn-forcing send even when no fallback episode or in-flight marker exists, because suppressing a needs-decision task behind a fallback episode would strand the only notification main can act on.
 
-An in-flight marker is additionally bounded on the wall clock: `FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS` (default 120000) is the longest an accepted-but-unconsumed fallback wake may suppress later main-bound wakes.
+`FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS` sets the wall-clock interval for both the in-flight marker and the model-entry check after the marker clears.
 Once the marker outlives that bound with no post-send `turn_start`, the next main-bound wake retires it exactly as the `turn_end` stale bound does and re-delivers through OMP's turn-forcing send (`deliverAs: "followUp"`, `triggerTurn: true`), which joins the agent follow-up queue while main is streaming and starts an agent-initiated turn while idle.
-The wall-clock bypass is driven by the next main-bound wake, and its forced send resets the in-flight bound.
+Once the marker clears, an open episode still qualifies for the same turn-forcing send if its latest tracked hand-off reaches the bound without a custom `message_start` matching that delivery's ID and wake text.
+A matching entry preserves ordinary episode coalescing, while entry by an earlier delivery leaves the latest hand-off eligible for the model-entry retry.
+When this bypass attempts a replacement for a hand-off already recorded as consumed, the ledger records its retirement as `consumed by=unentered-bound` with the original `wake` ID and `close` token.
+The next eligible main-bound close drives either wall-clock retry, and each new tracked send attempt starts a fresh interval.
 An open episode is also bounded by main's own activity: once the adapter reports a terminal `agent_end` (no scheduled continuation) and no `turn_start` follows, main has no active handler whose drain covers a suppressed close, so the next main-bound close uses the same turn-forcing send instead of being suppressed, retiring any wake still marked in flight (`consumed by=idle-bypass`).
 The next `turn_start` clears main's idle status and restores ordinary episode coalescing.
 At terminal `agent_end`, an open episode with main-owned rows still pending and no wake marked in flight releases the newest eligible coalesced close for delivery, ledgered as `granted` with `kind=settle`.

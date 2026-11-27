@@ -13,7 +13,7 @@ The durable marker and tmux flash remain as additional signals.
 
 The always-on watcher (`bin/fm-watch.sh`) checks its own durable queue once per poll: when the oldest main-owned row has sat unpresented for `FM_MAIN_WAKE_UNDELIVERED_ALARM_SECS` (default 300 s), it raises one wedge alarm and writes `state/.main-wake-undelivered`.
 The marker's first line records the alarmed sequence so a tick cannot re-fire inside one episode; a different row becoming oldest retires the marker and opens a fresh episode.
-This is the wall-clock backstop behind the OMP fallback's in-flight bound (`FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS`, see [omp-supervision-branch.md](omp-supervision-branch.md#main-fallback-re-entry-coalescing)): a forced re-delivery may still go unread, and the queue row is the durable evidence that nothing drained it.
+A forced retry under [OMP main-fallback coalescing](omp-supervision-branch.md#main-fallback-re-entry-coalescing) may still go unread, and the queue row is the durable evidence that nothing drained it.
 While `state/.afk` exists the away daemon owns delivery and carries its own wedge alarm, so the watcher stays silent.
 Rows reserved by a live branch grant are not main-owned and never feed this alarm.
 The alarm is strictly read-only against the queue and fires on the same channels as the injection wedge; on Linux, `auto` has no OS channel, so `config/wedge-alarm` needs `herdr` or `command:` for an active alert.
