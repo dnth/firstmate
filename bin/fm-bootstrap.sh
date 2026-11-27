@@ -52,8 +52,9 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
-#          treehouse is also MISSING when its installed version lacks
-#          "treehouse get --lease" support.
+#          treehouse is also MISSING when its installed version is older than
+#          3.0.1 (version 3.0.0 quarantines older pool slots and drops their
+#          lease holders), or when it lacks "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
@@ -843,6 +844,10 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN=1.31.2
+# Treehouse 3.0.0 quarantines older pool slots and drops their lease holders, so
+# the floor is the first release after it. bin/fm-install-treehouse.sh pins the
+# build CI exercises.
+TREEHOUSE_MIN=3.0.1
 # AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
 # version of that tool, captain-bumped periodically to keep the whole fleet on the
 # newest axi tools. It is NOT the minimum feature-introduced version. These floors
@@ -1454,12 +1459,16 @@ done
 for t in $COMMON_TOOLS; do
   command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
 done
-# The treehouse lease-support upgrade check is only relevant when the resolved
-# backend actually requires treehouse (every backend except orca, which owns its
-# own worktrees); an orca home must not be told to upgrade a provider it never uses.
-if fm_backend_list_contains "$TOOLS" treehouse \
-  && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
-  echo "MISSING: treehouse (install: $(install_cmd treehouse))"
+# The treehouse version-floor and lease-support upgrade check is only relevant
+# when the resolved backend actually requires treehouse (every backend except
+# orca, which owns its own worktrees); an orca home must not be told to upgrade a
+# provider it never uses.
+if fm_backend_list_contains "$TOOLS" treehouse && command -v treehouse >/dev/null 2>&1; then
+  if ! tool_version_at_least treehouse "$TREEHOUSE_MIN"; then
+    echo "MISSING: treehouse (requires $TREEHOUSE_MIN; install: $(install_cmd treehouse))"
+  elif ! treehouse_supports_lease; then
+    echo "MISSING: treehouse (install: $(install_cmd treehouse))"
+  fi
 fi
 treehouse_dirty_idle_slot_audit
 if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then

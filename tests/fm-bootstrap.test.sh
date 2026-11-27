@@ -8,7 +8,8 @@
 # 'MISSING: gh-axi (install: ...)', 'MISSING: lavish-axi (install: ...)', and
 # 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
-# advertises --lease, which (if any) tasks-axi version is on PATH, whether
+# advertises --lease, which treehouse version is on PATH, which (if any)
+# tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises
 # multi-ID moves, whether quota-axi is on PATH,
 # whether the local backend config opts out of tasks-axi backlog mutations,
@@ -61,6 +62,10 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_VERSION:-treehouse version v3.1.8 (fake)}"
+  exit 0
+fi
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
@@ -356,6 +361,36 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^mi
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
+}
+
+test_treehouse_min_version() {
+  local label version mode case_dir fakebin out expected n
+  expected='MISSING: treehouse (requires 3.0.1; install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)'
+  n=0
+  while IFS='^' read -r label version mode; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/treehouse-floor-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      missing)
+        [ "$out" = "$expected" ] || fail "$label: expected '$expected', got: $out" ;;
+    esac
+  done <<'ROWS'
+minimum treehouse version is accepted^treehouse version v3.0.1 (fake)^empty
+newer treehouse patch is accepted^treehouse version v3.1.8 (fake)^empty
+newer treehouse major is accepted^treehouse version v4.0.0 (fake)^empty
+older treehouse major reports an upgrade^treehouse version v2.3.0 (fake)^missing
+treehouse 3.0.0 reports an upgrade^treehouse version v3.0.0 (fake)^missing
+unparseable treehouse version reports an upgrade^treehouse development build^missing
+ROWS
+  pass "bootstrap separates a treehouse below 3.0.1 from one at or above its version floor"
 }
 
 test_gh_axi_min_version() {
@@ -1275,6 +1310,7 @@ test_bootstrap_does_not_emit_retired_path() {
 test_bootstrap_reporting
 test_bootstrap_does_not_emit_retired_path
 test_no_mistakes_min_version
+test_treehouse_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
 test_tasks_axi_min_version
