@@ -13,11 +13,11 @@
 # Output: the screened base name on stdout, or exit 1 with one reason on
 # stderr. The proposal is always "<Project> · <topic>": a model answer without
 # a project prefix and a nonempty topic is refused. The prefix must be the
-# thread's current project label. When the conversation clearly moves to
-# another project, it may use the built-in Firstmate label or a public label
-# from config/ext-project-labels for a project registered in data/projects.md;
-# any other prefix is refused, so a prefix is never free text. The result must
-# pass bin/fm-ext-topic.sh --check-title (bounds and shared safety screen).
+# thread's current project label. A nonempty config/ext-project-labels lets
+# the name use the built-in Firstmate label or a configured public label for
+# a project registered in data/projects.md when the conversation clearly moves.
+# Any other prefix is refused. The result must pass bin/fm-ext-topic.sh
+# --check-title (bounds and shared safety screen).
 #
 # OpenCode runs the fixed OpenCode Go DeepSeek V4.1 Flash model for at most
 # 120 seconds, using private input and structured output.
@@ -59,18 +59,20 @@ REGISTRY="${FM_DATA_OVERRIDE:-$FM_HOME/data}/projects.md"
 PUBLIC_LABELS="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/ext-project-labels"
 LABELS=$(
   {
-    printf '%s\n' Firstmate
-    if [ -f "$REGISTRY" ] && [ -f "$PUBLIC_LABELS" ] && [ ! -L "$PUBLIC_LABELS" ]; then
-      awk -F '\t' '
-        FILENAME == ARGV[1] {
-          if ($0 ~ /^- [^[:space:]]+ (\[[^]]+\] )?- /) {
-            split($0, fields, " ")
-            registered[fields[2]] = 1
+    if [ -f "$PUBLIC_LABELS" ] && [ -s "$PUBLIC_LABELS" ] && [ ! -L "$PUBLIC_LABELS" ]; then
+      printf '%s\n' Firstmate
+      if [ -f "$REGISTRY" ]; then
+        awk -F '\t' '
+          FILENAME == ARGV[1] {
+            if ($0 ~ /^- [^[:space:]]+ (\[[^]]+\] )?- /) {
+              split($0, fields, " ")
+              registered[fields[2]] = 1
+            }
+            next
           }
-          next
-        }
-        NF == 2 && $1 in registered { print $2 }
-      ' "$REGISTRY" "$PUBLIC_LABELS"
+          NF == 2 && $1 in registered { print $2 }
+        ' "$REGISTRY" "$PUBLIC_LABELS"
+      fi
     fi
   } | while IFS= read -r label; do
     case "$label" in

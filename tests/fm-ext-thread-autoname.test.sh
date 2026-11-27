@@ -1595,8 +1595,34 @@ PY
 # Prior titles cannot authorize a switch. Test 7 owns captain-name protection.
 
 test_17_a_drift_rename_may_move_to_another_known_project_label() {
-  local home="$TMP_ROOT/t17a" out
+  local home out map
+  for map in missing empty; do
+    home="$TMP_ROOT/t17-$map"
+    setup_home "$home"
+    if [ "$map" = empty ]; then
+      : > "$home/config/ext-project-labels"
+    fi
+    new_thread "$home" "$M1" "Aceh · log check" "Search latency is back to normal."
+    post "$home" "$M1" followup 2 "Moving on to the thread-title judge you asked about."
+    out=$(py "$home" <<'PY'
+(thread,) = threads()
+os.environ["FM_TEST_NAME"] = "Firstmate · thread title judge fix"
+assert deliver("drift") == ["sent"]
+tick(0)
+assert name(thread) == "Aceh · log check", name(thread)
+prompt = (CAPTURE / "namer.txt").read_text()
+labels = prompt.partition("--- known project labels ---\n")[2].partition("--- conversation ---")[0]
+assert not labels.strip(), prompt
+print("ok")
+PY
+    ) || fail "the $map public-label map did not prevent a prefix switch: $out"
+  done
+
+  home="$TMP_ROOT/t17a"
   setup_home "$home"
+  mkdir -p "$home/data"
+  printf '%s\n' '- hybrid-search - registered project (added 2026-11-23)' > "$home/data/projects.md"
+  printf 'hybrid-search\tHybrid Search Engine\n' > "$home/config/ext-project-labels"
   new_thread "$home" "$M1" "Hybrid Search Engine · log check" "Search latency is back to normal."
   post "$home" "$M1" followup 2 "Moving on to the Firstmate thread-title judge you asked about."
   out=$(py "$home" <<'PY'

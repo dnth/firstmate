@@ -1207,8 +1207,8 @@ When the topic drifted, the live title has a public `<Project> · ` prefix, and 
 The prefix is the thread's current project label unless the conversation clearly moved to another project with an approved public label.
 The optional local `config/ext-project-labels` lists one registry slug and its approved public label per line, separated by a tab.
 A configured label must pass the shared title screen and its slug must appear in the home's `data/projects.md` registry, including projects with no existing topic thread.
-`Firstmate` is a screened built-in alternate and needs neither a config entry nor a registry entry.
-An absent or empty file leaves the current prefix as the default and `Firstmate` as the only possible alternate.
+A nonempty map also enables the screened built-in `Firstmate` alternate without requiring an entry for it.
+An absent or empty map keeps renames on the current project prefix.
 Both models receive the current base title, its project prefix when present, and thread message text, which may include private interaction text.
 The naming model receives the approved alternate public labels and only the most recent history, bounded by 40 messages and 8,000 characters.
 The status comes from the verdict on the newest accepted message; until that verdict arrives, the marker of the last paced write holds.
