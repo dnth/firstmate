@@ -144,8 +144,11 @@
 #      exists after the failed attempt - a lock that self-clears mid-check still
 #      deserves a retry of the return.
 #   2. Other treehouse return failures still abort immediately and loudly (no retry).
-#   3. If every retry still hits the lock signature and the lock remains, it is removed
-#      and the return tried once more ONLY when the lock is provably stale per
+#   3. If every retry still hits the lock signature and the lock remains, a lock that
+#      provably has no live holder but is still younger than the age threshold is given
+#      one bounded wait for the remaining age, then re-checked. The wait only lets a
+#      killed process's lock age into the proof window; it never authorizes removal.
+#      The return is retried once more ONLY when the lock is provably stale per
 #      bin/fm-lock-lib.sh's fm_lock_is_provably_stale, passing the worktree dir as the
 #      companion directory and FM_STALE_WORKTREE_LOCK_AGE_SECS (default 30s) as the age
 #      threshold. That shared proof owns the exact lsof-holder, mtime-age, and fail-safe
@@ -1228,7 +1231,7 @@ finish_failed_treehouse_return() {  # <dir> <marker-backup> <status>
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc marker_backup
+  local out lock attempt=0 max_retries lock_desc marker_backup lock_age
 
   marker_backup=$(snapshot_returned_slot_role_markers "$dir") || return 1
   if ! strip_returned_slot_role_markers "$dir"; then
@@ -1285,6 +1288,15 @@ teardown_treehouse_return() {
   lock=$(worktree_git_lock_path "$dir") || lock=""
   if [ -n "$lock" ] && [ -e "$lock" ]; then
     lock_desc=$lock
+    # A killed git can orphan a lock that no live process holds while its mtime
+    # is still inside the staleness window. The bounded retries above cannot
+    # outlast that window, so wait out the remaining age once here; the proof
+    # below stays the only thing that authorizes removal.
+    if ! fm_lock_has_live_holder "$lock" "$dir" && lock_age=$(fm_lock_age "$lock") \
+      && [ "$lock_age" -lt "$STALE_WORKTREE_LOCK_AGE_SECS" ]; then
+      echo "teardown: git lock $lock has no live holder but is ${lock_age}s old; waiting $(( STALE_WORKTREE_LOCK_AGE_SECS - lock_age ))s before re-checking staleness" >&2
+      sleep "$(( STALE_WORKTREE_LOCK_AGE_SECS - lock_age ))"
+    fi
     if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
       rm -f "$lock"
       echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
