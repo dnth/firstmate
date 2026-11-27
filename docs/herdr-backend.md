@@ -198,23 +198,24 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 
 ## Pane display-agent label
 
-Every successful crewmate, scout, and second-mate Herdr spawn queues publication of the pane's display-only agent label as `<harness> · <model> <effort>` from the values `fm-spawn.sh` records in the task metadata.
+Firstmate publishes the pane's display-only agent label as `<harness> · <model> <effort>` from the values recorded in the task metadata.
 A recorded model or effort meaning "unset" (empty, `-`, `default`) is omitted, so a launch with no model shows only the harness and one with no effort shows `<harness> · <model>`.
 An effort is omitted whenever no model survives, because it names a model's reasoning budget rather than a launch of its own.
 A raw launch command is labeled with its recorded executable identity as the harness, omitting unset model and effort values.
 
 `bin/backends/herdr.sh` owns composition and publishing (`fm_backend_herdr_agent_display_label`, `fm_backend_herdr_report_agent_label`).
-`fm-spawn.sh` queues the label once, immediately after the launch command lands in the pane, so one hook covers every launch shape: a fresh spawn, a relaunch that reuses a retained idle shell, and a relaunch that recreates a proven-absent pane all submit their launch there.
+`fm-spawn.sh` publishes the label after the launch command lands in the pane, whether it is a fresh spawn, a relaunch in a retained idle shell, or a relaunch in a recreated pane.
 The label is published through `herdr pane report-metadata <pane> --source firstmate --display-agent <label>`.
 Workspace and tab labels are never touched, because they stay the task identity and recovery key described above.
 
 Publishing is best effort by contract.
-Publication runs in the background with a two-second bound through `bin/fm-timeout-lib.sh`, so the spawn continues without awaiting the CLI.
-Spawn success does not confirm publication; the label may appear after the spawn command returns.
+The publishing call has a two-second bound through `bin/fm-timeout-lib.sh`.
+Spawn success does not confirm publication, and a background publication may finish after the spawn command returns.
 A failing or unsupported call appends one warning to the owning home's `state/herdr-agent-label.log`, naming the pane, the label, and the CLI's own reason.
 If that log cannot be opened, publication is skipped with one warning on the caller's stderr and spawning continues.
 Support is detected from the installed CLI's own refusal rather than a version comparison, so a build without `report-metadata` costs one warning and nothing else.
-There is no retry, polling, or read-back; the publisher's input and output are detached from the caller's captured descriptors.
+There is no retry, polling, or read-back.
+Background publication detaches the publisher's input and output from the caller's captured descriptors.
 When the bound expires, the runner terminates the child process group and publication costs exactly one warning while leaving spawning successful.
 
 Verified presentation limits, live against Herdr 0.9.5 protocol 22 and recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr):
@@ -224,8 +225,7 @@ Verified presentation limits, live against Herdr 0.9.5 protocol 22 and recorded 
 - The most recent `display-agent` report wins across sources, while `--clear-display-agent` clears only the reporting source.
 - An agent's own lifecycle reports do not rewrite it: `pane report-agent` and `pane release-agent` set or release the agent identity and leave `display_agent` alone.
 - The installed OMP integration reports only session identity and agent lifecycle, so it does not overwrite the firstmate label.
-  A future integration that reports `display_agent` would win until the next launch re-reports.
-- The label mirrors recorded launch values, not live state, so an in-session model switch is not tracked.
+- A model change made directly in an agent session leaves the label at the value in task metadata.
 
 The publication hook runs only for Herdr; the other backend adapters do not use its pane metadata API:
 

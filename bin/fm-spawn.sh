@@ -247,7 +247,8 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (OMP turn-start
-#                  acknowledgement, programmatic inbox doorbell, and turn-end
+#                  acknowledgement, programmatic inbox doorbell, in-session
+#                  model-switch channel, and turn-end
 #                  extension, also outside the worktree)
 #     __OMPSESSIONDIR__ task-local or secondmate-home OMP session directory for exact resume
 #     __OMPRESUMEFLAG__ empty for a fresh OMP launch or the exact retained secondmate session file
@@ -522,6 +523,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$RELAUNCH_ID" ] || { echo "error: --relaunch requires a task id" >&2; exit 1; }
   RELAUNCH_META="$STATE/$RELAUNCH_ID.meta"
   [ -f "$RELAUNCH_META" ] || { echo "error: --relaunch needs existing metadata at $RELAUNCH_META" >&2; exit 1; }
+  RELAUNCH_PRIOR_GEN=$(fm_meta_get "$RELAUNCH_META" spawn_gen)
+  RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+  RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   if [ "$KIND" != secondmate ]; then
@@ -530,12 +535,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
       [ -n "$HARNESS_ARG" ] || { echo "error: relaunch metadata has no recorded harness for $RELAUNCH_ID" >&2; exit 1; }
     fi
     if [ "$MODEL_SET" -eq 0 ]; then
-      MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+      MODEL=$RELAUNCH_PRIOR_MODEL
       case "$MODEL" in default|-) MODEL= ;; esac
     fi
     if [ "$EFFORT_SET" -eq 0 ]; then
-      EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+      EFFORT=$RELAUNCH_PRIOR_EFFORT
       case "$EFFORT" in default|-) EFFORT= ;; esac
+      if [ "$RELAUNCH_PRIOR_HARNESS" = omp ]; then
+        case "$EFFORT" in
+          low|medium|high|xhigh|max) ;;
+          *) EFFORT= ;;
+        esac
+      fi
     fi
     if [ "$KIND" = ship ]; then
       if [ "$MODE_SET" -eq 0 ]; then
@@ -1081,6 +1092,7 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_CONTROL_LOCK=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_META_LOCK=
@@ -1446,6 +1458,9 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  if [ -n "$SPAWN_CONTROL_LOCK" ]; then
+    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+  fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1600,6 +1615,30 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+# A model-switch receipt exists only for an OMP worker, so relaunch coordination
+# with a switch (the control lock, the receipt scan, the label ordering) applies
+# only when the worker being replaced or its replacement is OMP.
+RELAUNCH_SWITCH_COORD=0
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ] \
+   && { [ "$RELAUNCH_PRIOR_HARNESS" = omp ] || [ "$HARNESS_ARG" = omp ]; }; then
+  RELAUNCH_SWITCH_COORD=1
+fi
+if [ "$RELAUNCH_SWITCH_COORD" -eq 1 ]; then
+  control_lock="$STATE/.control-$ID.lock"
+  if [ -z "${FM_CONTROL_RELAUNCH_TX:-}" ] || [ "$(cat "$control_lock/pid" 2>/dev/null || true)" != "${FM_CONTROL_RELAUNCH_LOCK_OWNER:-$PPID}" ]; then
+    if ! fm_lock_try_acquire "$control_lock"; then
+      echo "error: another control action is already in progress for $ID" >&2
+      exit 1
+    fi
+    SPAWN_CONTROL_LOCK=$control_lock
+  fi
+  if [ "$RELAUNCH_PRIOR_GEN" != "$(fm_meta_get "$RELAUNCH_META" spawn_gen)" ] \
+     || [ "$RELAUNCH_PRIOR_MODEL" != "$(fm_meta_get "$RELAUNCH_META" model)" ] \
+     || [ "$RELAUNCH_PRIOR_EFFORT" != "$(fm_meta_get "$RELAUNCH_META" effort)" ]; then
+    echo "error: task $ID changed while acquiring relaunch ownership; retry the relaunch" >&2
+    exit 1
+  fi
+fi
 
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
@@ -4374,6 +4413,25 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     fi
   fi
 fi
+if [ "$RELAUNCH_SWITCH_COORD" -eq 1 ]; then
+  switch_dir="$STATE/$ID.omp-doorbell-ready.requests"
+  if [ -d "$switch_dir" ] && [ ! -L "$switch_dir" ]; then
+    for request_artifact in "$switch_dir"/model-switch.*.ack.json; do
+      [ -f "$request_artifact" ] || continue
+      receipt_gen=$(jq -r '.spawnGen // empty' "$request_artifact" 2>/dev/null) || receipt_gen=
+      if [ -n "$receipt_gen" ] && [ "$receipt_gen" != "$RELAUNCH_PRIOR_GEN" ]; then
+        printf 'meta-stale %s artifact=%s reason=worker-generation-changed\n' "$ID" "${request_artifact##*/}" >&2
+        continue
+      fi
+      echo "error: relaunch has an unfolded model-switch receipt ($request_artifact); run fm-control.sh $ID switch-model --status" >&2
+      exit 1
+    done
+    for request_artifact in "$switch_dir"/model-switch.*.processing "$switch_dir"/model-switch.*.request.json; do
+      [ -f "$request_artifact" ] || continue
+      printf 'pending-unknown %s artifact=%s reason=worker-replacement\n' "$ID" "${request_artifact##*/}" >&2
+    done
+  fi
+fi
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -4903,8 +4961,9 @@ EOF
       rm -f "$OMP_READY" "$OMP_STARTED" "$OMP_DOORBELL_READY" "$OMP_DOORBELL_FAILED"
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate OMP launch acknowledgement, inbox doorbell, semantic busy state,
-// and turn-end signal; written by fm-spawn under the contract owned by
-// bin/fm-busy-lib.sh.
+// turn-end signal, and in-session model-switch channel; written by fm-spawn
+// under the contract owned by bin/fm-busy-lib.sh. The model-switch wire
+// contract is owned by .omp/extensions/lib/fm-task-model-switch.ts.
 // .omp-ready publishes only after the inbox doorbell activates; a failed
 // activation journals its reason to .omp-doorbell-failed instead, so a missing
 // marker is always attributable.
@@ -4919,6 +4978,7 @@ EOF
 // consulted because it still reads false at a natural agent_end.
 import { execFile } from "node:child_process";
 import { installTaskInboxDoorbell } from "$FM_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts";
+import { installTaskModelSwitch } from "$FM_ROOT/.omp/extensions/lib/fm-task-model-switch.ts";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -4965,6 +5025,12 @@ export default function (omp: any) {
     execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]);
   });
   omp.on("session_shutdown", taskInboxDoorbell.retire);
+  // Registered last: it only watches its request directory and applies a
+  // request at once, and subscribes to no turn event.
+  installTaskModelSwitch(omp, {
+    requestDir: "$OMP_DOORBELL_READY.requests",
+    spawnGen: "$SPAWN_GEN",
+  });
 }
 EOF
       ;;
@@ -5185,6 +5251,15 @@ else
   else
     SPAWN_TRACEPARENT=
   fi
+fi
+
+if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] && [ "$BACKEND" = herdr ]; then
+  control_lock="$STATE/.control-$ID.lock"
+  if ! fm_lock_try_acquire "$control_lock"; then
+    echo "error: another control action is already in progress for $ID" >&2
+    exit 1
+  fi
+  SPAWN_CONTROL_LOCK=$control_lock
 fi
 
 META_WINDOW=$T
@@ -5575,10 +5650,11 @@ sleep 0.3
 # exec already sits at each template's executable (launch_template), which is
 # the only point where the executable is syntactically first: prefixing exec
 # onto the assembled LAUNCH would yield "exec VAR=..." and fail.
-if [ "$HARNESS" = omp ] && [ "$RELAUNCH" -eq 1 ]; then
-  # Generation reconciliation: every request.* receipt under the doorbell
-  # requests dir was written for the PRIOR incarnation's doorbell. The
-  # extension only reconciles .ambiguous/.awaiting-turn on activate, so a
+if [ "$RELAUNCH" -eq 1 ] && { [ "$HARNESS" = omp ] || [ "$RELAUNCH_SWITCH_COORD" -eq 1 ]; }; then
+  # Generation reconciliation: every request.* receipt and model-switch.* file
+  # under the doorbell requests dir was written for the PRIOR incarnation's
+  # doorbell and extension. The doorbell only reconciles
+  # .ambiguous/.awaiting-turn on activate, so a
   # surviving .acked/.delivered/.unproven tombstone would suppress the
   # replacement worker's doorbell for the same still-unhandled record - the
   # exact delivered-no-turn stall this relaunch recovers from. This runs only
@@ -5588,8 +5664,9 @@ if [ "$HARNESS" = omp ] && [ "$RELAUNCH" -eq 1 ]; then
   # state/<id>.inbox and are untouched.
   OMP_REQUESTS_DIR="$STATE/$ID.omp-doorbell-ready.requests"
   if [ -d "$OMP_REQUESTS_DIR" ] && [ ! -L "$OMP_REQUESTS_DIR" ]; then
-    for request_artifact in "$OMP_REQUESTS_DIR"/request.*; do
+    for request_artifact in "$OMP_REQUESTS_DIR"/request.* "$OMP_REQUESTS_DIR"/model-switch.*; do
       [ -e "$request_artifact" ] || [ -L "$request_artifact" ] || continue
+      case "${request_artifact##*/}" in request.*) [ "$HARNESS" = omp ] || continue ;; esac
       if [ -L "$request_artifact" ] || [ ! -f "$request_artifact" ]; then
         echo "error: refusing OMP relaunch through unsafe request entry: $request_artifact" >&2
         exit 1
@@ -5644,7 +5721,11 @@ else
   spawn_send_key "$T" Enter
 fi
 if [ "$BACKEND" = herdr ]; then
-  fm_backend_herdr_report_agent_label "$T" "$HARNESS" "$MODEL" "$EFFORT"
+  if [ "$RELAUNCH_SWITCH_COORD" -eq 1 ] || { [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; }; then
+    fm_backend_herdr_report_agent_label_ordered "$T" "$HARNESS" "$MODEL" "$EFFORT"
+  else
+    fm_backend_herdr_report_agent_label "$T" "$HARNESS" "$MODEL" "$EFFORT"
+  fi
 fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0

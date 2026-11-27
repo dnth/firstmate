@@ -321,6 +321,7 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 | Skill invocation | `/skill:<name>`, for example `/skill:no-mistakes`. |
 | Autonomy | `--auto-approve` |
 | Resume | Use the exact selected OMP binary with `--session-dir /tmp/fm-<id>/omp-sessions --resume <session-file> --auto-approve -e state/<id>.omp-ext.ts`. |
+| Model switch | See the [`fm-control.sh` header](../../../bin/fm-control.sh) for the live OMP `switch-model` verb. |
 
 OMP is an exact harness identity and is never normalized to Pi.
 `bin/fm-omp-capabilities.sh` owns exact executable resolution and the selected OMP executable's launch and recovery capability checks that run before `fm-spawn` creates an endpoint.

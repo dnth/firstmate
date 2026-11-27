@@ -141,7 +141,8 @@ family_for_basename() {
     fm-pane-autoclose.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-hermes-harness.test.sh|fm-hermes-sandbox.test.sh|fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
-    fm-omp-fleet-hooks.test.sh|fm-omp-harness.test.sh|fm-operational-input.test.sh|\
+    fm-omp-fleet-hooks.test.sh|fm-omp-harness.test.sh|fm-omp-task-model-switch.test.sh|fm-control-switch-model.test.sh|\
+    fm-operational-input.test.sh|\
     fm-pi-compatible-family.test.sh|fm-pi-primary-types.test.sh|fm-reflect-skill.test.sh|\
     fm-cleanup-skill.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -199,7 +200,7 @@ family_for_basename() {
     fm-omp-primary-live-e2e.test.sh|fm-remote-omp-update-restart-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-inbox-doorbell-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
-    fm-omp-branch-live-e2e.test.sh)
+    fm-omp-branch-live-e2e.test.sh|fm-omp-model-switch-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr-server-detach.test.sh|fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -415,6 +416,7 @@ tests/fm-claude-stop-autoarm-live-e2e.test.sh 19
 tests/fm-claude-stop-autoarm.test.sh 60625
 tests/fm-cleanup-skill.test.sh 68
 tests/fm-codex-continuity-live-e2e.test.sh 22
+tests/fm-control-switch-model.test.sh 17000
 tests/fm-daemon.test.sh 56110
 tests/fm-devin-adapter.test.sh 368
 tests/fm-devin-herdr-live-e2e.test.sh 19
@@ -467,6 +469,7 @@ tests/fm-omp-harness.test.sh 67157
 tests/fm-omp-herdr-exit-live-e2e.test.sh 19
 tests/fm-omp-herdr-live-e2e.test.sh 17
 tests/fm-omp-launch-error-live-e2e.test.sh 20
+tests/fm-omp-model-switch-live-e2e.test.sh 20
 tests/fm-omp-primary-live-e2e.test.sh 19
 tests/fm-omp-primary.test.sh 74171
 tests/fm-omp-relaunch-guard.test.sh 5334
@@ -474,6 +477,7 @@ tests/fm-omp-relaunch-tmux-live-e2e.test.sh 22
 tests/fm-omp-secondmate-live-e2e.test.sh 19
 tests/fm-omp-secondmate.test.sh 140410
 tests/fm-omp-task-inbox-doorbell.test.sh 21482
+tests/fm-omp-task-model-switch.test.sh 2500
 tests/fm-omp-update.test.sh 744
 tests/fm-omp-worker-tmux-live-e2e.test.sh 17
 tests/fm-on.test.sh 15769
@@ -1003,6 +1007,14 @@ families_for_changed_path() {
     .omp/extensions/fm-compact-adviser-omp.ts|.omp/extensions/lib/compact-adviser/*)
       printf '%s\n' "__script__:fm-omp-compact-adviser.test.sh"
       printf '%s\n' "__script__:fm-omp-compact-adviser-live-e2e.test.sh"
+      ;;
+    .omp/extensions/lib/fm-task-model-switch.ts|tests/fm-omp-model-switch-host.mjs)
+      if [ "$path" = .omp/extensions/lib/fm-task-model-switch.ts ]; then
+        printf '%s\n' "__script__:fm-omp-branch-types.test.sh"
+      fi
+      printf '%s\n' "__script__:fm-omp-task-model-switch.test.sh"
+      printf '%s\n' "__script__:fm-control-switch-model.test.sh"
+      printf '%s\n' "__script__:fm-omp-model-switch-live-e2e.test.sh"
       ;;
     .omp/extensions/fm-primary-omp.ts|.omp/extensions/lib/fm-task-inbox-doorbell.ts)
       printf '%s\n' watcher-wake-lock

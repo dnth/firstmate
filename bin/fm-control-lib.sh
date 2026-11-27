@@ -12,7 +12,7 @@
 # verbs addressed to an exact task id, with the per-harness mechanics owned
 # here rather than improvised per harness in agent prose.
 #
-# This file owns three capability tables plus their pure artifact-path tables
+# This file owns four capability tables plus their pure artifact-path tables
 # and nothing else. It has no side effects, runs no backend command, and reads
 # no state, so it can be sourced by a test as a pure contract:
 #
@@ -33,6 +33,10 @@
 #      (bin/fm-backend.sh's fm_backend_agent_state) able to PROVE that an agent
 #      stopped. A verb whose postcondition cannot be proven on the recorded
 #      backend is refused rather than performed blind.
+#   4. In-session model switching: which harnesses and task kinds can change a
+#      RUNNING session's model through a verified channel rather than a
+#      relaunch. The channel's wire contract lives with its extension
+#      (.omp/extensions/lib/fm-task-model-switch.ts), not here.
 #
 # `resume` is deliberately NOT a verb. It is not deterministic across the
 # verified adapters: codex and grok resume only from a session id printed at
@@ -48,12 +52,25 @@ fm_control_verbs() {
 interrupt
 exit
 relaunch
+switch-model
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|exit|relaunch|switch-model) return 0 ;;
+  esac
+  return 1
+}
+
+# Which harness and task kind can change a running session's model in place.
+# Only an OMP ship or scout: its generated per-task extension carries the
+# request channel. An OMP secondmate runs the primary adapter, which has none,
+# and every other adapter has no verified in-session path at all.
+fm_control_model_switch_supported() {  # <harness> <kind>
+  [ "${1-}" = omp ] || return 1
+  case "${2-}" in
+    ship|scout) return 0 ;;
   esac
   return 1
 }
