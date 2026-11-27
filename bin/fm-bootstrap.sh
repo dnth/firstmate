@@ -52,9 +52,8 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
-#          treehouse is also MISSING when its installed version is older than
-#          3.0.1 (version 3.0.0 quarantines older pool slots and drops their
-#          lease holders), or when it lacks "treehouse get --lease" support.
+#          For backends that require treehouse, an installed build below
+#          TREEHOUSE_MIN or without "treehouse get --lease" reports MISSING.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and

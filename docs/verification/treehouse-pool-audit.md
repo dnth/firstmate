@@ -4,6 +4,7 @@ Audience: maintainer verification.
 
 This record supports the session-start `TREEHOUSE_POOL` audit guarantees: a dirty ownerless idle slot is reported even on a multi-user Linux host, and an unleased `treehouse-state.json` entry with no backing `git worktree list` registration surfaces as the distinct orphan diagnostic.
 The `cleanup` skill owns the slot-clearing operating procedure and `docs/configuration.md` owns the clean-tier flag; the mechanism stays in `bin/fm-treehouse-status-read-only.sh` and `bin/fm-bootstrap.sh`.
+The `test_treehouse_min_version` regression in [`tests/fm-bootstrap.test.sh`](../../tests/fm-bootstrap.test.sh) checks the [bootstrap toolchain contract](../configuration.md#toolchain), including that bootstrap skips `treehouse status` for a below-floor installation on both Treehouse-backed and Orca homes.
 
 ## Multi-user Linux occupancy (EACCES)
 

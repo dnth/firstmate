@@ -9,9 +9,8 @@
 # Usage:
 #   fm-install-treehouse.sh <destination-directory>
 #
-# Pins Treehouse v3.1.8, the version exercised by the local real-Herdr suite.
-# The bootstrap floor is 3.0.1 (bin/fm-bootstrap.sh owns it): Treehouse 3.0.0
-# quarantines older pool slots and drops their lease holders.
+# The pin below is used by the real-Herdr CI lane.
+# See bin/fm-bootstrap.sh for the separate pool compatibility floor.
 set -eu
 
 FM_TREEHOUSE_CI_VERSION=3.1.8

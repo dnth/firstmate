@@ -52,9 +52,6 @@ It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi 
 OMP recovery first validates its task-bound metadata and then distinguishes the two supported process shapes.
 Legacy Bun-script OMP requires an absolute argv entrypoint equal to `omp_bin`, an actual foreground executable equal to `omp_bun`, and an independent PID executable check for that same Bun runtime.
 Standalone OMP requires `omp_bun` and `omp_bin` to be the same absolute executable path, and its exact PID executable check is decisive regardless of the process name exposed by a renamed or symlinked installation.
-The session-lock ancestry walk stops at the shared OMP daemon broker that hosts the bash tool's `name`d calls.
-It checks the broker's PID record using the process's launch environment on Linux and its open lease file on macOS, independently of the standalone or Bun-script installation used to start it.
-[`bin/fm-session-lock-lib.sh`](../bin/fm-session-lock-lib.sh) owns that rule, and [`bin/fm-lock.sh`](../bin/fm-lock.sh) is the lock-taking path that names the cause when it refuses.
 For legacy env-shebang launches, a bare `bun` argv token or the canonical runtime basename is accepted only when the independent PID executable check proves the recorded Bun binary; a bare OMP token or a fresh `PATH` lookup is never identity evidence.
 The canonical `omp_bun` and `omp_bin` identities must be absolute, executable, and whitespace-free because the portable process reader exposes one flattened argument string.
 Legacy launches invoke the selected OMP entrypoint directly, with env-based Bun shebangs receiving a launch-local `PATH` binding and explicit absolute Bun shebangs using their declared interpreter, while standalone launches invoke the selected executable directly without passing it through Bun.
@@ -72,6 +69,12 @@ Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly
 
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
+
+### OMP session lock
+
+The session-lock ancestry walk stops at a confirmed shared OMP daemon broker, so a named bash call cannot acquire the session lock using the PID of the session that started that broker.
+[`bin/fm-session-lock-lib.sh`](../bin/fm-session-lock-lib.sh) confirms the broker by matching a PID-only lease record, located through the process's launch environment on Linux or its open lease file on macOS, independently of the primary session's OMP installation.
+[`bin/fm-lock.sh`](../bin/fm-lock.sh) names the broker when it refuses acquisition and reports a lock recorded against a confirmed broker as stale.
 
 ### Composer, busy state, and delivery
 
