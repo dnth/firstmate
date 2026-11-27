@@ -188,6 +188,20 @@ case "$cmd" in
     line=$(resolve "$target") || exit 1
     ses=${line%%	*}
     wid=$(printf '%s' "$line" | awk -F '\t' '{print $2}')
+    if [ "${FM_TEST_CLOSE_ON_EXIT:-0}" = 1 ]; then
+      case "${!#}" in
+        /exit)
+          : > "$STATE/$ses.exit-typed"
+          exit 0
+          ;;
+        Enter)
+          if [ -f "$STATE/$ses.exit-typed" ]; then
+            : > "$(winfile "$ses")"
+            exit 0
+          fi
+          ;;
+      esac
+    fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       for a in "$@"; do
         case "$a" in
@@ -433,12 +447,12 @@ case "$cmd" in
       get)
         p=${3:-}
         running || { printf '{"error":{"code":"server_not_running"}}\n'; exit 0; }
-        st=$(jq_state -r --arg p "$p" '.agent_status[$p] // empty' 2>/dev/null || true)
-        if [ -n "$st" ]; then
-          printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$st"
-        else
-          printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$p"
-        fi
+        jq_state -c --arg p "$p" '
+          if .agent_status[$p] then
+            {result:{agent:{agent:.agent_name[$p],agent_status:.agent_status[$p]}}}
+          else
+            {error:{code:"agent_not_found",message:"agent target \($p) not found"}}
+          end'
         ;;
     esac
     ;;
@@ -1436,12 +1450,144 @@ test_relaunch_without_delivery_identity_writes_none() {
   pass "fm-spawn --relaunch: a task not yet registered gains no empty delivery records"
 }
 
+# --- retired incarnation's busy generation -----------------------------------
+# A stopped incarnation's busy wiring is retired with it. The task record's
+# busy_gen= line names the generation a later steer resolves, so a line left
+# behind after the sidecar and record are gone makes the next incarnation's
+# interrupt target a generation that no longer exists.
+# The replacement launch is refused here on purpose (no durable worktree lease),
+# which leaves the post-retirement record in place for this test to read.
+
+test_control_relaunch_retires_recorded_busy_gen() {
+  local rec id meta gen changed
+  id=$(case_id busy-retire)
+  rec=$(make_case busy-retire "$id" pool)
+  read_case "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  write_meta "$meta" "$id" tmux "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" "$id")
+  printf 'busy_gen=%s\n' "$gen" >> "$meta"
+  grep -v '^busy_gen=' "$meta" > "$CASE_DIR/expected.meta"
+  : > "$CASE_DIR/fake/tmux-state/ses-$id.windows"
+
+  run_control "$CASE_DIR" "$HOME_DIR" "$id"
+  [ "$CONTROL_STATUS" -ne 0 ] \
+    || fail "a replacement without a durable lease should refuse; got: $CONTROL_OUT"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "the retired incarnation's gen sidecar survived launch refusal"
+  assert_absent "$HOME_DIR/state/$id.busy-state" "the retired incarnation's busy record survived launch refusal"
+  assert_no_grep "busy_gen=" "$meta" "the retired incarnation's busy_gen survived in the task record"
+  changed=$(diff "$CASE_DIR/expected.meta" "$meta") \
+    || fail "retiring the busy generation changed the rest of the task record:"$'\n'"$changed"
+  pass "fm-control relaunch: retirement persists when the replacement launch is refused"
+}
+
+test_control_exit_retries_busy_retirement() {
+  local endpoint=$1 rec id meta gen window retry_status
+  id=$(case_id "busy-retire-$endpoint")
+  rec=$(make_case "busy-retire-$endpoint" "$id" pool)
+  read_case "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  write_meta "$meta" "$id" tmux "$WT_DIR" "$PROJ_DIR" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" "$id" --state idle)
+  printf 'busy_gen=%s\n' "$gen" >> "$meta"
+  window="$CASE_DIR/fake/tmux-state/ses-$id.windows"
+  if [ "$endpoint" = closed ]; then
+    printf '@1\tfm-%s\t%s\tclaude\n' "$id" "$WT_DIR" > "$window"
+  else
+    printf '@1\tfm-%s\t%s\tbash\n' "$id" "$WT_DIR" > "$window"
+  fi
+
+  cat > "$FAKEBIN_DIR/mv" <<'SH'
+#!/usr/bin/env bash
+[ "${!#}" != "$FM_TEST_FAIL_META" ] || exit 1
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/mv"
+  CONTROL_OUT=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" \
+    FM_TEST_CLOSE_ON_EXIT=1 FM_CONTROL_POLL=0.05 FM_CONTROL_EXIT_WAIT=5 \
+    FM_TEST_FAIL_META="$meta" FM_TEST_REAL_MV="$(command -v mv)" "$CONTROL" "$id" exit 2>&1)
+  expect_code 1 "$?" "exit should surface an unsuccessful metadata rewrite; got: $CONTROL_OUT"
+  assert_contains "$CONTROL_OUT" "could not retire task $id's busy generation" "exit understated the rewrite failure"
+  assert_contains "$CONTROL_OUT" "use 'fm-control.sh $id relaunch' if it is gone" "exit did not identify the recovery command for a missing endpoint"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "the failed rewrite fixture did not retire the sidecar"
+  assert_absent "$HOME_DIR/state/$id.busy-state" "the failed rewrite fixture did not retire the busy record"
+  assert_grep "busy_gen=$gen" "$meta" "the failed rewrite lost the recorded generation"
+
+  rm "$FAKEBIN_DIR/mv"
+  CONTROL_OUT=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" "$CONTROL" "$id" exit 2>&1)
+  retry_status=$?
+  if [ "$endpoint" = closed ]; then
+    expect_code 1 "$retry_status" "exit should refuse an already missing endpoint; got: $CONTROL_OUT"
+    assert_contains "$CONTROL_OUT" "recorded endpoint is gone" "exit retry did not report the missing endpoint"
+    assert_grep "busy_gen=$gen" "$meta" "the refused exit unexpectedly changed the task record"
+    write_pool_state "$CASE_DIR" "$WT_DIR"
+    write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+    run_control "$CASE_DIR" "$HOME_DIR" "$id"
+    expect_code 1 "$CONTROL_STATUS" "relaunch without a durable lease should refuse; got: $CONTROL_OUT"
+    assert_contains "$CONTROL_OUT" "no durable Treehouse lease" "relaunch did not reach the replacement boundary"
+  else
+    expect_code 0 "$retry_status" "exit should finish a partially completed retirement; got: $CONTROL_OUT"
+    assert_contains "$CONTROL_OUT" "already-stopped" "exit did not report that the endpoint was already stopped"
+  fi
+  assert_no_grep "busy_gen=" "$meta" "the recovery command left the old generation recorded"
+  pass "fm-control exit: a $endpoint endpoint can finish retirement after losing its sidecar"
+}
+
+test_spawn_relaunch_retires_busy_gen_before_unarmed_replacement() {
+  local rec id meta gen pane verdict
+  id=$(case_id busy-retire-devin)
+  rec=$(make_case busy-retire-devin "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  meta="$HOME_DIR/state/$id.meta"
+  write_meta "$meta" "$id" herdr "$WT_DIR" "$PROJ_DIR" claude
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" "$id")
+  printf 'busy_gen=%s\n' "$gen" >> "$meta"
+  cp "$(type -P true)" "$FAKEBIN_DIR/devin"
+
+  SPAWN_OUT=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" XDG_CONFIG_HOME="$CASE_DIR/xdg" \
+    "$SPAWN" "$id" --relaunch --harness devin 2>&1)
+  expect_code 0 "$?" "standalone Devin relaunch should succeed; got: $SPAWN_OUT"
+  assert_grep 'harness=devin' "$meta" "the replacement did not publish its harness"
+  assert_no_grep 'spawn_gen=gen1' "$meta" "the replacement retained the prior worker identity"
+  assert_no_grep 'busy_gen=' "$meta" "the unarmed replacement recorded a busy generation"
+  pane=$(sed -n 's/^herdr_pane_id=//p' "$meta")
+  jq --arg pane "$pane" '.agent_status[$pane] = "idle" | .agent_name[$pane] = "devin"' \
+    "$CASE_DIR/fake/herdr-state.json" > "$CASE_DIR/herdr-idle.json"
+  mv "$CASE_DIR/herdr-idle.json" "$CASE_DIR/fake/herdr-state.json"
+  # shellcheck disable=SC2016 # The child Bash expands its own positional parameters.
+  verdict=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" bash -c '
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-busy-lib.sh"
+    fm_busy_classify_meta "$2/$3.meta" "$3" "$2"
+  ' _ "$ROOT" "$HOME_DIR/state" "$id")
+  [ "$verdict" = "idle herdr-native" ] || fail "the replacement inherited the retired busy verdict: $verdict"
+  if "$ROOT/bin/fm-busy-event.sh" apply "$HOME_DIR/state" "$id" busy \
+       --gen "$gen" --source claude-hook --event user-prompt-submit 2>/dev/null; then
+    fail "the retired generation could still write a busy event after the replacement"
+  fi
+  # shellcheck disable=SC2016 # The child Bash expands its own positional parameters.
+  verdict=$(spawn_env "$CASE_DIR" "$HOME_DIR" "$id" bash -c '
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-busy-lib.sh"
+    fm_busy_classify_meta "$2/$3.meta" "$3" "$2"
+  ' _ "$ROOT" "$HOME_DIR/state" "$id")
+  [ "$verdict" = "idle herdr-native" ] || fail "the late event changed the replacement's busy verdict: $verdict"
+  pass "fm-spawn --relaunch: a retired Claude generation cannot mark its Devin replacement busy"
+}
+
 # --- run ---------------------------------------------------------------------
 
 test_tmux_gone_relaunch_recreates_in_worktree
 test_relaunch_skips_duplicate_brief_guard
 test_relaunch_preserves_delivery_identity_mid_handoff
 test_relaunch_without_delivery_identity_writes_none
+test_control_relaunch_retires_recorded_busy_gen
+test_control_exit_retries_busy_retirement stopped
+test_control_exit_retries_busy_retirement closed
+test_spawn_relaunch_retires_busy_gen_before_unarmed_replacement
 test_tmux_gone_relaunch_durable_lease_ownership
 test_tmux_gone_relaunch_claim_without_lease_refuses
 test_control_relaunch_treats_missing_endpoint_as_stopped

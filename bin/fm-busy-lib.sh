@@ -166,6 +166,27 @@ fm_busy_current_gen() {  # <state-dir> <id>
   printf '%s' "$gen"
 }
 
+fm_busy_retire_incarnation() (  # <state-dir> <id> <spawn-gen>
+  local state=$1 id=$2 spawn_gen=$3 meta="$1/$2.meta" lock recorded armed tmp=
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  trap 'if [ -n "$tmp" ]; then rm -f -- "$tmp"; fi; fm_lock_release "$lock"' EXIT
+  [ -f "$meta" ] && [ ! -L "$meta" ] \
+    && [ "$(fm_meta_get "$meta" spawn_gen)" = "$spawn_gen" ] || return 1
+
+  recorded=$(fm_meta_get "$meta" busy_gen)
+  armed=$(fm_busy_current_gen "$state" "$id") || armed=$recorded
+  if [ -n "$armed" ]; then
+    "${BASH_SOURCE[0]%/*}/fm-busy-event.sh" retire "$state" "$id" --gen "$armed" || return 1
+  elif [ -e "$state/$id.busy-gen" ] || [ -L "$state/$id.busy-gen" ] \
+       || [ -e "$state/$id.busy-state" ] || [ -L "$state/$id.busy-state" ]; then
+    "${BASH_SOURCE[0]%/*}/fm-busy-event.sh" retire "$state" "$id" --current-gen || return 1
+  fi
+  [ -n "$recorded" ] || return 0
+  tmp=$(mktemp "$state/.$id.meta.retire.XXXXXX") || return 1
+  sed '/^busy_gen=/d' "$meta" > "$tmp" && mv -f -- "$tmp" "$meta"
+)
+
 # fm_busy_sources_for_harness: the semantic sources trusted to classify a
 # task recorded with <harness>. One line, space-separated, possibly empty.
 # The firstmate-owned sources are appended for every converted adapter.
