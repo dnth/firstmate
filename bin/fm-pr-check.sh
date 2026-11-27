@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
-# The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
-# live only in a private sidecar and are never interpolated into shell source.
+# See bin/fm-pr-lib.sh for the merge-poll registration and execution contract.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
 # Initial ship PR registration requires complete acceptance evidence

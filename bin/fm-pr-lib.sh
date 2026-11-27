@@ -19,6 +19,13 @@
 # wherever they appear, ignores every other key, and refuses a duplicated pr=
 # record or a malformed identity field.
 #
+# The registration binds the published check to the template copied at arming.
+# The check's bytes and file identity must match the registration's template
+# hash and check identity. Altered or unregistered checks cannot run as merge polls.
+# The watcher passes validated sidecar data to the current repository poll,
+# which must be a regular non-symlink file. It never executes the published
+# state-file copy as a merge poll.
+#
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
@@ -462,7 +469,7 @@ fm_pr_poll_prepare() {
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
-  [ -f "$template" ] || return 1
+  [ -f "$template" ] && [ ! -L "$template" ] || return 1
   # A second mate never owns a PR poll under its own id: its PRs are landed
   # under a main-owned landing record (bin/fm-landing.sh), and a poll armed
   # here would be orphaned the moment its restore rewrites the task record.
@@ -603,7 +610,9 @@ fm_pr_poll_artifacts_valid() {
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
-  cmp -s "$template" "$check" || return 1
+  # The repository entry point is checked here. The registration authenticates
+  # the published copy below.
+  [ -f "$template" ] && [ ! -L "$template" ] || return 1
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
   template_hash=$(fm_pr_sha256 "$check") || return 1

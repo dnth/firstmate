@@ -1499,6 +1499,146 @@ test_merged_poll_retires_once() {
   pass "validated merged polls notify once and retire before the next watcher cycle"
 }
 
+# A merge poll armed under an older poll template must keep working after the
+# repository template changes (upstream 8069). The registration binds the
+# published check to the generation it was armed from through that check's own
+# hash and file identity, while execution always dispatches the current
+# repository poll, so an older generation's bytes are never run.
+test_registered_poll_survives_template_update() {
+  local dir state historical_poll rc
+  dir=$(make_case template-update-survival)
+  state="$dir/home/state"
+  historical_poll="$dir/historical-fm-pr-poll.sh"
+  # A different generation's code. Its whole body is reachable, so a mistaken
+  # execution of the registered copy writes the marker, reports a non-merged
+  # result, and never reaches the forge.
+  cat > "$historical_poll" <<SH
+#!/usr/bin/env bash
+printf 'historical poll executed\n' > '$dir/sidecar-executed'
+printf 'historical-generation\n'
+SH
+  chmod 0600 "$historical_poll"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$historical_poll"
+  ! cmp -s "$POLL" "$state/task-a.check.sh" || fail "template-update fixture did not change the template"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "an intact registered generation was rejected after the template changed"
+  fm_pr_poll_snapshot_matches "$state" task-a "$POLL" \
+    || fail "an intact registered generation lost its snapshot after the template changed"
+
+  # A cycle that sees no merge leaves the authenticated generation armed.
+  add_stop_custom_check "$dir"
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-open.out" 2> "$dir/watch-open.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "open watcher cycle failed after the template changed: $(cat "$dir/watch-open.err")"
+  ! grep -F 'rejected unauthenticated state checks' "$dir/watch-open.out" >/dev/null \
+    || fail "the watcher revoked an intact generation after the template changed: $(cat "$dir/watch-open.out")"
+  grep -F 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" >/dev/null \
+    || fail "the open cycle did not run the current repository poll"
+  fm_pr_poll_snapshot_matches "$state" task-a "$POLL" \
+    || fail "an open cycle disarmed an intact generation after the template changed"
+  ack_watcher_cycle "$state" || fail "open cycle acknowledgement failed"
+
+  rm -f "$state/.last-check" "$dir/gh.log"
+  set +e
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-merged.out" 2> "$dir/watch-merged.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merged watcher cycle failed after the template changed: $(cat "$dir/watch-merged.err")"
+  case "$(cat "$dir/watch-merged.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "the poll armed under the previous generation did not fire: $(cat "$dir/watch-merged.out")" ;;
+  esac
+  [ ! -e "$dir/sidecar-executed" ] || fail "the watcher executed the registered state-file bytes"
+  grep -F 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" >/dev/null \
+    || fail "the merged cycle did not run the current repository poll"
+  assert_poll_absent "$state" task-a
+  pass "a registered poll survives a template update, stays armed, and fires without executing state-file bytes"
+}
+
+test_symlinked_template_preserves_registered_poll() {
+  local dir state template url=https://github.com/o/r/pull/1
+  dir=$(make_case symlinked-template-rearm)
+  state="$dir/home/state"
+  template="$dir/fm-pr-poll.sh"
+  cp "$POLL" "$template"
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url" "$template"
+  fm_pr_poll_snapshot_capture "$state" task-a "$template" || fail "could not capture the original poll"
+
+  mv "$template" "$template.original"
+  ln -s "$template.original" "$template"
+  if fm_pr_poll_prepare "$state" task-a github "$url" github.com o/r 1 "$template" &&
+    fm_pr_poll_publish_prepared; then
+    fail "re-arm accepted a symlinked template"
+  fi
+  fm_pr_poll_cleanup
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$template" \
+    || fail "the original poll validated with a symlinked repository template"
+  mv -f "$template.original" "$template"
+  fm_pr_poll_snapshot_matches "$state" task-a "$template" \
+    || fail "re-arm changed the original registration or poll artifacts"
+  pass "a refused re-arm preserves its registered poll when the repository template is symlinked"
+}
+
+# Generation binding never trusts a runnable name on its own: a check whose
+# bytes changed after registration, or a check with no registration at all, is
+# refused both when the armed generation still equals today's template and when
+# the template has since changed.
+test_altered_or_unregistered_checks_stay_refused() {
+  local dir state template historical_poll registration_hash rc scenario generation
+  for scenario in altered unregistered; do
+    for generation in armed-generation current-generation; do
+      dir=$(make_case "poll-refused-$scenario-$generation")
+      state="$dir/home/state"
+      historical_poll="$dir/historical-fm-pr-poll.sh"
+      cp "$POLL" "$historical_poll"
+      printf '\n# previous template generation\n' >> "$historical_poll"
+      chmod 0600 "$historical_poll"
+      write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+      case "$generation" in
+        armed-generation) template=$historical_poll ;;
+        current-generation) template=$POLL ;;
+      esac
+      seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$template"
+      fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+        || fail "$scenario:$generation fixture was not an intact registration"
+      if [ "$scenario" = altered ]; then
+        registration_hash=$(fm_pr_sha256 "$state/task-a.pr-poll-registration")
+        printf '# forged after registration\n' >> "$state/task-a.check.sh"
+        [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$registration_hash" ] \
+          || fail "$scenario:$generation fixture rewrote its own trust"
+      else
+        rm "$state/task-a.pr-poll-registration" || fail "$scenario:$generation could not remove only the registration"
+      fi
+      ! fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+        || fail "$scenario:$generation was accepted"
+
+      # The watcher refuses the runnable name instead of executing or querying.
+      # No control check here: a control wake would exit the cycle before the
+      # rejection summary that must surface.
+      set +e
+      FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+        run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+      rc=$?
+      set -e
+      [ "$rc" -eq 0 ] || fail "$scenario:$generation watcher failed: $(cat "$dir/watch.err")"
+      grep -q 'rejected unauthenticated state checks:.*task-a.check.sh' "$dir/watch.out" \
+        || fail "$scenario:$generation was not refused by the watcher: $(cat "$dir/watch.out")"
+      ! grep -F 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" >/dev/null \
+        || fail "$scenario:$generation queried the forge"
+      [ -e "$state/task-a.check.sh" ] \
+        || fail "$scenario:$generation removed the refused check instead of leaving it inert"
+    done
+  done
+  pass "altered and unregistered checks stay refused under both template generations"
+}
+
 # A poll's own retirement state is scoped to ONE registration, so it cannot by
 # itself catch a poll re-registered for a task whose merge was already
 # surfaced (e.g. bin/fm-pr-check.sh re-armed after the fact). The per-task
@@ -2365,6 +2505,9 @@ EOF
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
+test_registered_poll_survives_template_update
+test_symlinked_template_preserves_registered_poll
+test_altered_or_unregistered_checks_stay_refused
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome
