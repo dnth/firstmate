@@ -18,7 +18,7 @@ REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
 LOCAL_HOME="$TMP_ROOT/local-home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
-SSH_COUNT="$TMP_ROOT/ssh.count"
+AMBIGUOUS_SSH_LOG="$TMP_ROOT/ambiguous-ssh.log"
 DOCTOR_LOG="$TMP_ROOT/doctor.log"
 HERDR_STATE="$TMP_ROOT/remote-herdr.state"
 HERDR_LOG="$TMP_ROOT/remote-herdr.log"
@@ -181,8 +181,6 @@ printf 'primary harness defaults\n' > "$PARENT/config/crew-harness"
 
 cat > "$FAKEBIN/fake-ssh" <<'SH'
 #!/usr/bin/env bash
-count=$(cat "$FM_FAKE_SSH_COUNT" 2>/dev/null || echo 0)
-printf '%s\n' "$((count + 1))" > "$FM_FAKE_SSH_COUNT"
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
@@ -306,7 +304,11 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
 esac
 case "${FM_FAKE_SSH_MODE:-normal}" in
   unreachable) exit 255 ;;
-  ambiguous) "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"; exit 255 ;;
+  ambiguous)
+    printf 'attempt\n' >> "$FM_FAKE_AMBIGUOUS_SSH_LOG"
+    "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
+    exit 255
+    ;;
   *) exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" ;;
 esac
 SH
@@ -330,7 +332,7 @@ remote_env() {
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
   FM_SSH_BIN="$FAKEBIN/fake-ssh" \
-  FM_FAKE_SSH_COUNT="$SSH_COUNT" \
+  FM_FAKE_AMBIGUOUS_SSH_LOG="$AMBIGUOUS_SSH_LOG" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
@@ -358,7 +360,6 @@ seed_env() {
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
   FM_SSH_BIN="$FAKEBIN/fake-ssh" \
-  FM_FAKE_SSH_COUNT="$SSH_COUNT" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
@@ -631,7 +632,6 @@ remote_reconcile_snapshot="$TMP_ROOT/markerless-reconcile.json"
 # ambient remote-job queue instead of the fixture's isolated worker.
 export FM_SSH_BIN="$FAKEBIN/fake-ssh" FM_FAKE_REMOTE_CWD="$TMP_ROOT" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
-  FM_FAKE_SSH_COUNT="$SSH_COUNT" \
   FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
 jq -n --arg id ios --arg host remote-mac --arg root "$remote_root" \
@@ -827,7 +827,7 @@ pass "remote spawn serializes inheritance through launch publication"
 
 # A normal marked parent request traverses SSH, reaches the remote endpoint once,
 # and resolves only after the correlated remote log delta is ingested.
-ssh_before_send=$(cat "$SSH_COUNT")
+: > "$AMBIGUOUS_SSH_LOG"
 set +e
 FM_FAKE_SSH_MODE=ambiguous remote_env "$ROOT/bin/fm-send.sh" fm-ios \
   'report the build result' > "$TMP_ROOT/send.out" 2> "$TMP_ROOT/send.err"
@@ -835,8 +835,7 @@ send_rc=$?
 set -e
 [ "$send_rc" -ne 0 ] || fail "ambiguous remote send claimed definite delivery"
 assert_grep 'do not resend' "$TMP_ROOT/send.err" "ambiguous remote send did not require same-host reconciliation"
-ssh_after_send=$(cat "$SSH_COUNT")
-[ "$ssh_after_send" -eq $((ssh_before_send + 1)) ] || fail "ambiguous remote send was retried"
+[ "$(wc -l < "$AMBIGUOUS_SSH_LOG")" -eq 1 ] || fail "ambiguous remote send did not make exactly one SSH attempt"
 CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut -d= -f2-)
 [ -n "$CORR" ] || fail "remote send did not carry a correlation token"
 phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
