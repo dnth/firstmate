@@ -52,7 +52,8 @@ It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi 
 OMP recovery first validates its task-bound metadata and then distinguishes the two supported process shapes.
 Legacy Bun-script OMP requires an absolute argv entrypoint equal to `omp_bin`, an actual foreground executable equal to `omp_bun`, and an independent PID executable check for that same Bun runtime.
 Standalone OMP requires `omp_bun` and `omp_bin` to be the same absolute executable path, and its exact PID executable check is decisive regardless of the process name exposed by a renamed or symlinked installation.
-OMP's daemon workers (`omp __omp_worker_*`, including the shared broker that hosts the bash tool's `name`d calls) run that same executable but are never a session, so harness identity rejects them and the session-lock ancestry walk stops at one instead of climbing into whichever OMP started that shared worker.
+The session-lock ancestry walk stops at an OMP daemon worker, identified by the `__omp_worker_*` selector immediately after the standalone OMP executable or after the OMP entrypoint in a Bun launch.
+This includes the shared daemon broker that hosts the bash tool's `name`d calls, whose parent may belong to a different OMP session.
 [`bin/fm-session-lock-lib.sh`](../bin/fm-session-lock-lib.sh) owns that rule, and [`bin/fm-lock.sh`](../bin/fm-lock.sh) is the lock-taking path that names the cause when it refuses.
 For legacy env-shebang launches, a bare `bun` argv token or the canonical runtime basename is accepted only when the independent PID executable check proves the recorded Bun binary; a bare OMP token or a fresh `PATH` lookup is never identity evidence.
 The canonical `omp_bun` and `omp_bin` identities must be absolute, executable, and whitespace-free because the portable process reader exposes one flattened argument string.

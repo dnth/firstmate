@@ -224,31 +224,14 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
-# Evaluate one library expression as an OMP session would. The fake table makes
-# 2147483647 the launch-bound standalone OMP session, whose identity needs a real
-# executable path plus the PID executable, and 2147483600 OMP's daemon broker.
-# With shape=direct nothing sits between the tool shell and the session; with
-# shape=broker the tool shell runs under the shared broker.
-omp_lib_eval() {  # <fakebin> <shape> <expression>
-  local fakebin=$1 shape=$2 expr=$3
-  FM_TEST_OMP_SHAPE="$shape" FM_TEST_OMP_EXE="$fakebin/omp" \
-    FM_OMP_PROCESS_EXPECTED_BUN="$fakebin/omp" \
-    FM_OMP_PROCESS_EXPECTED_BIN="$fakebin/omp" \
-    lib_eval "$fakebin" "$expr"
-}
-
-# OMP's daemon broker (`omp __omp_worker_daemon_broker`) hosts every bash call
-# made with `name`, carries the bare name `omp`, and is shared by every OMP in
-# one project directory, so it outlives sessions and its parent is whichever OMP
-# started it. It is never the session: the walk must stop at it instead of
-# climbing into an unrelated OMP, and a lock naming it must read stale.
 test_omp_daemon_worker_is_never_the_session() {
-  local dir fakebin got args
+  local dir fakebin got rc entry runtime launch distro shape
   dir="$TMP_ROOT/omp-daemon-worker"
   fakebin=$(fm_fakebin "$dir")
-  mkdir -p "$dir/state"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/omp"
-  chmod +x "$fakebin/omp"
+  mkdir -p "$dir/state" "$dir/@oh-my-pi/pi-coding-agent/src"
+  fm_fake_exit0 "$fakebin" omp bun renamed-omp
+  printf '#!/usr/bin/env bun\n' > "$dir/@oh-my-pi/pi-coding-agent/src/cli.ts"
+  chmod +x "$dir/@oh-my-pi/pi-coding-agent/src/cli.ts"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -260,74 +243,71 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-case "$pid:$field:${FM_TEST_OMP_SHAPE:-broker}" in
-  2147483647:comm=:*) printf '%s\n' omp ;;
-  2147483647:args=:*) printf '%s\n' 'omp --resume 01a0d36d' ;;
-  2147483647:ppid=:*) printf '%s\n' 1 ;;
-  2147483600:comm=:*) printf '%s\n' /opt/homebrew/Cellar/omp/18.8.4/bin/omp ;;
-  2147483600:args=:*) printf '%s\n' '/opt/homebrew/Cellar/omp/18.8.4/bin/omp __omp_worker_daemon_broker' ;;
-  2147483600:ppid=:*) printf '%s\n' 2147483647 ;;
-  *:comm=:*) printf '%s\n' bash ;;
-  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
-  *:ppid=:broker) printf '%s\n' 2147483600 ;;
-  *:ppid=:direct) printf '%s\n' 2147483647 ;;
+case "$pid:$field" in
+  2147483647:comm=|2147483600:comm=) printf '%s\n' "${FM_TEST_OMP_EXE##*/}" ;;
+  2147483647:args=) printf '%s\n' "$FM_TEST_OMP_LAUNCH --resume 01a0d36d __omp_worker_daemon_broker" ;;
+  2147483647:ppid=) printf '%s\n' 1 ;;
+  2147483600:args=) printf '%s\n' "$FM_TEST_OMP_LAUNCH __omp_worker_daemon_broker" ;;
+  2147483600:ppid=) printf '%s\n' 2147483647 ;;
+  2147483599:comm=) printf '%s\n' codex ;;
+  2147483599:args=) printf '%s\n' 'codex __omp_worker_daemon_broker is the bug to investigate' ;;
+  2147483599:ppid=) printf '%s\n' 1 ;;
+  2147483598:comm=) printf '%s\n' bun ;;
+  2147483598:args=) printf '%s\n' 'bun /opt/project/cli.ts __omp_worker_daemon_broker' ;;
+  2147483598:ppid=) printf '%s\n' 2147483599 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=)
+    case "$FM_TEST_OMP_SHAPE" in
+      broker) printf '%s\n' 2147483600 ;;
+      direct) printf '%s\n' 2147483647 ;;
+      codex) printf '%s\n' 2147483598 ;;
+    esac
+    ;;
 esac
 SH
   chmod +x "$fakebin/ps"
   cat > "$fakebin/lsof" <<'SH'
 #!/usr/bin/env bash
-printf 'n%s\n' "${FM_TEST_OMP_EXE:-}"
+case "$*" in
+  *2147483599*) printf '%s\n' 'n/opt/bin/codex' ;;
+  *) printf 'n%s\n' "$FM_TEST_OMP_EXE" ;;
+esac
 SH
   chmod +x "$fakebin/lsof"
 
-  # Only an `__omp_worker_*` argument in subcommand position makes a worker; an
-  # ordinary OMP session, and a prompt that merely mentions the token, do not.
-  for args in \
-    '/opt/homebrew/Cellar/omp/18.8.4/bin/omp __omp_worker_daemon_broker' \
-    '/opt/homebrew/Cellar/omp/18.8.4/bin/omp __omp_worker_lsp_mux --stdio' \
-    'omp __omp_worker_text_predict'; do
-    lib_eval "$fakebin" "fm_omp_daemon_worker '$args'" \
-      || fail "an OMP daemon worker argv was not recognized: $args"
+  for distro in standalone bun-script renamed-standalone; do
+    case "$distro" in
+      standalone) runtime="$fakebin/omp"; entry="$runtime" ;;
+      bun-script) runtime="$fakebin/bun"; entry="$dir/@oh-my-pi/pi-coding-agent/src/cli.ts" ;;
+      renamed-standalone) runtime="$fakebin/renamed-omp"; entry="$runtime" ;;
+    esac
+    printf '18.8.4\n2147483647\n%s\n%s\n' "$runtime" "$entry" > "$dir/state/.omp-primary-extension-loaded"
+    printf '2147483647\n' > "$dir/state/.lock"
+    launch=$runtime
+    [ "$runtime" = "$entry" ] || launch="$runtime $entry"
+    for shape in direct broker codex; do
+      got=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TEST_OMP_EXE="$runtime" \
+        FM_TEST_OMP_LAUNCH="$launch" FM_TEST_OMP_SHAPE="$shape" \
+        lib_eval "$fakebin" '
+          rc=0
+          fm_harness_ancestry_pid || rc=$?
+          printf "ancestry exit: %s\n" "$rc"
+          if fm_session_lock_owned_by_self "$FM_STATE_OVERRIDE"; then printf "owns session lock\n"; fi
+          for pid in 2147483647 2147483600 2147483599; do
+            if fm_harness_pid_alive "$pid"; then printf "live: %s\n" "$pid"; fi
+          done
+        ')
+      case "$shape" in
+        direct) rc=$'2147483647\nancestry exit: 0\nowns session lock' ;;
+        broker) rc='ancestry exit: 2' ;;
+        codex) rc=$'2147483599\nancestry exit: 0' ;;
+      esac
+      [ "$got" = "$rc"$'\nlive: 2147483647\nlive: 2147483599' ] \
+        || fail "$distro $shape: wrong ancestry or holder liveness: $got"
+    done
   done
-  for args in \
-    '/opt/homebrew/Cellar/omp/18.8.4/bin/omp' \
-    '/opt/homebrew/Cellar/omp/18.8.4/bin/omp --resume 01a0d36d' \
-    'omp --model x __omp_worker_daemon_broker'; do
-    if lib_eval "$fakebin" "fm_omp_daemon_worker '$args'"; then
-      fail "a non-worker OMP argv was treated as a daemon worker: $args"
-    fi
-  done
-
-  # Non-vacuity: an ordinary tool call straight under the OMP session resolves it,
-  # and nothing claims it runs under a worker.
-  got=$(omp_lib_eval "$fakebin" direct 'fm_harness_ancestry_pid') \
-    || fail "an OMP session directly above the tool shell was not found"
-  [ "$got" = 2147483647 ] || fail "direct ancestry resolved '$got', expected the OMP session pid 2147483647"
-  if omp_lib_eval "$fakebin" direct 'fm_harness_ancestry_under_omp_worker'; then
-    fail "a direct tool call was reported as running under an OMP daemon worker"
-  fi
-  printf '2147483647\n' > "$dir/state/.lock"
-  omp_lib_eval "$fakebin" direct "fm_session_lock_owned_by_self '$dir/state'" \
-    || fail "the OMP session did not recognize its own lock"
-
-  # Under the broker the walk must stop with no verdict, not climb to the OMP
-  # session above it: that OMP is merely whichever one started the shared worker.
-  if got=$(omp_lib_eval "$fakebin" broker 'fm_harness_ancestry_pid'); then
-    fail "a broker-hosted command resolved harness pid '$got'; the walk must stop at the OMP daemon worker"
-  fi
-  omp_lib_eval "$fakebin" broker 'fm_harness_ancestry_under_omp_worker' \
-    || fail "a broker-hosted command was not reported as running under an OMP daemon worker"
-
-  if omp_lib_eval "$fakebin" broker 'fm_harness_pid_alive 2147483600'; then
-    fail "a live OMP daemon broker was recognized as a harness"
-  fi
-  omp_lib_eval "$fakebin" broker 'fm_harness_pid_alive 2147483647' \
-    || fail "a live OMP session was not recognized as a harness"
-  printf '2147483600\n' > "$dir/state/.lock"
-  if omp_lib_eval "$fakebin" broker "fm_session_lock_owned_by_self '$dir/state'"; then
-    fail "a lock recorded with the OMP daemon broker pid was claimed as this session's own"
-  fi
-  pass "session-lock: an OMP daemon worker is never the session, and a lock pinned to one reads stale"
+  pass "session-lock: standalone and Bun-script OMP brokers stop ancestry and read stale"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------

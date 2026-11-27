@@ -75,6 +75,7 @@ if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   exit 0
 fi
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  [ -z "${FM_FAKE_TREEHOUSE_STATUS_LOG:-}" ] || printf '%s\n' "$PWD" >> "$FM_FAKE_TREEHOUSE_STATUS_LOG"
   printf '%s\n' "${FM_FAKE_TREEHOUSE_STATUS_JSON:-[]}"
   exit 0
 fi
@@ -364,31 +365,48 @@ ROWS
 }
 
 test_treehouse_min_version() {
-  local label version mode case_dir fakebin out expected n
+  local label version mode backend case_dir fakebin out expected n detect_only status_log
   expected='MISSING: treehouse (requires 3.0.1; install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)'
   n=0
-  while IFS='^' read -r label version mode; do
+  while IFS='^' read -r label version mode backend; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/treehouse-floor-$n"
     mkdir -p "$case_dir/home/config"
+    git init --quiet -b main "$case_dir/home"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' "${backend:-tmux}" > "$case_dir/home/config/backend"
     fakebin=$(make_fake_toolchain "$case_dir")
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
-    case "$mode" in
-      empty)
-        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$expected" ] || fail "$label: expected '$expected', got: $out" ;;
-    esac
+    add_real_node "$fakebin"
+    fm_fake_exit0 "$fakebin" orca jq
+    for detect_only in 0 1; do
+      status_log="$case_dir/status-$detect_only"
+      out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+        FM_BOOTSTRAP_DETECT_ONLY="$detect_only" FM_FAKE_TREEHOUSE_STATUS_LOG="$status_log" \
+        FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
+      case "$mode" in
+        accepted)
+          [ -z "$out" ] || fail "$label: expected silence, got: $out"
+          [ -s "$status_log" ] || fail "$label: compatible Treehouse never received status"
+          ;;
+        missing)
+          [ "$out" = "$expected" ] || fail "$label: expected '$expected', got: $out"
+          [ ! -e "$status_log" ] || fail "$label: rejected Treehouse received status"
+          ;;
+        optional)
+          [ -z "$out" ] || fail "$label: expected silence, got: $out"
+          [ ! -e "$status_log" ] || fail "$label: rejected optional Treehouse received status"
+          ;;
+      esac
+    done
   done <<'ROWS'
-minimum treehouse version is accepted^treehouse version v3.0.1 (fake)^empty
-newer treehouse patch is accepted^treehouse version v3.1.8 (fake)^empty
-newer treehouse major is accepted^treehouse version v4.0.0 (fake)^empty
+minimum treehouse version is accepted^treehouse version v3.0.1 (fake)^accepted
+newer treehouse patch is accepted^treehouse version v3.1.8 (fake)^accepted
+newer treehouse major is accepted^treehouse version v4.0.0 (fake)^accepted
 older treehouse major reports an upgrade^treehouse version v2.3.0 (fake)^missing
 treehouse 3.0.0 reports an upgrade^treehouse version v3.0.0 (fake)^missing
 unparseable treehouse version reports an upgrade^treehouse development build^missing
+incompatible optional treehouse is skipped on Orca^treehouse version v3.0.0 (fake)^optional^orca
 ROWS
   pass "bootstrap separates a treehouse below 3.0.1 from one at or above its version floor"
 }

@@ -15,11 +15,8 @@ FM_SESSION_LOCK_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "$FM_SESSION_LOCK_LIB_DIR/fm-omp-process-lib.sh"
 
-# True when full argument string $1 is one of OMP's daemon worker processes
-# (`omp __omp_worker_daemon_broker`, `omp __omp_worker_mnemopi_embed`, ...):
-# its first argument after the executable is an `__omp_worker_*` subcommand.
-# Only that position counts, so a session whose prompt merely mentions the
-# token is still a session.
+# True when a standalone or Bun-script OMP launch has an `__omp_worker_*`
+# selector immediately after its executable or entrypoint, respectively.
 #
 # They run the same `omp` executable as a session, so launch-bound OMP identity
 # would otherwise claim them, but none of them is a session. The daemon broker
@@ -30,14 +27,34 @@ FM_SESSION_LOCK_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # upstream on OMP 18.8.0 through 18.8.4: a `name`d bash call running
 # bin/fm-session-start.sh recorded the broker in state/.lock, where it outlived
 # every session and pinned the lock.
-fm_omp_daemon_worker() {  # <args>
-  local rest
-  case "$1" in *" "*) ;; *) return 1 ;; esac
-  rest=${1#* }
-  case "${rest%% *}" in
-    __omp_worker_*) return 0 ;;
+fm_omp_daemon_worker() {  # <comm> <args> [pid]
+  local comm=$1 args=$2 pid=${3:-} first second third shape marker
+  local runtime=${FM_OMP_PROCESS_EXPECTED_BUN:-} entry=${FM_OMP_PROCESS_EXPECTED_BIN:-}
+  read -r first second third _ <<< "$args"
+  if [[ $second == __omp_worker_* ]]; then
+    [ "${first##*/}" != omp ] || return 0
+    shape=standalone
+  elif [[ $third == __omp_worker_* ]]; then
+    case "${first##*/}:$second" in
+      bun:/*/omp|bun:/*/@oh-my-pi/pi-coding-agent/src/cli.ts|bun:/*/@oh-my-pi/pi-coding-agent/dist/cli.js|bun:/*/packages/coding-agent/src/cli.ts)
+        return 0 ;;
+    esac
+    shape=script
+  else
+    return 1
+  fi
+  if [ -z "$runtime" ] || [ -z "$entry" ]; then
+    marker=$(fm_omp_process_primary_marker_path) || return 1
+    fm_omp_primary_marker_read "$marker" || return 1
+    runtime=$FM_OMP_MARKER_BUN
+    entry=$FM_OMP_MARKER_BIN
+  fi
+  case "$shape" in
+    standalone) [ "$runtime" = "$entry" ] || return 1 ;;
+    script) [ "$runtime" != "$entry" ] || return 1 ;;
   esac
-  return 1
+  FM_OMP_PROCESS_EXPECTED_BUN="$runtime" FM_OMP_PROCESS_EXPECTED_BIN="$entry" \
+    fm_omp_process_matches "$comm" "$args" "$pid"
 }
 
 # The same generic harnesses as exact executable names. Keep in sync with
@@ -81,12 +98,12 @@ fm_harness_path_name() {  # <path>
 #      Linux;
 #   4. a bare interpreter (node, python) running a generic harness script path.
 #
-# An OMP daemon worker never matches (fm_omp_daemon_worker), whatever its name.
+# An OMP daemon worker returns 2 so the ancestry walk can stop at it.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args> [pid]
   local comm=$1 args=$2 pid=${3:-} base argv0 name
   FM_HARNESS_IS_CLAUDE=0
-  fm_omp_daemon_worker "$args" && return 1
+  fm_omp_daemon_worker "$comm" "$args" "$pid" && return 2
   if fm_omp_process_matches "$comm" "$args" "$pid"; then
     return 0
   fi
@@ -114,6 +131,7 @@ fm_harness_process_matches() {  # <comm> <args> [pid]
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
+# Return 2 if an OMP daemon worker ends the walk before any session is found.
 #
 # The walk climbs freely until the first harness match, because the caller is
 # normally an ordinary shell several levels below its session. After that first
@@ -131,42 +149,24 @@ fm_harness_process_matches() {  # <comm> <args> [pid]
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
+  local pid=$$ comm args printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    # An OMP daemon worker ends the walk with no verdict: everything above it
-    # belongs to whichever OMP launched that shared worker, not to the session
-    # that asked for this command (see fm_omp_daemon_worker).
-    fm_omp_daemon_worker "$args" && break
     if fm_harness_process_matches "$comm" "$args" "$pid"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
-      extending=1
-    elif [ "$extending" -eq 1 ]; then
-      break
+    else
+      if [ "$?" -eq 2 ] && [ "$printed" -eq 0 ]; then
+        return 2
+      fi
+      [ "$printed" -eq 0 ] || break
     fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
   [ "$printed" -eq 1 ]
-}
-
-# True when this process's ancestry reaches an OMP daemon worker before any
-# harness, i.e. the command runs as an OMP bash `name`d service rather than an
-# ordinary tool call. Lets callers that cannot find a harness say why.
-fm_harness_ancestry_under_omp_worker() {
-  local pid=$$ comm args
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    fm_omp_daemon_worker "$args" && return 0
-    fm_harness_process_matches "$comm" "$args" "$pid" && return 1
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
-  done
-  return 1
 }
 
 # Print the one pid that identifies this session when the session lock is being
@@ -177,7 +177,7 @@ fm_harness_ancestry_under_omp_worker() {
 # innermost match unchanged.
 fm_harness_ancestry_pid() {
   local pids pid outermost=''
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids) || return "$?"
   while IFS= read -r pid; do
     [ -n "$pid" ] && outermost=$pid
   done <<EOF
@@ -193,7 +193,7 @@ fm_harness_pid_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args" "$pid"
+  fm_harness_process_matches "$comm" "$args" "$pid" || return 1
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
