@@ -19,6 +19,11 @@
 # wherever they appear, ignores every other key, and refuses a duplicated pr=
 # record or a malformed identity field.
 #
+# A registered poll binds to the template generation it was armed from through
+# the check's own recorded hash and file identity, so a repository template
+# update leaves an armed poll valid. The watcher executes the current repository
+# poll with validated data and never executes the registered state-file copy.
+#
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
@@ -603,7 +608,11 @@ fm_pr_poll_artifacts_valid() {
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
-  cmp -s "$template" "$check" || return 1
+  # Authenticate the published generation against its registration below, not
+  # against a template that may have changed during a repository update. The
+  # template must still be a runnable repository file because the watcher runs
+  # it with this poll's validated data and never executes the check bytes.
+  [ -f "$template" ] && [ ! -L "$template" ] || return 1
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
   template_hash=$(fm_pr_sha256 "$check") || return 1
