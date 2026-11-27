@@ -131,9 +131,9 @@ def _atomic_json(path: Path, data: dict) -> None:
 def accepted_posts(home: Path) -> dict[str, list[dict]]:
     """Every Discord-accepted Firstmate reply per destination thread, oldest first.
 
-    Each entry is one outbox generation: ``message_id`` is its newest accepted
-    chunk, ``complete`` says every chunk landed, and ``state`` and ``retitle``
-    are the reply's own title inputs.
+    Each entry is one outbox generation: ``message_ids`` lists accepted chunks
+    oldest first, ``message_id`` is the newest, ``complete`` says every chunk
+    landed, and ``state`` and ``retitle`` are the reply's own title inputs.
     """
     posts: dict[str, list[dict]] = {}
     outbox = poster.state_dir(home) / "ext-outbox"
@@ -148,15 +148,16 @@ def accepted_posts(home: Path) -> dict[str, list[dict]]:
             continue
         if not isinstance(data, dict) or not isinstance(data.get("discord_message_ids"), list):
             continue
-        newest = max((_id(item) for item in data["discord_message_ids"]), default=0)
+        message_ids = sorted({key for item in data["discord_message_ids"] if (key := _id(item)) > 0})
         request = str(data.get("request_id") or "").split(":")
         thread_id = str(data.get("topic_thread_id") or (request[3] if len(request) > 3 else ""))
-        if not newest or not poster._SNOWFLAKE.fullmatch(thread_id):
+        if not message_ids or not poster._SNOWFLAKE.fullmatch(thread_id):
             continue
         given = data.get("title_input") if isinstance(data.get("title_input"), dict) else {}
         state, retitle = given.get("state"), given.get("retitle")
         posts.setdefault(thread_id, []).append({
-            "message_id": newest,
+            "message_id": message_ids[-1],
+            "message_ids": message_ids,
             "complete": int(data.get("posted_count") or 0) >= int(data.get("total") or 0),
             "state": state if isinstance(state, str) else "",
             "retitle": retitle if isinstance(retitle, str) else "",
@@ -358,6 +359,31 @@ def _publish_verdict(title: dict, verdict: dict) -> None:
         title["judge_failed"] = None
 
 
+def _append_audit_verdict(title: dict, verdict: dict) -> None:
+    audit = [entry for entry in title.get("verdicts") or [] if entry.get("audit_only")]
+    audit.append(dict(verdict, audit_only=True))
+    title["verdicts"] = _applicable_verdicts(title) + audit[-_AUDIT_VERDICT_LIMIT:]
+
+
+def judge_skipped(title: dict, reply_start: int) -> bool:
+    return any(entry.get("audit_only") and entry.get("skip_reason")
+               and _id(entry.get("reply_start")) == reply_start
+               for entry in title.get("verdicts") or [])
+
+
+def record_judge_skip(home: Path, thread_id: str, post: dict, reason: str) -> None:
+    reply_start = post["message_ids"][0]
+
+    def change(title):
+        if judge_skipped(title, reply_start):
+            return False
+        _append_audit_verdict(title, {"message_id": str(post["message_id"]),
+                                      "reply_start": str(reply_start), "skip_reason": reason,
+                                      "at": time.time()})
+
+    _change_title(home, thread_id, change)
+
+
 def record_verdict(home: Path, thread_id: str, message_id: object, status: str, topic_fits: bool,
                    base: str = "", judged: dict | None = None,
                    confidence: float | None = None, *, pending_name: bool = False) -> str:
@@ -384,10 +410,7 @@ def record_verdict(home: Path, thread_id: str, message_id: object, status: str, 
 
     def change(title):
         if stale or pending_name:
-            log = title.get("verdicts") or []
-            audit = [entry for entry in log if entry.get("audit_only")]
-            audit.append(dict(verdict, audit_only=True))
-            title["verdicts"] = _applicable_verdicts(title) + audit[-_AUDIT_VERDICT_LIMIT:]
+            _append_audit_verdict(title, verdict)
         else:
             _publish_verdict(title, verdict)
 
@@ -409,7 +432,7 @@ def publish_named_verdict(home: Path, thread_id: str, cutoff: int, base: str) ->
         log = title.get("verdicts") or []
         for index in range(len(log) - 1, -1, -1):
             entry = log[index]
-            if entry.get("audit_only") and _id(entry.get("message_id")) == cutoff:
+            if entry.get("audit_only") and not entry.get("skip_reason") and _id(entry.get("message_id")) == cutoff:
                 title["verdicts"] = log[:index] + log[index + 1:]
                 verdict = dict(entry, base=base)
                 del verdict["audit_only"]

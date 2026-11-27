@@ -42,7 +42,7 @@ except ImportError:  # loaded from sys.path in hermetic tests
 # Catch-up judges only this many of the threads Firstmate posted in most
 # recently.
 CATCH_UP_LIMIT = 10
-# Bounds for optional history beyond the newest reply.
+NEWEST_REPLY_MAX_CHARS = 47_500
 TEXT_BUDGET_CHARS = 8000
 MESSAGE_MAX_CHARS = 2000
 MESSAGE_LIMIT = 40
@@ -76,15 +76,6 @@ def judging_state(home: Path) -> str:
 
 # --- thread text -----------------------------------------------------------------
 
-def _message(role: str, text: object) -> dict | None:
-    if not isinstance(text, str) or not text.strip():
-        return None
-    text = text.strip()
-    if len(text) > MESSAGE_MAX_CHARS:
-        text = text[:MESSAGE_MAX_CHARS - 1].rstrip() + "…"
-    return {"role": role, "text": text}
-
-
 def _captains(record: dict, home: Path) -> set[str]:
     request = poster._creating_request(record)
     prefix = f"{request.get('guild_id')}:{request.get('channel_id')}:"
@@ -100,54 +91,75 @@ def _captains(record: dict, home: Path) -> set[str]:
             and poster._SNOWFLAKE.fullmatch(line.strip()[len(prefix):])}
 
 
-def thread_messages(record: dict, home: Path, through: int) -> list[dict]:
-    """The thread's text through message ``through``, oldest first."""
-    thread_id = record["topic_thread_id"]
-    raw = thread_title.discord_read_messages(home, thread_id, through, MESSAGE_LIMIT)
-    latest_id = str(through)
-    entries = {str(item.get("id")): item for item in raw if isinstance(item, dict)}
-    posts = poster.firstmate_posts(home)
-    newest_reply = posts.get(latest_id, {}).get("reply")
-    if latest_id not in entries or newest_reply is None:
-        raise RuntimeError("accepted message missing from judge history")
-    newest_ids = {key for key, post in posts.items()
-                  if post.get("reply") == newest_reply and int(key) <= through}
-    for key in sorted(newest_ids - entries.keys(), key=int):
-        entries[key] = thread_title.discord_read_message(home, thread_id, key)
+class UnjudgeableReply(Exception):
+    pass
 
+
+def _bounded_history(candidates: dict[int, dict]) -> dict[int, dict]:
+    kept = {}
+    budget = TEXT_BUDGET_CHARS
+    for key in sorted(candidates, reverse=True):
+        text = candidates[key]["text"].strip()
+        if len(text) > MESSAGE_MAX_CHARS:
+            text = text[:MESSAGE_MAX_CHARS - 1].rstrip() + "…"
+        if len(kept) >= MESSAGE_LIMIT or len(text) > budget:
+            break
+        kept[key] = dict(candidates[key], text=text)
+        budget -= len(text)
+    return kept
+
+
+def thread_messages(record: dict, home: Path, post: dict) -> tuple[list[dict], list[dict]]:
+    """The judge and namer histories through the selected message, oldest first."""
+    thread_id = record["topic_thread_id"]
+    through = post["message_id"]
+    raw = thread_title.discord_read_messages(home, thread_id, through, MESSAGE_LIMIT)
+    posts = poster.firstmate_posts(home)
     captains = _captains(record, home)
-    candidates = []
-    for key in sorted(entries, key=thread_title._id, reverse=True):
-        item = entries[key]
+
+    def read(item):
         entry = thread_context._entry(item, "", "", posts, "")
-        required = key in newest_ids
         if entry is None:
-            if required:
-                raise RuntimeError("accepted reply chunk missing from judge history")
-            continue
-        if int(key) > through:
-            continue
+            return None
         role = "firstmate" if entry["role"] == "firstmate" else (
             "captain" if entry["author_id"] in captains else "participant")
-        message = {"role": role, "text": entry["text"]} if required else _message(role, entry["text"])
-        if message:
-            candidates.append((key, message))
+        return {"role": role, "text": entry["text"]}
 
-    budget = TEXT_BUDGET_CHARS - sum(len(message["text"]) for key, message in candidates if key in newest_ids)
-    remaining = MESSAGE_LIMIT - len(newest_ids)
-    kept, aliases = [], {}
-    for key, message in candidates:
-        if key not in newest_ids:
-            if remaining <= 0 or len(message["text"]) > budget:
-                remaining = 0
-                continue
-            remaining -= 1
-            budget -= len(message["text"])
+    recent = {}
+    for item in raw:
+        if isinstance(item, dict) and 0 < (key := thread_title._id(item.get("id"))) <= through:
+            message = read(item)
+            if message:
+                recent[key] = message
+
+    newest = {}
+    total = 0
+    for key in post["message_ids"]:
+        message = recent.get(key)
+        if message is None:
+            try:
+                message = read(thread_title.discord_read_message(home, thread_id, str(key)))
+            except poster.DiscordSendError as err:
+                if err.http_code == 404:
+                    raise UnjudgeableReply("incomplete reply, chunk deleted") from err
+                raise
+        if message is None:
+            raise RuntimeError("accepted reply chunk missing from judge history")
+        newest[key] = message
+        total += len(message["text"])
+    if total > NEWEST_REPLY_MAX_CHARS:
+        raise UnjudgeableReply("reply too long to judge")
+
+    naming = _bounded_history(recent)
+    judging = _bounded_history({key: message for key, message in recent.items() if key not in newest})
+    judging.update(newest)
+    aliases = {}
+    for key in sorted(judging, reverse=True):
+        message = judging[key]
         if message["role"] == "firstmate":
-            reply = posts[key]["reply"]
-            message["reply"] = aliases.setdefault(reply, len(aliases) + 1)
-        kept.append(message)
-    return list(reversed(kept))
+            reply = posts[str(key)]["reply"]
+            judging[key] = dict(message, reply=aliases.setdefault(reply, len(aliases) + 1))
+    return [judging[key] for key in sorted(judging)], [naming[key] for key in sorted(naming)]
 
 
 # --- the two model calls -----------------------------------------------------------
@@ -198,7 +210,7 @@ def propose_name(state: dict, home: Path) -> str:
 def judge_thread(home: Path, record: dict, post: dict) -> str:
     """Judge a thread through one accepted message and add the verdict to its log.
 
-    Returns recorded, stale, gone, waiting (Discord asked us to wait), or failed.
+    Returns recorded, stale, gone, waiting, skipped, or failed.
     """
     thread_id = record["topic_thread_id"]
     through = post["message_id"]
@@ -207,7 +219,7 @@ def judge_thread(home: Path, record: dict, post: dict) -> str:
         base = thread_title.split_marker(live)[1]
         # The project comes only from the thread's own public name.
         project = thread_context.project_from_name(base)
-        messages = thread_messages(record, home, through)
+        messages, naming_messages = thread_messages(record, home, post)
         thread = {"name": base, "project": project, "messages": messages}
         judged = {"name": base, "project": project, "messages": len(messages)}
         reply_state = post["state"]
@@ -221,10 +233,14 @@ def judge_thread(home: Path, record: dict, post: dict) -> str:
                                               verdict["topic_fits"], judged=judged,
                                               confidence=verdict["confidence"], pending_name=needs_name)
         if outcome == "pending-name":
-            return thread_title.publish_named_verdict(home, thread_id, through, propose_name(state, home))
+            name_state = {"thread": dict(thread, messages=naming_messages)}
+            return thread_title.publish_named_verdict(home, thread_id, through, propose_name(name_state, home))
         return outcome
     except thread_title.RateLimited:
         return "waiting"
+    except UnjudgeableReply as err:
+        thread_title.record_judge_skip(home, thread_id, post, str(err))
+        return "skipped"
     except Exception as err:
         _log(f"thread {thread_id} keeps its title: {err}")
         thread_title.record_judge_failure(home, thread_id, through)
@@ -280,7 +296,8 @@ def judge_scan(home: Path | None = None, threads=None, retry_failed: bool = Fals
             if not record or (through <= horizon and thread_id not in cohort["threads"]):
                 continue
             title = record.get("title") or {}
-            if thread_title._verdict_at(title, through):
+            if (thread_title._verdict_at(title, through)
+                    or thread_title.judge_skipped(title, post["message_ids"][0])):
                 continue
             failed = title.get("judge_failed") or {}
             if not retry_failed and thread_title._id(failed.get("message_id")) == through:
